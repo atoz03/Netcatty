@@ -5,7 +5,6 @@ import { SearchAddon } from "@xterm/addon-search";
 import "@xterm/xterm/css/xterm.css";
 import { Cpu, Copy, HardDrive, Maximize2, MemoryStick, Radio, ArrowDownToLine, ArrowUpFromLine } from "lucide-react";
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import ReactDOM from "react-dom";
 import { useI18n } from "../application/i18n/I18nProvider";
 import { logger } from "../lib/logger";
 import { cn, normalizeLineEndings, wrapBracketedPaste } from "../lib/utils";
@@ -71,7 +70,7 @@ import { useTerminalContextActions } from "./terminal/hooks/useTerminalContextAc
 import { useTerminalAuthState } from "./terminal/hooks/useTerminalAuthState";
 import { useServerStats } from "./terminal/hooks/useServerStats";
 import { extractDropEntries, getPathForFile, DropEntry } from "../lib/sftpFileUtils";
-import { useTerminalAutocomplete, AutocompletePopup } from "./terminal/autocomplete";
+import { TerminalAutocomplete } from "./terminal/TerminalAutocomplete";
 import { createTerminalCwdTracker, resolvePreferredTerminalCwd } from "./terminal/sftpCwd";
 
 const MAX_CONNECTION_LOG_DATA_CHARS = 1_000_000;
@@ -384,10 +383,13 @@ const TerminalComponent: React.FC<TerminalProps> = ({
   const snippetsRef = useRef(snippets);
   snippetsRef.current = snippets;
 
-  // Autocomplete handler refs (set after hook initialization)
+  // Autocomplete handler refs — populated by <TerminalAutocomplete> so the
+  // xterm runtime (and a few effects here) can drive the hook without making
+  // Terminal re-render on every suggestion update.
   const autocompleteKeyEventRef = useRef<((e: KeyboardEvent) => boolean) | undefined>(undefined);
   const autocompleteInputRef = useRef<((data: string) => void) | undefined>(undefined);
   const autocompleteRepositionRef = useRef<(() => void) | undefined>(undefined);
+  const autocompleteCloseRef = useRef<(() => void) | undefined>(undefined);
 
   const terminalBackend = useTerminalBackend();
   const { resizeSession, setSessionEncoding } = terminalBackend;
@@ -536,31 +538,19 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     }
   };
 
-  const autocomplete = useTerminalAutocomplete({
-    termRef,
-    sessionId,
-    hostId: host.id,
-    hostOs: host.os || (host.protocol === "local"
-      ? (navigator.platform?.startsWith("Win") ? "windows" : navigator.platform?.startsWith("Mac") ? "macos" : "linux")
-      : "linux"),
-    settings: terminalSettings ? {
-      enabled: terminalSettings.autocompleteEnabled ?? true,
-      showGhostText: terminalSettings.autocompleteGhostText ?? true,
-      showPopupMenu: terminalSettings.autocompletePopupMenu ?? true,
-      debounceMs: terminalSettings.autocompleteDebounceMs ?? 100,
-      minChars: terminalSettings.autocompleteMinChars ?? 1,
-      maxSuggestions: terminalSettings.autocompleteMaxSuggestions ?? 8,
-    } : undefined,
-    onAcceptText: (text) => autocompleteAcceptTextRef.current?.(text),
-    protocol: host.protocol,
-    getCwd: () => terminalCwdTracker.getRendererCwd() ?? knownCwdRef.current,
-  });
-
-  // Wire up autocomplete handler refs so createXTermRuntime can use them
-  autocompleteKeyEventRef.current = autocomplete.handleKeyEvent;
-  autocompleteInputRef.current = autocomplete.handleInput;
-  autocompleteRepositionRef.current = autocomplete.repositionPopup;
-  const autocompleteClosePopup = autocomplete.closePopup;
+  // Autocomplete config — the hook itself lives in <TerminalAutocomplete> so
+  // its state updates don't re-render this component (see render below).
+  const autocompleteHostOs: "linux" | "windows" | "macos" = host.os || (host.protocol === "local"
+    ? (navigator.platform?.startsWith("Win") ? "windows" : navigator.platform?.startsWith("Mac") ? "macos" : "linux")
+    : "linux");
+  const autocompleteSettings = terminalSettings ? {
+    enabled: terminalSettings.autocompleteEnabled ?? true,
+    showGhostText: terminalSettings.autocompleteGhostText ?? true,
+    showPopupMenu: terminalSettings.autocompletePopupMenu ?? true,
+    debounceMs: terminalSettings.autocompleteDebounceMs ?? 100,
+    minChars: terminalSettings.autocompleteMinChars ?? 1,
+    maxSuggestions: terminalSettings.autocompleteMaxSuggestions ?? 8,
+  } : undefined;
 
   const resolveSftpInitialPath = useCallback(async (): Promise<string | undefined> => {
     const cwd = await resolvePreferredTerminalCwd({
@@ -635,9 +625,9 @@ const TerminalComponent: React.FC<TerminalProps> = ({
 
   useEffect(() => {
     if (!isVisible) {
-      autocompleteClosePopup();
+      autocompleteCloseRef.current?.();
     }
-  }, [isVisible, autocompleteClosePopup]);
+  }, [isVisible]);
 
   // Check if this is a local or serial connection (doesn't need connection dialog during connecting)
   const isLocalConnection = host.protocol === "local";
@@ -2379,29 +2369,27 @@ const TerminalComponent: React.FC<TerminalProps> = ({
             }}
           />
 
-          {/* Autocomplete popup — rendered via Portal to escape overflow:hidden */}
-          {isVisible && autocomplete.state.popupVisible && autocomplete.state.suggestions.length > 0 &&
-            ReactDOM.createPortal(
-              <AutocompletePopup
-                suggestions={autocomplete.state.suggestions}
-                selectedIndex={autocomplete.state.selectedIndex}
-                position={autocomplete.state.popupPosition}
-                cursorLineTop={autocomplete.state.popupCursorLineTop}
-                cursorLineBottom={autocomplete.state.popupCursorLineBottom}
-                visible={autocomplete.state.popupVisible}
-                expandUpward={autocomplete.state.expandUpward}
-                themeColors={effectiveTheme.colors}
-                onSelect={autocomplete.selectSuggestion}
-                subDirPanels={autocomplete.state.subDirPanels}
-                subDirFocusLevel={autocomplete.state.subDirFocusLevel}
-                containerRef={containerRef}
-                onRequestReposition={autocomplete.repositionPopup}
-                searchBarOffset={isSearchOpen ? 64 : 30}
-                onDismiss={autocompleteClosePopup}
-              />,
-              document.body,
-            )
-          }
+          {/* Autocomplete — owns the hook + popup in its own component so
+              suggestion/selection updates don't re-render Terminal. Mounted
+              unconditionally; it gates the popup on `visible` internally. */}
+          <TerminalAutocomplete
+            termRef={termRef}
+            sessionId={sessionId}
+            hostId={host.id}
+            hostOs={autocompleteHostOs}
+            settings={autocompleteSettings}
+            protocol={host.protocol}
+            getCwd={() => terminalCwdTracker.getRendererCwd() ?? knownCwdRef.current}
+            onAcceptText={(text) => autocompleteAcceptTextRef.current?.(text)}
+            visible={isVisible}
+            themeColors={effectiveTheme.colors}
+            containerRef={containerRef}
+            searchBarOffset={isSearchOpen ? 64 : 30}
+            keyEventRef={autocompleteKeyEventRef}
+            inputRef={autocompleteInputRef}
+            repositionRef={autocompleteRepositionRef}
+            closeRef={autocompleteCloseRef}
+          />
 
           {/* OSC-52 clipboard read prompt */}
           {osc52ReadPromptVisible && (

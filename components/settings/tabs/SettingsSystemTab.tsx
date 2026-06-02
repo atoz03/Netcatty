@@ -45,6 +45,13 @@ interface TempDirInfo {
   totalSize: number;
 }
 
+interface SshDebugLogInfo {
+  enabled: boolean;
+  path: string;
+  exists: boolean;
+  size: number;
+}
+
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const k = 1024;
@@ -76,6 +83,8 @@ interface SettingsSystemTabProps {
   setSessionLogsDir: (dir: string) => void;
   sessionLogsFormat: SessionLogFormat;
   setSessionLogsFormat: (format: SessionLogFormat) => void;
+  sshDebugLogsEnabled: boolean;
+  setSshDebugLogsEnabled: (enabled: boolean) => void;
   toggleWindowHotkey: string;
   setToggleWindowHotkey: (hotkey: string) => void;
   closeToTray: boolean;
@@ -100,6 +109,8 @@ const SettingsSystemTab: React.FC<SettingsSystemTabProps> = ({
   setSessionLogsDir,
   sessionLogsFormat,
   setSessionLogsFormat,
+  sshDebugLogsEnabled,
+  setSshDebugLogsEnabled,
   toggleWindowHotkey,
   setToggleWindowHotkey,
   closeToTray,
@@ -132,6 +143,8 @@ const SettingsSystemTab: React.FC<SettingsSystemTabProps> = ({
   const [logEntries, setLogEntries] = useState<CrashLogEntry[]>([]);
   const [isClearingCrashLogs, setIsClearingCrashLogs] = useState(false);
   const [crashLogClearResult, setCrashLogClearResult] = useState<{ deletedCount: number } | null>(null);
+  const [sshDebugLogInfo, setSshDebugLogInfo] = useState<SshDebugLogInfo | null>(null);
+  const [isLoadingSshDebugLogInfo, setIsLoadingSshDebugLogInfo] = useState(false);
 
   const [appVersion, setAppVersion] = useState('');
 
@@ -195,6 +208,24 @@ const SettingsSystemTab: React.FC<SettingsSystemTabProps> = ({
   useEffect(() => {
     void loadCrashLogs();
   }, [loadCrashLogs]);
+
+  const loadSshDebugLogInfo = useCallback(async () => {
+    const bridge = netcattyBridge.get();
+    if (!bridge?.getSshDebugLogInfo) return;
+    setIsLoadingSshDebugLogInfo(true);
+    try {
+      const info = await bridge.getSshDebugLogInfo();
+      setSshDebugLogInfo(info);
+    } catch (err) {
+      console.error("[SettingsSystemTab] Failed to load SSH debug log info:", err);
+    } finally {
+      setIsLoadingSshDebugLogInfo(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSshDebugLogInfo();
+  }, [loadSshDebugLogInfo, sshDebugLogsEnabled]);
 
   const expandRequestRef = React.useRef(0);
   const handleExpandCrashLog = useCallback(async (fileName: string) => {
@@ -293,6 +324,12 @@ const SettingsSystemTab: React.FC<SettingsSystemTabProps> = ({
       console.error("[SettingsSystemTab] Failed to open directory:", err);
     }
   }, [sessionLogsDir]);
+
+  const handleOpenSshDebugLogDir = useCallback(async () => {
+    const bridge = netcattyBridge.get();
+    if (!bridge?.openSshDebugLogDir) return;
+    await bridge.openSshDebugLogDir();
+  }, []);
 
   // Handle global toggle hotkey recording
   const cancelHotkeyRecording = useCallback(() => {
@@ -874,6 +911,73 @@ const SettingsSystemTab: React.FC<SettingsSystemTabProps> = ({
 
             <p className="text-xs text-muted-foreground">
               {t("settings.sessionLogs.hint")}
+            </p>
+          </div>
+
+          {/* SSH Debug Logs Section */}
+          <div className="space-y-4">
+            <div className="flex items-center gap-2">
+              <FileText size={18} className="text-muted-foreground" />
+              <h3 className="text-base font-medium">{t("settings.sshDebugLogs.title")}</h3>
+            </div>
+
+            <div className="bg-muted/30 rounded-lg p-4 space-y-4">
+              <SettingRow
+                label={t("settings.sshDebugLogs.enable")}
+                description={t("settings.sshDebugLogs.enableDesc")}
+              >
+                <Toggle
+                  checked={sshDebugLogsEnabled}
+                  onChange={setSshDebugLogsEnabled}
+                />
+              </SettingRow>
+
+              <div className="space-y-2">
+                <span className="text-sm font-medium">{t("settings.sshDebugLogs.location")}</span>
+                <div className="flex items-center gap-2">
+                  <div className="flex-1 min-w-0">
+                    <div className="bg-background border border-input rounded-md px-3 py-2 text-sm font-mono truncate">
+                      {isLoadingSshDebugLogInfo ? "..." : (sshDebugLogInfo?.path || "-")}
+                    </div>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={loadSshDebugLogInfo}
+                    disabled={isLoadingSshDebugLogInfo}
+                    className="shrink-0 gap-1.5"
+                  >
+                    <RefreshCw size={14} className={isLoadingSshDebugLogInfo ? "animate-spin" : ""} />
+                    {t("settings.system.refresh")}
+                  </Button>
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <Button
+                        variant="ghost"
+                        size="icon"
+                        onClick={handleOpenSshDebugLogDir}
+                        className="shrink-0"
+                      >
+                        <FolderOpen size={16} />
+                      </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>{t("settings.system.openFolder")}</TooltipContent>
+                  </Tooltip>
+                </div>
+                <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                  <span>
+                    {t("settings.sshDebugLogs.status")}:{" "}
+                    {sshDebugLogsEnabled ? t("settings.sshDebugLogs.statusOn") : t("settings.sshDebugLogs.statusOff")}
+                  </span>
+                  <span>
+                    {t("settings.sshDebugLogs.size")}: {formatBytes(sshDebugLogInfo?.size ?? 0)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <p className="text-xs text-muted-foreground">
+              {t("settings.sshDebugLogs.hint")}
             </p>
           </div>
 

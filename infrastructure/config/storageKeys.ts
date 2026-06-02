@@ -106,6 +106,7 @@ export const STORAGE_KEY_EDITOR_WORD_WRAP = 'netcatty_editor_word_wrap_v1';
 export const STORAGE_KEY_SESSION_LOGS_ENABLED = 'netcatty_session_logs_enabled_v1';
 export const STORAGE_KEY_SESSION_LOGS_DIR = 'netcatty_session_logs_dir_v1';
 export const STORAGE_KEY_SESSION_LOGS_FORMAT = 'netcatty_session_logs_format_v1';
+export const STORAGE_KEY_SSH_DEBUG_LOGS_ENABLED = 'netcatty_ssh_debug_logs_enabled_v1';
 
 // Archived legacy key records that are no longer supported by the app (e.g. biometric/WebAuthn/FIDO2 experiments).
 export const STORAGE_KEY_LEGACY_KEYS = 'netcatty_legacy_keys_v1';

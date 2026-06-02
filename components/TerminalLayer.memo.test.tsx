@@ -29,6 +29,7 @@ const baseProps = {
   sftpUseCompressedUpload: false,
   sftpAutoOpenSidebar: false,
   editorWordWrap: false,
+  sshDebugLogsEnabled: false,
   setEditorWordWrap: () => {},
   onHotkeyAction: () => {},
   onUpdateHost: () => {},
@@ -114,6 +115,16 @@ test("TerminalLayer re-renders when broadcast toggle handler changes", () => {
     terminalLayerAreEqual(
       baseProps as never,
       { ...baseProps, onToggleBroadcast: () => {} } as never,
+    ),
+    false,
+  );
+});
+
+test("TerminalLayer re-renders when SSH debug logging changes", () => {
+  assert.equal(
+    terminalLayerAreEqual(
+      baseProps as never,
+      { ...baseProps, sshDebugLogsEnabled: true } as never,
     ),
     false,
   );

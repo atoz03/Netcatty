@@ -599,6 +599,79 @@ test("startSSH allows jump hosts that use reference key files with unavailable s
   assert.equal(jumpHosts[0]?.passphrase, undefined);
 });
 
+test("startSSH forwards the SSH debug logging setting to the native bridge", async () => {
+  let capturedOptions: Record<string, unknown> | null = null;
+
+  const terminalBackend = {
+    backendAvailable: () => true,
+    telnetAvailable: () => true,
+    moshAvailable: () => true,
+    localAvailable: () => true,
+    serialAvailable: () => true,
+    execAvailable: () => true,
+    startSSHSession: async (options: Record<string, unknown>) => {
+      capturedOptions = options;
+      return "ssh-session";
+    },
+    startTelnetSession: async () => "telnet-session",
+    startMoshSession: async () => "mosh-session",
+    startLocalSession: async () => "local-session",
+    startSerialSession: async () => "serial-session",
+    execCommand: async () => ({}),
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+
+  const ctx = {
+    host: {
+      id: "host-1",
+      label: "Target",
+      hostname: "target.example.test",
+      username: "alice",
+      port: 22,
+      password: "pw",
+    },
+    keys: [],
+    knownHosts: [],
+    resolvedChainHosts: [],
+    sessionId: "session-1",
+    terminalBackend,
+    sshDebugLogEnabled: true,
+    terminalSettings: { keepaliveInterval: 30, keepaliveCountMax: 10 },
+    sessionRef: { current: null },
+    hasConnectedRef: { current: false },
+    hasRunStartupCommandRef: { current: false },
+    disposeDataRef: { current: null },
+    disposeExitRef: { current: null },
+    fitAddonRef: { current: null },
+    serializeAddonRef: { current: null },
+    pendingAuthRef: { current: null },
+    updateStatus: noop,
+    setStatus: noop,
+    setError: noop,
+    setNeedsAuth: noop,
+    setAuthRetryMessage: noop,
+    setAuthPassword: noop,
+    setProgressLogs: noop,
+    setProgressValue: noop,
+    setChainProgress: noop,
+    onSessionAttached: noop,
+  };
+
+  const term = {
+    cols: 120,
+    rows: 32,
+    write: (_data: string, cb?: () => void) => cb?.(),
+    loadAddon: noop,
+  };
+  await createTerminalSessionStarters(ctx as unknown as TerminalSessionStartersContext).startSSH(term);
+
+  assert.equal(capturedOptions?.sshDebugLogEnabled, true);
+});
+
 test("startSSH omits identity file paths when password auth is selected", async () => {
   let capturedOptions: Record<string, unknown> | null = null;
 

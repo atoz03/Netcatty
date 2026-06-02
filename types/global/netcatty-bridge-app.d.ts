@@ -39,6 +39,15 @@ declare global {
     getAutoUpdate?(): Promise<{ enabled: boolean }>;
     setAutoUpdate?(enabled: boolean): Promise<{ success: boolean }>;
 
+    // SSH diagnostic logs
+    getSshDebugLogInfo?(): Promise<{
+      enabled: boolean;
+      path: string;
+      exists: boolean;
+      size: number;
+    }>;
+    openSshDebugLogDir?(): Promise<{ success: boolean; error?: string }>;
+
     // System Tray / Close to Tray
     setCloseToTray?(enabled: boolean): Promise<{ success: boolean; enabled: boolean }>;
     isCloseToTray?(): Promise<{ enabled: boolean }>;

@@ -63,6 +63,7 @@ export const DEFAULT_EDITOR_WORD_WRAP = false;
 // Session Logs defaults
 export const DEFAULT_SESSION_LOGS_ENABLED = false;
 export const DEFAULT_SESSION_LOGS_FORMAT: SessionLogFormat = 'txt';
+export const DEFAULT_SSH_DEBUG_LOGS_ENABLED = false;
 
 export const readStoredString = (key: string): string | null => {
   const raw = localStorageAdapter.readString(key);
@@ -155,4 +156,3 @@ export const applyThemeTokens = (
   netcattyBridge.get()?.setTheme?.(themeSource);
   netcattyBridge.get()?.setBackgroundColor?.(tokens.background);
 };
-

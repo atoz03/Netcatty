@@ -31,6 +31,7 @@ import {
   STORAGE_KEY_SESSION_LOGS_ENABLED,
   STORAGE_KEY_SESSION_LOGS_DIR,
   STORAGE_KEY_SESSION_LOGS_FORMAT,
+  STORAGE_KEY_SSH_DEBUG_LOGS_ENABLED,
   STORAGE_KEY_TOGGLE_WINDOW_HOTKEY,
   STORAGE_KEY_CLOSE_TO_TRAY,
   STORAGE_KEY_GLOBAL_HOTKEY_ENABLED,
@@ -77,6 +78,7 @@ import {
   DEFAULT_SHOW_ONLY_UNGROUPED_HOSTS_IN_ROOT,
   DEFAULT_SHOW_RECENT_HOSTS,
   DEFAULT_SHOW_SFTP_TAB,
+  DEFAULT_SSH_DEBUG_LOGS_ENABLED,
   DEFAULT_TERMINAL_THEME,
   DEFAULT_THEME,
   applyThemeTokens,
@@ -239,6 +241,10 @@ export const useSettingsState = () => {
     const stored = readStoredString(STORAGE_KEY_SESSION_LOGS_FORMAT);
     if (stored === 'txt' || stored === 'raw' || stored === 'html') return stored;
     return DEFAULT_SESSION_LOGS_FORMAT;
+  });
+  const [sshDebugLogsEnabled, setSshDebugLogsEnabled] = useState<boolean>(() => {
+    const stored = readStoredString(STORAGE_KEY_SSH_DEBUG_LOGS_ENABLED);
+    return stored === 'true' ? true : DEFAULT_SSH_DEBUG_LOGS_ENABLED;
   });
 
   // Global Toggle Window Settings (Quake Mode)
@@ -460,6 +466,12 @@ export const useSettingsState = () => {
     const storedWrap = readStoredString(STORAGE_KEY_EDITOR_WORD_WRAP);
     if (storedWrap === 'true' || storedWrap === 'false') setEditorWordWrapState(storedWrap === 'true');
 
+    // SSH diagnostics
+    const storedSshDebugLogsEnabled = readStoredString(STORAGE_KEY_SSH_DEBUG_LOGS_ENABLED);
+    if (storedSshDebugLogsEnabled === 'true' || storedSshDebugLogsEnabled === 'false') {
+      setSshDebugLogsEnabled(storedSshDebugLogsEnabled === 'true');
+    }
+
     // SFTP
     const storedDblClick = readStoredString(STORAGE_KEY_SFTP_DOUBLE_CLICK_BEHAVIOR);
     if (storedDblClick === 'open' || storedDblClick === 'transfer') setSftpDoubleClickBehavior(storedDblClick);
@@ -552,6 +564,7 @@ export const useSettingsState = () => {
     setSessionLogsEnabled,
     setSessionLogsDir,
     setSessionLogsFormat,
+    setSshDebugLogsEnabled,
     setHotkeyScheme,
     applyIncomingCustomKeyBindings,
     setIsHotkeyRecordingState,
@@ -587,7 +600,7 @@ export const useSettingsState = () => {
     sftpDoubleClickBehavior, sftpAutoSync, sftpShowHiddenFiles,
     sftpUseCompressedUpload, sftpAutoOpenSidebar, sftpDefaultViewMode,
     showRecentHosts, showOnlyUngroupedHostsInRoot, showSftpTab,
-    editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat,
+    editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat, sshDebugLogsEnabled,
     globalHotkeyEnabled, autoUpdateEnabled,
     setTheme, setLightUiThemeId, setDarkUiThemeId, setAccentMode, setCustomAccent,
     setCustomCSS, setUiFontFamilyId, setHotkeyScheme, setUiLanguage,
@@ -596,7 +609,7 @@ export const useSettingsState = () => {
     setSftpDoubleClickBehavior, setSftpAutoSync, setSftpShowHiddenFiles,
     setSftpUseCompressedUpload, setSftpAutoOpenSidebar, setSftpDefaultViewMode,
     setShowRecentHostsState, setShowOnlyUngroupedHostsInRootState, setShowSftpTabState,
-    setEditorWordWrapState, setSessionLogsEnabled, setSessionLogsDir, setSessionLogsFormat,
+    setEditorWordWrapState, setSessionLogsEnabled, setSessionLogsDir, setSessionLogsFormat, setSshDebugLogsEnabled,
     setGlobalHotkeyEnabled, setAutoUpdateEnabled, setWorkspaceFocusStyleState,
     setSftpTransferConcurrencyState, applyIncomingCustomKeyBindings, mergeIncomingTerminalSettings,
   });
@@ -779,6 +792,12 @@ export const useSettingsState = () => {
     notifySettingsChanged(STORAGE_KEY_SESSION_LOGS_FORMAT, sessionLogsFormat);
   }, [sessionLogsFormat, notifySettingsChanged]);
 
+  useEffect(() => {
+    localStorageAdapter.writeString(STORAGE_KEY_SSH_DEBUG_LOGS_ENABLED, sshDebugLogsEnabled ? 'true' : 'false');
+    if (!persistMountedRef.current) return;
+    notifySettingsChanged(STORAGE_KEY_SSH_DEBUG_LOGS_ENABLED, sshDebugLogsEnabled);
+  }, [sshDebugLogsEnabled, notifySettingsChanged]);
+
   useSystemSettingsEffects({
     toggleWindowHotkey,
     globalHotkeyEnabled,
@@ -940,6 +959,8 @@ export const useSettingsState = () => {
     setSessionLogsDir,
     sessionLogsFormat,
     setSessionLogsFormat,
+    sshDebugLogsEnabled,
+    setSshDebugLogsEnabled,
     // Global Toggle Window (Quake Mode)
     toggleWindowHotkey,
     setToggleWindowHotkey,
@@ -963,7 +984,7 @@ export const useSettingsState = () => {
       customKeyBindings, editorWordWrap,
       sftpDoubleClickBehavior, sftpAutoSync, sftpShowHiddenFiles, sftpUseCompressedUpload, sftpAutoOpenSidebar, sftpDefaultViewMode,
       showRecentHosts, showOnlyUngroupedHostsInRoot, showSftpTab,
-      customThemes, workspaceFocusStyle,
+      customThemes, workspaceFocusStyle, sshDebugLogsEnabled,
     ]),
   };
 };

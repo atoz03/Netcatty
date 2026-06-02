@@ -417,6 +417,7 @@ export interface TerminalLayerProps {
   sessionLogsEnabled?: boolean;
   sessionLogsDir?: string;
   sessionLogsFormat?: string;
+  sshDebugLogsEnabled?: boolean;
   toggleScriptsSidePanelRef?: React.MutableRefObject<(() => void) | null>;
   toggleSidePanelRef?: React.MutableRefObject<(() => void) | null>;
 }
@@ -449,6 +450,7 @@ interface TerminalPaneProps {
   isResizing: boolean;
   isComposeBarOpen: boolean;
   sessionLog?: { enabled: true; directory: string; format: string };
+  sshDebugLogEnabled?: boolean;
   onHotkeyAction?: (action: string, event: KeyboardEvent) => void;
   onTerminalFontSizeChange?: (sessionId: string, fontSize: number) => void;
   onOpenSftp: (
@@ -516,6 +518,7 @@ const terminalPanePropsAreEqual = (
   prev.isResizing === next.isResizing &&
   prev.isComposeBarOpen === next.isComposeBarOpen &&
   prev.sessionLog === next.sessionLog &&
+  prev.sshDebugLogEnabled === next.sshDebugLogEnabled &&
   prev.onHotkeyAction === next.onHotkeyAction &&
   prev.onTerminalFontSizeChange === next.onTerminalFontSizeChange &&
   prev.onOpenSftp === next.onOpenSftp &&
@@ -710,6 +713,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
         onBroadcastInput={broadcastEnabled ? onBroadcastInput : undefined}
         onSnippetExecutorChange={onSnippetExecutorChange}
         sessionLog={sessionLog}
+        sshDebugLogEnabled={sshDebugLogEnabled}
       />
     </div>
   );
@@ -744,6 +748,7 @@ interface TerminalPanesHostProps {
   isResizing: boolean;
   isComposeBarOpen: boolean;
   sessionLog?: { enabled: true; directory: string; format: string };
+  sshDebugLogEnabled?: boolean;
   onHotkeyAction?: (action: string, event: KeyboardEvent) => void;
   onTerminalFontSizeChange?: TerminalPaneProps['onTerminalFontSizeChange'];
   onOpenSftp: TerminalPaneProps['onOpenSftp'];

@@ -14,6 +14,7 @@ import {
   STORAGE_KEY_SESSION_LOGS_DIR,
   STORAGE_KEY_SESSION_LOGS_ENABLED,
   STORAGE_KEY_SESSION_LOGS_FORMAT,
+  STORAGE_KEY_SSH_DEBUG_LOGS_ENABLED,
   STORAGE_KEY_SFTP_AUTO_OPEN_SIDEBAR,
   STORAGE_KEY_SFTP_AUTO_SYNC,
   STORAGE_KEY_SFTP_DEFAULT_VIEW_MODE,
@@ -73,6 +74,7 @@ interface UseSettingsStorageSyncParams {
   sessionLogsEnabled: boolean;
   sessionLogsDir: string;
   sessionLogsFormat: SessionLogFormat;
+  sshDebugLogsEnabled: boolean;
   globalHotkeyEnabled: boolean;
   autoUpdateEnabled: boolean;
   setTheme: Dispatch<SetStateAction<'dark' | 'light' | 'system'>>;
@@ -103,6 +105,7 @@ interface UseSettingsStorageSyncParams {
   setSessionLogsEnabled: Dispatch<SetStateAction<boolean>>;
   setSessionLogsDir: Dispatch<SetStateAction<string>>;
   setSessionLogsFormat: Dispatch<SetStateAction<SessionLogFormat>>;
+  setSshDebugLogsEnabled: Dispatch<SetStateAction<boolean>>;
   setGlobalHotkeyEnabled: Dispatch<SetStateAction<boolean>>;
   setAutoUpdateEnabled: Dispatch<SetStateAction<boolean>>;
   setWorkspaceFocusStyleState: Dispatch<SetStateAction<'dim' | 'border'>>;
@@ -118,7 +121,7 @@ export function useSettingsStorageSync({
   sftpDoubleClickBehavior, sftpAutoSync, sftpShowHiddenFiles,
   sftpUseCompressedUpload, sftpAutoOpenSidebar, sftpDefaultViewMode,
   showRecentHosts, showOnlyUngroupedHostsInRoot, showSftpTab,
-  editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat,
+  editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat, sshDebugLogsEnabled,
   globalHotkeyEnabled, autoUpdateEnabled,
   setTheme, setLightUiThemeId, setDarkUiThemeId, setAccentMode, setCustomAccent,
   setCustomCSS, setUiFontFamilyId, setHotkeyScheme, setUiLanguage,
@@ -127,7 +130,7 @@ export function useSettingsStorageSync({
   setSftpDoubleClickBehavior, setSftpAutoSync, setSftpShowHiddenFiles,
   setSftpUseCompressedUpload, setSftpAutoOpenSidebar, setSftpDefaultViewMode,
   setShowRecentHostsState, setShowOnlyUngroupedHostsInRootState, setShowSftpTabState,
-  setEditorWordWrapState, setSessionLogsEnabled, setSessionLogsDir, setSessionLogsFormat,
+  setEditorWordWrapState, setSessionLogsEnabled, setSessionLogsDir, setSessionLogsFormat, setSshDebugLogsEnabled,
   setGlobalHotkeyEnabled, setAutoUpdateEnabled, setWorkspaceFocusStyleState,
   setSftpTransferConcurrencyState, applyIncomingCustomKeyBindings, mergeIncomingTerminalSettings,
 }: UseSettingsStorageSyncParams) {
@@ -141,7 +144,7 @@ export function useSettingsStorageSync({
     sftpDoubleClickBehavior, sftpAutoSync, sftpShowHiddenFiles,
     sftpUseCompressedUpload, sftpAutoOpenSidebar, sftpDefaultViewMode,
     showRecentHosts, showOnlyUngroupedHostsInRoot, showSftpTab,
-    editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat,
+    editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat, sshDebugLogsEnabled,
     globalHotkeyEnabled, autoUpdateEnabled,
   });
   settingsSnapshotRef.current = {
@@ -151,7 +154,7 @@ export function useSettingsStorageSync({
     sftpDoubleClickBehavior, sftpAutoSync, sftpShowHiddenFiles,
     sftpUseCompressedUpload, sftpAutoOpenSidebar, sftpDefaultViewMode,
     showRecentHosts, showOnlyUngroupedHostsInRoot, showSftpTab,
-    editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat,
+    editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat, sshDebugLogsEnabled,
     globalHotkeyEnabled, autoUpdateEnabled,
   };
 
@@ -302,6 +305,12 @@ export function useSettingsStorageSync({
           setSessionLogsFormat(e.newValue);
         }
       }
+      if (e.key === STORAGE_KEY_SSH_DEBUG_LOGS_ENABLED && e.newValue !== null) {
+        const newValue = e.newValue === 'true';
+        if (newValue !== s.sshDebugLogsEnabled) {
+          setSshDebugLogsEnabled(newValue);
+        }
+      }
       // Sync SFTP compressed upload setting from other windows
       if (e.key === STORAGE_KEY_SFTP_USE_COMPRESSED_UPLOAD && e.newValue !== null) {
         const newValue = e.newValue === 'true' || e.newValue === 'enabled';
@@ -387,6 +396,7 @@ export function useSettingsStorageSync({
     setSessionLogsDir,
     setSessionLogsEnabled,
     setSessionLogsFormat,
+    setSshDebugLogsEnabled,
     setSftpAutoOpenSidebar,
     setSftpAutoSync,
     setSftpDefaultViewMode,

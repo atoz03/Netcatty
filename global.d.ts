@@ -116,6 +116,8 @@ declare global {
     sudo?: boolean;
     // Session log configuration for real-time streaming
     sessionLog?: { enabled: boolean; directory: string; format: string };
+    // SSH connection diagnostics. Does not capture terminal output.
+    sshDebugLogEnabled?: boolean;
     // Local SSH key file paths (from SSH config IdentityFile)
     identityFilePaths?: string[];
   }

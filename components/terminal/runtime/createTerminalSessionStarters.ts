@@ -369,6 +369,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
           keepaliveInterval: keepalive.interval,
           keepaliveCountMax: keepalive.countMax,
           sessionLog: ctx.sessionLog?.enabled ? ctx.sessionLog : undefined,
+          sshDebugLogEnabled: ctx.sshDebugLogEnabled,
           identityFilePaths: attempt.password ? undefined : targetIdentityFilePaths,
           knownHosts: ctx.knownHosts,
         });

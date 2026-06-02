@@ -3,6 +3,9 @@ function createStartSessionApi(ctx) {
   with (ctx) {
     async function startSSHSession(event, options) {
       const sessionId = options.sessionId || randomUUID();
+      const log = createSshDiagnosticLogger(
+        !!options.sshDebugLogEnabled || process.env.NETCATTY_SSH_DEBUG === "1",
+      );
     
       const cols = options.cols || 80;
       const rows = options.rows || 24;
@@ -15,6 +18,15 @@ function createStartSessionApi(ctx) {
       };
     
       try {
+        log("session starting", {
+          sessionId,
+          hostname: options.hostname,
+          port: options.port || 22,
+          username: options.username || "root",
+          hostLabel: options.hostLabel || options.label,
+          hasJumpHosts: (options.jumpHosts || []).length > 0,
+          hasProxy: !!options.proxy,
+        });
         const conn = new SSHClient();
         let chainConnections = [];
         let connectionSocket = null;
@@ -50,14 +62,14 @@ function createStartSessionApi(ctx) {
             algorithmOverrides: options.algorithmOverrides,
           }),
         };
-        attachSshDebugLogger(connectOpts);
+        attachSshDebugLogger(connectOpts, log);
         logSshAlgorithms("Target host", connectOpts.algorithms, {
           hostname: options.hostname,
           port: options.port || 22,
           legacyAlgorithms: !!options.legacyAlgorithms,
           skipEcdsaHostKey: !!options.skipEcdsaHostKey,
           hasAlgorithmOverrides: !!options.algorithmOverrides,
-        });
+        }, log);
     
         connectOpts.hostVerifier = hostKeyVerifier.createHostVerifier({
           sender,
@@ -481,7 +493,8 @@ function createStartSessionApi(ctx) {
         if (hasJumpHosts) {
           // Pass fetched keys to chain connection to avoid re-reading files
           options._defaultKeys = allDefaultKeys;
-    
+          options._sshDiagnosticLogger = log;
+
           const chainResult = await connectThroughChain(
             event,
             options,
@@ -523,11 +536,17 @@ function createStartSessionApi(ctx) {
     
           conn.once("handshake", () => {
             console.log(`${logPrefix} ${options.hostname} handshake complete`);
+            log("target handshake complete", { sessionId, hostname: options.hostname });
             sendProgress(totalHops, totalHops, options.hostname, 'authenticating');
           });
     
           conn.once("ready", () => {
             console.log(`${logPrefix} ${options.hostname} ready`);
+            log("target ready", {
+              sessionId,
+              hostname: options.hostname,
+              remoteSshVersion: (conn && typeof conn._remoteVer === 'string') ? conn._remoteVer : '',
+            });
     
             // Cache the successful auth method
             if (connectOpts._lastTriedMethodRef) {
@@ -582,6 +601,7 @@ function createStartSessionApi(ctx) {
               shellOptions,
               (err, stream) => {
                 if (err) {
+                  log("shell open failed", { sessionId, hostname: options.hostname, error: err.message });
                   if (detachX11Forwarding) detachX11Forwarding();
                   settled = true;
                   conn.end();
@@ -711,11 +731,19 @@ function createStartSessionApi(ctx) {
                 let streamExitCode = 0;
                 let streamExited = false;
                 stream.on("exit", (code, signal) => {
+                  log("shell exit", { sessionId, hostname: options.hostname, code, signal });
                   streamExitCode = typeof code === "number" ? code : 0;
                   streamExited = typeof code === "number" && !signal;
                 });
     
                 stream.on("close", () => {
+                  log("shell stream closed", {
+                    sessionId,
+                    hostname: options.hostname,
+                    streamExitCode,
+                    streamExited,
+                    transportError: sessions.get(sessionId)?._transportError,
+                  });
                   // Always flush buffered data regardless of session state.
                   // flushBuffer() cancels any pending scheduled flush internally.
                   flushBuffer();
@@ -782,6 +810,13 @@ function createStartSessionApi(ctx) {
             // any buffered data first and then send exit with this error info.
             if (settled) {
               console.warn(`${logPrefix} ${options.hostname} post-settle error:`, err.message);
+              log("post-connect transport error", {
+                sessionId,
+                hostname: options.hostname,
+                error: err.message,
+                code: err.code,
+                level: err.level,
+              });
               // Store the error so the close handler can include it in the exit event
               if (sessions.has(sessionId)) {
                 const session = sessions.get(sessionId);
@@ -801,6 +836,13 @@ function createStartSessionApi(ctx) {
             if (isAuthError) {
               clearCachedAuthMethod(connectOpts.username, options.hostname, options.port);
               console.log(`${logPrefix} ${options.hostname} auth failed:`, err.message);
+              log("authentication failed", {
+                sessionId,
+                hostname: options.hostname,
+                error: err.message,
+                code: err.code,
+                level: err.level,
+              });
               safeSend(contents, "netcatty:auth:failed", {
                 sessionId,
                 error: err.message,
@@ -808,6 +850,13 @@ function createStartSessionApi(ctx) {
               });
             } else {
               console.error(`${logPrefix} ${options.hostname} error:`, err.message);
+              log("connection error", {
+                sessionId,
+                hostname: options.hostname,
+                error: err.message,
+                code: err.code,
+                level: err.level,
+              });
             }
     
             sendProgress(totalHops, totalHops, options.hostname, 'error', err.message);
@@ -834,6 +883,7 @@ function createStartSessionApi(ctx) {
           conn.once("timeout", () => {
             console.error(`${logPrefix} ${options.hostname} connection timeout`);
             const err = new Error(`Connection timeout to ${options.hostname}`);
+            log("connection timeout", { sessionId, hostname: options.hostname, error: err.message });
             const contents = event.sender;
             sendProgress(totalHops, totalHops, options.hostname, 'error', err.message);
             safeSend(contents, "netcatty:exit", { sessionId, exitCode: 1, error: err.message, reason: "timeout" });
@@ -852,6 +902,12 @@ function createStartSessionApi(ctx) {
     
           conn.once("close", () => {
             const contents = event.sender;
+            log("connection closed", {
+              sessionId,
+              hostname: options.hostname,
+              settled,
+              transportError: sessions.get(sessionId)?._transportError,
+            });
             if (!settled) {
               sendProgress(totalHops, totalHops, options.hostname, 'error', `Connection to ${options.hostname} closed unexpectedly`);
             }

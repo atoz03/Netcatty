@@ -36,6 +36,7 @@ const {
 const sessionLogStreamManager = require("./sessionLogStreamManager.cjs");
 const { trackSessionIdlePrompt, looksLikeIdleAutoLogout } = require("./ai/shellUtils.cjs");
 const { createZmodemSentry } = require("./zmodemHelper.cjs");
+const tempDirBridge = require("./tempDirBridge.cjs");
 const {
   buildAlgorithms,
   _resetAlgorithmSupportCacheForTests,
@@ -256,41 +257,116 @@ async function getAvailableAgentSocket() {
   return getSshAgentSocket();
 }
 
-const DEBUG_SSH = process.env.NETCATTY_SSH_DEBUG === "1";
+const SSH_DEBUG_REDACTED_KEYS = new Set([
+  "password",
+  "passphrase",
+  "privateKey",
+  "key",
+  "certificate",
+]);
+let sshDebugLoggingEnabled = process.env.NETCATTY_SSH_DEBUG === "1";
+let sshDebugLogFilePath = tempDirBridge.getTempFilePath("netcatty-ssh.log");
 
-// Debug logger (disabled by default)
-const logFile = DEBUG_SSH
-  ? path.join(require("os").tmpdir(), "netcatty-ssh.log")
-  : null;
-const log = (msg, data) => {
-  if (!DEBUG_SSH) return;
-  const line = `[${new Date().toISOString()}] ${msg} ${data ? JSON.stringify(data) : ""}\n`;
-  try { fs.appendFileSync(logFile, line); } catch { }
-  console.log("[SSH]", msg, data ? JSON.stringify(data, null, 2) : "");
-};
+function sanitizeSshDebugValue(value, key = "") {
+  if (SSH_DEBUG_REDACTED_KEYS.has(key)) return "[redacted]";
+  if (Array.isArray(value)) return value.map((item) => sanitizeSshDebugValue(item));
+  if (value && typeof value === "object") {
+    const result = {};
+    for (const [entryKey, entryValue] of Object.entries(value)) {
+      result[entryKey] = sanitizeSshDebugValue(entryValue, entryKey);
+    }
+    return result;
+  }
+  return value;
+}
+
+function setSshDebugLoggingEnabled(enabled, options = {}) {
+  sshDebugLoggingEnabled = !!enabled;
+  if (typeof options.logFilePath === "string" && options.logFilePath.trim()) {
+    sshDebugLogFilePath = options.logFilePath;
+  }
+}
+
+function isSshDebugLoggingEnabled() {
+  return sshDebugLoggingEnabled;
+}
+
+function getSshDebugLogFilePath() {
+  return sshDebugLogFilePath;
+}
+
+function appendSshDiagnosticLog(msg, data, options = {}) {
+  const enabled = Object.prototype.hasOwnProperty.call(options, "enabled")
+    ? !!options.enabled
+    : isSshDebugLoggingEnabled();
+  if (!enabled) return;
+  const safeData = data ? sanitizeSshDebugValue(data) : undefined;
+  const line = `[${new Date().toISOString()}] ${msg} ${safeData ? JSON.stringify(safeData) : ""}\n`;
+  try { fs.appendFileSync(sshDebugLogFilePath, line); } catch { }
+  console.log("[SSH]", msg, safeData ? JSON.stringify(safeData, null, 2) : "");
+}
+
+const log = appendSshDiagnosticLog;
+log.isEnabled = isSshDebugLoggingEnabled;
+
+function createSshDiagnosticLogger(enabled) {
+  const isEnabled = !!enabled;
+  const logger = (msg, data) => appendSshDiagnosticLog(msg, data, { enabled: isEnabled });
+  logger.isEnabled = () => isEnabled;
+  return logger;
+}
 
 function shouldLogSshDebugMessage(msg) {
   if (typeof msg !== "string") return false;
   return /auth|publickey|keyboard|handshake|kex|newkeys|dh gex/i.test(msg);
 }
 
-function attachSshDebugLogger(connectOpts) {
-  if (!DEBUG_SSH) return;
+function attachSshDebugLogger(connectOpts, logger = log) {
+  if (typeof logger.isEnabled === "function" && !logger.isEnabled()) return;
   connectOpts.debug = (msg) => {
     if (shouldLogSshDebugMessage(msg)) {
-      log("ssh2 debug", { msg });
+      logger("ssh2 debug", { msg });
     }
   };
 }
 
-function logSshAlgorithms(label, algorithms, extra = {}) {
-  log(`${label} algorithm configuration`, {
+function logSshAlgorithms(label, algorithms, extra = {}, logger = log) {
+  logger(`${label} algorithm configuration`, {
     ...extra,
     kex: algorithms.kex,
     cipher: algorithms.cipher,
     hmac: algorithms.hmac,
     serverHostKey: algorithms.serverHostKey,
   });
+}
+
+async function getSshDebugLogInfo() {
+  let size = 0;
+  let exists = false;
+  try {
+    const stat = await fs.promises.stat(sshDebugLogFilePath);
+    exists = stat.isFile();
+    size = stat.size;
+  } catch {
+    exists = false;
+  }
+  return {
+    enabled: isSshDebugLoggingEnabled(),
+    path: sshDebugLogFilePath,
+    exists,
+    size,
+  };
+}
+
+async function openSshDebugLogDir() {
+  if (!electronModule?.shell?.openPath) return { success: false, error: "shell unavailable" };
+  try {
+    await fs.promises.mkdir(path.dirname(sshDebugLogFilePath), { recursive: true });
+    const error = await electronModule.shell.openPath(path.dirname(sshDebugLogFilePath));
+    return error ? { success: false, error } : { success: true };
+  } catch (err) {
+    return { success: false, error: err?.message || String(err) };
+  }
 }
 
 // Session storage - shared reference passed from main
@@ -383,6 +459,7 @@ function init(deps) {
 async function connectThroughChain(event, options, jumpHosts, targetHost, targetPort, sessionId) {
   const sender = event.sender;
   const connections = options?._connectionsRef || [];
+  const sshDiagnosticLogger = options?._sshDiagnosticLogger || log;
   let currentSocket = null;
 
   const sendProgress = (hop, total, label, status, error) => {
@@ -453,14 +530,14 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
           },
         ),
       };
-      attachSshDebugLogger(connOpts);
+      attachSshDebugLogger(connOpts, sshDiagnosticLogger);
       logSshAlgorithms("Jump host", connOpts.algorithms, {
         hostname: jump.hostname,
         port: jump.port || 22,
         legacyAlgorithms: !!(jump.legacyAlgorithms ?? options.legacyAlgorithms),
         skipEcdsaHostKey: !!jump.skipEcdsaHostKey,
         hasAlgorithmOverrides: !!jump.algorithmOverrides,
-      });
+      }, sshDiagnosticLogger);
 
       // Auth - support agent (certificate), key, password, and default key fallback
       const hasCertificate =
@@ -704,7 +781,7 @@ const startSessionApi = createStartSessionApi({
   iconv, getSessionDecoder, resetSessionDecoders, sessionEncodings, sessionDecoders,
   connectThroughChain, getAvailableAgentSocket, getCachedAuthMethod, setCachedAuthMethod, clearCachedAuthMethod,
   attachSshDebugLogger, logSshAlgorithms, resolveLangFromCharset, safeSend, zmodemOverwritePending,
-  shouldLogSshDebugMessage, log,
+  shouldLogSshDebugMessage, log, createSshDiagnosticLogger,
   buildAlgorithms, randomUUID, findDefaultPrivateKey, findAllDefaultPrivateKeys,
   preparePrivateKeyForAuth, loadFirstIdentityFileForAuth, createKeyboardInteractiveHandler,
   get probeReceiveConflicts() { return probeReceiveConflicts; },
@@ -917,6 +994,8 @@ function registerHandlers(ipcMain) {
   ipcMain.handle("netcatty:ssh:stats", getServerStats);
   ipcMain.handle("netcatty:key:generate", generateKeyPair);
   ipcMain.handle("netcatty:ssh:setEncoding", setSessionEncoding);
+  ipcMain.handle("netcatty:sshDebugLog:info", getSshDebugLogInfo);
+  ipcMain.handle("netcatty:sshDebugLog:openDir", openSshDebugLogDir);
   ipcMain.handle("netcatty:ssh:check-agent", async () => {
     return await checkWindowsSshAgent();
   });
@@ -955,5 +1034,9 @@ module.exports = {
   connectThroughChain,
   buildAlgorithms,
   _resetAlgorithmSupportCacheForTests,
+  _appendSshDiagnosticLog: appendSshDiagnosticLog,
+  _createSshDiagnosticLogger: createSshDiagnosticLogger,
+  _getSshDebugLogFilePath: getSshDebugLogFilePath,
+  _setSshDebugLoggingEnabled: setSshDebugLoggingEnabled,
   _shouldLogSshDebugMessage: shouldLogSshDebugMessage,
 };

@@ -366,6 +366,8 @@ function createPreloadApi(ctx) {
     ipcRenderer.on("netcatty:settings:changed", handler);
     return () => ipcRenderer.removeListener("netcatty:settings:changed", handler);
   },
+  getSshDebugLogInfo: () => ipcRenderer.invoke("netcatty:sshDebugLog:info"),
+  openSshDebugLogDir: () => ipcRenderer.invoke("netcatty:sshDebugLog:openDir"),
 
   // Cloud sync session (in-memory only, shared across windows)
   cloudSyncSetSessionPassword: (password) =>

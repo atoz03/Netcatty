@@ -161,6 +161,17 @@ export const enCoreMessages: Messages = {
   'settings.sessionLogs.formatHtml': 'HTML (.html)',
   'settings.sessionLogs.hint': 'Session logs capture all terminal output for troubleshooting and auditing purposes.',
 
+  // Settings > SSH Debug Logs
+  'settings.sshDebugLogs.title': 'SSH Debug Logs',
+  'settings.sshDebugLogs.enable': 'Enable SSH debug logs',
+  'settings.sshDebugLogs.enableDesc': 'Record connection, auth, handshake, disconnect, and error reasons without saving terminal output.',
+  'settings.sshDebugLogs.location': 'Log Location',
+  'settings.sshDebugLogs.status': 'Status',
+  'settings.sshDebugLogs.statusOn': 'On',
+  'settings.sshDebugLogs.statusOff': 'Off',
+  'settings.sshDebugLogs.size': 'Size',
+  'settings.sshDebugLogs.hint': 'When enabled, newly started SSH connections write diagnostic events for bastion, auth, and unexpected disconnect troubleshooting.',
+
   // Settings > Global Hotkey (Quake Mode)
   'settings.globalHotkey.title': 'Global Hotkey',
   'settings.globalHotkey.toggleWindow': 'Toggle Window',

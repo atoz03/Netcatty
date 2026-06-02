@@ -125,6 +125,7 @@ export interface TerminalProps {
     executor: ((command: string, noAutoRun?: boolean) => void) | null,
   ) => void;
   sessionLog?: { enabled: boolean; directory: string; format: string };
+  sshDebugLogEnabled?: boolean;
 }
 
 export function formatNetSpeed(bytesPerSec: number): string {

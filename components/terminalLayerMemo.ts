@@ -26,6 +26,7 @@ export const terminalLayerAreEqual = (
   prev.sftpUseCompressedUpload === next.sftpUseCompressedUpload &&
   prev.sftpAutoOpenSidebar === next.sftpAutoOpenSidebar &&
   prev.editorWordWrap === next.editorWordWrap &&
+  prev.sshDebugLogsEnabled === next.sshDebugLogsEnabled &&
   prev.setEditorWordWrap === next.setEditorWordWrap &&
   prev.onHotkeyAction === next.onHotkeyAction &&
   prev.onUpdateHost === next.onUpdateHost &&

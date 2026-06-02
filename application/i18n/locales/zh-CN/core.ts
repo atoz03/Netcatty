@@ -145,6 +145,17 @@ export const zhCNCoreMessages: Messages = {
   'settings.sessionLogs.formatHtml': 'HTML (.html)',
   'settings.sessionLogs.hint': '会话日志用于记录终端输出，便于故障排查和审计。',
 
+  // Settings > SSH Debug Logs
+  'settings.sshDebugLogs.title': 'SSH 调试日志',
+  'settings.sshDebugLogs.enable': '启用 SSH 调试日志',
+  'settings.sshDebugLogs.enableDesc': '记录连接、认证、握手、断开和错误原因，不记录终端输出。',
+  'settings.sshDebugLogs.location': '日志位置',
+  'settings.sshDebugLogs.status': '状态',
+  'settings.sshDebugLogs.statusOn': '已开启',
+  'settings.sshDebugLogs.statusOff': '未开启',
+  'settings.sshDebugLogs.size': '大小',
+  'settings.sshDebugLogs.hint': '开启后，新发起的 SSH 连接会写入诊断信息，方便排查堡垒机、认证和异常断开问题。',
+
   // Settings > Global Hotkey (Quake Mode)
   'settings.globalHotkey.title': '全局快捷键',
   'settings.globalHotkey.toggleWindow': '切换窗口',

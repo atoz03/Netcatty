@@ -161,6 +161,17 @@ export const ruCoreMessages: Messages = {
   'settings.sessionLogs.formatHtml': 'HTML (.html)',
   'settings.sessionLogs.hint': 'Журналы сессий сохраняют весь вывод терминала для диагностики и аудита.',
 
+  // Settings > SSH Debug Logs
+  'settings.sshDebugLogs.title': 'Отладочные журналы SSH',
+  'settings.sshDebugLogs.enable': 'Включить отладочные журналы SSH',
+  'settings.sshDebugLogs.enableDesc': 'Записывать подключение, аутентификацию, рукопожатие, отключение и причины ошибок без вывода терминала.',
+  'settings.sshDebugLogs.location': 'Расположение журнала',
+  'settings.sshDebugLogs.status': 'Статус',
+  'settings.sshDebugLogs.statusOn': 'Включено',
+  'settings.sshDebugLogs.statusOff': 'Отключено',
+  'settings.sshDebugLogs.size': 'Размер',
+  'settings.sshDebugLogs.hint': 'Когда включено, новые SSH-подключения записывают диагностические события для разбора бастионов, аутентификации и неожиданных отключений.',
+
   // Settings > Global Hotkey (Quake Mode)
   'settings.globalHotkey.title': 'Глобальная горячая клавиша',
   'settings.globalHotkey.toggleWindow': 'Переключение окна',

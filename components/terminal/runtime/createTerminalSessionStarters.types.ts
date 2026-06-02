@@ -95,6 +95,7 @@ export type TerminalSessionStartersContext = {
   terminalBackend: TerminalBackendApi;
   serialConfig?: SerialConfig;
   sessionLog?: SessionLogConfig;
+  sshDebugLogEnabled?: boolean;
   isVisibleRef?: RefObject<boolean>;
   pendingOutputScrollRef?: RefObject<boolean>;
 

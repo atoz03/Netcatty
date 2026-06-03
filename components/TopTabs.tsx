@@ -1,4 +1,4 @@
-import { Bell, Folder, FolderLock, Moon, MoreHorizontal, Plus, Settings, Sparkles, Sun } from 'lucide-react';
+import { Folder, FolderLock, Moon, MoreHorizontal, Plus, Settings, Sparkles, Sun } from 'lucide-react';
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { fromEditorTabId, isEditorTabId } from '../application/state/activeTabStore';
 import type { EditorTab } from '../application/state/editorTabStore';
@@ -604,9 +604,6 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
             </TooltipTrigger>
             <TooltipContent>{t('topTabs.aiAssistant')}</TooltipContent>
           </Tooltip>
-          <Button variant="ghost" size="icon" className="h-6 w-6 app-no-drag" style={{ color: 'var(--top-tabs-muted, hsl(var(--muted-foreground)))' }}>
-            <Bell size={16} />
-          </Button>
           <SyncStatusButton onOpenSettings={onOpenSettings} onSyncNow={onSyncNow} />
           <Tooltip>
             <TooltipTrigger asChild>

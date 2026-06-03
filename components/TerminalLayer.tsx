@@ -37,6 +37,7 @@ import { Button } from './ui/button';
 import { setupMcpApprovalBridge } from '../infrastructure/ai/shared/approvalGate';
 import { resolveScriptsSidePanelShortcutIntent } from '../application/state/resolveSnippetsShortcutIntent';
 import { resolveSidePanelToggleIntent } from '../application/state/resolveSidePanelToggleIntent';
+import { resolveAiSidePanelToggleIntent } from '../application/state/resolveAiSidePanelToggleIntent';
 import { terminalLayerAreEqual } from './terminalLayerMemo';
 import { useTerminalLayerEffects } from './terminalLayer/useTerminalLayerEffects';
 import { TerminalLayerView } from './terminalLayer/TerminalLayerView';
@@ -841,10 +842,31 @@ const TerminalLayerInner: React.FC<TerminalLayerProps> = ({
     handleSwitchSidePanelTab('theme');
   }, [handleSwitchSidePanelTab]);
 
-  // Open AI chat side panel
+  // Open AI chat side panel (side-panel rail button: a plain switch that is a
+  // no-op when AI is already the active sub-panel, matching the other rail tabs)
   const handleOpenAI = useCallback(() => {
     handleSwitchSidePanelTab('ai');
   }, [handleSwitchSidePanelTab]);
+
+  // Toggle the AI chat side panel from the top-bar button: open it (or switch
+  // to it from another sub-panel), and close the side panel when AI is already
+  // the open sub-panel. Unlike handleOpenAI (the rail switch), a second click
+  // here dismisses the panel.
+  const handleToggleAiFromTopBar = useCallback(() => {
+    const tabId = activeTabIdRef.current;
+    if (!tabId) return;
+
+    const intent = resolveAiSidePanelToggleIntent(
+      sidePanelOpenTabsRef.current.get(tabId) ?? null,
+    );
+
+    if (intent.kind === 'closeTerminalSidePanel') {
+      handleCloseSidePanel();
+      return;
+    }
+
+    handleSwitchSidePanelTab('ai');
+  }, [handleCloseSidePanel, handleSwitchSidePanelTab]);
 
   // Execute snippet on the focused terminal session
   const handleSnippetClickForFocusedSession = useCallback((command: string, noAutoRun?: boolean) => {
@@ -981,7 +1003,7 @@ const TerminalLayerInner: React.FC<TerminalLayerProps> = ({
   // Track previous focusedSessionId to detect changes
   const prevFocusedSessionIdRef = useRef<string | undefined>(undefined);
 
-  useTerminalLayerEffects({ activeSidePanelTab, activeTabId, activeTabIdRef, activeTopTabsThemeId, activeWorkspace, activityTrackedSessions, appliedPreviewSessionRef, applyTerminalPreviewVars, applyTopTabsPreviewVars, cancelAnimationFrame, ChunkedEscapeFilter, clearTerminalPreviewVars, clearTimeout, clearTopTabsPreviewVars, document, dropHint, filterTabsMap, focusedSessionId, followAppTerminalTheme, getSessionActivityIdsToClear, handleOpenAI, handleToggleScriptsSidePanel, handleToggleSidePanel, hasNotifiableTerminalOutput, isFocusMode, isTerminalLayerVisible, lastSidePanelTabRef, Map, Math, onSessionData, onSplitSessionRef, onToggleBroadcastRef, onToggleWorkspaceViewModeRef, onUpdateSplitSizes, prevFocusedSessionIdRef, previewTargetSessionId, requestAnimationFrame, ResizeObserver, resizing, sessionActivityStore, sessions, Set, setDropHint, setResizing, setSftpHostForTab, setSftpInitialLocationForTab, setSftpPendingUploadsForTab, setSidePanelOpenTabs, setThemePreview, setTimeout, setupMcpApprovalBridge, setWorkspaceArea, sftpActiveHost, sftpHostForTab, shouldMarkSessionActivity, sidePanelOpenTabs, splitHorizontalHandlersRef, splitVerticalHandlersRef, terminalRendererCwdBySessionRef, themeCommitTimerRef, themePreview, toggleScriptsSidePanelRef, toggleSidePanelRef, validAIScopeTargetIds, validSessionActivityIds, visibleFocusedThemeId, window, workspaceBroadcastHandlersRef, workspaceFocusHandlersRef, workspaceInnerRef, workspaces });
+  useTerminalLayerEffects({ activeSidePanelTab, activeTabId, activeTabIdRef, activeTopTabsThemeId, activeWorkspace, activityTrackedSessions, appliedPreviewSessionRef, applyTerminalPreviewVars, applyTopTabsPreviewVars, cancelAnimationFrame, ChunkedEscapeFilter, clearTerminalPreviewVars, clearTimeout, clearTopTabsPreviewVars, document, dropHint, filterTabsMap, focusedSessionId, followAppTerminalTheme, getSessionActivityIdsToClear, handleToggleAiFromTopBar, handleToggleScriptsSidePanel, handleToggleSidePanel, hasNotifiableTerminalOutput, isFocusMode, isTerminalLayerVisible, lastSidePanelTabRef, Map, Math, onSessionData, onSplitSessionRef, onToggleBroadcastRef, onToggleWorkspaceViewModeRef, onUpdateSplitSizes, prevFocusedSessionIdRef, previewTargetSessionId, requestAnimationFrame, ResizeObserver, resizing, sessionActivityStore, sessions, Set, setDropHint, setResizing, setSftpHostForTab, setSftpInitialLocationForTab, setSftpPendingUploadsForTab, setSidePanelOpenTabs, setThemePreview, setTimeout, setupMcpApprovalBridge, setWorkspaceArea, sftpActiveHost, sftpHostForTab, shouldMarkSessionActivity, sidePanelOpenTabs, splitHorizontalHandlersRef, splitVerticalHandlersRef, terminalRendererCwdBySessionRef, themeCommitTimerRef, themePreview, toggleScriptsSidePanelRef, toggleSidePanelRef, validAIScopeTargetIds, validSessionActivityIds, visibleFocusedThemeId, window, workspaceBroadcastHandlersRef, workspaceFocusHandlersRef, workspaceInnerRef, workspaces });
   return <TerminalLayerView ctx={{ accentMode, activeResizers, activeSidePanelTab, activeTabId, activeWorkspace, AIChatPanelsHost, aiContextsByTabId, AIStateMaintenanceHost, AIStateProvider, Array, Button, cn, composeBarThemeColors, computeSplitHint, customAccent, draggingSessionId, dropHint, editorWordWrap, effectiveHosts, findSplitNode, focusedFontFamilyId, focusedFontFamilyOverridden, focusedFontSize, focusedFontSizeOverridden, focusedFontWeight, focusedFontWeightOverridden, focusedSessionId, focusedThemeOverridden, FolderTree, followAppTerminalTheme, fontSize, getTerminalCwd, handleAddKnownHost, handleBroadcastInput, handleCloseSession, handleCloseSidePanel, handleCommandExecuted, handleComposeSend, handleFontFamilyChangeForFocusedSession, handleFontFamilyResetForFocusedSession, handleFontSizeChangeForFocusedSession, handleFontSizeResetForFocusedSession, handleFontWeightChangeForFocusedSession, handleFontWeightResetForFocusedSession, handleOpenAI, handleOpenScripts, handleOpenSftp, handleOpenTheme, handleOsDetected, handlePendingUploadHandled, handleSessionExit, handleSftpInitialLocationApplied, handleSidePanelResizeStart, handleSnippetClickForFocusedSession, handleSnippetFromPanel, handleSnippetExecutorChange, handleStatusChange, handleTerminalCwdChange, handleTerminalDataCapture, handleTerminalFontSizeChange, handleThemeChangeForFocusedSession, handleThemeResetForFocusedSession, handleToggleSftpFromBar, handleToggleWorkspaceComposeBar, handleUpdateHost, handleWorkspaceDrop, hosts, hotkeyScheme, identities, isBroadcastEnabled, isComposeBarOpen, isFocusMode, isSidePanelOpenForCurrentTab, isTerminalLayerVisible, keyBindings, keys, knownHosts, MessageSquare, mountedAiTabIds, mountedSftpTabIds, onHotkeyAction, onSetWorkspaceFocusedSession, onSplitSession, Palette, PanelLeft, PanelRight, previewedOrVisibleThemeId, refocusActiveTerminalSession, refocusTerminalSession, renderFocusModeSidebar, resizing, resolveAIExecutorContext, resolvedPreviewTheme, ScriptsSidePanel, sessionChainHostsMap, sessionHostsMap, sessionLogConfig, sessions, setDropHint, setEditorWordWrap, setIsComposeBarOpen, setResizing, setSidePanelPosition, sftpActiveHost, sftpAutoSync, sftpDefaultViewMode, sftpDoubleClickBehavior, sftpInitialLocationForTab, sftpPendingUploadsForTab, sftpShowHiddenFiles, SftpSidePanel, sftpUseCompressedUpload, sidePanelPosition, sidePanelWidth, snippetPackages, snippets, splitHorizontalHandlersRef, splitVerticalHandlersRef, sshDebugLogsEnabled, t, TerminalComposeBar, terminalFontFamilyId, TerminalPanesHost, terminalSettings, terminalTheme, themePreview, ThemeSidePanel, Tooltip, TooltipContent, TooltipTrigger, updateHosts, validAIScopeTargetIds, workspaceBroadcastHandlersRef, workspaceById, workspaceFocusHandlersRef, workspaceInnerRef, workspaceOuterRef, workspaceOverlayRef, workspaceRectsById, X, Zap }} />;
 };
 

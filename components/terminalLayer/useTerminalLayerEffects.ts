@@ -4,7 +4,7 @@ import { useEffect, useLayoutEffect } from 'react';
 type TerminalLayerEffectsContext = Record<string, any>;
 
 export function useTerminalLayerEffects(ctx: TerminalLayerEffectsContext) {
-  const { activeSidePanelTab, activeTabId, activeTabIdRef, activeTopTabsThemeId, activeWorkspace, activityTrackedSessions, appliedPreviewSessionRef, applyTerminalPreviewVars, applyTopTabsPreviewVars, cancelAnimationFrame, ChunkedEscapeFilter, clearTerminalPreviewVars, clearTimeout, clearTopTabsPreviewVars, document, dropHint, filterTabsMap, focusedSessionId, followAppTerminalTheme, getSessionActivityIdsToClear, handleOpenAI, handleToggleScriptsSidePanel, handleToggleSidePanel, hasNotifiableTerminalOutput, isFocusMode, isTerminalLayerVisible, lastSidePanelTabRef, Map, Math, onSessionData, onSplitSessionRef, onToggleBroadcastRef, onToggleWorkspaceViewModeRef, onUpdateSplitSizes, prevFocusedSessionIdRef, previewTargetSessionId, requestAnimationFrame, ResizeObserver, resizing, sessionActivityStore, sessions, Set, setDropHint, setResizing, setSftpHostForTab, setSftpInitialLocationForTab, setSftpPendingUploadsForTab, setSidePanelOpenTabs, setThemePreview, setTimeout, setupMcpApprovalBridge, setWorkspaceArea, sftpActiveHost, sftpHostForTab, shouldMarkSessionActivity, sidePanelOpenTabs, splitHorizontalHandlersRef, splitVerticalHandlersRef, terminalRendererCwdBySessionRef, themeCommitTimerRef, themePreview, toggleScriptsSidePanelRef, toggleSidePanelRef, validAIScopeTargetIds, validSessionActivityIds, visibleFocusedThemeId, window, workspaceBroadcastHandlersRef, workspaceFocusHandlersRef, workspaceInnerRef, workspaces } = ctx;
+  const { activeSidePanelTab, activeTabId, activeTabIdRef, activeTopTabsThemeId, activeWorkspace, activityTrackedSessions, appliedPreviewSessionRef, applyTerminalPreviewVars, applyTopTabsPreviewVars, cancelAnimationFrame, ChunkedEscapeFilter, clearTerminalPreviewVars, clearTimeout, clearTopTabsPreviewVars, document, dropHint, filterTabsMap, focusedSessionId, followAppTerminalTheme, getSessionActivityIdsToClear, handleToggleAiFromTopBar, handleToggleScriptsSidePanel, handleToggleSidePanel, hasNotifiableTerminalOutput, isFocusMode, isTerminalLayerVisible, lastSidePanelTabRef, Map, Math, onSessionData, onSplitSessionRef, onToggleBroadcastRef, onToggleWorkspaceViewModeRef, onUpdateSplitSizes, prevFocusedSessionIdRef, previewTargetSessionId, requestAnimationFrame, ResizeObserver, resizing, sessionActivityStore, sessions, Set, setDropHint, setResizing, setSftpHostForTab, setSftpInitialLocationForTab, setSftpPendingUploadsForTab, setSidePanelOpenTabs, setThemePreview, setTimeout, setupMcpApprovalBridge, setWorkspaceArea, sftpActiveHost, sftpHostForTab, shouldMarkSessionActivity, sidePanelOpenTabs, splitHorizontalHandlersRef, splitVerticalHandlersRef, terminalRendererCwdBySessionRef, themeCommitTimerRef, themePreview, toggleScriptsSidePanelRef, toggleSidePanelRef, validAIScopeTargetIds, validSessionActivityIds, visibleFocusedThemeId, window, workspaceBroadcastHandlersRef, workspaceFocusHandlersRef, workspaceInnerRef, workspaces } = ctx;
 
   useEffect(() => {
       const liveSessionIds = new Set(sessions.map((session) => session.id));
@@ -188,12 +188,13 @@ export function useTerminalLayerEffects(ctx: TerminalLayerEffectsContext) {
       };
     }, [toggleSidePanelRef, handleToggleSidePanel]);
   
-  // Listen for global AI panel toggle (from TopTabs button)
+  // Listen for global AI panel toggle (from TopTabs button). Uses the toggle
+    // handler so a second click on an already-open AI panel closes it.
     useEffect(() => {
-      const handler = () => handleOpenAI();
+      const handler = () => handleToggleAiFromTopBar();
       window.addEventListener('netcatty:toggle-ai-panel', handler);
       return () => window.removeEventListener('netcatty:toggle-ai-panel', handler);
-    }, [handleOpenAI]);
+    }, [handleToggleAiFromTopBar]);
   
   useEffect(() => {
       const sessionIdsToClear = getSessionActivityIdsToClear(activeTabId, sessions);

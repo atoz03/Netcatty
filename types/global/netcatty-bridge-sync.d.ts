@@ -12,6 +12,7 @@ declare global {
     windowIsMaximized?(): Promise<boolean>;
     windowIsFullscreen?(): Promise<boolean>;
     windowFocus?(): Promise<boolean>;
+    onWindowCommandCloseRequested?(cb: () => void): () => void;
     onWindowFullScreenChanged?(cb: (isFullscreen: boolean) => void): () => void;
 
     // Settings window

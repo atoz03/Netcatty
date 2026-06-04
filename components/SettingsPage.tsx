@@ -164,7 +164,7 @@ const SettingsSyncTabWithVault: React.FC<{ onSettingsApplied?: () => void }> = (
 
 const SettingsPageContent: React.FC<{ settings: SettingsState }> = ({ settings }) => {
     const { t } = useI18n();
-    const { notifyRendererReady, closeSettingsWindow } = useWindowControls();
+    const { notifyRendererReady, closeSettingsWindow, onWindowCommandCloseRequested } = useWindowControls();
     const { updateState, checkNow, installUpdate, openReleasePage, startDownload, isUpdateDemoMode } = useUpdateCheck({
         autoUpdateEnabled: settings.autoUpdateEnabled,
         // Install blocked by unsaved editors in the main window — surface a toast
@@ -177,6 +177,13 @@ const SettingsPageContent: React.FC<{ settings: SettingsState }> = ({ settings }
     useEffect(() => {
         notifyRendererReady();
     }, [notifyRendererReady]);
+
+    useEffect(() => {
+        const unsubscribe = onWindowCommandCloseRequested(() => {
+            void closeSettingsWindow();
+        });
+        return () => unsubscribe?.();
+    }, [closeSettingsWindow, onWindowCommandCloseRequested]);
 
     useEffect(() => {
         setMountedTabs((prev) => {

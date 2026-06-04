@@ -139,7 +139,13 @@ function createMainWindowApi(ctx) {
       // Terminal apps need these keys to pass through to the remote shell (e.g., byobu, tmux).
       // Using setIgnoreMenuShortcuts lets the keydown still reach the page (xterm.js)
       // while preventing Chromium's built-in shortcuts from triggering.
-      win.webContents.on("before-input-event", (_event, input) => {
+      win.webContents.on("before-input-event", (event, input) => {
+        if (isMac && shouldCloseWindowFromInput(input)) {
+          event.preventDefault();
+          requestWindowCommandClose(win);
+          return;
+        }
+
         if (input.alt && !input.control && !input.meta) {
           if (input.key === "ArrowLeft" || input.key === "ArrowRight") {
             win.webContents.setIgnoreMenuShortcuts(true);

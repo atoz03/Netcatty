@@ -2,11 +2,14 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  buildAppMenu,
   isWindowUsable,
   registerWindowHandlers,
   resolveSettingsWindowBounds,
   restoreWindowInputFocus,
+  shouldCloseWindowFromInput,
 } = require("./windowManager.cjs");
+const { createMainWindowApi } = require("./windowManager/mainWindow.cjs");
 
 function createWindowStub({ destroyed = false, webContents } = {}) {
   return {
@@ -167,6 +170,154 @@ test("restoreWindowInputFocus can show the window when requested", () => {
 
   assert.equal(restored, true);
   assert.deepEqual(calls, ["show", "focus", "webContents.focus"]);
+});
+
+test("buildAppMenu wires macOS Command+W to close the focused window", () => {
+  let capturedTemplate = null;
+  const Menu = {
+    buildFromTemplate(template) {
+      capturedTemplate = template;
+      return { template };
+    },
+  };
+
+  buildAppMenu(Menu, { name: "Netcatty" }, true);
+
+  const windowMenu = capturedTemplate.find((item) => item.label === "Window");
+  assert.ok(windowMenu);
+  const closeItem = windowMenu.submenu.find((item) => item.accelerator === "CommandOrControl+W");
+  assert.ok(closeItem);
+  assert.equal(closeItem.label, "Close Window");
+
+  const sentChannels = [];
+  closeItem.click(null, {
+    isDestroyed() { return false; },
+    webContents: {
+      isDestroyed() { return false; },
+      send(channel) { sentChannels.push(channel); },
+    },
+  });
+
+  assert.deepEqual(sentChannels, ["netcatty:window:command-close"]);
+});
+
+test("shouldCloseWindowFromInput only matches macOS Command+W keydown", () => {
+  assert.equal(shouldCloseWindowFromInput({ type: "keyDown", meta: true, key: "w" }), true);
+  assert.equal(shouldCloseWindowFromInput({ type: "keyDown", meta: true, key: "W" }), true);
+  assert.equal(shouldCloseWindowFromInput({ type: "keyUp", meta: true, key: "w" }), false);
+  assert.equal(shouldCloseWindowFromInput({ type: "keyDown", control: true, key: "w" }), false);
+  assert.equal(shouldCloseWindowFromInput({ type: "keyDown", meta: true, shift: true, key: "w" }), false);
+});
+
+test("main window asks renderer to close tabs from macOS Command+W before-input-event", async () => {
+  let beforeInputHandler = null;
+  const commandCloseRequests = [];
+
+  class BrowserWindowStub {
+    constructor() {
+      this.webContents = {
+        id: 1,
+        on(channel, handler) {
+          if (channel === "before-input-event") beforeInputHandler = handler;
+        },
+        once() {},
+        isDestroyed() {
+          return false;
+        },
+        isCrashed() {
+          return false;
+        },
+        setIgnoreMenuShortcuts() {},
+        setWindowOpenHandler() {},
+        openDevTools() {},
+      };
+    }
+
+    on() {}
+    once() {}
+    isDestroyed() { return false; }
+    isMaximized() { return false; }
+    isFullScreen() { return false; }
+    getBounds() { return { x: 0, y: 0, width: 1400, height: 900 }; }
+    setBackgroundColor() {}
+    async loadURL() {}
+    close() {}
+  }
+
+  const api = createMainWindowApi({
+    mainWindow: null,
+    electronApp: null,
+    currentTheme: "light",
+    isQuitting: false,
+    pendingWindowStateWrite: null,
+    queuedWindowState: null,
+    windowStateCloseRequested: false,
+    DEFAULT_WINDOW_WIDTH: 1400,
+    DEFAULT_WINDOW_HEIGHT: 900,
+    MIN_WINDOW_WIDTH: 1100,
+    MIN_WINDOW_HEIGHT: 640,
+    V8_CACHE_OPTIONS: "bypassHeatCheck",
+    THEME_COLORS: { light: { background: "#fff" } },
+    unhealthyWebContentsIds: new Set(),
+    rendererReadySeenByWebContentsId: new Set(),
+    __dirname,
+    URL,
+    require,
+    console,
+    setTimeout,
+    clearTimeout,
+    getGlobalShortcutBridge() {
+      return { handleWindowClose: () => false };
+    },
+    debugLog() {},
+    resolveFrontendBackgroundColor() { return null; },
+    loadWindowState() { return null; },
+    getDevRendererBaseUrl(url) { return url; },
+    getWindowBoundsState() { return null; },
+    queueWindowStateSave() {},
+    saveWindowStateSync() {},
+    setupDeferredShow() {},
+    createExternalOnlyWindowOpenHandler() { return {}; },
+    createAppWindowOpenHandler() { return {}; },
+    attachOAuthLoadingOverlay() {},
+    registerWindowHandlers() {},
+    requestWindowCommandClose(win) {
+      commandCloseRequests.push(win);
+      return true;
+    },
+    shouldCloseWindowFromInput,
+    closeSettingsWindow() {},
+    hideSettingsWindow() {},
+  });
+
+  await api.createWindow(
+    {
+      BrowserWindow: BrowserWindowStub,
+      nativeTheme: {},
+      app: {},
+      screen: {},
+      shell: {},
+      ipcMain: {},
+    },
+    {
+      preload: "/tmp/preload.cjs",
+      devServerUrl: "http://localhost:5173",
+      isDev: true,
+      appIcon: null,
+      isMac: true,
+      electronDir: __dirname,
+    },
+  );
+
+  let prevented = false;
+  beforeInputHandler({ preventDefault: () => { prevented = true; } }, {
+    type: "keyDown",
+    meta: true,
+    key: "w",
+  });
+
+  assert.equal(prevented, true);
+  assert.equal(commandCloseRequests.length, 1);
 });
 
 test("window focus IPC handler focuses the sender owner window", async () => {

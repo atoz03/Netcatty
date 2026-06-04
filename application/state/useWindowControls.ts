@@ -50,6 +50,11 @@ export const useWindowControls = () => {
     return bridge?.onWindowFullScreenChanged?.(cb) ?? (() => {});
   }, []);
 
+  const onWindowCommandCloseRequested = useCallback((cb: () => void) => {
+    const bridge = netcattyBridge.get();
+    return bridge?.onWindowCommandCloseRequested?.(cb) ?? (() => {});
+  }, []);
+
   return {
     notifyRendererReady,
     closeSettingsWindow,
@@ -60,5 +65,6 @@ export const useWindowControls = () => {
     isMaximized,
     isFullscreen,
     onFullscreenChanged,
+    onWindowCommandCloseRequested,
   };
 };

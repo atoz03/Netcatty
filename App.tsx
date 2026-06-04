@@ -36,6 +36,7 @@ import { selectConnectionLogForTerminalDataCapture } from './domain/connectionLo
 import { collectSessionIds } from './domain/workspace';
 import { resolveCloseIntent } from './application/state/resolveCloseIntent';
 import { resolveSnippetsShortcutIntent } from './application/state/resolveSnippetsShortcutIntent';
+import { resolveWindowCommandCloseIntent } from './application/state/windowCommandClose';
 import { TERMINAL_THEMES } from './infrastructure/config/terminalThemes';
 import { useCustomThemes } from './application/state/customThemeStore';
 import type { SyncPayload } from './domain/sync';
@@ -705,7 +706,7 @@ function App({ settings }: { settings: SettingsState }) {
   // Populated by UnsavedChangesProvider render-prop below so that the hotkey
   // dispatcher (defined outside that scope) can still reach the dirty-confirm
   // close flow.
-  const handleRequestCloseEditorTabRef = useRef<(id: string) => void>(() => {});
+  const handleRequestCloseEditorTabRef = useRef<(id: string) => boolean | Promise<boolean>>(() => false);
 
   const createLocalTerminalWithCurrentShell = useCallback(() => { return createLocalTerminalWithCurrentShellImpl(() => ({ classifyLocalShellType, createLocalTerminal, discoveredShells, resolveShellSetting, terminalSettings })); }, [createLocalTerminal, terminalSettings, discoveredShells]);
 
@@ -727,6 +728,12 @@ function App({ settings }: { settings: SettingsState }) {
 
   const closeTabsInFlightRef = useRef(false);
 
+  // 顶层标签顺序需要包含编辑器标签，供顶部标签和编辑器邻居计算使用。
+  const orderedTabsWithEditors = useMemo(
+    () => [...orderedTabs, ...editorTabs.map((tab) => toEditorTabId(tab.id))],
+    [orderedTabs, editorTabs],
+  );
+
   // Close many tabs at once with a single batched busy-shell confirmation.
   // Used by the "Close all / Close others / Close to the right" context-menu
   // actions on tabs (#748).
@@ -737,6 +744,43 @@ function App({ settings }: { settings: SettingsState }) {
 
   // Shared hotkey action handler - used by both global handler and terminal callback
   const executeHotkeyAction = useCallback((action: string, e: KeyboardEvent) => { return executeHotkeyActionImpl(() => ({ IS_DEV, MOVE_FOCUS_DEBOUNCE_MS, action, activeTabStore, addConnectionLogRef, closeSession, closeTabInFlightRef, closeWorkspace, collectSessionIds, confirmIfBusyLocalTerminal, createLocalTerminalWithCurrentShell, e, editorTabs, fromEditorTabId, handleOpenSettingsRef, handleRequestCloseEditorTabRef, isEditorTabId, lastMoveFocusTimeRef, moveFocusInWorkspace, orderedTabs, resolveCloseIntent, resolveSnippetsShortcutIntent, sessions, setActiveTabId, setAddToWorkspaceDialog, setIsQuickSwitcherOpen, setNavigateToSection, settings, splitSessionWithCurrentShell, systemInfoRef, toEditorTabId, toggleBroadcast, toggleScriptsSidePanelRef, toggleSidePanelRef, workspaces }), action, e); }, [orderedTabs, editorTabs, sessions, workspaces, setActiveTabId, closeSession, closeWorkspace, createLocalTerminalWithCurrentShell, splitSessionWithCurrentShell, moveFocusInWorkspace, toggleBroadcast, settings, confirmIfBusyLocalTerminal]);
+
+  const handleWindowCommandCloseRequest = useCallback(async () => {
+    const openDialogs = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][data-state="open"]'));
+    const topmostOpenDialog = openDialogs[openDialogs.length - 1] ?? null;
+    const topmostDialogClose = topmostOpenDialog?.querySelector<HTMLElement>('[data-dialog-close="true"]');
+    if (topmostDialogClose) {
+      topmostDialogClose.click();
+      return;
+    }
+
+    const intent = resolveWindowCommandCloseIntent({
+      activeTabId,
+      editorTabIds: editorTabs.map((tab) => toEditorTabId(tab.id)),
+      sessionIds: sessions.map((session) => session.id),
+      workspaceIds: workspaces.map((workspace) => workspace.id),
+      logViewIds: logViews.map((logView) => logView.id),
+    });
+
+    if (intent.kind === 'closeTab') {
+      executeHotkeyAction('closeTab', new KeyboardEvent('keydown', { key: 'w', metaKey: true }));
+      return;
+    }
+
+    if (intent.kind === 'closeLogView') {
+      closeLogView(intent.tabId);
+      return;
+    }
+
+    await netcattyBridge.get()?.windowClose?.();
+  }, [activeTabId, closeLogView, editorTabs, executeHotkeyAction, logViews, sessions, workspaces]);
+
+  useEffect(() => {
+    const unsubscribe = netcattyBridge.get()?.onWindowCommandCloseRequested?.(() => {
+      void handleWindowCommandCloseRequest();
+    });
+    return () => unsubscribe?.();
+  }, [handleWindowCommandCloseRequest]);
 
   // Callback for terminal to invoke app-level hotkey actions
   const handleHotkeyAction = useCallback((action: string, e: KeyboardEvent) => {
@@ -940,12 +984,6 @@ function App({ settings }: { settings: SettingsState }) {
   }, [setDraggingSessionId]);
 
   const handleRootContextMenu = useCallback((e: React.MouseEvent<HTMLDivElement>) => { return handleRootContextMenuImpl(() => ({ e }), e); }, []);
-
-  // Combined ordered tab list including editor tab ids (for TopTabs scrollable area)
-  const orderedTabsWithEditors = useMemo(
-    () => [...orderedTabs, ...editorTabs.map((t) => toEditorTabId(t.id))],
-    [orderedTabs, editorTabs],
-  );
 
   return <AppView ctx={{ accentMode, activeTabId, activeTerminalTheme, addShellHistoryEntry, addSessionToWorkspace, addToWorkspaceDialog, appendHostToWorkspace, appendLocalTerminalToWorkspace, clearAndRemoveSource, clearAndRemoveSources, clearUnsavedConnectionLogs, closeLogView, closeSession, closeTabsBatch, copySessionWithCurrentShell, closeWorkspace, connectionLogs, convertKnownHostToHost, createWorkspaceFromSessions, createWorkspaceFromTargets, createWorkspaceWithHosts, customAccent, customGroups, currentTerminalTheme, deleteConnectionLog, draggingSessionId, effectiveKnownHosts, editorTabs, editorWordWrap, emptyVaultConflict, followAppTerminalTheme, groupConfigs, handleAddKnownHost, handleConnectSerial, handleConnectToHost, handleCreateLocalTerminal, handleDeleteHost, handleEndSessionDrag, handleHostConnectWithProtocolCheck, handleHotkeyAction, handleKeyboardInteractiveCancel, handleKeyboardInteractiveSubmit, handleOpenQuickSwitcher, handleOpenSettings, handleRootContextMenu, handlePassphraseCancel, handlePassphraseSkip, handlePassphraseSubmit, handleProtocolSelect, handleRequestCloseEditorTabRef, handleSessionStatusChange, handleSyncNowManual, handleTerminalDataCapture, handleToggleTheme, handleUpdateHostFromTerminal, hostById, hosts, hotkeyScheme, identities, importOrReuseKey, isBroadcastEnabled, isCreateWorkspaceOpen, isMacClient, isQuickSwitcherOpen, keyBindings, keyboardInteractiveQueue, keys, logViews, managedSources, navigateToSection, openLogView, orderedTabsWithEditors, orphanSessions, passphraseQueue, protocolSelectHost, proxyProfiles, quickResults, quickSearch, reorderTabs, reorderWorkspaceSessions, resetSessionRename, resetWorkspaceRename, resolveEmptyVaultConflict, resolvedTheme, runSnippet: handleRunSnippet, sessionLogsDir, sessionLogsEnabled, sessionLogsFormat, sessionRenameTarget, sessionRenameValue, sessions, setActiveTabId, setAddToWorkspaceDialog, setDraggingSessionId, setEditorWordWrap, setIsCreateWorkspaceOpen, setIsQuickSwitcherOpen, setNavigateToSection, setProtocolSelectHost, setQuickSearch, setSessionRenameValue, setTerminalFontFamilyId, setTerminalFontSize, setTerminalThemeId, setWorkspaceFocusedSession, setWorkspaceRenameValue, settings, sftpAutoOpenSidebar, sftpAutoSync, sftpDefaultViewMode, sftpDoubleClickBehavior, sftpShowHiddenFiles, sftpUseCompressedUpload, shellHistory, snippetPackages, snippets, splitSessionWithCurrentShell, sshDebugLogsEnabled: settings.sshDebugLogsEnabled, startSessionRename, startWorkspaceRename, submitSessionRename, submitWorkspaceRename, t, terminalFontFamilyId, terminalFontSize, terminalSettings, terminalThemeId, toggleBroadcast, toggleConnectionLogSaved, toggleScriptsSidePanelRef, toggleSidePanelRef, toggleWorkspaceViewMode, unmanageSource, updateConnectionLog, updateCustomGroups, updateGroupConfigs, updateHostDistro, updateHosts, updateIdentities, updateKeys, updateKnownHosts, updateManagedSources, updateProxyProfiles, updateSnippetPackages, updateSnippets, updateSplitSizes, updateTerminalSetting, workspaceRenameTarget, workspaceRenameValue, workspaces, VaultViewContainer, SftpViewMount, TerminalLayerMount, LogViewWrapper }} />;
 }

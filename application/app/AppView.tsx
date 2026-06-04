@@ -72,31 +72,34 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
         };
 
         // Real dirty-confirm close handler.
-        const handleRequestCloseEditorTab = async (id: string) => {
+        const handleRequestCloseEditorTab = async (id: string): Promise<boolean> => {
           const tab = editorTabStore.getTab(id);
-          if (!tab) return;
+          if (!tab) return false;
           const dirty = tab.content !== tab.baselineContent;
           if (!dirty) {
             closeEditorAndActivateNeighbor(id);
-            return;
+            return true;
           }
           const choice = await prompt(tab.fileName);
-          if (choice === 'cancel') return;
+          if (choice === 'cancel') return false;
           if (choice === 'discard') {
             closeEditorAndActivateNeighbor(id);
-            return;
+            return true;
           }
           if (choice === 'save') {
             const ok = await saveEditorTab(id);
             if (!ok) {
               const msg = editorTabStore.getTab(id)?.saveError ?? 'Save failed';
               toast.error(msg, 'SFTP');
-              return;
+              return false;
             }
             const latest = editorTabStore.getTab(id);
-            if (!latest || latest.content !== latest.baselineContent) return;
+            if (!latest || latest.content !== latest.baselineContent) return false;
             closeEditorAndActivateNeighbor(id);
+            return true;
           }
+
+          return false;
         };
 
         // Expose to the hotkey dispatcher (Cmd/Ctrl+W).

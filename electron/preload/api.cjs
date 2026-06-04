@@ -350,6 +350,11 @@ function createPreloadApi(ctx) {
   windowIsMaximized: () => ipcRenderer.invoke("netcatty:window:isMaximized"),
   windowIsFullscreen: () => ipcRenderer.invoke("netcatty:window:isFullscreen"),
   windowFocus: () => ipcRenderer.invoke("netcatty:window:focus"),
+  onWindowCommandCloseRequested: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on("netcatty:window:command-close", handler);
+    return () => ipcRenderer.removeListener("netcatty:window:command-close", handler);
+  },
   onWindowFullScreenChanged: (cb) => {
     fullscreenChangeListeners.add(cb);
     return () => fullscreenChangeListeners.delete(cb);

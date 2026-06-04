@@ -7,6 +7,7 @@ const {
   registerWindowHandlers,
   resolveSettingsWindowBounds,
   restoreWindowInputFocus,
+  requestWindowCommandClose,
   shouldCloseWindowFromInput,
 } = require("./windowManager.cjs");
 const { createMainWindowApi } = require("./windowManager/mainWindow.cjs");
@@ -172,7 +173,7 @@ test("restoreWindowInputFocus can show the window when requested", () => {
   assert.deepEqual(calls, ["show", "focus", "webContents.focus"]);
 });
 
-test("buildAppMenu wires macOS Command+W to close the focused window", () => {
+test("buildAppMenu closes a non-app window directly when Cmd+W is invoked", () => {
   let capturedTemplate = null;
   const Menu = {
     buildFromTemplate(template) {
@@ -189,15 +190,36 @@ test("buildAppMenu wires macOS Command+W to close the focused window", () => {
   assert.ok(closeItem);
   assert.equal(closeItem.label, "Close Window");
 
-  const sentChannels = [];
+  const calls = [];
   closeItem.click(null, {
     isDestroyed() { return false; },
+    close() {
+      calls.push("close");
+    },
     webContents: {
       isDestroyed() { return false; },
-      send(channel) { sentChannels.push(channel); },
+      send(channel) {
+        calls.push(`send:${channel}`);
+      },
     },
   });
 
+  assert.deepEqual(calls, ["close"]);
+});
+
+test("requestWindowCommandClose sends command-close to renderer-capable windows", () => {
+  const sentChannels = [];
+  const win = {
+    isDestroyed() { return false; },
+    webContents: {
+      isDestroyed() { return false; },
+      send(channel) {
+        sentChannels.push(channel);
+      },
+    },
+  };
+
+  assert.equal(requestWindowCommandClose(win), true);
   assert.deepEqual(sentChannels, ["netcatty:window:command-close"]);
 });
 

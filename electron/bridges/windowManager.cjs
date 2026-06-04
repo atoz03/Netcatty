@@ -939,6 +939,12 @@ function buildAppMenu(Menu, app, isMac, language = currentLanguage) {
   // Save deps so later language changes can rebuild the menu.
   menuDeps = { Menu, app, isMac };
   const closeFocusedWindow = (_menuItem, browserWindow) => {
+    // 只有主窗口/设置窗口会接收 command-close；其他 BrowserWindow 直接关闭。
+    if (browserWindow && browserWindow !== mainWindow && browserWindow !== settingsWindow) {
+      closeBrowserWindow(browserWindow);
+      return;
+    }
+
     // macOS 的 Cmd+W 先交给渲染层关闭标签页；没有标签页时渲染层再关闭窗口。
     requestWindowCommandClose(browserWindow) || requestWindowCommandClose(mainWindow);
   };

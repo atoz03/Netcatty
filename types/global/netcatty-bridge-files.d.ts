@@ -86,6 +86,8 @@ declare global {
     // Get file path from File object (for drag-and-drop, uses Electron's webUtils)
     getPathForFile?(file: File): string | undefined;
     readClipboardText?(): Promise<string>;
+    writeClipboardText?(text: string): Promise<boolean>;
+    readClipboardFiles?(): Promise<Array<{ path: string; name: string; isDirectory: boolean; size?: number }>>;
 
     // Credential encryption (field-level safeStorage for sensitive data at rest)
     credentialsAvailable?(): Promise<boolean>;

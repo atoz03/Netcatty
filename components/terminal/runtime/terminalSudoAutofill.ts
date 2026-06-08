@@ -149,13 +149,13 @@ export const createSudoPasswordAutofill = (_options: {
       // Fast path for bulk output: a prompt line ends in a colon, so a chunk
       // with no colon can't be completing one. Skip the regex work unless a hint
       // is pending (then we must keep watching for the prompt moving on).
-      // Also check for Chinese password keywords because Kylin's sudo prompt
-      // doesn't end with a colon (#1293).
+      // Also check for password keywords because Kylin's sudo prompt doesn't
+      // end with a colon (#1293).
       if (
         !pending &&
         !data.includes(":") &&
         !data.includes("：") &&
-        !/密码|口令/.test(data)
+        !/(?:\bpassword\b|密码|口令)/i.test(data)
       ) {
         return data;
       }

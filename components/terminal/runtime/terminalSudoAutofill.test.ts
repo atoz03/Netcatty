@@ -29,12 +29,30 @@ test("isSudoPasswordPrompt matches Kylin-style prompts without trailing colon", 
   assert.equal(isSudoPasswordPrompt("密码"), true);
   assert.equal(isSudoPasswordPrompt("用户 的密码"), true);
   assert.equal(isSudoPasswordPrompt("密码 "), true);
+  // Exact prompts from issue #1293 screenshots (sudo -s on Kylin V10)
+  assert.equal(isSudoPasswordPrompt("输入密码"), true);
+  assert.equal(isSudoPasswordPrompt("Input Password"), true);
 });
 
 test("isExplicitSudoPrompt matches Kylin-style prompts", () => {
   // Kylin-style [sudo] prompt without trailing colon
   assert.equal(isExplicitSudoPrompt("[sudo] 密码"), true);
   assert.equal(isExplicitSudoPrompt("[sudo] password for alice"), true);
+});
+
+test("handleOutput hints on Kylin screenshot sudo prompts when armed", () => {
+  const { autofill, hints, writes } = make();
+  autofill.armForCommand("sudo -s");
+  autofill.handleOutput("输入密码");
+  assert.deepEqual(hints, [true]);
+  assert.deepEqual(writes, []);
+  assert.equal(autofill.isPromptPending(), true);
+
+  const english = make();
+  english.autofill.armForCommand("sudo -s");
+  english.autofill.handleOutput("Input Password");
+  assert.deepEqual(english.hints, [true]);
+  assert.deepEqual(english.writes, []);
 });
 
 test("isSudoPasswordPrompt detects color-wrapped prompts", () => {

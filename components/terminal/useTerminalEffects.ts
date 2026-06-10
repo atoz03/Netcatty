@@ -1,6 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/exhaustive-deps */
 import { useRef } from 'react';
-import { subscribeWindowFullscreenChanged } from '../../application/state/useWindowControls';
 import { resolveFontWeightBold } from '../../lib/fontWeightAvailability';
 
 type TerminalEffectsContext = Record<string, any>;
@@ -1045,7 +1044,7 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
     window.addEventListener('focus', handleWindowFocus);
 
     // Fullscreen changes layout for every visible pane.
-    const unsubscribeFullscreen = subscribeWindowFullscreenChanged((isFullscreen) => {
+    const unsubscribeFullscreen = terminalBackend.onWindowFullScreenChanged?.((isFullscreen) => {
       scheduleLayoutRecoveryRefit(isFullscreen ? [0, 150, 400] : [0, 100, 300]);
     });
 
@@ -1055,7 +1054,7 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
       window.removeEventListener('focus', handleWindowFocus);
       unsubscribeFullscreen?.();
     };
-  }, [isVisible, inWorkspace, isFocusMode, isFocused]);
+  }, [isVisible, inWorkspace, isFocusMode, isFocused, terminalBackend]);
 
 
   // Only register the snippet executor once the terminal session is ready.

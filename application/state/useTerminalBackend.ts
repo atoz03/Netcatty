@@ -132,6 +132,11 @@ export const useTerminalBackend = () => {
     return bridge?.onConnectionReuseFallback?.(cb);
   }, []);
 
+  const onWindowFullScreenChanged = useCallback((cb: (isFullscreen: boolean) => void) => {
+    const bridge = netcattyBridge.get();
+    return bridge?.onWindowFullScreenChanged?.(cb);
+  }, []);
+
   const onHostKeyVerification = useCallback((cb: Parameters<NonNullable<NetcattyBridge["onHostKeyVerification"]>>[0]) => {
     const bridge = netcattyBridge.get();
     return bridge?.onHostKeyVerification?.(cb);
@@ -240,6 +245,7 @@ export const useTerminalBackend = () => {
       onTelnetAutoLoginCancelled,
       onChainProgress,
       onConnectionReuseFallback,
+      onWindowFullScreenChanged,
       onHostKeyVerification,
       respondHostKeyVerification,
       openExternal,
@@ -276,6 +282,7 @@ export const useTerminalBackend = () => {
       onTelnetAutoLoginCancelled,
       onChainProgress,
       onConnectionReuseFallback,
+      onWindowFullScreenChanged,
       onHostKeyVerification,
       respondHostKeyVerification,
       openExternal,

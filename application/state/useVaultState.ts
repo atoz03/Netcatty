@@ -35,6 +35,7 @@ import {
   STORAGE_KEY_SNIPPETS,
 } from "../../infrastructure/config/storageKeys";
 import { localStorageAdapter } from "../../infrastructure/persistence/localStorageAdapter";
+import { mergeGlobalHistoryOnAppend } from "../../domain/globalHistory";
 import {
   decryptGroupConfigs,
   decryptHosts,
@@ -306,14 +307,9 @@ export const useVaultState = () => {
 
   const addShellHistoryEntry = useCallback(
     (entry: Omit<ShellHistoryEntry, "id" | "timestamp">) => {
-      const newEntry: ShellHistoryEntry = {
-        ...entry,
-        id: crypto.randomUUID(),
-        timestamp: Date.now(),
-      };
       setShellHistory((prev) => {
-        // Keep only the last 1000 entries
-        const updated = [newEntry, ...prev].slice(0, 1000);
+        const updated = mergeGlobalHistoryOnAppend(prev, entry);
+        if (updated === prev) return prev;
         localStorageAdapter.write(STORAGE_KEY_SHELL_HISTORY, updated);
         return updated;
       });

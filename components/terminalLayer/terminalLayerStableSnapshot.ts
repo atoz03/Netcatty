@@ -150,4 +150,5 @@ export type TerminalLayerStableSnapshot = {
   sshDebugLogsEnabled: boolean;
   groupConfigs: GroupConfig[];
   proxyProfiles: ProxyProfile[];
+  shellHistory: import('../../types').ShellHistoryEntry[];
 };

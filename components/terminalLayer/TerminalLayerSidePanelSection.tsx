@@ -118,6 +118,7 @@ function TerminalLayerSidePanelTabBody({ ctx }: { ctx: SidePanelContext }) {
     previewedOrVisibleThemeId,
     refocusActiveTerminalSession,
     remoteHistory,
+    shellHistory,
     resolveAIExecutorContext,
     resolvedPreviewTheme,
     ScriptsSidePanel,
@@ -483,6 +484,7 @@ function TerminalLayerSidePanelTabBody({ ctx }: { ctx: SidePanelContext }) {
                   focusedHost={focusedHost}
                   focusedSessionId={historySessionId}
                   state={remoteHistory.getState(focusedHost?.id, historySessionId)}
+                  globalEntries={shellHistory}
                   onFetch={remoteHistory.fetch}
                   onPasteToTerminal={handleHistoryPaste}
                   onRunInTerminal={handleHistoryRun}

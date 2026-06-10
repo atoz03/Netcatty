@@ -265,6 +265,7 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
           onCommandExecuted={(command, hostId, hostLabel, sessionId) => {
             addShellHistoryEntry({ command, hostId, hostLabel, sessionId });
           }}
+          shellHistory={shellHistory}
           onTerminalDataCapture={handleTerminalDataCapture}
           onCreateWorkspaceFromSessions={createWorkspaceFromSessions}
           onAddSessionToWorkspace={addSessionToWorkspace}

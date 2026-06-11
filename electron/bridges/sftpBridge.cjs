@@ -771,9 +771,16 @@ async function openSftpForSession(_event, payload) {
   if (!sessionId) throw new Error("sessionId is required");
 
   throwIfAborted(payload?.abortSignal);
-  const { sshClient } = ensureRemoteSftpSupport(sessionId);
+  const { session, sshClient } = ensureRemoteSftpSupport(sessionId);
   const sftpId = `${sessionId}-sftp-${randomUUID()}`;
-  const client = createSessionBackedSftpClient(sessionId, sshClient);
+  const refHolder = {};
+  if (session.connRef && typeof acquireConnectionRef === "function") {
+    acquireConnectionRef(refHolder, session.connRef);
+  }
+  const client = createSessionBackedSftpClient(sessionId, sshClient, {
+    refHolder,
+    sourceSessionId: sessionId,
+  });
   try {
     await requireSftpChannel(client, {
       signal: payload?.abortSignal,
@@ -928,6 +935,7 @@ const {
  */
 function registerHandlers(ipcMain) {
   ipcMain.handle("netcatty:sftp:open", openSftp);
+  ipcMain.handle("netcatty:sftp:openForSession", openSftpForSession);
   ipcMain.handle("netcatty:sftp:list", listSftp);
   ipcMain.handle("netcatty:sftp:read", readSftp);
   ipcMain.handle("netcatty:sftp:readBinary", readSftpBinary);

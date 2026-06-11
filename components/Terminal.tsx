@@ -461,6 +461,14 @@ const TerminalComponent: React.FC<TerminalProps> = ({
   // Check if this is a local or serial connection (doesn't need connection dialog during connecting)
   const isLocalConnection = host.protocol === "local";
   const isSerialConnection = host.protocol === "serial";
+  const supportsRemoteImagePaste =
+    !isLocalConnection &&
+    !isSerialConnection &&
+    host.protocol !== "telnet" &&
+    host.protocol !== "mosh" &&
+    !host.moshEnabled &&
+    host.protocol !== "et" &&
+    !host.etEnabled;
 
   // Server stats (CPU, Memory, Disk) — only for Linux/macOS, never for
   // network devices. See isNetworkDevice above for why the gating uses the
@@ -816,6 +824,14 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     }
   }, []);
 
+  const broadcastUserPasteData = useCallback((data: string) => {
+    if (sessionRef.current && isBroadcastEnabledRef.current && onBroadcastInputRef.current) {
+      onBroadcastInputRef.current(data, sessionId);
+      return true;
+    }
+    return false;
+  }, [sessionId]);
+
   const executeSnippetCommand = useCallback((
     command: string,
     noAutoRun?: boolean,
@@ -870,7 +886,10 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     isBroadcastEnabledRef,
     onBroadcastInputRef,
     isLocalConnection,
+    supportsRemoteImagePaste,
     terminalBackend,
+    getRemoteCwd: () => resolveSftpInitialPath({ preferFreshBackend: true }),
+    scrollToBottomAfterProgrammaticInput,
   });
   // Kept fresh on every render so the mouseTracking capture handler at
   // handleContextMenuCapture (which is bound once per sessionId) can
@@ -1106,10 +1125,14 @@ const TerminalComponent: React.FC<TerminalProps> = ({
 
   useTerminalFilePaste({
     isLocalConnection,
+    supportsRemoteImagePaste,
     status,
     termRef,
     sessionRef,
     terminalBackend,
+    resolveSftpInitialPath,
+    scrollOnPasteRef,
+    onPasteData: broadcastUserPasteData,
     scrollToBottomAfterProgrammaticInput,
     containerRef,
   });

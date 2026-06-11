@@ -6,6 +6,7 @@ export const enAiMessages: Messages = {
   'ai.title': 'AI',
   'ai.description': 'Configure AI providers, agents, and safety settings',
   'ai.providers': 'Providers',
+  'ai.agents': 'Agents',
   'ai.providers.empty': 'No providers configured. Add a provider to get started.',
   'ai.providers.add': 'Add Provider',
   'ai.providers.active': 'Active',

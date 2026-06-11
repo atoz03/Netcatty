@@ -895,6 +895,9 @@ function createPreloadApi(ctx) {
   aiDiscoverAgents: async (options) => {
     return ipcRenderer.invoke("netcatty:ai:agents:discover", options);
   },
+  aiPrewarmShellEnv: async () => {
+    return ipcRenderer.invoke("netcatty:ai:shell-env:prewarm");
+  },
   aiResolveCli: async (params) => {
     return ipcRenderer.invoke("netcatty:ai:resolve-cli", params);
   },

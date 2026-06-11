@@ -5,12 +5,12 @@
 import { AppWindow, Cloud, FileType, HardDrive, Keyboard, Palette, Sparkles, TerminalSquare, X } from "lucide-react";
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { useSettingsState } from "../application/state/useSettingsState";
+import { useAISettingsState } from "../application/state/useAISettingsState";
 import { useAvailableFonts } from "../application/state/fontStore";
 import { usePortForwardingState } from "../application/state/usePortForwardingState";
 import { useVaultState } from "../application/state/useVaultState";
 import { useWindowControls } from "../application/state/useWindowControls";
 import { useUpdateCheck } from "../application/state/useUpdateCheck";
-import { useAIState } from "../application/state/useAIState";
 import { I18nProvider, useI18n } from "../application/i18n/I18nProvider";
 import { sanitizePortForwardingRulesForSync } from "../application/syncPayload";
 import { toast } from "./ui/toast";
@@ -126,7 +126,7 @@ const SettingsTerminalTabContainer = React.memo<TerminalTabSettingsProps>(functi
 });
 
 const SettingsAITabContainer: React.FC = () => {
-    const aiState = useAIState();
+    const aiState = useAISettingsState();
 
     return (
         <AITabErrorBoundary>

@@ -22,6 +22,7 @@ import { PROVIDER_PRESETS } from "../../../infrastructure/ai/types";
 import { useI18n } from "../../../application/i18n/I18nProvider";
 import { Button } from "../../ui/button";
 import { Select, SettingCard, SettingsSection, SettingsTabContent, SettingRow } from "../settings-ui";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../ui/tabs";
 import { AgentIconBadge } from "../../ai/AgentIconBadge";
 import { canSendWithAgent } from "../../ai/agentSendEligibility";
 
@@ -55,6 +56,57 @@ import {
 } from "./ai/managedAgentState";
 import { splitClaudeEnv, buildClaudeEnv } from "./ai/claudeConfigEnv";
 import { splitCodebuddyEnv } from "./ai/codebuddyConfigEnv";
+
+type IdleWindow = Window & {
+  requestIdleCallback?: (callback: IdleRequestCallback, options?: IdleRequestOptions) => number;
+  cancelIdleCallback?: (handle: number) => void;
+};
+
+function scheduleAfterFirstPaint(callback: () => void, delayMs = 0): () => void {
+  let cancelled = false;
+  let idleHandle: number | null = null;
+  const timeoutHandle = window.setTimeout(() => {
+    if (cancelled) return;
+    const idleWindow = window as IdleWindow;
+    if (typeof idleWindow.requestIdleCallback === "function") {
+      idleHandle = idleWindow.requestIdleCallback(() => {
+        if (!cancelled) callback();
+      }, { timeout: 1200 });
+      return;
+    }
+    callback();
+  }, delayMs);
+
+  return () => {
+    cancelled = true;
+    window.clearTimeout(timeoutHandle);
+    if (idleHandle !== null) {
+      (window as IdleWindow).cancelIdleCallback?.(idleHandle);
+    }
+  };
+}
+
+type AISettingsSubTab = "providers" | "agents" | "tools" | "search" | "safety";
+
+function getSavedManagedAgentPathInfo(
+  agents: ExternalAgentConfig[],
+  agentKey: ManagedAgentKey,
+): AgentPathInfo | null {
+  const managed = agents.find((agent) => agent.id === `discovered_${agentKey}`);
+  const command = typeof managed?.command === "string" ? managed.command.trim() : "";
+  if (!managed || !command) return null;
+  const savedAvailable = managed.available === true || managed.enabled === true;
+
+  return {
+    path: command,
+    binPath: command,
+    version: null,
+    available: savedAvailable,
+    installed: true,
+    authenticated: undefined,
+    authSource: null,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Props
@@ -127,14 +179,29 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
   const [codexLoginSession, setCodexLoginSession] = useState<CodexLoginSession | null>(null);
   const [isCodexLoading, setIsCodexLoading] = useState(false);
   const [codexError, setCodexError] = useState<string | null>(null);
+  const initialManagedPathsRef = useRef<{
+    codex: string;
+    claude: string;
+    copilot: string;
+    cursor: string;
+    codebuddy: string;
+  } | null>(null);
+  if (!initialManagedPathsRef.current) {
+    initialManagedPathsRef.current = getInitialManagedAgentPaths(externalAgents);
+  }
 
   // Path detection state
-  const [codexPathInfo, setCodexPathInfo] = useState<AgentPathInfo | null>(null);
-  const [codexCustomPath, setCodexCustomPath] = useState("");
+  const [codexPathInfo, setCodexPathInfo] = useState<AgentPathInfo | null>(
+    () => getSavedManagedAgentPathInfo(externalAgents, "codex"),
+  );
+  const [codexCustomPath, setCodexCustomPath] = useState(() => initialManagedPathsRef.current?.codex ?? "");
   const [isResolvingCodex, setIsResolvingCodex] = useState(false);
+  const [activeSubTab, setActiveSubTab] = useState<AISettingsSubTab>("providers");
 
-  const [claudePathInfo, setClaudePathInfo] = useState<AgentPathInfo | null>(null);
-  const [claudeCustomPath, setClaudeCustomPath] = useState("");
+  const [claudePathInfo, setClaudePathInfo] = useState<AgentPathInfo | null>(
+    () => getSavedManagedAgentPathInfo(externalAgents, "claude"),
+  );
+  const [claudeCustomPath, setClaudeCustomPath] = useState(() => initialManagedPathsRef.current?.claude ?? "");
   const [isResolvingClaude, setIsResolvingClaude] = useState(false);
 
   const claudeManagedEnv = useMemo(
@@ -160,26 +227,21 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
     [setExternalAgents],
   );
 
-  const initialManagedPathsRef = useRef<{
-    codex: string;
-    claude: string;
-    copilot: string;
-    cursor: string;
-    codebuddy: string;
-  } | null>(null);
-  if (!initialManagedPathsRef.current) {
-    initialManagedPathsRef.current = getInitialManagedAgentPaths(externalAgents);
-  }
-
-  const [copilotPathInfo, setCopilotPathInfo] = useState<AgentPathInfo | null>(null);
-  const [copilotCustomPath, setCopilotCustomPath] = useState("");
+  const [copilotPathInfo, setCopilotPathInfo] = useState<AgentPathInfo | null>(
+    () => getSavedManagedAgentPathInfo(externalAgents, "copilot"),
+  );
+  const [copilotCustomPath, setCopilotCustomPath] = useState(() => initialManagedPathsRef.current?.copilot ?? "");
   const [isResolvingCopilot, setIsResolvingCopilot] = useState(false);
 
-  const [cursorPathInfo, setCursorPathInfo] = useState<AgentPathInfo | null>(null);
+  const [cursorPathInfo, setCursorPathInfo] = useState<AgentPathInfo | null>(
+    () => getSavedManagedAgentPathInfo(externalAgents, "cursor"),
+  );
   const [isResolvingCursor, setIsResolvingCursor] = useState(false);
 
-  const [codebuddyPathInfo, setCodebuddyPathInfo] = useState<AgentPathInfo | null>(null);
-  const [codebuddyCustomPath, setCodebuddyCustomPath] = useState("");
+  const [codebuddyPathInfo, setCodebuddyPathInfo] = useState<AgentPathInfo | null>(
+    () => getSavedManagedAgentPathInfo(externalAgents, "codebuddy"),
+  );
+  const [codebuddyCustomPath, setCodebuddyCustomPath] = useState(() => initialManagedPathsRef.current?.codebuddy ?? "");
   const [isResolvingCodebuddy, setIsResolvingCodebuddy] = useState(false);
 
   const codebuddyManagedEnv = useMemo(
@@ -209,15 +271,11 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
   // Ref to read current defaultAgentId without adding it as a dependency.
   const defaultAgentIdRef = useRef(defaultAgentId);
   defaultAgentIdRef.current = defaultAgentId;
+  const autoResolvedAgentStateRef = useRef<Partial<Record<ManagedAgentKey, "pending" | "done">>>({});
+  const codexIntegrationLoadedRef = useRef(false);
+  const userSkillsLoadedRef = useRef(false);
 
-  const resolveAgentPath = useCallback(async (
-    agentKey: ManagedAgentKey,
-    customPath = "",
-    options?: { apiKeyPresent?: boolean },
-  ) => {
-    const bridge = getBridge();
-    if (!bridge?.aiResolveCli) return null;
-
+  const applyResolvedAgentPath = useCallback((agentKey: ManagedAgentKey, result: AgentPathInfo | null) => {
     const setInfo = agentKey === "codex"
       ? setCodexPathInfo
       : agentKey === "claude"
@@ -227,6 +285,31 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
           : agentKey === "cursor"
             ? setCursorPathInfo
             : setCodebuddyPathInfo;
+
+    setInfo(result);
+
+    let nextDefaultId: string | null = null;
+    setExternalAgents((prev) => {
+      const state = buildManagedAgentState(prev, defaultAgentIdRef.current, agentKey, result);
+      if (state.defaultAgentId !== defaultAgentIdRef.current) {
+        nextDefaultId = state.defaultAgentId;
+        defaultAgentIdRef.current = state.defaultAgentId;
+      }
+      return areExternalAgentListsEqual(prev, state.agents) ? prev : state.agents;
+    });
+    if (nextDefaultId !== null) {
+      setDefaultAgentId(nextDefaultId);
+    }
+  }, [setDefaultAgentId, setExternalAgents]);
+
+  const resolveAgentPath = useCallback(async (
+    agentKey: ManagedAgentKey,
+    customPath = "",
+    options?: { apiKeyPresent?: boolean; refreshShellEnv?: boolean },
+  ) => {
+    const bridge = getBridge();
+    if (!bridge?.aiResolveCli) return null;
+
     const setResolving = agentKey === "codex"
       ? setIsResolvingCodex
       : agentKey === "claude"
@@ -242,28 +325,10 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
       const result = await bridge.aiResolveCli({
         command: agentKey,
         customPath: customPath.trim(),
-        refreshShellEnv: agentKey === "cursor",
+        refreshShellEnv: Boolean(options?.refreshShellEnv),
         ...(agentKey === "cursor" ? { apiKeyPresent: Boolean(options?.apiKeyPresent ?? cursorApiKeyEncrypted) } : {}),
       });
-      setInfo(result);
-
-      // Consolidate managed agent entries using the callback form of
-      // setExternalAgents so we never depend on externalAgents directly.
-      // All three agents resolve concurrently on mount — React runs
-      // state updater callbacks sequentially, so updating the ref inside
-      // ensures later calls see earlier defaultAgentId changes.
-      let nextDefaultId: string | null = null;
-      setExternalAgents((prev) => {
-        const state = buildManagedAgentState(prev, defaultAgentIdRef.current, agentKey, result);
-        if (state.defaultAgentId !== defaultAgentIdRef.current) {
-          nextDefaultId = state.defaultAgentId;
-          defaultAgentIdRef.current = state.defaultAgentId;
-        }
-        return areExternalAgentListsEqual(prev, state.agents) ? prev : state.agents;
-      });
-      if (nextDefaultId !== null) {
-        setDefaultAgentId(nextDefaultId);
-      }
+      applyResolvedAgentPath(agentKey, result);
 
       return result;
     } catch (err) {
@@ -272,15 +337,41 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
     } finally {
       setResolving(false);
     }
-  }, [cursorApiKeyEncrypted, setExternalAgents, setDefaultAgentId]);
+  }, [applyResolvedAgentPath, cursorApiKeyEncrypted]);
 
   useEffect(() => {
-    void resolveAgentPath("codex", initialManagedPathsRef.current?.codex ?? "");
-    void resolveAgentPath("claude", initialManagedPathsRef.current?.claude ?? "");
-    void resolveAgentPath("copilot", initialManagedPathsRef.current?.copilot ?? "");
-    void resolveAgentPath("cursor", initialManagedPathsRef.current?.cursor ?? "", { apiKeyPresent: Boolean(cursorApiKeyEncrypted) });
-    void resolveAgentPath("codebuddy", initialManagedPathsRef.current?.codebuddy ?? "");
-  }, [cursorApiKeyEncrypted, resolveAgentPath]);
+    if (activeSubTab !== "agents") return;
+
+    const initialPaths = initialManagedPathsRef.current;
+    const tasks: Array<{
+      key: ManagedAgentKey;
+      delayMs: number;
+      path: string;
+      options?: { apiKeyPresent?: boolean };
+    }> = [
+      { key: "codex", delayMs: 160, path: initialPaths?.codex ?? "" },
+      { key: "claude", delayMs: 440, path: initialPaths?.claude ?? "" },
+      { key: "copilot", delayMs: 720, path: initialPaths?.copilot ?? "" },
+      {
+        key: "cursor",
+        delayMs: 1000,
+        path: initialPaths?.cursor ?? "",
+        options: { apiKeyPresent: Boolean(cursorApiKeyEncrypted) },
+      },
+      { key: "codebuddy", delayMs: 1280, path: initialPaths?.codebuddy ?? "" },
+    ];
+    const cancelTasks = tasks
+      .filter((task) => !autoResolvedAgentStateRef.current[task.key])
+      .map((task) => scheduleAfterFirstPaint(() => {
+        autoResolvedAgentStateRef.current[task.key] = "pending";
+        void resolveAgentPath(task.key, task.path, task.options).finally(() => {
+          autoResolvedAgentStateRef.current[task.key] = "done";
+        });
+      }, task.delayMs));
+    return () => {
+      for (const cancel of cancelTasks) cancel();
+    };
+  }, [activeSubTab, cursorApiKeyEncrypted, resolveAgentPath]);
 
   // Validate a custom path for an agent
   const handleCheckCustomPath = useCallback(async (agentKey: ManagedAgentKey) => {
@@ -293,7 +384,7 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
           : agentKey === "codebuddy"
             ? codebuddyCustomPath
             : "";
-    await resolveAgentPath(agentKey, customPath);
+    await resolveAgentPath(agentKey, customPath, { refreshShellEnv: true });
   }, [claudeCustomPath, codexCustomPath, copilotCustomPath, codebuddyCustomPath, resolveAgentPath]);
 
   const handleSaveCursorApiKey = useCallback(async (apiKey: string) => {
@@ -373,7 +464,15 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
     }
   }, [agentOptions, defaultAgentId, setDefaultAgentId]);
 
-  const refreshCodexIntegration = useCallback(async (opts?: { refreshShellEnv?: boolean }) => {
+  useEffect(() => {
+    const bridge = getBridge();
+    if (!bridge?.aiPrewarmShellEnv) return;
+    return scheduleAfterFirstPaint(() => {
+      void bridge.aiPrewarmShellEnv?.();
+    }, 900);
+  }, []);
+
+  const refreshCodexIntegration = useCallback(async (opts?: { refreshShellEnv?: boolean; validateChatGptAuth?: boolean }) => {
     const bridge = getBridge();
     if (!bridge?.aiCodexGetIntegration) return;
 
@@ -390,8 +489,13 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
   }, []);
 
   useEffect(() => {
-    void refreshCodexIntegration();
-  }, [refreshCodexIntegration]);
+    if (activeSubTab !== "agents") return;
+    if (codexIntegrationLoadedRef.current) return;
+    return scheduleAfterFirstPaint(() => {
+      codexIntegrationLoadedRef.current = true;
+      void refreshCodexIntegration();
+    }, 620);
+  }, [activeSubTab, refreshCodexIntegration]);
 
   useEffect(() => {
     if (!codexLoginSession || codexLoginSession.state !== "running") {
@@ -411,7 +515,7 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
         setCodexLoginSession(result.session);
         if (result.session.state !== "running") {
           if (result.session.state === "success") {
-            void refreshCodexIntegration();
+            void refreshCodexIntegration({ validateChatGptAuth: true });
           }
         }
       }).catch((err) => {
@@ -482,7 +586,7 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
         throw new Error(result.error || "Failed to log out from Codex");
       }
       setCodexLoginSession(null);
-      await refreshCodexIntegration();
+      await refreshCodexIntegration({ refreshShellEnv: true, validateChatGptAuth: true });
     } catch (err) {
       setCodexError(normalizeCodexBridgeError(err));
     } finally {
@@ -513,14 +617,13 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
   }, [t]);
 
   useEffect(() => {
-    let cancelled = false;
-    void refreshUserSkillsStatus().then(() => {
-      if (cancelled) return;
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, [refreshUserSkillsStatus]);
+    if (activeSubTab !== "tools") return;
+    if (userSkillsLoadedRef.current) return;
+    return scheduleAfterFirstPaint(() => {
+      userSkillsLoadedRef.current = true;
+      void refreshUserSkillsStatus();
+    }, 520);
+  }, [activeSubTab, refreshUserSkillsStatus]);
 
   const reservedUserSkillSlugs = useMemo(
     () => (userSkillsStatus?.ok && userSkillsStatus.skills
@@ -549,6 +652,16 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
 
   return (
     <SettingsTabContent value="ai">
+      <Tabs value={activeSubTab} onValueChange={(value) => setActiveSubTab(value as AISettingsSubTab)} className="space-y-5">
+        <TabsList className="h-auto flex-wrap justify-start bg-muted/50">
+          <TabsTrigger value="providers">{t('ai.providers')}</TabsTrigger>
+          <TabsTrigger value="agents">{t('ai.agents')}</TabsTrigger>
+          <TabsTrigger value="tools">{t('ai.toolAccess.title')}</TabsTrigger>
+          <TabsTrigger value="search">{t("ai.webSearch.title")}</TabsTrigger>
+          <TabsTrigger value="safety">{t('ai.safety.title')}</TabsTrigger>
+        </TabsList>
+
+        <TabsContent value="providers" className="m-0 space-y-6">
           <SettingsSection
             title={t('ai.providers')}
             actions={<AddProviderDropdown onAdd={handleAddProvider} />}
@@ -569,7 +682,6 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
                     isActive={provider.id === activeProviderId}
                     onToggleEnabled={(enabled) => {
                       if (enabled) {
-                        // Activate this provider, deactivate all others
                         setActiveProviderId(provider.id);
                         if (provider.defaultModel) {
                           setActiveModelId(provider.defaultModel);
@@ -577,12 +689,11 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
                         for (const p of providers) {
                           if (p.id === provider.id) {
                             if (!p.enabled) updateProvider(p.id, { enabled: true });
-                          } else {
-                            if (p.enabled) updateProvider(p.id, { enabled: false });
+                          } else if (p.enabled) {
+                            updateProvider(p.id, { enabled: false });
                           }
                         }
                       } else {
-                        // Deactivate this provider
                         if (activeProviderId === provider.id) {
                           setActiveProviderId("");
                           setActiveModelId("");
@@ -598,7 +709,6 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
                     onRemove={() => handleRemoveProvider(provider.id)}
                     onUpdate={(updates) => {
                       updateProvider(provider.id, updates);
-                      // If this is the active provider and model changed, update activeModelId
                       if (provider.id === activeProviderId && updates.defaultModel !== undefined) {
                         setActiveModelId(updates.defaultModel || "");
                       }
@@ -610,7 +720,9 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
               </div>
             )}
           </SettingsSection>
+        </TabsContent>
 
+        <TabsContent value="agents" className="m-0 space-y-6">
           <SettingsSection
             title={t('ai.codex')}
             leading={<AgentIconBadge agent={{ id: "codex", icon: "openai", name: "Codex CLI" }} variant="plain" className="h-5 w-5 text-muted-foreground/90" />}
@@ -625,7 +737,7 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
               loginSession={codexLoginSession}
               isLoading={isCodexLoading}
               error={codexError}
-              onRefresh={() => void refreshCodexIntegration({ refreshShellEnv: true })}
+              onRefresh={() => void refreshCodexIntegration({ refreshShellEnv: true, validateChatGptAuth: true })}
               onConnect={() => void handleStartCodexLogin()}
               onCancel={() => void handleCancelCodexLogin()}
               onOpenUrl={handleOpenCodexLoginUrl}
@@ -709,7 +821,9 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
               </SettingCard>
             </SettingsSection>
           )}
+        </TabsContent>
 
+        <TabsContent value="tools" className="m-0 space-y-6">
           <SettingsSection title={t('ai.toolAccess.title')}>
             <SettingCard>
               <SettingRow description={t('ai.toolAccess.description')}>
@@ -778,10 +892,7 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
               {userSkillsStatus?.ok && userSkillsStatus.skills && userSkillsStatus.skills.length > 0 ? (
                 <div className="border-t border-border/60 divide-y divide-border/60">
                   {userSkillsStatus.skills.map((skill) => (
-                    <div
-                      key={skill.id}
-                      className="py-3"
-                    >
+                    <div key={skill.id} className="py-3">
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0 space-y-1">
                           <div className="text-sm font-medium">{skill.name}</div>
@@ -828,13 +939,16 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
             setQuickMessages={setQuickMessages}
             reservedUserSkillSlugs={reservedUserSkillSlugs}
           />
+        </TabsContent>
 
+        <TabsContent value="search" className="m-0 space-y-6">
           <WebSearchSettings
             webSearchConfig={webSearchConfig}
             setWebSearchConfig={setWebSearchConfig}
           />
+        </TabsContent>
 
-          {/* -- Safety Section -- */}
+        <TabsContent value="safety" className="m-0 space-y-6">
           <SafetySettings
             globalPermissionMode={globalPermissionMode}
             setGlobalPermissionMode={setGlobalPermissionMode}
@@ -845,6 +959,8 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
             maxIterations={maxIterations}
             setMaxIterations={setMaxIterations}
           />
+        </TabsContent>
+      </Tabs>
     </SettingsTabContent>
   );
 };

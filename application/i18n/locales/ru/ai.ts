@@ -6,6 +6,7 @@ export const ruAiMessages: Messages = {
   'ai.title': 'AI',
   'ai.description': 'Настройка AI-провайдеров, агентов и параметров безопасности',
   'ai.providers': 'Провайдеры',
+  'ai.agents': 'Агенты',
   'ai.providers.empty': 'Провайдеры не настроены. Добавьте провайдера, чтобы начать.',
   'ai.providers.add': 'Добавить провайдера',
   'ai.providers.active': 'Активен',

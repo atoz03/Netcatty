@@ -67,6 +67,22 @@ function loadBridgeWithMocks(options = {}) {
         typeof options.resolveCliFromPath === "function"
           ? options.resolveCliFromPath(...args)
           : null,
+      resolveCliFromPathAsync: async (...args) =>
+        typeof options.resolveCliFromPathAsync === "function"
+          ? options.resolveCliFromPathAsync(...args)
+          : typeof options.resolveCliFromPath === "function"
+            ? options.resolveCliFromPath(...args)
+            : null,
+      resolveSdkBinPath: (...args) =>
+        typeof options.resolveSdkBinPath === "function"
+          ? options.resolveSdkBinPath(...args)
+          : null,
+      resolveSdkBinPathAsync: async (...args) =>
+        typeof options.resolveSdkBinPathAsync === "function"
+          ? options.resolveSdkBinPathAsync(...args)
+          : typeof options.resolveSdkBinPath === "function"
+            ? options.resolveSdkBinPath(...args)
+            : null,
       getShellEnv: async () => (
         typeof options.shellEnv === "function"
           ? options.shellEnv()

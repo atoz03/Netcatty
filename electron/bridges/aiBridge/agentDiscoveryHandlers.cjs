@@ -65,8 +65,8 @@ function registerAgentDiscoveryHandlers(ctx) {
       }
 
       const resolvedPath = agent.command === "cursor"
-        ? (resolveCliFromPath(agent.command, shellEnv) || "cursor")
-        : resolveCliFromPath(agent.command, shellEnv); // Layer-1: locate
+        ? (await resolveCliFromPathAsync(agent.command, shellEnv) || "cursor")
+        : await resolveCliFromPathAsync(agent.command, shellEnv); // Layer-1: locate
       if (!resolvedPath || seenPaths.has(resolvedPath)) continue;
 
       const probe = agent.command === "cursor" && resolvedPath === "cursor"
@@ -85,9 +85,7 @@ function registerAgentDiscoveryHandlers(ctx) {
         } else if (agent.command === "copilot") {
           auth = probeCopilotAuth({});
         } else if (agent.command === "codex") {
-          // codex login status is async; resolve it then inject synchronously.
-          const codexStatus = await runCodexCli(["login", "status"]).catch(() => null);
-          auth = probeCodexAuth({ runLoginStatus: () => codexStatus || { exitCode: 1, stdout: "" } });
+          auth = { authenticated: false, authSource: null };
         } else if (agent.command === "cursor") {
           auth = {
             authenticated: cursorSdkStatus.authenticated,
@@ -119,6 +117,16 @@ function registerAgentDiscoveryHandlers(ctx) {
     return agents;
   });
 
+  ipcMain.handle("netcatty:ai:shell-env:prewarm", async (event) => {
+    if (!validateSenderOrSettings(event)) return { ok: false, error: "Unauthorized IPC sender" };
+    try {
+      await getShellEnv();
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err?.message || String(err) };
+    }
+  });
+
   // Resolve a CLI binary path (auto-detect or validate custom path)
   ipcMain.handle("netcatty:ai:resolve-cli", async (event, { command, customPath, refreshShellEnv, apiKeyPresent }) => {
     if (!validateSenderOrSettings(event)) return { ok: false, error: "Unauthorized IPC sender" };
@@ -133,16 +141,16 @@ function registerAgentDiscoveryHandlers(ctx) {
       // Normalize Windows shim paths like `codex` -> `codex.cmd` when present.
       // Fall back to PATH search if the stored path no longer exists
       // (e.g. CLI reinstalled to a different location).
-      resolvedPath = normalizeCliPathForPlatform(customPath) || resolveCliFromPath(command, shellEnv);
+      resolvedPath = normalizeCliPathForPlatform(customPath) || await resolveCliFromPathAsync(command, shellEnv);
     } else {
-      resolvedPath = resolveCliFromPath(command, shellEnv);
+      resolvedPath = await resolveCliFromPathAsync(command, shellEnv);
     }
 
     if (command === "cursor") {
       const cursorSdkStatus = await probeCursorSdkAvailability(shellEnv, {
         apiKeyPresent: Boolean(apiKeyPresent),
       });
-      const cursorPath = resolveCliFromPath(command, shellEnv) || "cursor";
+      const cursorPath = await resolveCliFromPathAsync(command, shellEnv) || "cursor";
       return {
         path: cursorSdkStatus.installed ? cursorPath : null,
         binPath: cursorSdkStatus.installed ? cursorPath : null,
@@ -186,7 +194,7 @@ function registerAgentDiscoveryHandlers(ctx) {
       let state = normalizeCodexIntegrationState(rawOutput);
       let effectiveRawOutput = rawOutput;
 
-      if (state === "connected_chatgpt") {
+      if (state === "connected_chatgpt" && options?.validateChatGptAuth === true) {
         const validation = await validateCodexChatGptAuth({ maxAgeMs: 10000 });
         if (!validation.ok) {
           if (isCodexAuthError(validation)) {
@@ -258,7 +266,7 @@ function registerAgentDiscoveryHandlers(ctx) {
 
     try {
       const shellEnv = await getShellEnv();
-      const codexCliPath = resolveCliFromPath("codex", shellEnv) || "codex";
+      const codexCliPath = await resolveCliFromPathAsync("codex", shellEnv) || "codex";
       const sessionId = `codex_login_${randomUUID()}`;
       const spawnSpec = prepareCommandForSpawn(codexCliPath, ["login"]);
       const child = spawn(spawnSpec.command, spawnSpec.args, {

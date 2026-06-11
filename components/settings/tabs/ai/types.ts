@@ -103,7 +103,9 @@ export interface FetchBridge {
 }
 
 export interface NetcattyAiBridge {
-  aiCodexGetIntegration?: (options?: { refreshShellEnv?: boolean }) => Promise<CodexIntegrationStatus>;
+  aiDiscoverAgents?: (options?: { refreshShellEnv?: boolean; apiKeyPresent?: boolean }) => Promise<Array<AgentPathInfo & { command: string }>>;
+  aiPrewarmShellEnv?: () => Promise<{ ok: boolean; error?: string }>;
+  aiCodexGetIntegration?: (options?: { refreshShellEnv?: boolean; validateChatGptAuth?: boolean }) => Promise<CodexIntegrationStatus>;
   aiCodexStartLogin?: () => Promise<{ ok: boolean; session?: CodexLoginSession; error?: string }>;
   aiCodexGetLoginSession?: (sessionId: string) => Promise<{ ok: boolean; session?: CodexLoginSession; error?: string }>;
   aiCodexCancelLogin?: (sessionId: string) => Promise<{ ok: boolean; found?: boolean; session?: CodexLoginSession; error?: string }>;

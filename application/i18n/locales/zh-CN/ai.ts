@@ -6,6 +6,7 @@ export const zhCNAiMessages: Messages = {
   'ai.title': 'AI',
   'ai.description': '配置 AI 提供商、Agent 和安全设置',
   'ai.providers': '提供商',
+  'ai.agents': 'Agent',
   'ai.providers.empty': '尚未配置提供商。添加一个提供商以开始使用。',
   'ai.providers.add': '添加提供商',
   'ai.providers.active': '活跃',

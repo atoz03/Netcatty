@@ -28,7 +28,7 @@ test("remote paths are quoted for shell-safe insertion", () => {
   );
 });
 
-test("remote clipboard image paste uploads and inserts the remote image path", async () => {
+test("remote clipboard image paste uploads and inserts the remote image path without broadcasting", async () => {
   const writes: Array<{ sessionId: string; data: string }> = [];
   const scrolled: string[] = [];
   let focused = false;
@@ -67,7 +67,6 @@ test("remote clipboard image paste uploads and inserts the remote image path", a
     terminalBackend: {
       writeToSession: (sessionId, data) => writes.push({ sessionId, data }),
     },
-    onPasteData: (data) => broadcastData.push(data),
     term: {
       focus: () => {
         focused = true;
@@ -95,7 +94,7 @@ test("remote clipboard image paste uploads and inserts the remote image path", a
     },
   ]);
   assert.deepEqual(scrolled, ["/home/alice/project/.netcatty-paste-images/shot_1.png"]);
-  assert.deepEqual(broadcastData, ["/home/alice/project/.netcatty-paste-images/shot_1.png"]);
+  assert.deepEqual(broadcastData, []);
   assert.equal(focused, true);
   assert.equal(closedSftpId, "sftp-1");
   assert.equal(deletedTempFile, "/tmp/netcatty/shot.png");

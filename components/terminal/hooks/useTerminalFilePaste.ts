@@ -74,7 +74,6 @@ export function useTerminalFilePaste({
               sessionId: sessionRef.current,
               terminalBackend,
               term: termRef.current,
-              onPasteData,
               scrollToBottomAfterProgrammaticInput,
             });
             if (!handled) fallbackToTextPaste();

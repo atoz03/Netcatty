@@ -85,7 +85,6 @@ export const useTerminalContextActions = ({
           sessionId: sessionRef.current,
           terminalBackend,
           term,
-          onPasteData: broadcastUserPasteData,
           scrollToBottomAfterProgrammaticInput,
         });
         if (handled) return;

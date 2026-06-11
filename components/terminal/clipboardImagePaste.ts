@@ -21,7 +21,6 @@ type HandleRemoteClipboardImagePasteOptions = {
   createTransferId?: () => string;
   getRemoteCwd: () => Promise<string | null | undefined>;
   scrollToBottomAfterProgrammaticInput?: (data: string) => void;
-  onPasteData?: (data: string) => boolean | void;
   sessionId: string | null | undefined;
   terminalBackend: {
     writeToSession: (sessionId: string, data: string, options?: { automated?: boolean }) => void;
@@ -71,7 +70,6 @@ export async function handleRemoteClipboardImagePaste({
   createTransferId = defaultTransferId,
   getRemoteCwd,
   scrollToBottomAfterProgrammaticInput,
-  onPasteData,
   sessionId,
   terminalBackend,
   term,
@@ -105,7 +103,6 @@ export async function handleRemoteClipboardImagePaste({
 
     const pastedPath = quoteRemotePathForShell(targetPath);
     terminalBackend.writeToSession(sessionId, pastedPath);
-    onPasteData?.(pastedPath);
     scrollToBottomAfterProgrammaticInput?.(pastedPath);
     term?.focus?.();
     return true;

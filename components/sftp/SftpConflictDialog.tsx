@@ -5,6 +5,7 @@
 import { AlertCircle } from 'lucide-react';
 import React, { memo, useState } from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
+import { canReplaceSftpConflict, getSftpConflictTypeKey } from '../../domain/sftpConflict';
 import { Button } from '../ui/button';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '../ui/dialog';
 import type { FileConflictAction } from '../../domain/models';
@@ -22,6 +23,13 @@ interface ConflictItem {
     existingModified: number;
     newModified: number;
 }
+
+export const canReplaceConflict = (conflict: Pick<ConflictItem, 'isDirectory' | 'existingType'>): boolean => {
+    return canReplaceSftpConflict(conflict.isDirectory, conflict.existingType);
+};
+
+const getConflictTypeKey = (conflict: Pick<ConflictItem, 'isDirectory' | 'existingType'>): string =>
+    getSftpConflictTypeKey(conflict.isDirectory, conflict.existingType);
 
 interface SftpConflictDialogProps {
     conflicts: ConflictItem[];
@@ -42,9 +50,10 @@ const SftpConflictDialogInner: React.FC<SftpConflictDialogProps> = ({ conflicts,
 
     const sameTypeConflictCount = Math.max(
         conflict.applyToAllCount ?? 1,
-        conflicts.filter((item) => item.isDirectory === conflict.isDirectory).length,
+        conflicts.filter((item) => getConflictTypeKey(item) === getConflictTypeKey(conflict)).length,
     );
     const canMerge = conflict.isDirectory && conflict.existingType === 'directory';
+    const canReplace = canReplaceConflict(conflict);
 
     const handleAction = (action: FileConflictAction) => {
         onResolve(conflict.transferId, action, applyToAll);
@@ -145,13 +154,15 @@ const SftpConflictDialogInner: React.FC<SftpConflictDialogProps> = ({ conflicts,
                             {t('sftp.conflict.action.merge')}
                         </Button>
                     )}
-                    <Button
-                        variant="default"
-                        onClick={() => handleAction('replace')}
-                        className="flex-1"
-                    >
-                        {t('sftp.conflict.action.replace')}
-                    </Button>
+                    {canReplace && (
+                        <Button
+                            variant="default"
+                            onClick={() => handleAction('replace')}
+                            className="flex-1"
+                        >
+                            {t('sftp.conflict.action.replace')}
+                        </Button>
+                    )}
                 </DialogFooter>
             </DialogContent>
         </Dialog>

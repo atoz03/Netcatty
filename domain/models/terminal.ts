@@ -391,4 +391,6 @@ export interface TerminalSession {
   // Per-pane font size override (workspace splits only; not persisted to vault hosts).
   fontSize?: number;
   fontSizeOverride?: boolean;
+  /** User-assigned display name for this terminal session (overrides hostLabel in UI) */
+  customName?: string;
 }

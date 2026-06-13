@@ -88,7 +88,7 @@ function terminalViewCtxEqual(
 }
 
 function TerminalViewInner({ ctx }: { ctx: TerminalViewContext }) {
-  const { Activity, Button, Clock3, Copy, Maximize2, Radio, Sparkles, TerminalAutocomplete, TerminalComposeBar, TerminalConnectionDialog, TerminalContextMenu, TerminalSearchBar, Tooltip, TooltipContent, TooltipTrigger, ZmodemOverwriteDialog, ZmodemProgressIndicator, auth, autocompleteAcceptTextRef, autocompleteCloseRef, autocompleteHostOs, autocompleteInputRef, autocompleteKeyEventRef, autocompleteRepositionRef, autocompleteSettings, chainProgress, cn, compactToolbar, lineTimestampsAvailable, containerRef, effectiveFontSize, effectiveFontWeight, effectiveTheme, error, executeSnippet, executeSnippetCommand, handleAddSelectionToAI, handleCancelConnect, handleCloseDisconnectedSession, handleCloseSearch, handleDismissDisconnectedDialog, handleDragEnter, handleDragLeave, handleDragOver, handleDrop, handleFindNext, handleFindPrevious, handleHostKeyAddAndContinue, handleHostKeyClose, handleHostKeyContinue, handleOsc52ReadResponse, handleReceiveYmodem, handleRetry, handleSearch, handleSendYmodem, handleTopOverlayMouseDownCapture, hasMouseTracking, hasSelection, host, hotkeyScheme, inWorkspace, isBroadcastEnabled, isCancelling, isComposeBarOpen, isDraggingOver, isFocusMode, isLocalConnection, remoteDragDropUsesZmodem, isSerialConnection, isSearchOpen, isSupportedOs, isSystemSidebarEligible, isVisible, keyBindings, keys, knownCwdRef, needsHostKeyVerification, onCloseSession, onExpandToFocus, onOpenSystem, onSplitHorizontal, onSplitVertical, onToggleBroadcast, onUpdateHost, osc52ReadPromptVisible, pendingHostKeyInfo, progressLogs, progressValue, renderControls, resolvedFontFamily, searchMatchCount, selectionOverlayPosition, sessionId, sessionRef, setIsComposeBarOpen, setShowLogs, shouldShowConnectionDialog, showLogs, showSelectionAIAction, snippets, status, statusDotTone, sudoHintRef, sudoHintText, t, termRef, terminalContextActions, terminalCwdTracker, terminalPreviewVars, terminalSettings, timeLeft, toast, zmodem } = ctx;
+  const { Activity, Button, Clock3, Copy, Maximize2, Radio, Sparkles, SquareArrowOutUpRight, TerminalAutocomplete, TerminalComposeBar, TerminalConnectionDialog, TerminalContextMenu, TerminalSearchBar, Tooltip, TooltipContent, TooltipTrigger, ZmodemOverwriteDialog, ZmodemProgressIndicator, auth, autocompleteAcceptTextRef, autocompleteCloseRef, autocompleteHostOs, autocompleteInputRef, autocompleteKeyEventRef, autocompleteRepositionRef, autocompleteSettings, chainProgress, cn, compactToolbar, lineTimestampsAvailable, containerRef, effectiveFontSize, effectiveFontWeight, effectiveTheme, error, executeSnippet, executeSnippetCommand, handleAddSelectionToAI, handleCancelConnect, handleCloseDisconnectedSession, handleCloseSearch, handleDismissDisconnectedDialog, handleDragEnter, handleDragLeave, handleDragOver, handleDrop, handleFindNext, handleFindPrevious, handleHostKeyAddAndContinue, handleHostKeyClose, handleHostKeyContinue, handleOsc52ReadResponse, handleReceiveYmodem, handleRetry, handleSearch, handleSendYmodem, handleTopOverlayMouseDownCapture, hasMouseTracking, hasSelection, host, hotkeyScheme, inWorkspace, isBroadcastEnabled, isCancelling, isComposeBarOpen, isDraggingOver, isFocusMode, isLocalConnection, remoteDragDropUsesZmodem, isSerialConnection, isSearchOpen, isSupportedOs, isSystemSidebarEligible, isVisible, keyBindings, keys, knownCwdRef, needsHostKeyVerification, onCloseSession, onDetach, onDetachPointerDown, onExpandToFocus, onOpenSystem, onRename, onSplitHorizontal, onSplitVertical, onToggleBroadcast, onUpdateHost, osc52ReadPromptVisible, pendingHostKeyInfo, progressLogs, progressValue, renderControls, resolvedFontFamily, searchMatchCount, selectionOverlayPosition, sessionDisplayName, sessionId, sessionRef, setIsComposeBarOpen, setShowLogs, shouldShowConnectionDialog, showLogs, showSelectionAIAction, snippets, status, statusDotTone, sudoHintRef, sudoHintText, t, termRef, terminalContextActions, terminalCwdTracker, terminalPreviewVars, terminalSettings, timeLeft, toast, zmodem } = ctx;
   const ymodemActionEnabled = shouldEnableYmodemAction({
     isSerialConnection,
     status,
@@ -133,6 +133,8 @@ function TerminalViewInner({ ctx }: { ctx: TerminalViewContext }) {
       onReconnect={handleRetry}
       onClose={inWorkspace ? () => onCloseSession?.(sessionId) : undefined}
       onAddSelectionToAI={ctx.onAddSelectionToAI ? handleAddSelectionToAI : undefined}
+      onRename={onRename}
+      onDetach={inWorkspace ? onDetach : undefined}
     >
       <div
         className={cn(
@@ -170,7 +172,7 @@ function TerminalViewInner({ ctx }: { ctx: TerminalViewContext }) {
         )}
         <div className="absolute left-0 right-0 top-0 z-20 pointer-events-none">
           <div
-            className="flex items-center gap-1 px-2 py-0.5 backdrop-blur-md pointer-events-auto min-w-0"
+            className="terminal-topbar flex items-center gap-1 px-2 py-0.5 backdrop-blur-md pointer-events-auto min-w-0"
             onMouseDownCapture={handleTopOverlayMouseDownCapture}
             style={{
               backgroundColor: 'var(--terminal-ui-bg)',
@@ -183,14 +185,27 @@ function TerminalViewInner({ ctx }: { ctx: TerminalViewContext }) {
               ['--terminal-toolbar-btn-active' as never]: 'var(--terminal-ui-toolbar-btn-active)',
             }}
           >
-            <div className="flex items-center gap-1 text-[11px] font-semibold min-w-0">
-              <span className="whitespace-nowrap truncate">{host.label}</span>
-              <span
+            <div
+              className={cn(
+                "terminal-title-cluster flex items-center gap-1 text-[11px] font-semibold min-w-0 overflow-hidden shrink",
+              )}
+            >
+              <div
                 className={cn(
-                  "inline-block h-2 w-2 rounded-full flex-shrink-0",
-                  statusDotTone,
+                  "flex items-center gap-1 min-w-0",
+                  inWorkspace && onDetachPointerDown && "cursor-grab active:cursor-grabbing",
                 )}
-              />
+                data-terminal-detach-drag-handle={inWorkspace && onDetachPointerDown ? "true" : undefined}
+                onPointerDown={onDetachPointerDown}
+              >
+                <span className="whitespace-nowrap truncate min-w-0 max-w-[12rem]">{sessionDisplayName || host.label}</span>
+                <span
+                  className={cn(
+                    "inline-block h-2 w-2 rounded-full flex-shrink-0",
+                    statusDotTone,
+                  )}
+                />
+              </div>
               {shouldShowLineTimestampToolbarToggle(lineTimestampsAvailable, onUpdateHost) && (
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -266,7 +281,7 @@ function TerminalViewInner({ ctx }: { ctx: TerminalViewContext }) {
                 isVisible={isVisible}
               />
             )}
-            <div className="flex-1" />
+            <div className="flex-1 min-w-0" />
             <div className="flex items-center gap-0.5 flex-shrink-0">
               {inWorkspace && onToggleBroadcast && (
                 <Tooltip>
@@ -294,6 +309,22 @@ function TerminalViewInner({ ctx }: { ctx: TerminalViewContext }) {
                       ? t("terminal.toolbar.broadcastDisable")
                       : t("terminal.toolbar.broadcastEnable")}
                   </TooltipContent>
+                </Tooltip>
+              )}
+              {inWorkspace && onDetach && (
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      variant="secondary"
+                      size="icon"
+                      className="h-6 w-6 p-0 shadow-none border-none text-[color:var(--terminal-toolbar-fg)] bg-transparent hover:bg-transparent"
+                      onClick={onDetach}
+                      aria-label={t('terminal.toolbar.detach')}
+                    >
+                      <SquareArrowOutUpRight size={12} />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent side="bottom">{t('terminal.toolbar.detach')}</TooltipContent>
                 </Tooltip>
               )}
               {inWorkspace && !isFocusMode && onExpandToFocus && (

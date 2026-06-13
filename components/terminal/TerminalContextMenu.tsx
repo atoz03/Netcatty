@@ -6,8 +6,10 @@ import {
   ClipboardPaste,
   Copy,
   Download,
+  Pencil,
   RefreshCcw,
   Sparkles,
+  SquareArrowOutUpRight,
   SplitSquareHorizontal,
   SplitSquareVertical,
   Terminal as TerminalIcon,
@@ -48,6 +50,8 @@ export interface TerminalContextMenuProps {
   onClose?: () => void;
   onSelectWord?: () => void;
   onAddSelectionToAI?: () => void;
+  onRename?: () => void;
+  onDetach?: () => void;
 }
 
 export const shouldShowReconnectAction = ({
@@ -125,6 +129,8 @@ export const TerminalContextMenu: React.FC<TerminalContextMenuProps> = ({
   onClose,
   onSelectWord,
   onAddSelectionToAI,
+  onRename,
+  onDetach,
 }) => {
   const { t } = useI18n();
   const isMac = hotkeyScheme === 'mac';
@@ -298,6 +304,26 @@ export const TerminalContextMenu: React.FC<TerminalContextMenuProps> = ({
             {t('terminal.menu.clearBuffer')}
             <ContextMenuShortcut>{clearShortcut}</ContextMenuShortcut>
           </ContextMenuItem>
+
+          {onRename && (
+            <>
+              <ContextMenuSeparator />
+              <ContextMenuItem onClick={onRename}>
+                <Pencil size={14} className="mr-2" />
+                {t('terminal.menu.rename')}
+              </ContextMenuItem>
+            </>
+          )}
+
+          {onDetach && (
+            <>
+              <ContextMenuSeparator />
+              <ContextMenuItem onClick={onDetach}>
+                <SquareArrowOutUpRight size={14} className="mr-2" />
+                {t('terminal.menu.detach')}
+              </ContextMenuItem>
+            </>
+          )}
 
           {onClose && (
             <>

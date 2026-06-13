@@ -33,6 +33,7 @@ export const terminalPropsAreEqual = (
   && prev.customAccent === next.customAccent
   && prev.terminalSettings === next.terminalSettings
   && prev.sessionId === next.sessionId
+  && prev.sessionDisplayName === next.sessionDisplayName
   && prev.startupCommand === next.startupCommand
   && prev.noAutoRun === next.noAutoRun
   && prev.reuseConnectionFromSessionId === next.reuseConnectionFromSessionId
@@ -71,4 +72,11 @@ export const terminalPropsAreEqual = (
   && prev.onBroadcastInput === next.onBroadcastInput
   && prev.onSnippetExecutorChange === next.onSnippetExecutorChange
   && prev.onAddSelectionToAI === next.onAddSelectionToAI
+  && prev.onRename === next.onRename
+  && prev.onDetach === next.onDetach
+  && prev.onStartSessionDrag === next.onStartSessionDrag
+  && prev.onEndSessionDrag === next.onEndSessionDrag
+  && prev.onDetachPointerDown === next.onDetachPointerDown
+  && prev.onDetachDragStart === next.onDetachDragStart
+  && prev.onDetachDragEnd === next.onDetachDragEnd
 );

@@ -42,7 +42,7 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
     handleRequestCloseEditorTabRef, handleSessionStatusChange, handleSyncNowManual, handleTerminalDataCapture, handleToggleTheme, handleUpdateHostFromTerminal,
     hostById, hosts, hotkeyScheme, identities, importOrReuseKey, isBroadcastEnabled, isCreateWorkspaceOpen, isMacClient, isQuickSwitcherOpen,
     keyBindings, keyboardInteractiveQueue, keys, logViews, managedSources, navigateToSection, openLogView, orderedTabsWithEditors, orphanSessions,
-    passphraseQueue, protocolSelectHost, proxyProfiles, quickResults, quickSearch, reorderWorkTabs, reorderWorkspaceSessions, resetSessionRename,
+    passphraseQueue, protocolSelectHost, proxyProfiles, quickResults, quickSearch, removeSessionFromWorkspace, reorderWorkTabs, reorderWorkspaceSessions, resetSessionRename,
     resetWorkspaceRename, resolveEmptyVaultConflict, resolvedTheme, runSnippet, sessionLogsDir, sessionLogsEnabled, sessionLogsFormat, sessionLogsTimestampsEnabled, sessionRenameTarget, sshDebugLogsEnabled,
     sessionRenameValue, sessions, setActiveTabId, setAddToWorkspaceDialog, setDraggingSessionId, setEditorWordWrap, setIsCreateWorkspaceOpen, setIsQuickSwitcherOpen,
     setNavigateToSection, setProtocolSelectHost, setQuickSearch, setSessionRenameValue, setTerminalFontFamilyId, setTerminalFontSize, setTerminalThemeId, updateSessionFontSize, clearSessionFontSizeOverride,
@@ -134,6 +134,7 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
         onStartSessionDrag={setDraggingSessionId}
         onEndSessionDrag={handleEndSessionDrag}
         onReorderTabs={reorderWorkTabs}
+        onRemoveSessionFromWorkspace={removeSessionFromWorkspace}
         showSftpTab={settings.showSftpTab}
         showHostTreeSidebar={settings.showHostTreeSidebar}
         editorTabs={editorTabs}
@@ -281,6 +282,9 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
           onToggleWorkspaceViewMode={toggleWorkspaceViewMode}
           onSetWorkspaceFocusedSession={setWorkspaceFocusedSession}
           onReorderWorkspaceSessions={reorderWorkspaceSessions}
+          onReorderTabs={reorderWorkTabs}
+          onCopySession={copySessionWithCurrentShell}
+          onCopySessionToNewWindow={copySessionToNewWindowWithCurrentShell}
           onSplitSession={splitSessionWithCurrentShell}
           onConnectToHost={handleConnectToHost}
           onCreateLocalTerminal={handleCreateLocalTerminal}
@@ -307,6 +311,9 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
           showHostTreeSidebar={settings.showHostTreeSidebar}
           toggleScriptsSidePanelRef={toggleScriptsSidePanelRef}
           toggleSidePanelRef={toggleSidePanelRef}
+          onStartSessionRename={startSessionRename}
+          onSubmitSessionRename={submitSessionRename}
+          onRemoveSessionFromWorkspace={removeSessionFromWorkspace}
         />
 
         {/* Log Views - readonly terminal replays */}

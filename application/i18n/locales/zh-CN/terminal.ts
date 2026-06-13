@@ -2,6 +2,9 @@ import type { Messages } from '../types';
 
 export const zhCNTerminalMessages: Messages = {
   'terminal.sudoHint.pressEnter': '按 Enter 粘贴 sudo 密码',
+  'terminal.menu.rename': '重命名',
+  'terminal.toolbar.detach': '移出到独立标签',
+  'terminal.menu.detach': '从工作区移出',
   'terminal.toolbar.timestampsEnable': '显示时间戳',
   'terminal.toolbar.timestampsDisable': '隐藏时间戳',
   'terminal.connection.protocol.et': 'EternalTerminal',

@@ -1,3 +1,4 @@
+import type { DragEvent, PointerEvent } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 
 import { logger } from "../../lib/logger";
@@ -16,6 +17,14 @@ import type {
 } from "../../types";
 
 export const MAX_CONNECTION_LOG_DATA_CHARS = 1_000_000;
+
+/**
+ * Get the display name for a terminal session.
+ * Uses customName if set, otherwise falls back to hostLabel.
+ */
+export function getSessionDisplayName(session: TerminalSession): string {
+  return session.customName || session.hostLabel || '';
+}
 
 /**
  * Extract unique root paths from drop entries for local terminal path insertion.
@@ -170,6 +179,17 @@ export interface TerminalProps {
   sudoAutofillPassword?: string;
   showSelectionAIAction?: boolean;
   onAddSelectionToAI?: (sessionId: string, selection: string) => void;
+  /** Override display name for the pane title bar (customName || hostLabel) */
+  sessionDisplayName?: string;
+  /** Open rename dialog for this session */
+  onRename?: () => void;
+  /** Detach this session from its workspace to a standalone tab */
+  onDetach?: () => void;
+  onStartSessionDrag?: (sessionId: string) => void;
+  onEndSessionDrag?: () => void;
+  onDetachPointerDown?: (e: PointerEvent<HTMLElement>) => void;
+  onDetachDragStart?: (e: DragEvent) => void;
+  onDetachDragEnd?: (e: DragEvent) => void;
 }
 
 export function formatNetSpeed(bytesPerSec: number): string {

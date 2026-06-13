@@ -6,6 +6,7 @@ import {
   isHostTreeWorkTabSurface,
   isRootPageTabId,
   isTerminalContentTabSurface,
+  reorderWorkTabIds,
   resolveWorkTabActiveHostId,
 } from './workTabSurface';
 import type { EditorTab } from '../state/editorTabStore';
@@ -15,6 +16,29 @@ test('work tab order keeps custom positions and appends new tabs', () => {
   assert.deepEqual(
     buildOrderedWorkTabIds(['log-1', 'session-1'], ['session-1', 'workspace-1', 'log-1', 'editor:file-1']),
     ['log-1', 'session-1', 'workspace-1', 'editor:file-1'],
+  );
+});
+
+test('work tab order removes duplicate ids before rendering', () => {
+  assert.deepEqual(
+    buildOrderedWorkTabIds(
+      ['session-2', 'session-1', 'session-2', 'session-1'],
+      ['session-1', 'session-2', 'session-3', 'session-3'],
+    ),
+    ['session-2', 'session-1', 'session-3'],
+  );
+});
+
+test('work tab order reorders with newly materialized tabs', () => {
+  assert.deepEqual(
+    reorderWorkTabIds(
+      ['session-1', 'session-2', 'session-3'],
+      ['session-1', 'session-2', 'session-3'],
+      'session-1',
+      'session-3',
+      'after',
+    ),
+    ['session-2', 'session-3', 'session-1'],
   );
 });
 

@@ -284,6 +284,11 @@ const WORKSPACE_CTX_KEYS = [
   'setResizing',
   'Array',
   'cn',
+  'onStartSessionRename',
+  'onRemoveSessionFromWorkspace',
+  'onReorderTabs',
+  'onStartSessionDrag',
+  'onEndSessionDrag',
 ] as const;
 
 export function terminalLayerSidePanelCtxEqual(prev: Ctx, next: Ctx): boolean {
@@ -337,6 +342,11 @@ export function terminalLayerFocusSidebarPropsEqual(prev: Ctx, next: Ctx): boole
     && eq(prev, next, 't')
     && eq(prev, next, 'onReorderWorkspaceSessions')
     && eq(prev, next, 'onRequestAddToWorkspace')
+    && eq(prev, next, 'handleCloseSession')
+    && eq(prev, next, 'onCopySession')
+    && eq(prev, next, 'onCopySessionToNewWindow')
+    && eq(prev, next, 'onRemoveSessionFromWorkspace')
     && eq(prev, next, 'onSetWorkspaceFocusedSession')
-    && eq(prev, next, 'onToggleWorkspaceViewMode');
+    && eq(prev, next, 'onToggleWorkspaceViewMode')
+    && eq(prev, next, 'onSubmitSessionRename');
 }

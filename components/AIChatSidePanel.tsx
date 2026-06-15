@@ -171,6 +171,38 @@ function shouldDelayAIChatSidePanelActivation(props: AIChatSidePanelProps): bool
   return !hasAIChatSidePanelRetainedContent(props);
 }
 
+export function resolveAIChatSidePanelActivationState(input: {
+  activationKey: string;
+  shouldDelayActivation: boolean;
+  activatedKey: string | null;
+}): {
+  activationReady: boolean;
+  activatedKey: string | null;
+  shouldScheduleActivation: boolean;
+} {
+  if (!input.shouldDelayActivation) {
+    return {
+      activationReady: true,
+      activatedKey: input.activationKey,
+      shouldScheduleActivation: false,
+    };
+  }
+
+  if (input.activatedKey === input.activationKey) {
+    return {
+      activationReady: true,
+      activatedKey: input.activatedKey,
+      shouldScheduleActivation: false,
+    };
+  }
+
+  return {
+    activationReady: false,
+    activatedKey: input.activatedKey,
+    shouldScheduleActivation: true,
+  };
+}
+
 function schedulePanelActivation(callback: () => void): () => void {
   let timeoutId: number | null = null;
   if (typeof requestAnimationFrame === 'function') {
@@ -1182,16 +1214,27 @@ const AIChatSidePanel = React.memo(function AIChatSidePanel(props: AIChatSidePan
   const shouldKeepMounted = shouldKeepAIChatSidePanelMounted(props);
   const shouldDelayActivation = shouldKeepMounted && shouldDelayAIChatSidePanelActivation(props);
   const activationKey = `${props.scopeType}:${props.scopeTargetId ?? ''}`;
+  const activatedKeyRef = useRef<string | null>(!shouldDelayActivation ? activationKey : null);
   const [activationReady, setActivationReady] = useState(!shouldDelayActivation);
 
   useEffect(() => {
-    if (!shouldDelayActivation) {
-      setActivationReady(true);
+    const nextActivationState = resolveAIChatSidePanelActivationState({
+      activationKey,
+      shouldDelayActivation,
+      activatedKey: activatedKeyRef.current,
+    });
+
+    activatedKeyRef.current = nextActivationState.activatedKey;
+    setActivationReady(nextActivationState.activationReady);
+
+    if (!nextActivationState.shouldScheduleActivation) {
       return undefined;
     }
 
-    setActivationReady(false);
-    return schedulePanelActivation(() => setActivationReady(true));
+    return schedulePanelActivation(() => {
+      activatedKeyRef.current = activationKey;
+      setActivationReady(true);
+    });
   }, [activationKey, shouldDelayActivation]);
 
   if (!shouldKeepMounted) return null;

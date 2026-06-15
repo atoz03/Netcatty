@@ -5,6 +5,7 @@ import type { AIDraft, AISession } from '../infrastructure/ai/types';
 import {
   aiChatSidePanelPropsAreEqual,
   hasAIChatSidePanelRetainedContent,
+  resolveAIChatSidePanelActivationState,
   shouldKeepAIChatSidePanelMounted,
 } from './AIChatSidePanel.tsx';
 import type { AIChatSidePanelProps } from './AIChatSidePanel.types.ts';
@@ -114,4 +115,36 @@ test('AI side panel re-renders when retained content becomes visible again', () 
     hiddenProps,
     { ...hiddenProps, isVisible: true },
   ), false);
+});
+
+test('activated empty AI side panel stays ready when draft text is cleared', () => {
+  const activationKey = 'terminal:terminal-1';
+
+  assert.deepEqual(
+    resolveAIChatSidePanelActivationState({
+      activationKey,
+      shouldDelayActivation: true,
+      activatedKey: activationKey,
+    }),
+    {
+      activationReady: true,
+      activatedKey: activationKey,
+      shouldScheduleActivation: false,
+    },
+  );
+});
+
+test('fresh empty AI side panel still schedules delayed activation', () => {
+  assert.deepEqual(
+    resolveAIChatSidePanelActivationState({
+      activationKey: 'terminal:terminal-1',
+      shouldDelayActivation: true,
+      activatedKey: null,
+    }),
+    {
+      activationReady: false,
+      activatedKey: null,
+      shouldScheduleActivation: true,
+    },
+  );
 });

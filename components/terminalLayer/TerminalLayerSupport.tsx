@@ -504,6 +504,12 @@ export interface TerminalLayerProps {
   onReorderWorkspaceSessions?: (workspaceId: string, draggedSessionId: string, targetSessionId: string, position: 'before' | 'after') => void;
   onReorderTabs?: (draggedId: string, targetId: string, position: 'before' | 'after', additionalTabIds?: readonly string[]) => void;
   onCopySession?: (sessionId: string) => void;
+  onOpenManagedTerminal?: (
+    sessionId: string,
+    title: string,
+    startupCommand: string,
+    options?: { mode?: 'tab' | 'verticalSplit' },
+  ) => boolean | void;
   onCopySessionToNewWindow?: (sessionId: string) => void;
   onRemoveSessionFromWorkspace?: (
     sessionId: string,

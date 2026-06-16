@@ -332,6 +332,30 @@ export function copySessionWithCurrentShellImpl(getCtx: AppContextGetter, sessio
   }
 }
 
+export function openManagedTerminalWithCurrentShellImpl(
+  getCtx: AppContextGetter,
+  sessionId: string,
+  title: string,
+  startupCommand: string,
+  options?: { mode?: 'tab' | 'verticalSplit' },
+) {
+  const { classifyLocalShellType, copySession, discoveredShells, resolveShellSetting, splitSession, terminalSettings } = getCtx();
+{
+    const resolved = resolveShellSetting(terminalSettings.localShell, discoveredShells);
+    const cloneOptions = {
+      localShellType: classifyLocalShellType(resolved?.command || terminalSettings.localShell, navigator.userAgent),
+      startupCommand,
+      customName: title,
+    };
+    if (options?.mode === 'verticalSplit') {
+      splitSession(sessionId, 'vertical', cloneOptions);
+      return true;
+    }
+    copySession(sessionId, cloneOptions);
+    return true;
+  }
+}
+
 export async function copySessionToNewWindowWithCurrentShellImpl(getCtx: AppContextGetter, sessionId: string) {
   const { classifyLocalShellType, discoveredShells, netcattyBridge, resolveShellSetting, sessions, terminalSettings, t, toast } = getCtx();
 {

@@ -3,6 +3,7 @@ export type TargetOs = 'linux' | 'darwin' | 'win32' | 'unknown';
 export interface SessionCapabilities {
   targetOs: TargetOs;
   hasTmux: boolean;
+  hasZellij: boolean;
   hasDocker: boolean;
   probedAt: number;
 }
@@ -67,6 +68,15 @@ export type TmuxManageAction =
   | { action: 'selectWindow'; sessionName: string; windowIndex: number }
   | { action: 'killServer' };
 
+export interface ZellijSessionInfo {
+  name: string;
+  current: boolean;
+  exited: boolean;
+}
+
+export type ZellijManageAction =
+  | { action: 'killSession'; sessionName: string };
+
 export interface DockerContainerInfo {
   id: string;
   name: string;
@@ -119,7 +129,7 @@ export type DockerImageManageAction =
   | { action: 'prune'; all?: boolean }
   | { action: 'tag'; imageId: string; repository: string; tag?: string };
 
-export type SystemManagerSubTab = 'processes' | 'tmux' | 'docker';
+export type SystemManagerSubTab = 'processes' | 'tmux' | 'zellij' | 'docker';
 
 export interface TerminalPopupIcon {
   kind: 'image';

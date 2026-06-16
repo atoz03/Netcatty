@@ -62,6 +62,20 @@ declare global {
     tmuxAction?(options: {
       sessionId: string;
     } & import("../../domain/systemManager/types").TmuxManageAction): Promise<{ success: boolean; error?: string }>;
+    listZellijSessions?(sessionId: string): Promise<{
+      success: boolean;
+      error?: string;
+      zellijVersion?: string;
+      sessions?: import("../../domain/systemManager/types").ZellijSessionInfo[];
+    }>;
+    createZellijSession?(options: { sessionId: string; name: string }): Promise<{
+      success: boolean;
+      error?: string;
+      name?: string;
+    }>;
+    zellijAction?(options: {
+      sessionId: string;
+    } & import("../../domain/systemManager/types").ZellijManageAction): Promise<{ success: boolean; error?: string }>;
     listDockerContainers?(sessionId: string): Promise<{
       success: boolean;
       error?: string;

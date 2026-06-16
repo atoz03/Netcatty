@@ -107,6 +107,15 @@ function createPreloadApi(ctx) {
   tmuxAction: async (options) => {
     return ipcRenderer.invoke("netcatty:system:tmuxAction", options);
   },
+  listZellijSessions: async (sessionId) => {
+    return ipcRenderer.invoke("netcatty:system:listZellijSessions", { sessionId });
+  },
+  createZellijSession: async (options) => {
+    return ipcRenderer.invoke("netcatty:system:createZellijSession", options);
+  },
+  zellijAction: async (options) => {
+    return ipcRenderer.invoke("netcatty:system:zellijAction", options);
+  },
   listDockerContainers: async (sessionId) => {
     return ipcRenderer.invoke("netcatty:system:listDockerContainers", { sessionId });
   },

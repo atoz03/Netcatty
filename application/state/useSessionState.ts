@@ -601,6 +601,8 @@ export const useSessionState = () => {
     direction: SplitDirection,
     options?: {
       localShellType?: TerminalSession['shellType'];
+      startupCommand?: string;
+      customName?: string;
     },
   ) => {
 	    setSessions(prevSessions => {
@@ -614,6 +616,8 @@ export const useSessionState = () => {
           id: crypto.randomUUID(),
           localShellType: options?.localShellType,
           workspaceId: session.workspaceId,
+          startupCommand: options?.startupCommand,
+          customName: options?.customName,
         });
 
         // Add pane to existing workspace
@@ -637,6 +641,8 @@ export const useSessionState = () => {
       const newSession = createSplitTerminalSessionClone(session, {
         id: crypto.randomUUID(),
         localShellType: options?.localShellType,
+        startupCommand: options?.startupCommand,
+        customName: options?.customName,
       });
 
       const hint: SplitHint = {
@@ -794,6 +800,8 @@ export const useSessionState = () => {
   // Copy a session - creates a new session with the same host connection
   const copySession = useCallback((sessionId: string, options?: {
     localShellType?: TerminalSession['shellType'];
+    startupCommand?: string;
+    customName?: string;
   }) => {
     // Pre-allocate the new id outside the updater so StrictMode's
     // double-invocation of the functional updater doesn't mint two ids.
@@ -808,6 +816,8 @@ export const useSessionState = () => {
       const newSession = createCopiedTerminalSessionClone(session, {
         id: newSessionId,
         localShellType: options?.localShellType,
+        startupCommand: options?.startupCommand,
+        customName: options?.customName,
       });
 
       // Schedule the activeTab + tabOrder updates only when creation
@@ -847,11 +857,15 @@ export const useSessionState = () => {
 
   const createSessionFromCloneSource = useCallback((sourceSession: TerminalSession, options?: {
     localShellType?: TerminalSession['shellType'];
+    startupCommand?: string;
+    customName?: string;
   }) => {
     const newSessionId = crypto.randomUUID();
     const newSession = createCopiedTerminalSessionClone(sourceSession, {
       id: newSessionId,
       localShellType: options?.localShellType,
+      startupCommand: options?.startupCommand,
+      customName: options?.customName,
     });
     delete newSession.workspaceId;
 

@@ -2,13 +2,16 @@
 
 const { createExecOnSessionApi } = require("./systemManager/execOnSession.cjs");
 const { createTmuxOpsApi } = require("./systemManager/tmuxOps.cjs");
+const { createZellijOpsApi } = require("./systemManager/zellijOps.cjs");
 const { createDockerOpsApi } = require("./systemManager/dockerOps.cjs");
 
 const CAPABILITY_SCRIPT_POSIX = [
-  "exec sh -c ",
+  "exec bash -lc ",
   "'",
+  'export PATH="$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH"; ',
   'printf "%s\\n" "__NC_OS__=$(uname -s)"; ',
   'command -v tmux >/dev/null 2>&1 && printf "%s\\n" __NC_TMUX__=1; ',
+  'command -v zellij >/dev/null 2>&1 && printf "%s\\n" __NC_ZELLIJ__=1; ',
   'command -v docker >/dev/null 2>&1 && printf "%s\\n" __NC_DOCKER__=1',
   "'",
 ].join("");
@@ -37,8 +40,9 @@ function parseCapabilities(stdout, isLocal, localPlatform) {
     else if (uname.includes("windows") || uname.includes("mingw")) targetOs = "win32";
   }
   const hasTmux = text.includes("__NC_TMUX__=1");
+  const hasZellij = text.includes("__NC_ZELLIJ__=1");
   const hasDocker = text.includes("__NC_DOCKER__=1");
-  return { targetOs, hasTmux, hasDocker, probedAt: Date.now() };
+  return { targetOs, hasTmux, hasZellij, hasDocker, probedAt: Date.now() };
 }
 
 function parseProcessLines(stdout) {
@@ -114,6 +118,7 @@ function createSystemManagerBridge(deps) {
   const { execOnSession, execOnLocalMachine, isLocalSession, getSession } = execApi;
 
   const tmuxOps = createTmuxOpsApi({ execOnSession });
+  const zellijOps = createZellijOpsApi({ execOnSession });
   const dockerOps = createDockerOpsApi({ execOnSession, getSession });
 
   async function probeCapabilities(event, payload) {
@@ -125,18 +130,18 @@ function createSystemManagerBridge(deps) {
       let script = CAPABILITY_SCRIPT_POSIX;
       if (platform === "win32") {
         const result = await execOnLocalMachine(
-          "$os=[System.Environment]::OSVersion.Platform; Write-Output \"__NC_OS__=Windows\"; if (Get-Command tmux -ErrorAction SilentlyContinue) { Write-Output '__NC_TMUX__=1' }; docker info 2>$null; if ($LASTEXITCODE -eq 0) { Write-Output '__NC_DOCKER__=1' }",
+          "$os=[System.Environment]::OSVersion.Platform; Write-Output \"__NC_OS__=Windows\"; if (Get-Command tmux -ErrorAction SilentlyContinue) { Write-Output '__NC_TMUX__=1' }; if (Get-Command zellij -ErrorAction SilentlyContinue) { Write-Output '__NC_ZELLIJ__=1' }; docker info 2>$null; if ($LASTEXITCODE -eq 0) { Write-Output '__NC_DOCKER__=1' }",
           8000,
         );
         if (!result.success) return { success: false, error: result.error || "Probe failed" };
         return { success: true, capabilities: parseCapabilities(result.stdout, true, platform) };
       }
       const result = await execOnLocalMachine(
-        script.replace(/^exec sh -c '/, "").replace(/'$/, ""),
+        script.replace(/^exec bash -lc '/, "").replace(/'$/, ""),
         8000,
       );
       if (!result.success) {
-        const fallback = await execOnLocalMachine("uname -s; command -v tmux; command -v docker >/dev/null 2>&1 && echo docker_ok", 8000);
+        const fallback = await execOnLocalMachine("export PATH=\"$HOME/.local/bin:$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$PATH\"; uname -s; command -v tmux; command -v zellij; command -v docker >/dev/null 2>&1 && echo docker_ok", 8000);
         if (!fallback.success) return { success: false, error: fallback.error || "Probe failed" };
         const text = fallback.stdout || "";
         return {
@@ -144,6 +149,7 @@ function createSystemManagerBridge(deps) {
           capabilities: {
             targetOs: platform === "linux" ? "linux" : platform === "darwin" ? "darwin" : "unknown",
             hasTmux: text.includes("tmux") && !text.includes("not found"),
+            hasZellij: text.includes("zellij") && !text.includes("not found"),
             hasDocker: text.includes("docker_ok"),
             probedAt: Date.now(),
           },
@@ -243,6 +249,24 @@ function createSystemManagerBridge(deps) {
     return { success: true };
   }
 
+  async function listZellijSessions(event, payload) {
+    const sessionId = typeof payload === "string" ? payload : payload?.sessionId;
+    if (!sessionId) return { success: false, error: "Missing sessionId" };
+    return zellijOps.listSessions(event, sessionId);
+  }
+
+  async function createZellijSession(event, payload) {
+    return zellijOps.createSession(event, payload);
+  }
+
+  async function zellijAction(event, payload) {
+    const result = await zellijOps.zellijAction(event, payload);
+    if (result.success === false) {
+      return { success: false, error: result.error || result.stderr || "zellij command failed" };
+    }
+    return { success: true };
+  }
+
   async function listDockerContainers(event, payload) {
     const sessionId = payload?.sessionId;
     if (!sessionId) return { success: false, error: "Missing sessionId" };
@@ -293,6 +317,9 @@ function createSystemManagerBridge(deps) {
     ipcMain.handle("netcatty:system:listTmuxPanes", listTmuxPanes);
     ipcMain.handle("netcatty:system:listTmuxClients", listTmuxClients);
     ipcMain.handle("netcatty:system:tmuxAction", tmuxAction);
+    ipcMain.handle("netcatty:system:listZellijSessions", listZellijSessions);
+    ipcMain.handle("netcatty:system:createZellijSession", createZellijSession);
+    ipcMain.handle("netcatty:system:zellijAction", zellijAction);
     ipcMain.handle("netcatty:system:listDockerContainers", listDockerContainers);
     ipcMain.handle("netcatty:system:listDockerImages", listDockerImages);
     ipcMain.handle("netcatty:system:dockerStats", dockerStats);

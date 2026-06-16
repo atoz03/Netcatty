@@ -9,7 +9,7 @@ export function isNetcattyAiHistoryCommand(command: string): boolean {
 }
 
 const NETCATTY_MANAGED_STARTUP_COMMAND =
-  /^(?:sh\s+-c\s+.*printf .*\\033\[H\\033\[2J\\033\[3J.*_nc_docker_err=.*\bdocker\s+inspect\b|printf '\\033\[H\\033\[2J\\033\[3J';\s*(?:_nc_docker_err=.*\bdocker\s+inspect\b|exec\s+(?:docker\s+(?:exec|logs)\b|tmux\s+attach\b)))/;
+  /^(?:sh\s+-c\s+.*printf .*\\033\[H\\033\[2J\\033\[3J.*_nc_docker_err=.*\bdocker\s+inspect\b|printf '\\033\[H\\033\[2J\\033\[3J';\s*(?:_nc_docker_err=.*\bdocker\s+inspect\b|exec\s+(?:docker\s+(?:exec|logs)\b|tmux\s+attach\b|zellij\s+attach\b)))/;
 
 /** True when a shell history line came from a Netcatty-managed terminal launch. */
 export function isNetcattyManagedStartupHistoryCommand(command: string): boolean {

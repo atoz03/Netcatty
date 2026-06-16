@@ -21,6 +21,19 @@ export function shouldShowTmuxTab(
   capabilities: SessionCapabilities | undefined,
   session: TerminalSession | null | undefined,
 ): boolean {
+  if (capabilities?.hasTmux === true) return true;
+  if (isDefiniteLinuxTarget(host, capabilities, session)) return true;
+  if (capabilities?.targetOs === 'darwin') return true;
+  if (host?.os === 'macos') return true;
+  return false;
+}
+
+export function shouldShowZellijTab(
+  host: Host | null | undefined,
+  capabilities: SessionCapabilities | undefined,
+  session: TerminalSession | null | undefined,
+): boolean {
+  if (capabilities?.hasZellij === true) return true;
   if (isDefiniteLinuxTarget(host, capabilities, session)) return true;
   if (capabilities?.targetOs === 'darwin') return true;
   if (host?.os === 'macos') return true;
@@ -43,6 +56,7 @@ export function buildSystemManagerTabs(
 ): SystemManagerSubTab[] {
   const tabs: SystemManagerSubTab[] = ['processes'];
   if (shouldShowTmuxTab(host, capabilities, session)) tabs.push('tmux');
+  if (shouldShowZellijTab(host, capabilities, session)) tabs.push('zellij');
   if (shouldShowDockerTab(host, capabilities, session)) tabs.push('docker');
   return tabs;
 }

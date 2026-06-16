@@ -3,6 +3,7 @@ import type {
   DockerImageInfo,
   SystemProcessInfo,
   TmuxSessionInfo,
+  ZellijSessionInfo,
 } from './types';
 
 export function systemProcessInfoEqual(a: SystemProcessInfo, b: SystemProcessInfo): boolean {
@@ -25,6 +26,12 @@ export function tmuxSessionInfoEqual(a: TmuxSessionInfo, b: TmuxSessionInfo): bo
     && a.created === b.created
     && a.activity === b.activity
     && a.group === b.group;
+}
+
+export function zellijSessionInfoEqual(a: ZellijSessionInfo, b: ZellijSessionInfo): boolean {
+  return a.name === b.name
+    && a.current === b.current
+    && a.exited === b.exited;
 }
 
 export function dockerContainerInfoEqual(a: DockerContainerInfo, b: DockerContainerInfo): boolean {

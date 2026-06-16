@@ -11,3 +11,7 @@ export function buildTmuxAttachCommand(sessionName: string, windowIndex?: number
     : shQuote(sessionName);
   return `${CLEAR_STARTUP_OUTPUT} exec tmux attach -t ${target}`;
 }
+
+export function buildZellijAttachCommand(sessionName: string): string {
+  return `${CLEAR_STARTUP_OUTPUT} exec zellij attach ${shQuote(sessionName)}`;
+}

@@ -40,6 +40,7 @@ export const terminalLayerAreEqual = (
   prev.onSetWorkspaceFocusedSession === next.onSetWorkspaceFocusedSession &&
   prev.onReorderWorkspaceSessions === next.onReorderWorkspaceSessions &&
   prev.onReorderTabs === next.onReorderTabs &&
+  prev.onOpenManagedTerminal === next.onOpenManagedTerminal &&
   prev.onSplitSession === next.onSplitSession &&
   prev.onConnectToHost === next.onConnectToHost &&
   prev.onCreateLocalTerminal === next.onCreateLocalTerminal &&

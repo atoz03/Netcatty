@@ -13,6 +13,8 @@ type CloneSessionOptions = {
   id: string;
   localShellType?: TerminalSession["shellType"];
   workspaceId?: string;
+  startupCommand?: string;
+  customName?: string;
 };
 
 function getClonedShellType(
@@ -45,6 +47,8 @@ function createTerminalSessionClone(
     localShellIcon: session.localShellIcon,
     fontSize: session.fontSize,
     fontSizeOverride: session.fontSizeOverride,
+    startupCommand: options.startupCommand,
+    customName: options.customName,
     reuseConnectionFromSessionId: canReuseTerminalConnection(session) ? session.id : undefined,
   };
 

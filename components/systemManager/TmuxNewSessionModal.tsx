@@ -25,6 +25,8 @@ interface TmuxNewSessionModalProps {
   snippets: Snippet[];
   creating?: boolean;
   error?: string | null;
+  kind?: 'tmux' | 'zellij';
+  commandEnabled?: boolean;
 }
 
 export const TmuxNewSessionModal = memo(function TmuxNewSessionModal({
@@ -34,6 +36,8 @@ export const TmuxNewSessionModal = memo(function TmuxNewSessionModal({
   snippets,
   creating = false,
   error,
+  kind = 'tmux',
+  commandEnabled = true,
 }: TmuxNewSessionModalProps) {
   const { t } = useI18n();
   const [commandTab, setCommandTab] = useState<CommandTab>('custom');
@@ -70,12 +74,12 @@ export const TmuxNewSessionModal = memo(function TmuxNewSessionModal({
   const handleCreate = useCallback(async () => {
     const trimmedName = name.trim();
     if (!trimmedName) {
-      setLocalError(t('systemManager.tmux.newSessionRequired'));
+      setLocalError(t(`systemManager.${kind}.newSessionRequired`));
       return;
     }
     setLocalError(null);
-    await onCreate(trimmedName, command);
-  }, [command, name, onCreate, t]);
+    await onCreate(trimmedName, commandEnabled ? command : '');
+  }, [command, commandEnabled, kind, name, onCreate, t]);
 
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && !creating && name.trim()) {
@@ -104,72 +108,74 @@ export const TmuxNewSessionModal = memo(function TmuxNewSessionModal({
         onKeyDown={handleKeyDown}
       >
         <DialogHeader className="shrink-0 pr-8">
-          <DialogTitle>{t('systemManager.tmux.newSessionTitle')}</DialogTitle>
-          <DialogDescription>{t('systemManager.tmux.newSessionDesc')}</DialogDescription>
+          <DialogTitle>{t(`systemManager.${kind}.newSessionTitle`)}</DialogTitle>
+          <DialogDescription>{t(`systemManager.${kind}.newSessionDesc`)}</DialogDescription>
         </DialogHeader>
 
         <div className="min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
           <div className="space-y-1.5">
             <Label htmlFor="tmux-new-session-name" className="text-xs">
-              {t('systemManager.tmux.newSessionName')}
+              {t(`systemManager.${kind}.newSessionName`)}
             </Label>
             <Input
               id="tmux-new-session-name"
               ref={nameInputRef}
               value={name}
               onChange={(e) => setName(e.target.value)}
-              placeholder={t('systemManager.tmux.newSessionPlaceholder')}
+              placeholder={t(`systemManager.${kind}.newSessionPlaceholder`)}
               className="h-9"
               spellCheck={false}
               disabled={creating}
             />
           </div>
 
-          <Tabs
-            value={commandTab}
-            onValueChange={(value) => setCommandTab(value as CommandTab)}
-            className="flex min-h-0 flex-col"
-          >
-            <TabsList className="grid h-8 w-full grid-cols-2 bg-muted/50 p-0.5">
-              <TabsTrigger value="custom" className="h-7 text-xs">
-                {t('systemManager.tmux.newSessionTabCustom')}
-              </TabsTrigger>
-              <TabsTrigger value="snippet" className="h-7 text-xs">
-                {t('systemManager.tmux.newSessionTabSnippet')}
-              </TabsTrigger>
-            </TabsList>
+          {commandEnabled && (
+            <Tabs
+              value={commandTab}
+              onValueChange={(value) => setCommandTab(value as CommandTab)}
+              className="flex min-h-0 flex-col"
+            >
+              <TabsList className="grid h-8 w-full grid-cols-2 bg-muted/50 p-0.5">
+                <TabsTrigger value="custom" className="h-7 text-xs">
+                  {t('systemManager.tmux.newSessionTabCustom')}
+                </TabsTrigger>
+                <TabsTrigger value="snippet" className="h-7 text-xs">
+                  {t('systemManager.tmux.newSessionTabSnippet')}
+                </TabsTrigger>
+              </TabsList>
 
-            <TabsContent value="custom" className="mt-3 space-y-3 focus-visible:outline-none">
-              <SnippetScriptEditor
-                id="tmux-new-session-command"
-                label={t('systemManager.tmux.newSessionCommand')}
-                value={command}
-                onChange={handleCommandChange}
-                placeholder={t('systemManager.tmux.newSessionCommandPlaceholder')}
-                defaultHeight={150}
-                maxHeight={260}
-                persistHeight={false}
-              />
-              <p className="text-[11px] text-muted-foreground">
-                {t('systemManager.tmux.newSessionCommandHint')}
-              </p>
-            </TabsContent>
-
-            <TabsContent value="snippet" className="mt-3 space-y-3 focus-visible:outline-none">
-              <SnippetCommandPicker
-                snippets={snippets}
-                selectedId={selectedSnippetId}
-                onSelect={handleSnippetSelect}
-                showTitle={false}
-                className="h-[240px] min-h-[240px]"
-              />
-              {selectedSnippet && (
+              <TabsContent value="custom" className="mt-3 space-y-3 focus-visible:outline-none">
+                <SnippetScriptEditor
+                  id="tmux-new-session-command"
+                  label={t('systemManager.tmux.newSessionCommand')}
+                  value={command}
+                  onChange={handleCommandChange}
+                  placeholder={t('systemManager.tmux.newSessionCommandPlaceholder')}
+                  defaultHeight={150}
+                  maxHeight={260}
+                  persistHeight={false}
+                />
                 <p className="text-[11px] text-muted-foreground">
-                  {t('systemManager.tmux.selectedSnippet', { label: selectedSnippet.label })}
+                  {t('systemManager.tmux.newSessionCommandHint')}
                 </p>
-              )}
-            </TabsContent>
-          </Tabs>
+              </TabsContent>
+
+              <TabsContent value="snippet" className="mt-3 space-y-3 focus-visible:outline-none">
+                <SnippetCommandPicker
+                  snippets={snippets}
+                  selectedId={selectedSnippetId}
+                  onSelect={handleSnippetSelect}
+                  showTitle={false}
+                  className="h-[240px] min-h-[240px]"
+                />
+                {selectedSnippet && (
+                  <p className="text-[11px] text-muted-foreground">
+                    {t('systemManager.tmux.selectedSnippet', { label: selectedSnippet.label })}
+                  </p>
+                )}
+              </TabsContent>
+            </Tabs>
+          )}
 
           {displayError && (
             <p className="text-xs text-destructive">{displayError}</p>

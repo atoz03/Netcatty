@@ -139,6 +139,7 @@ export type TerminalLayerStableSnapshot = {
   onReorderWorkspaceSessions: TerminalLayerProps['onReorderWorkspaceSessions'];
   onReorderTabs: TerminalLayerProps['onReorderTabs'];
   onCopySession: TerminalLayerProps['onCopySession'];
+  onOpenManagedTerminal: TerminalLayerProps['onOpenManagedTerminal'];
   onCopySessionToNewWindow: TerminalLayerProps['onCopySessionToNewWindow'];
   onRequestAddToWorkspace: TerminalLayerProps['onRequestAddToWorkspace'];
   onSetWorkspaceFocusedSession: TerminalLayerProps['onSetWorkspaceFocusedSession'];

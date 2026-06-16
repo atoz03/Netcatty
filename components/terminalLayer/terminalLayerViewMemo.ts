@@ -287,6 +287,7 @@ const WORKSPACE_CTX_KEYS = [
   'onStartSessionRename',
   'onRemoveSessionFromWorkspace',
   'onReorderTabs',
+  'onOpenManagedTerminal',
   'onStartSessionDrag',
   'onEndSessionDrag',
 ] as const;
@@ -344,6 +345,7 @@ export function terminalLayerFocusSidebarPropsEqual(prev: Ctx, next: Ctx): boole
     && eq(prev, next, 'onRequestAddToWorkspace')
     && eq(prev, next, 'handleCloseSession')
     && eq(prev, next, 'onCopySession')
+    && eq(prev, next, 'onOpenManagedTerminal')
     && eq(prev, next, 'onCopySessionToNewWindow')
     && eq(prev, next, 'onRemoveSessionFromWorkspace')
     && eq(prev, next, 'onSetWorkspaceFocusedSession')

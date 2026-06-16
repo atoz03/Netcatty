@@ -11,7 +11,7 @@ import {
   isNetcattyManagedStartupHistoryCommand,
 } from './remoteHistory.ts';
 import { buildDockerExecShellCommand, buildDockerLogsCommand } from './systemManager/dockerShell.ts';
-import { buildTmuxAttachCommand } from './systemManager/tmuxShell.ts';
+import { buildTmuxAttachCommand, buildZellijAttachCommand } from './systemManager/tmuxShell.ts';
 
 test('parseBashHistory: plain lines', () => {
   const out = parseBashHistory(['ls -la', 'cd /tmp', 'echo hi'].join('\n'));
@@ -201,10 +201,12 @@ test('isNetcattyManagedStartupHistoryCommand: detects Docker and tmux terminal l
   assert.equal(isNetcattyManagedStartupHistoryCommand(buildDockerLogsCommand('587abcdef123')), true);
   assert.equal(isNetcattyManagedStartupHistoryCommand(buildTmuxAttachCommand('my-session')), true);
   assert.equal(isNetcattyManagedStartupHistoryCommand(buildTmuxAttachCommand('my-session', 2)), true);
+  assert.equal(isNetcattyManagedStartupHistoryCommand(buildZellijAttachCommand('my-session')), true);
   assert.equal(isNetcattyManagedStartupHistoryCommand('docker ps -a'), false);
   assert.equal(isNetcattyManagedStartupHistoryCommand('docker logs -f 587abcdef123'), false);
   assert.equal(isNetcattyManagedStartupHistoryCommand('docker exec -it 587abcdef123 bash'), false);
   assert.equal(isNetcattyManagedStartupHistoryCommand('tmux attach -t my-session'), false);
+  assert.equal(isNetcattyManagedStartupHistoryCommand('zellij attach my-session'), false);
 });
 
 test('mergeRemoteHistory: drops Netcatty AI PTY history lines', () => {
@@ -227,6 +229,7 @@ test('mergeRemoteHistory: drops Netcatty managed Docker and tmux startup lines',
         'docker ps -a',
         buildDockerLogsCommand('587abcdef123'),
         buildTmuxAttachCommand('my-session'),
+        buildZellijAttachCommand('my-session'),
         'history',
       ].join('\n'),
     ),
@@ -251,6 +254,8 @@ test('mergeRemoteHistory: drops Netcatty managed startup lines from zsh and fish
       '  when: 1700000200',
       `- cmd: ${buildTmuxAttachCommand('my-session')}`,
       '  when: 1700000300',
+      `- cmd: ${buildZellijAttachCommand('my-session')}`,
+      '  when: 1700000400',
     ].join('\n'),
   );
 

@@ -33,7 +33,7 @@ type AppViewContext = Record<string, any>;
 export function AppView({ ctx }: { ctx: AppViewContext }) {
   const {
     accentMode, addShellHistoryEntry, addSessionToWorkspace, addToWorkspaceDialog, appendHostToWorkspace, appendLocalTerminalToWorkspace,
-    clearAndRemoveSource, clearAndRemoveSources, clearUnsavedConnectionLogs, closeLogView, closeSession, closeTabsBatch, closeWorkspace, copySessionToNewWindowWithCurrentShell, copySessionWithCurrentShell,
+    clearAndRemoveSource, clearAndRemoveSources, clearUnsavedConnectionLogs, closeLogView, closeSession, closeTabsBatch, closeWorkspace, copySessionToNewWindowWithCurrentShell, copySessionWithCurrentShell, openManagedTerminalWithCurrentShell,
     connectionLogs, convertKnownHostToHost, createWorkspaceFromSessions, createWorkspaceFromTargets, createWorkspaceWithHosts, customAccent,
     customGroups, currentTerminalTheme, deleteConnectionLog, draggingSessionId, effectiveKnownHosts, editorTabs, editorWordWrap, emptyVaultConflict,
     followAppTerminalTheme, groupConfigs, handleAddKnownHost, handleConnectSerial, handleConnectToHost, handleCreateLocalTerminal, handleDeleteHost,
@@ -289,6 +289,7 @@ export function AppView({ ctx }: { ctx: AppViewContext }) {
           onReorderWorkspaceSessions={reorderWorkspaceSessions}
           onReorderTabs={reorderWorkTabs}
           onCopySession={copySessionWithCurrentShell}
+          onOpenManagedTerminal={openManagedTerminalWithCurrentShell}
           onCopySessionToNewWindow={copySessionToNewWindowWithCurrentShell}
           onSplitSession={splitSessionWithCurrentShell}
           onConnectToHost={handleConnectToHost}

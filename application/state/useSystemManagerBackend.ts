@@ -1,5 +1,10 @@
 import { useCallback, useMemo } from 'react';
-import type { DockerContainerAction, DockerImageManageAction, TmuxManageAction } from '../../domain/systemManager/types';
+import type {
+  DockerContainerAction,
+  DockerImageManageAction,
+  TmuxManageAction,
+  ZellijManageAction,
+} from '../../domain/systemManager/types';
 import { netcattyBridge } from '../../infrastructure/services/netcattyBridge';
 
 export function useSystemManagerBackend() {
@@ -88,6 +93,33 @@ export function useSystemManagerBackend() {
     return bridge.tmuxAction(options);
   }, []);
 
+  const listZellijSessions = useCallback(async (sessionId: string) => {
+    const bridge = netcattyBridge.get();
+    if (!bridge?.listZellijSessions) {
+      return { success: false as const, error: 'listZellijSessions unavailable' };
+    }
+    return bridge.listZellijSessions(sessionId);
+  }, []);
+
+  const createZellijSession = useCallback(async (options: {
+    sessionId: string;
+    name: string;
+  }) => {
+    const bridge = netcattyBridge.get();
+    if (!bridge?.createZellijSession) {
+      return { success: false as const, error: 'createZellijSession unavailable' };
+    }
+    return bridge.createZellijSession(options);
+  }, []);
+
+  const zellijAction = useCallback(async (options: { sessionId: string } & ZellijManageAction) => {
+    const bridge = netcattyBridge.get();
+    if (!bridge?.zellijAction) {
+      return { success: false as const, error: 'zellijAction unavailable' };
+    }
+    return bridge.zellijAction(options);
+  }, []);
+
   const listDockerContainers = useCallback(async (sessionId: string) => {
     const bridge = netcattyBridge.get();
     if (!bridge?.listDockerContainers) {
@@ -169,6 +201,9 @@ export function useSystemManagerBackend() {
     listTmuxPanes,
     listTmuxClients,
     tmuxAction,
+    listZellijSessions,
+    createZellijSession,
+    zellijAction,
     listDockerContainers,
     listDockerImages,
     getDockerStats,
@@ -187,6 +222,9 @@ export function useSystemManagerBackend() {
     listTmuxPanes,
     listTmuxClients,
     tmuxAction,
+    listZellijSessions,
+    createZellijSession,
+    zellijAction,
     listDockerContainers,
     listDockerImages,
     getDockerStats,

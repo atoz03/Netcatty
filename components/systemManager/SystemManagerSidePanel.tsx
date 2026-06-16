@@ -12,6 +12,7 @@ import { cn } from '../../lib/utils';
 import { DockerManagerTab } from './DockerManagerTab';
 import { ProcessManagerTab } from './ProcessManagerTab';
 import { TmuxManagerTab } from './TmuxManagerTab';
+import { ZellijManagerTab } from './ZellijManagerTab';
 import { WorkspaceSidebarHostHeader } from '../terminalLayer/WorkspaceSidebarHostHeader';
 import { SystemPanelEmpty, SystemPanelShell } from './SystemPanelUi';
 import { useSessionCapabilities } from './hooks/useSystemManager';
@@ -36,6 +37,12 @@ interface SystemManagerSidePanelProps {
   isVisible: boolean;
   terminalSettings: TerminalSettings;
   snippets: Snippet[];
+  onOpenManagedTerminal?: (
+    sessionId: string,
+    title: string,
+    startupCommand: string,
+    options?: { mode?: 'tab' | 'verticalSplit' },
+  ) => boolean | void;
 }
 
 export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
@@ -45,6 +52,7 @@ export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
   isVisible,
   terminalSettings,
   snippets,
+  onOpenManagedTerminal,
 }: SystemManagerSidePanelProps) {
   const { t } = useI18n();
   const backend = useSystemManagerBackend();
@@ -76,6 +84,8 @@ export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
         refreshCapabilities().finally(() => { probingRef.current = false; });
       }
     } else if (resolvedTab === 'tmux' && capabilities?.hasTmux !== true) {
+      void refreshCapabilities();
+    } else if (resolvedTab === 'zellij' && capabilities?.hasZellij !== true) {
       void refreshCapabilities();
     }
   }, [resolvedTab, capabilities, refreshCapabilities]);
@@ -154,14 +164,21 @@ export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
   const tabDefs: { id: SystemManagerSubTab; icon: typeof LayoutList; label: string }[] = [
     { id: 'processes', icon: LayoutList, label: t('systemManager.tabs.processes') },
     { id: 'tmux', icon: TerminalSquare, label: t('systemManager.tabs.tmux') },
+    { id: 'zellij', icon: TerminalSquare, label: t('systemManager.tabs.zellij') },
     { id: 'docker', icon: Box, label: t('systemManager.tabs.docker') },
   ];
 
   const tmuxReady = capabilities?.hasTmux === true;
+  const zellijReady = capabilities?.hasZellij === true;
   const dockerReady = capabilities?.hasDocker === true;
   const tmuxPanelState = resolveCapabilityPanelState({
     isActive: resolvedTab === 'tmux',
     ready: tmuxReady,
+    capabilitiesKnown: capabilities !== undefined,
+  });
+  const zellijPanelState = resolveCapabilityPanelState({
+    isActive: resolvedTab === 'zellij',
+    ready: zellijReady,
     capabilitiesKnown: capabilities !== undefined,
   });
   const dockerPanelState = resolveCapabilityPanelState({
@@ -216,6 +233,28 @@ export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
               parentSession={session}
               isVisible={isVisible && resolvedTab === 'tmux'}
               warmupEnabled={isVisible && resolvedTab !== 'tmux'}
+              backend={backend}
+              refreshIntervalSec={terminalSettings.systemManagerTmuxRefreshInterval}
+              snippets={snippets}
+              onOpenManagedTerminal={onOpenManagedTerminal}
+            />
+          </div>
+        ) : null}
+        {zellijPanelState === 'unavailable' ? (
+          <div className="flex-1 min-h-0">
+            <SystemPanelEmpty icon={TerminalSquare} message={t('systemManager.zellij.unavailable')} />
+          </div>
+        ) : zellijPanelState === 'checking' ? (
+          <div className="flex-1 min-h-0">
+            <SystemPanelChecking message={t('systemManager.common.checkingAvailability')} />
+          </div>
+        ) : zellijPanelState === 'ready' ? (
+          <div className={cn('flex-1 min-h-0 flex flex-col', resolvedTab !== 'zellij' && 'hidden')}>
+            <ZellijManagerTab
+              sessionId={sessionId}
+              parentSession={session}
+              isVisible={isVisible && resolvedTab === 'zellij'}
+              warmupEnabled={isVisible && resolvedTab !== 'zellij'}
               backend={backend}
               refreshIntervalSec={terminalSettings.systemManagerTmuxRefreshInterval}
               snippets={snippets}

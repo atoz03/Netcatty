@@ -786,6 +786,7 @@ test("each main window close saves its own state", async () => {
     unregisterMainWindow() {},
     registerAppContentWindow() {},
     unregisterAppContentWindow() {},
+    queryDirtyEditors: async () => false,
     applyWindowOpacityToWindow() {},
     closeSettingsWindow() {},
     hideSettingsWindow() {},
@@ -812,8 +813,11 @@ test("each main window close saves its own state", async () => {
   await api.createWindow(electronModule, options);
 
   assert.equal(closeHandlers.length, 2);
-  closeHandlers[0]({});
-  closeHandlers[1]({});
+  closeHandlers[0]({ preventDefault() {} });
+  closeHandlers[1]({ preventDefault() {} });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  closeHandlers[0]({ preventDefault() {} });
+  closeHandlers[1]({ preventDefault() {} });
 
   assert.deepEqual(savedStates, [{ windowId: 1 }, { windowId: 2 }]);
 });
@@ -1172,6 +1176,128 @@ test("peer session window close queries dirty editors before destroying the rend
 
   assert.equal(preventDefaultCount, 1);
   assert.equal(queriedWebContents.length, 1);
+});
+
+test("main window close queries dirty editors before destroying the renderer", async () => {
+  const closeHandlers = [];
+  const queriedWebContents = [];
+  let preventDefaultCount = 0;
+  let savedStateCount = 0;
+
+  class BrowserWindowStub {
+    constructor() {
+      this.closeCalls = 0;
+      this.webContents = {
+        id: 1,
+        on() {},
+        setWindowOpenHandler() {},
+        openDevTools() {},
+        send() {},
+        isDestroyed: () => false,
+        isCrashed: () => false,
+      };
+    }
+    on(channel, handler) {
+      if (channel === "close") closeHandlers.push(handler);
+    }
+    once() {}
+    close() {
+      this.closeCalls += 1;
+    }
+    isDestroyed() { return false; }
+    isMaximized() { return false; }
+    isFullScreen() { return false; }
+    getBounds() { return { width: 1000, height: 700 }; }
+    setBackgroundColor() {}
+    setOpacity() {}
+    loadURL() { return Promise.resolve(); }
+  }
+
+  const api = createMainWindowApi({
+    mainWindow: null,
+    electronApp: null,
+    currentTheme: "light",
+    isQuitting: false,
+    pendingWindowStateWrite: null,
+    queuedWindowState: null,
+    windowStateCloseRequested: false,
+    DEFAULT_WINDOW_WIDTH: 1400,
+    DEFAULT_WINDOW_HEIGHT: 900,
+    MIN_WINDOW_WIDTH: 1100,
+    MIN_WINDOW_HEIGHT: 640,
+    V8_CACHE_OPTIONS: "bypassHeatCheck",
+    THEME_COLORS: { light: { background: "#fff" } },
+    unhealthyWebContentsIds: new Set(),
+    rendererReadySeenByWebContentsId: new Set(),
+    __dirname,
+    URL,
+    require,
+    console,
+    setTimeout,
+    clearTimeout,
+    getGlobalShortcutBridge() {
+      return { handleWindowClose: () => false };
+    },
+    debugLog() {},
+    resolveFrontendBackgroundColor() { return null; },
+    loadWindowState() { return null; },
+    getDevRendererBaseUrl(url) { return url; },
+    getWindowBoundsState() {
+      return { width: 1000, height: 700 };
+    },
+    queueWindowStateSave() {},
+    saveWindowStateSync() {
+      savedStateCount += 1;
+    },
+    setupDeferredShow() {},
+    createExternalOnlyWindowOpenHandler() { return {}; },
+    createAppWindowOpenHandler() { return {}; },
+    attachOAuthLoadingOverlay() {},
+    registerWindowHandlers() {},
+    requestWindowCommandClose() {
+      return true;
+    },
+    shouldCloseWindowFromInput,
+    registerMainWindow() {},
+    unregisterMainWindow() {},
+    queryDirtyEditors: async (webContents) => {
+      queriedWebContents.push(webContents);
+      return true;
+    },
+    applyWindowOpacityToWindow() {},
+    closeSettingsWindow() {},
+    hideSettingsWindow() {},
+  });
+
+  await api.createWindow(
+    {
+      BrowserWindow: BrowserWindowStub,
+      nativeTheme: {},
+      app: {},
+      screen: {},
+      shell: {},
+      ipcMain: {},
+    },
+    {
+      preload: "/tmp/preload.cjs",
+      devServerUrl: "http://localhost:5173",
+      isDev: true,
+      appIcon: null,
+      isMac: true,
+      electronDir: __dirname,
+    },
+  );
+
+  closeHandlers[0]?.({
+    preventDefault() {
+      preventDefaultCount += 1;
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(preventDefaultCount, 1);
+  assert.equal(queriedWebContents.length, 1);
+  assert.equal(savedStateCount, 0);
 });
 
 test("window IPC handlers target the sender owner window", async () => {

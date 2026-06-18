@@ -201,6 +201,7 @@ function createMainWindowApi(ctx) {
       let lastNormalBounds = null;
       let saveStateTimer = null;
       let thisWindowCloseRequested = false;
+      let dirtyEditorCloseConfirmed = false;
     
       const updateNormalBounds = () => {
         if (!win.isDestroyed() && !win.isMaximized() && !win.isFullScreen()) {
@@ -234,33 +235,41 @@ function createMainWindowApi(ctx) {
         scheduleSaveState();
       });
     
+      const queryDirtyEditorsBeforeClose = (event, { markCloseRequested = false } = {}) => {
+        event.preventDefault();
+        if (markCloseRequested) {
+          thisWindowCloseRequested = true;
+        }
+        const dirtyEditorQuery = typeof queryDirtyEditors === "function"
+          ? queryDirtyEditors(win.webContents, 5000, { ipcMain: electronModule.ipcMain })
+          : false;
+        Promise.resolve(dirtyEditorQuery)
+          .then((hasDirty) => {
+            if (hasDirty) {
+              thisWindowCloseRequested = false;
+              return;
+            }
+            dirtyEditorCloseConfirmed = true;
+            try {
+              win.close();
+            } catch {
+              // ignore
+            }
+          })
+          .catch(() => {
+            dirtyEditorCloseConfirmed = true;
+            try {
+              win.close();
+            } catch {
+              // ignore
+            }
+          });
+      };
+
       // Save state when window is about to close
       win.on("close", (event) => {
-        if (!registerAsMainWindow && registerAsAppContentWindow && !isQuitting && !thisWindowCloseRequested) {
-          event.preventDefault();
-          thisWindowCloseRequested = true;
-          const dirtyEditorQuery = typeof queryDirtyEditors === "function"
-            ? queryDirtyEditors(win.webContents, 5000, { ipcMain: electronModule.ipcMain })
-            : false;
-          Promise.resolve(dirtyEditorQuery)
-            .then((hasDirty) => {
-              if (hasDirty) {
-                thisWindowCloseRequested = false;
-                return;
-              }
-              try {
-                win.close();
-              } catch {
-                // ignore
-              }
-            })
-            .catch(() => {
-              try {
-                win.close();
-              } catch {
-                // ignore
-              }
-            });
+        if (!registerAsMainWindow && registerAsAppContentWindow && !isQuitting && !dirtyEditorCloseConfirmed) {
+          queryDirtyEditorsBeforeClose(event, { markCloseRequested: true });
           return;
         }
 
@@ -272,6 +281,11 @@ function createMainWindowApi(ctx) {
           const state = persistWindowState ? getWindowBoundsState(win, lastNormalBounds) : null;
           if (state) saveWindowStateSync(state);
           hideSettingsWindow();
+          return;
+        }
+
+        if (registerAsMainWindow && registerAsAppContentWindow && !isQuitting && !dirtyEditorCloseConfirmed) {
+          queryDirtyEditorsBeforeClose(event);
           return;
         }
     

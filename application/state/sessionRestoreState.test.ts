@@ -6,7 +6,6 @@ import {
   createInitialRestoredSessionState,
   mergeSessionRestoreCwd,
   updateRestoredSessionStatusState,
-  updateSessionRestoreCwdState,
   shouldPersistSessionRestoreState,
 } from "./sessionRestoreState.ts";
 import type { SessionRestorePayload } from "../../domain/sessionRestore.ts";
@@ -66,24 +65,6 @@ test("mergeSessionRestoreCwd removes cwd when terminal reports null", () => {
     sessions: [{ ...payload.sessions[0], lastCwd: "/tmp" }],
   }, "s1", null);
   assert.equal(next.sessions[0].lastCwd, undefined);
-});
-
-test("updateSessionRestoreCwdState records cwd in live session state", () => {
-  const next = updateSessionRestoreCwdState(payload.sessions, "s1", "/opt/project");
-  assert.equal(next[0].lastCwd, "/opt/project");
-  assert.notEqual(next, payload.sessions);
-});
-
-test("updateSessionRestoreCwdState removes cwd from live session state", () => {
-  const next = updateSessionRestoreCwdState([
-    { ...payload.sessions[0], lastCwd: "/tmp" },
-  ], "s1", null);
-  assert.equal(next[0].lastCwd, undefined);
-});
-
-test("updateSessionRestoreCwdState preserves reference when session is missing", () => {
-  const next = updateSessionRestoreCwdState(payload.sessions, "missing", "/opt/project");
-  assert.equal(next, payload.sessions);
 });
 
 test("updateRestoredSessionStatusState clears restore marker after reconnect starts", () => {

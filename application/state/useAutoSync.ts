@@ -23,6 +23,7 @@ import {
   collectCloudSyncableSettings,
   getEffectivePortForwardingRulesForSync,
   hasMeaningfulCloudSyncData,
+  sanitizePortForwardingRulesForSync,
   shouldPromptCloudVaultRecovery,
 } from '../syncPayload';
 import { readInterruptedVaultApply } from '../localVaultBackups';
@@ -38,6 +39,7 @@ import {
   getRuntimeRemoteCheckIntervalMs,
   shouldRunRuntimeRemoteCheck,
 } from './autoSyncRemoteSchedule';
+import { resolveAutoSyncHashDecision } from './autoSyncHashDecision';
 
 interface AutoSyncConfig {
   enabled?: boolean;
@@ -99,6 +101,23 @@ const isRestoreInProgress = (): boolean => {
   return true;
 };
 
+const getSyncPayloadDataHash = (payload: SyncPayload): string => {
+  return JSON.stringify({
+    hosts: payload.hosts,
+    keys: payload.keys,
+    identities: payload.identities,
+    proxyProfiles: payload.proxyProfiles,
+    snippets: payload.snippets,
+    customGroups: payload.customGroups,
+    snippetPackages: payload.snippetPackages,
+    notes: payload.notes,
+    noteGroups: payload.noteGroups,
+    portForwardingRules: sanitizePortForwardingRulesForSync(payload.portForwardingRules),
+    groupConfigs: payload.groupConfigs,
+    settings: payload.settings,
+  });
+};
+
 type SyncTrigger = 'auto' | 'manual';
 
 interface SyncNowOptions {
@@ -130,7 +149,7 @@ export const useAutoSync = (config: AutoSyncConfig) => {
   const remoteCheckDoneRef = useRef(false);
   const isInitializedRef = useRef(false);
   const isSyncRunningRef = useRef(false);
-  const skipNextSyncRef = useRef(false);
+  const skipNextSyncHashRef = useRef<string | null>(null);
 
   // State for the empty-vault-vs-cloud confirmation dialog (Fix D).
   // When checkRemoteVersion detects that the local vault is empty but
@@ -220,8 +239,8 @@ export const useAutoSync = (config: AutoSyncConfig) => {
   }, [getSyncSnapshot]);
   
   // Sync now handler - get fresh state directly from manager
-  const syncNow = useCallback(async (options?: SyncNowOptions) => {
-    if (!enabled) return;
+  const syncNow = useCallback(async (options?: SyncNowOptions): Promise<boolean> => {
+    if (!enabled) return false;
     const trigger: SyncTrigger = options?.trigger ?? 'auto';
 
     isSyncRunningRef.current = true;
@@ -238,7 +257,7 @@ export const useAutoSync = (config: AutoSyncConfig) => {
       if (syncing) {
         if (trigger === 'auto') {
           console.info('[AutoSync] Skipping overlapping auto-sync because another sync is already running.');
-          return;
+          return false;
         }
         throw new Error(t('sync.autoSync.alreadySyncing'));
       }
@@ -258,7 +277,7 @@ export const useAutoSync = (config: AutoSyncConfig) => {
       if (isRestoreInProgress()) {
         if (trigger === 'auto') {
           console.info('[AutoSync] Skipping: a vault restore is in progress in another window.');
-          return;
+          return false;
         }
         throw new Error(t('sync.autoSync.restoreInProgress'));
       }
@@ -282,7 +301,7 @@ export const useAutoSync = (config: AutoSyncConfig) => {
             '[AutoSync] Skipping: previous apply was interrupted — refusing to push partial state.',
             interruptedApply,
           );
-          return;
+          return false;
         }
         throw new Error(t('sync.autoSync.interruptedApplyMessage'));
       }
@@ -327,7 +346,7 @@ export const useAutoSync = (config: AutoSyncConfig) => {
       if (!hasMeaningfulCloudSyncData(payload)) {
         if (trigger === 'auto') {
           console.warn('[AutoSync] Blocked: refusing to auto-sync an empty vault to cloud');
-          return;
+          return false;
         }
         throw new Error(t('sync.autoSync.emptyVaultManual'));
       }
@@ -348,7 +367,7 @@ export const useAutoSync = (config: AutoSyncConfig) => {
               recordDownload: true,
             });
           }
-          skipNextSyncRef.current = allProvidersSynced;
+          skipNextSyncHashRef.current = allProvidersSynced ? getSyncPayloadDataHash(result.mergedPayload) : null;
           if (!allProvidersSynced) {
             console.warn('[AutoSync] Remote payload applied locally, but not every provider synced; leaving next auto-sync enabled for retry.');
           }
@@ -378,6 +397,7 @@ export const useAutoSync = (config: AutoSyncConfig) => {
       // would require the user to manually sync after every edit.
       hasCheckedRemoteRef.current = true;
       remoteCheckDoneRef.current = true;
+      return true;
     } catch (error) {
       if (trigger === 'manual') {
         throw error;
@@ -387,6 +407,7 @@ export const useAutoSync = (config: AutoSyncConfig) => {
         error instanceof Error ? error.message : t('common.unknownError'),
         t('sync.autoSync.failedTitle'),
       );
+      return false;
     } finally {
       isSyncRunningRef.current = false;
     }
@@ -531,7 +552,7 @@ export const useAutoSync = (config: AutoSyncConfig) => {
           await manager.commitRemoteInspection(connectedProvider, remoteFile, remotePayload, {
             recordDownload: true,
           });
-          skipNextSyncRef.current = true;
+          skipNextSyncHashRef.current = getSyncPayloadDataHash(remotePayload);
           startupConsistent = true;
           notify.success(tRef.current('sync.autoSync.restoredMessage'), tRef.current('sync.autoSync.restoredTitle'));
         } else {
@@ -568,7 +589,9 @@ export const useAutoSync = (config: AutoSyncConfig) => {
         const wasShrinkBlocked = roundTripResultList.some((result) => result.shrinkBlocked === true);
         const roundTripFullySynced = roundTripResultList.length > 0
           && roundTripResultList.every((result) => result.success);
-        skipNextSyncRef.current = roundTripFullySynced || wasShrinkBlocked;
+        skipNextSyncHashRef.current = (roundTripFullySynced || wasShrinkBlocked)
+          ? getSyncPayloadDataHash(remotePayload)
+          : null;
         markCurrentDataSynced = roundTripFullySynced || wasShrinkBlocked;
         if (wasShrinkBlocked) {
           console.warn('[AutoSync] Cloud-wins round-trip was shrink-blocked; cloud data applied locally, leaving sync blocked for user review.');
@@ -648,7 +671,9 @@ export const useAutoSync = (config: AutoSyncConfig) => {
           // once React commits the applied state, since we've just
           // already pushed that exact payload upstream. If some provider
           // failed, allow the follow-up tick to retry the applied payload.
-          skipNextSyncRef.current = roundTripFullySynced || wasShrinkBlocked;
+          skipNextSyncHashRef.current = (roundTripFullySynced || wasShrinkBlocked)
+            ? getSyncPayloadDataHash(mergeResult.payload)
+            : null;
           markCurrentDataSynced = roundTripFullySynced || wasShrinkBlocked;
         } catch (error) {
           // Non-fatal: the next user edit will drive another sync cycle.
@@ -726,6 +751,21 @@ export const useAutoSync = (config: AutoSyncConfig) => {
       clearTimeout(syncTimeoutRef.current);
     }
 
+    // Establish the initial baseline immediately. If this were delayed by
+    // the debounce below, an edit made right after startup could become the
+    // baseline and never be pushed.
+    if (!isInitializedRef.current) {
+      isInitializedRef.current = true;
+      void (async () => {
+        const currentHash = await getDataHash();
+        if (cancelled) return;
+        lastSyncedDataRef.current = currentHash;
+      })();
+      return () => {
+        cancelled = true;
+      };
+    }
+
     // Debounce first, then build the expensive full-data hash. This keeps
     // rapid edit bursts from serializing the whole vault on every keystroke.
     syncTimeoutRef.current = setTimeout(() => {
@@ -734,23 +774,24 @@ export const useAutoSync = (config: AutoSyncConfig) => {
         const currentHash = await getDataHash();
         if (cancelled) return;
 
-        // Skip initial render
-        if (!isInitializedRef.current) {
-          isInitializedRef.current = true;
+        // After a remote apply or merge, skip only that exact applied data.
+        // If the user edits before this timer fires, the hash differs and the
+        // edit still syncs normally.
+        const skipHash = skipNextSyncHashRef.current;
+
+        const hashDecision = resolveAutoSyncHashDecision({
+          currentHash,
+          lastSyncedHash: lastSyncedDataRef.current,
+          appliedSkipHash: skipHash,
+        });
+        if (hashDecision === 'skip-applied') {
+          if (skipNextSyncHashRef.current === skipHash) {
+            skipNextSyncHashRef.current = null;
+          }
           lastSyncedDataRef.current = currentHash;
           return;
         }
-
-        // After a merge, onApplyPayload changes local state which triggers
-        // this effect. Skip that cycle and just update the hash baseline.
-        if (skipNextSyncRef.current) {
-          skipNextSyncRef.current = false;
-          lastSyncedDataRef.current = currentHash;
-          return;
-        }
-
-        // Skip if data hasn't changed
-        if (currentHash === lastSyncedDataRef.current) {
+        if (hashDecision === 'unchanged') {
           return;
         }
 
@@ -777,7 +818,10 @@ export const useAutoSync = (config: AutoSyncConfig) => {
           return;
         }
 
-        void syncNow();
+        const didSync = await syncNow();
+        if (didSync && skipHash !== null && skipNextSyncHashRef.current === skipHash) {
+          skipNextSyncHashRef.current = null;
+        }
       })();
     }, 3000);
     

@@ -125,27 +125,6 @@ export function mergeSessionRestoreCwd(
   });
 }
 
-export function updateSessionRestoreCwdState<T extends Pick<TerminalSession, "id" | "lastCwd">>(
-  sessions: readonly T[],
-  sessionId: string,
-  cwd: string | null,
-): T[] {
-  let changed = false;
-  const next = sessions.map((session) => {
-    if (session.id !== sessionId) return session;
-    if (cwd) {
-      if (session.lastCwd === cwd) return session;
-      changed = true;
-      return { ...session, lastCwd: cwd };
-    }
-    if (session.lastCwd === undefined) return session;
-    const { lastCwd: _lastCwd, ...rest } = session;
-    changed = true;
-    return rest as T;
-  });
-  return changed ? next : sessions as T[];
-}
-
 export function updateRestoredSessionStatusState<T extends Pick<TerminalSession, "id" | "status" | "restoreState">>(
   sessions: readonly T[],
   sessionId: string,

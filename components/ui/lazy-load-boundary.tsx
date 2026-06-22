@@ -30,6 +30,10 @@ export class LazyLoadBoundary extends Component<LazyLoadBoundaryProps, LazyLoadB
   }
 
   private retry = () => {
+    if (typeof window !== "undefined" && typeof window.location?.reload === "function") {
+      window.location.reload();
+      return;
+    }
     this.setState(({ retryKey }) => ({ error: null, retryKey: retryKey + 1 }));
   };
 
@@ -51,7 +55,7 @@ export class LazyLoadBoundary extends Component<LazyLoadBoundaryProps, LazyLoadB
             className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted"
             onClick={this.retry}
           >
-            Retry
+            Reload
           </button>
         </div>
       );

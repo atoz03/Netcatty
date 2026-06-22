@@ -69,8 +69,23 @@ const SettingsTabLoading = ({ value }: { value: string }) => (
     </SettingsTabContent>
 );
 
+const SettingsTabLoadError = ({ value }: { value: string }) => (
+    <SettingsTabContent value={value}>
+        <div className="flex min-h-[320px] flex-col items-start justify-center gap-3 text-sm text-muted-foreground">
+            <div className="font-medium text-foreground">This settings tab could not load.</div>
+            <button
+                type="button"
+                className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted"
+                onClick={() => window.location.reload()}
+            >
+                Reload
+            </button>
+        </div>
+    </SettingsTabContent>
+);
+
 const SettingsLazyTab = ({ children, value }: { children: React.ReactNode; value: string }) => (
-    <LazyLoadBoundary name="Settings tab" resetKey={value}>
+    <LazyLoadBoundary name="Settings tab" resetKey={value} fallback={<SettingsTabLoadError value={value} />}>
         <Suspense fallback={<SettingsTabLoading value={value} />}>
             {children}
         </Suspense>

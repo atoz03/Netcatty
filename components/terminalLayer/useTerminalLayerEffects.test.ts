@@ -16,3 +16,17 @@ test("follow-app mode changes clear previews in either direction", () => {
   assert.match(source, /const didChangeFollowTheme = followAppTerminalTheme !== previousFollowAppTerminalThemeRef\.current/);
   assert.match(source, /if \(!didChangeFollowTheme\) return/);
 });
+
+test("terminal activity filter consumes chunks before activity guards", () => {
+  const subscriptionIndex = source.indexOf("return onSessionData(session.id, (chunk) => {");
+  const filterIndex = source.indexOf("const hasNotifiableOutput = hasNotifiableTerminalOutput(filter, chunk);", subscriptionIndex);
+  const visibleGuardIndex = source.indexOf("if (!shouldMarkSessionActivity(activeTabIdRef.current, session))", subscriptionIndex);
+  const alreadyActiveGuardIndex = source.indexOf("if (sessionActivityStore.getSnapshot()[session.id])", subscriptionIndex);
+
+  assert.notEqual(subscriptionIndex, -1);
+  assert.notEqual(filterIndex, -1);
+  assert.notEqual(visibleGuardIndex, -1);
+  assert.notEqual(alreadyActiveGuardIndex, -1);
+  assert.ok(filterIndex < visibleGuardIndex);
+  assert.ok(filterIndex < alreadyActiveGuardIndex);
+});

@@ -731,6 +731,58 @@ test("local session runs startup command after attaching", async () => {
   }]);
 });
 
+test("ssh snippet startup command restores terminal mode after attaching", async () => {
+  const sessionWrites: Array<{ id: string; data: string; automated?: boolean }> = [];
+
+  const terminalBackend = {
+    backendAvailable: () => true,
+    telnetAvailable: () => true,
+    moshAvailable: () => true,
+    localAvailable: () => true,
+    serialAvailable: () => true,
+    execAvailable: () => true,
+    startSSHSession: async () => "ssh-session",
+    startTelnetSession: async () => "telnet-session",
+    startMoshSession: async () => "mosh-session",
+    startLocalSession: async () => "local-session",
+    startSerialSession: async () => "serial-session",
+    execCommand: async () => ({}),
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: (id: string, data: string, options?: { automated?: boolean }) => {
+      sessionWrites.push({ id, data, automated: options?.automated });
+    },
+    resizeSession: noop,
+  };
+
+  const ctx = createStarterContext({
+    host: {
+      id: "host-1",
+      label: "CentOS",
+      hostname: "centos.example.test",
+      username: "alice",
+      protocol: "ssh",
+      os: "linux",
+      distro: "centos",
+    },
+    terminalSettings: { startupCommandDelayMs: 0 },
+    terminalBackend,
+    startupCommand: "bash <(curl -sSL https://linuxmirrors.cn/docker.sh)",
+    protectStartupCommandTerminalMode: true,
+    promptLineBreakStateRef: undefined,
+  });
+
+  await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(sessionWrites.length, 1);
+  assert.equal(sessionWrites[0].id, "ssh-session");
+  assert.equal(sessionWrites[0].automated, true);
+  assert.match(sessionWrites[0].data, /netcatty-stty/);
+  assert.equal(sessionWrites[0].data.endsWith("\r"), true);
+});
+
 test("startup command suppression is consumed only when scheduling", () => {
   const suppressHostStartupCommandRef = { current: true };
   const ctx = createStarterContext({

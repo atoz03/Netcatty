@@ -892,6 +892,7 @@ export const useSessionState = ({
       // Store the command to run after connection
       startupCommand: resolvedCommand,
       noAutoRun: snippet.noAutoRun,
+      protectStartupCommandTerminalMode: true,
     }));
 
 	    setSessions(prev => [...prev, ...sessionsWithWorkspace]);

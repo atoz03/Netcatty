@@ -1,8 +1,10 @@
 import type { DragEvent, PointerEvent } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 
+import { classifyDistroId } from "../../domain/host";
 import { logger } from "../../lib/logger";
 import { getPathForFile, type DropEntry } from "../../lib/sftpFileUtils";
+import { normalizeLineEndings } from "../../lib/utils";
 import type {
   Host,
   Identity,
@@ -17,6 +19,13 @@ import type {
 } from "../../types";
 
 export const MAX_CONNECTION_LOG_DATA_CHARS = 1_000_000;
+
+export interface TerminalBroadcastInputOptions {
+  protectTerminalMode?: boolean;
+  rawCommand?: string;
+  fallbackData?: string;
+  noAutoRun?: boolean;
+}
 
 /**
  * Get the display name for a terminal session.
@@ -126,6 +135,7 @@ export interface TerminalProps {
   restoreTerminalCwd?: boolean;
   startupCommand?: string;
   noAutoRun?: boolean;
+  protectStartupCommandTerminalMode?: boolean;
   // When this tab was created from a connected SSH session, the id of the
   // source session whose authenticated connection should be reused for a new
   // shell channel — skipping a second MFA prompt (issue #1204).
@@ -173,10 +183,18 @@ export interface TerminalProps {
   onToggleBroadcast?: () => void;
   onToggleComposeBar?: () => void;
   isWorkspaceComposeBarOpen?: boolean;
-  onBroadcastInput?: (data: string, sourceSessionId: string) => void;
+  onBroadcastInput?: (
+    data: string,
+    sourceSessionId: string,
+    options?: TerminalBroadcastInputOptions,
+  ) => void;
   onSnippetExecutorChange?: (
     sessionId: string,
-    executor: ((command: string, noAutoRun?: boolean) => void) | null,
+    executor: ((
+      command: string,
+      noAutoRun?: boolean,
+      options?: { broadcast?: boolean; protectTerminalMode?: boolean },
+    ) => void) | null,
   ) => void;
   sessionLog?: { enabled: boolean; directory: string; format: string; timestampsEnabled?: boolean };
   sshDebugLogEnabled?: boolean;
@@ -225,6 +243,158 @@ export function shouldShowTerminalConnectionDialog({
     && !(!!hideConnectingDialogForConnectionReuse && status === "connecting")
     && !((isLocalConnection || isSerialConnection) && status === "connecting")
     && !(status === "disconnected" && isDisconnectedDialogDismissed);
+}
+
+type SnippetRestoreHost = Pick<Host, "protocol" | "deviceType" | "distro" | "os">;
+
+function shouldUseSnippetRestoreShell(shellType?: TerminalSession["shellType"]): boolean {
+  return shellType === undefined || shellType === "posix";
+}
+
+function shouldRestoreTerminalModeAfterSnippet({
+  host,
+  noAutoRun,
+  shellType,
+}: {
+  host: SnippetRestoreHost;
+  noAutoRun?: boolean;
+  shellType?: TerminalSession["shellType"];
+}): boolean {
+  if (noAutoRun) return false;
+  if (!shouldUseSnippetRestoreShell(shellType)) return false;
+  const protocol = host.protocol ?? "ssh";
+  if (protocol !== "ssh") return false;
+
+  const detectedDeviceClass = classifyDistroId(host.distro);
+  if (host.deviceType === "network" || detectedDeviceClass === "network-device") return false;
+
+  return host.os === "macos" || detectedDeviceClass === "linux-like";
+}
+
+function encodeUtf8Base64(text: string): string {
+  const bytes = new TextEncoder().encode(text);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const chunk = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return btoa(binary);
+}
+
+function hasMultipleCommandLines(command: string): boolean {
+  return command.includes("\n") || command.includes("\r");
+}
+
+function doubleQuoteFishAndPosix(value: string): string {
+  return `"${value
+    .replaceAll("\\", "\\\\")
+    .replaceAll("\"", "\\\"")
+    .replaceAll("$", "\\$")
+    .replaceAll("`", "\\`")}"`;
+}
+
+function buildPosixSnippetRestoreCommand(encodedCommand: string): string {
+  return [
+    "__netcatty_stty_state=\"$(stty -g 2>/dev/null || true)\"",
+    "__netcatty_restore(){ if [ -n \"$__netcatty_stty_state\" ]; then stty \"$__netcatty_stty_state\" 2>/dev/null || stty sane 2>/dev/null || true; else stty sane 2>/dev/null || true; fi; }",
+    "trap __netcatty_restore INT TERM EXIT",
+    `__netcatty_cmd_b64='${encodedCommand}'`,
+    "__netcatty_cmd=\"$(printf %s \"$__netcatty_cmd_b64\" | base64 -d 2>/dev/null || printf %s \"$__netcatty_cmd_b64\" | base64 -D 2>/dev/null)\"",
+    "__netcatty_decode_status=$?",
+    "if [ \"$__netcatty_decode_status\" -eq 0 ]; then eval \"$__netcatty_cmd\"; __netcatty_status=$?; else printf '%s\\n' 'Netcatty: failed to decode protected snippet command' >&2; __netcatty_status=127; fi",
+    "__netcatty_restore",
+    "trap - INT TERM EXIT",
+    "unset __netcatty_stty_state __netcatty_cmd_b64 __netcatty_cmd __netcatty_decode_status",
+    "unset -f __netcatty_restore 2>/dev/null || true",
+    "( exit $__netcatty_status )",
+  ].join("; ");
+}
+
+function buildPortableCurrentShellSnippetRestoreCommand(command: string): string | null {
+  const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  const stateFile = `/tmp/.netcatty-stty-${suffix}`;
+  const statusFile = `/tmp/.netcatty-status-${suffix}`;
+  const commandFile = `/tmp/.netcatty-cmd-${suffix}`;
+  const encodedCommand = encodeUtf8Base64(command);
+  const writeCommand = `sh -c 'printf %s "$1" | base64 -d > ${commandFile} 2>/dev/null || printf %s "$1" | base64 -D > ${commandFile} 2>/dev/null' sh '${encodedCommand}'`;
+  const saveState = `sh -c 'stty -g > ${stateFile} 2>/dev/null || true'`;
+  const restoreState = `sh -c 'xargs stty < ${stateFile} 2>/dev/null || stty sane 2>/dev/null || true'; rm -f ${stateFile}`;
+  const trapCleanup = `${restoreState}; rm -f ${statusFile} ${commandFile}`;
+  const exitWithStatus = `sh -c 'code=$(cat ${statusFile} 2>/dev/null || printf 1); rm -f ${statusFile}; exit "$code"'`;
+  const fishRunner = [
+    `source ${commandFile}`,
+    "set __netcatty_status $status",
+    `sh -c 'printf %s "$1" > ${statusFile}' sh "$__netcatty_status"`,
+    "set -e __netcatty_status",
+    "true",
+  ].join("; ");
+  const posixRunner = [
+    `. ${commandFile}`,
+    "__netcatty_status=$?",
+    `sh -c 'printf %s "$1" > ${statusFile}' sh "$__netcatty_status"`,
+    "unset __netcatty_status",
+    "true",
+  ].join("; ");
+  const runInCurrentShell = [
+    `sh -c 'test -n "$1"' sh "$FISH_VERSION" && eval ${doubleQuoteFishAndPosix(fishRunner)}`,
+    `eval ${doubleQuoteFishAndPosix(posixRunner)}`,
+  ].join(" || ");
+
+  return [
+    writeCommand,
+    saveState,
+    `trap ${doubleQuoteFishAndPosix(trapCleanup)} INT TERM EXIT`,
+    runInCurrentShell,
+    restoreState,
+    "trap - INT TERM EXIT",
+    `rm -f ${commandFile}`,
+    exitWithStatus,
+  ].join("; ");
+}
+
+export function prepareAutoRunSnippetCommand(
+  command: string,
+  opts: {
+    host: SnippetRestoreHost;
+    noAutoRun?: boolean;
+    shellType?: TerminalSession["shellType"];
+  },
+): string {
+  const rawCommand = String(command ?? "");
+  if (!shouldRestoreTerminalModeAfterSnippet(opts)) {
+    return rawCommand;
+  }
+  if (hasMultipleCommandLines(rawCommand)) {
+    return rawCommand;
+  }
+
+  const encodedCommand = encodeUtf8Base64(rawCommand);
+  return opts.shellType === undefined
+    ? (buildPortableCurrentShellSnippetRestoreCommand(rawCommand) ?? rawCommand)
+    : buildPosixSnippetRestoreCommand(encodedCommand);
+}
+
+export function prepareProtectedBroadcastSnippetData({
+  rawCommand,
+  fallbackData,
+  host,
+  noAutoRun,
+  shellType,
+}: {
+  rawCommand: string;
+  fallbackData: string;
+  host: SnippetRestoreHost;
+  noAutoRun?: boolean;
+  shellType?: TerminalSession["shellType"];
+}): string {
+  const prepared = prepareAutoRunSnippetCommand(rawCommand, { host, noAutoRun, shellType });
+  if (prepared === String(rawCommand ?? "")) {
+    return fallbackData;
+  }
+  let data = normalizeLineEndings(prepared);
+  if (!noAutoRun) data = `${data}\r`;
+  return data;
 }
 
 export function shouldHideConnectingDialogForConnectionReuse({

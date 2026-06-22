@@ -103,6 +103,8 @@ export type TerminalSessionStartersContext = {
   reuseConnectionFromSessionId?: string;
   startupCommand?: string;
   noAutoRun?: boolean;
+  protectStartupCommandTerminalMode?: boolean;
+  shellType?: TerminalSession["shellType"];
   suppressHostStartupCommandRef?: RefObject<boolean>;
   terminalSettings?: TerminalSettings;
   terminalSettingsRef?: RefObject<TerminalSettings | undefined>;

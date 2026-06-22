@@ -87,6 +87,7 @@ import {
 import {
   forceSyncRenderAfterResize,
   MAX_CONNECTION_LOG_DATA_CHARS,
+  prepareAutoRunSnippetCommand,
   shouldHideConnectingDialogForConnectionReuse,
   shouldShowTerminalConnectionDialog,
   type TerminalProps,
@@ -124,6 +125,7 @@ const TerminalComponent: React.FC<TerminalProps> = ({
   restoreTerminalCwd = false,
   startupCommand,
   noAutoRun,
+  protectStartupCommandTerminalMode,
   reuseConnectionFromSessionId,
   serialConfig,
   hotkeyScheme = "disabled",
@@ -697,6 +699,8 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     reuseConnectionFromSessionId,
     startupCommand,
     noAutoRun,
+    protectStartupCommandTerminalMode,
+    shellType,
     suppressHostStartupCommandRef,
     terminalSettings,
     terminalSettingsRef,
@@ -875,13 +879,23 @@ const TerminalComponent: React.FC<TerminalProps> = ({
   const executeSnippetCommand = useCallback((
     command: string,
     noAutoRun?: boolean,
-    options?: { broadcast?: boolean },
+    options?: { broadcast?: boolean; protectTerminalMode?: boolean },
   ) => {
     const term = termRef.current;
     const id = sessionRef.current;
     if (!term || !id) return;
 
-    let data = normalizeLineEndings(command);
+    let fallbackBroadcastData = normalizeLineEndings(command);
+    const fallbackBroadcastIsMultiLine = fallbackBroadcastData.includes('\n');
+    if (fallbackBroadcastIsMultiLine && term.modes.bracketedPasteMode && !disableBracketedPasteRef.current) {
+      fallbackBroadcastData = wrapBracketedPaste(fallbackBroadcastData);
+    }
+    if (!noAutoRun) fallbackBroadcastData = `${fallbackBroadcastData}\r`;
+
+    const commandToSend = options?.protectTerminalMode
+      ? prepareAutoRunSnippetCommand(command, { host, noAutoRun, shellType })
+      : command;
+    let data = normalizeLineEndings(commandToSend);
     const isMultiLine = data.includes('\n');
     // Wrap in bracketed paste BEFORE appending \r so the Enter is sent
     // outside the paste markers — otherwise shells treat it as pasted text
@@ -899,19 +913,26 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     // broadcast mode would clear peer input (the clear keystrokes already go
     // through the broadcast-aware path) but never send the command.
     if (options?.broadcast !== false && isBroadcastEnabledRef.current && onBroadcastInputRef.current) {
-      onBroadcastInputRef.current(data, sessionId);
+      onBroadcastInputRef.current(data, sessionId, options?.protectTerminalMode
+        ? {
+            protectTerminalMode: true,
+            rawCommand: command,
+            fallbackData: fallbackBroadcastData,
+            noAutoRun,
+          }
+        : undefined);
     }
 
     data = prepareProgrammaticSudoInput(data);
     terminalBackend.writeToSession(id, data);
     scrollToBottomAfterProgrammaticInput(data);
     term.focus();
-  }, [prepareProgrammaticSudoInput, scrollToBottomAfterProgrammaticInput, terminalBackend, sessionId]);
+  }, [host, prepareProgrammaticSudoInput, scrollToBottomAfterProgrammaticInput, shellType, terminalBackend, sessionId]);
 
   const executeSnippet = useCallback(async (snippet: Snippet) => {
     const command = await resolveSnippetCommand(snippet);
     if (command === null) return;
-    executeSnippetCommand(command, snippet.noAutoRun);
+    executeSnippetCommand(command, snippet.noAutoRun, { protectTerminalMode: true });
   }, [executeSnippetCommand]);
 
   const onSnippetShortkeyRef = useRef(executeSnippet);

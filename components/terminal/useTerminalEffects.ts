@@ -280,7 +280,7 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
           onCwdChange: (cwd: string) => {
             terminalCwdTracker.setRendererCwd(cwd);
             knownCwdRef.current = cwd;
-            onTerminalCwdChange?.(sessionId, cwd);
+            onTerminalCwdChange?.(sessionId, cwd, { source: 'osc7' });
           },
           onTitleChange: (title: string | null) => {
             onTerminalTitleChange?.(sessionId, title);

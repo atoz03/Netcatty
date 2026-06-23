@@ -79,7 +79,7 @@ __netcatty_osc7_url_path() {
 mkdir -p "$(dirname "$config")"
 touch "$config"
 if grep -F "$marker" "$config" >/dev/null 2>&1; then
-  printf "Netcatty OSC 7 cwd tracking is already configured in %s\n" "$config"
+  :
 else
   case "$shell_name" in
     bash)
@@ -141,12 +141,10 @@ end
 NETCATTY_OSC7_FISH
       ;;
   esac
-  printf "Netcatty OSC 7 cwd tracking configured in %s\n" "$config"
 fi
 
 host=$(hostname 2>/dev/null || printf localhost)
-printf '\033]7;file://%s%s\a' "$host" "$(__netcatty_osc7_url_path "$PWD")"
-printf "\nRestart this shell, or open a new one, to keep tracking future directory changes.\n"`;
+printf '\033]7;file://%s%s\a' "$host" "$(__netcatty_osc7_url_path "$PWD")"`;
 
 export const buildOsc7SetupCommand = (): string =>
   `set +u 2>/dev/null || true; printf "%s\\n" ${quoteForSingleQuotedShellString(POSIX_SETUP_SCRIPT)} | env NETCATTY_ZDOTDIR="$ZDOTDIR" NETCATTY_XDG_CONFIG_HOME="$XDG_CONFIG_HOME" sh\n`;

@@ -195,6 +195,7 @@ const TerminalLayerInner: React.FC<TerminalLayerProps> = ({
   const focusedSessionIdRef = useRef<string | undefined>(undefined);
   const terminalCwdRevisionRef = useRef(0);
   const [terminalCwdRevision, setTerminalCwdRevision] = useState(0);
+  const terminalOsc7SignalBySessionRef = useRef<Map<string, number>>(new Map());
   const cwdProbeCancelersRef = useRef<Map<string, () => void>>(new Map());
   const cwdProbeGenerationRef = useRef<Map<string, number>>(new Map());
 
@@ -208,7 +209,16 @@ const TerminalLayerInner: React.FC<TerminalLayerProps> = ({
     return () => window.clearTimeout(timeoutId);
   }, []);
 
-  const handleTerminalCwdChange = useCallback((sessionId: string, cwd: string | null) => {
+  const handleTerminalCwdChange = useCallback((
+    sessionId: string,
+    cwd: string | null,
+    meta?: { source?: 'osc7' },
+  ) => {
+    if (meta?.source === 'osc7') {
+      const nextSignal = (terminalOsc7SignalBySessionRef.current.get(sessionId) ?? 0) + 1;
+      terminalOsc7SignalBySessionRef.current.set(sessionId, nextSignal);
+    }
+
     const currentCwd = terminalRendererCwdBySessionRef.current.get(sessionId) ?? null;
     const nextCwd = cwd && cwd.trim().length > 0 ? cwd : null;
     if (currentCwd === nextCwd) return;
@@ -707,14 +717,14 @@ const TerminalLayerInner: React.FC<TerminalLayerProps> = ({
     const followHost = resolveSftpFollowTerminalCwdTargetHost(visibleSftpHost, sessionHost);
     if (!resolveHostFollowTerminalCwd(followHost?.sftpFollowTerminalCwd, sftpFollowTerminalCwdRef.current)) return;
 
-    const revisionAtCommand = terminalCwdRevisionRef.current;
+    const osc7SignalAtCommand = terminalOsc7SignalBySessionRef.current.get(sessionId) ?? 0;
     const probeGeneration = (cwdProbeGenerationRef.current.get(sessionId) ?? 0) + 1;
     cwdProbeGenerationRef.current.set(sessionId, probeGeneration);
     cwdProbeCancelersRef.current.get(sessionId)?.();
     const cancelProbe = scheduleBackendCwdProbeAfterCommand({
       sessionId,
-      cwdRevisionAtCommand: revisionAtCommand,
-      getCwdRevision: () => terminalCwdRevisionRef.current,
+      osc7SignalAtCommand,
+      getOsc7Signal: () => terminalOsc7SignalBySessionRef.current.get(sessionId) ?? 0,
       getSessionPwd: (id, options) => terminalBackend.getSessionPwd(id, options),
       canProbe: async () => {
         if (cwdProbeGenerationRef.current.get(sessionId) !== probeGeneration) return false;

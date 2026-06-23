@@ -663,7 +663,7 @@ interface TerminalPaneProps {
     pendingUploadEntries?: DropEntry[],
     sourceSessionId?: string,
   ) => void;
-  onTerminalCwdChange: (sessionId: string, cwd: string | null) => void;
+  onTerminalCwdChange: (sessionId: string, cwd: string | null, meta?: { source?: 'osc7' }) => void;
   onTerminalTitleChange?: (sessionId: string, title: string | null) => void;
   onTerminalBell?: (sessionId: string) => void;
   onTerminalOutput?: (sessionId: string, chunk: string) => void;

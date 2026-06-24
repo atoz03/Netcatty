@@ -141,6 +141,7 @@ const DRIVER_REGISTRY = {
         binPath: ctx.binPath,
         injectedMcpServers: ctx.injectedMcpServers,
         toolIntegrationMode: ctx.toolIntegrationMode,
+        skillsPathAllowlist: ctx.skillsPathAllowlist,
         resumeSessionId: ctx.resumeSessionId,
         emitter: ctx.emitter,
         abortController: ctx.abortController,

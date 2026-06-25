@@ -30,6 +30,9 @@ function loadBridgeWithMocks(options = {}) {
           ? options.getPermissionMode()
           : "default",
       getMaxIterations: () => 20,
+      updateAttachmentMetadata: (...args) => {
+        if (typeof options.updateAttachmentMetadata === "function") options.updateAttachmentMetadata(...args);
+      },
       setChatSessionCancelled() {},
       cancelPtyExecsForSession() {},
       clearPendingApprovals() {},
@@ -174,6 +177,42 @@ function loadBridgeWithMocks(options = {}) {
     throw error;
   }
 }
+
+test("mcp attachment update handler forwards current chat attachments", async () => {
+  const calls = [];
+  const { bridge, restore } = loadBridgeWithMocks({
+    updateAttachmentMetadata: (attachments, chatSessionId) => calls.push({ attachments, chatSessionId }),
+  });
+  const ipcMain = createIpcMainStub();
+
+  bridge.init({
+    sessions: new Map(),
+    sftpClients: new Map(),
+    electronModule: { app: { getPath: () => process.cwd() } },
+  });
+  bridge.registerHandlers(ipcMain);
+
+  try {
+    const updateAttachments = ipcMain.handlers.get("netcatty:ai:mcp:update-attachments");
+    assert.equal(typeof updateAttachments, "function");
+    const attachments = [{
+      filename: "hosts_export_2026-06-25.csv",
+      mediaType: "text/csv",
+      base64Data: Buffer.from("label,hostname\nprod,prod.example.com\n").toString("base64"),
+      filePath: "/tmp/hosts_export_2026-06-25.csv",
+    }];
+
+    const result = await updateAttachments({ sender: { id: 1 } }, {
+      attachments,
+      chatSessionId: "chat-1",
+    });
+
+    assert.deepEqual(result, { ok: true });
+    assert.deepEqual(calls, [{ attachments, chatSessionId: "chat-1" }]);
+  } finally {
+    restore();
+  }
+});
 
 test("discover returns the 3-layer contract for an installed, authenticated agent", async (t) => {
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "netcatty-discover-contract-"));

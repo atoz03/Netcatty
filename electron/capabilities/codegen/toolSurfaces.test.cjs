@@ -47,6 +47,15 @@ test("listCattyToolSpecs includes vault host tools and SFTP transfer", () => {
   assert.ok(capabilityIds.includes("sftp.upload"));
 });
 
+test("vault host import tool description routes unknown attached host text to host creation", () => {
+  const importSpec = listCattyToolSpecs().find((spec) => spec.capabilityId === "vault.host.import");
+  assert.ok(importSpec);
+  assert.match(importSpec.description, /known export formats/i);
+  assert.match(importSpec.description, /unknown/i);
+  assert.match(importSpec.description, /read_attachment/i);
+  assert.match(importSpec.description, /vault_hosts_create/i);
+});
+
 test("listCattyToolSpecs binds vault note tools to global RPC methods", () => {
   const specs = listCattyToolSpecs();
   const noteCreate = specs.find((spec) => spec.capabilityId === "vault.note.create");

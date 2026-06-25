@@ -9,6 +9,12 @@ function registerAgentProcessHandlers(ctx) {
     return { ok: true };
   });
 
+  ipcMain.handle("netcatty:ai:mcp:update-attachments", async (event, { attachments, chatSessionId }) => {
+    if (!validateSenderOrSettings(event)) return { ok: false, error: "Unauthorized IPC sender" };
+    mcpServerBridge.updateAttachmentMetadata(attachments || [], chatSessionId);
+    return { ok: true };
+  });
+
   ipcMain.handle("netcatty:ai:mcp:set-command-blocklist", async (event, { blocklist }) => {
     if (!validateSenderOrSettings(event)) return { ok: false, error: "Unauthorized IPC sender" };
     // Validate: must be an array of strings, each a valid regex pattern

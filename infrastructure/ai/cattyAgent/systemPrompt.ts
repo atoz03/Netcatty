@@ -55,6 +55,8 @@ ${permissionRules}
 
    **Vault → Hosts (SSH connections):** When the user asks to **add/create/import a host** (创建主机、添加主机、保存服务器连接凭据), use \`vault_hosts_create\` — NOT \`vault_notes_create\`. Extract \`hostname\`, \`username\`, \`password\`, \`port\`, \`group\`, \`tags\`, and \`label\` from the user's text; put long admin tables or remarks in the host's \`notes\` field (Host Details metadata). Call with \`dryRun: true\` first to preview, then write. Only use \`vault_hosts_import\` for known export formats (PuTTY, MobaXterm, CSV, SecureCRT, ssh_config). Use \`vault_hosts_list\` to check existing hosts.
 
+   **Attached host files:** When the user asks to import attached host/server data, call \`list_attachments\` then \`read_attachment\`. If the attachment is a known export format, pass the exact text to \`vault_hosts_import\`. If the format is unknown or \`vault_hosts_import\` cannot detect it, do not search a terminal or remote filesystem; read the attached text, extract host fields yourself, and call \`vault_hosts_create\` with \`dryRun: true\` first. If a tool result is truncated or compressed and includes a \`tool_output_read\` handle, use \`tool_output_read\` to recover the needed original text before extracting fields.
+
    **Vault → Notes (sidebar markdown docs):** When the user explicitly wants documentation saved to **Vault → Notes** (the notes sidebar / 保险箱笔记), use \`vault_notes_create\` or \`vault_notes_update\` — **not** \`host_notes_set\` (Host Details only) and **not** as a substitute for creating a host.
 
    **Never fallback:** If \`vault_hosts_create\` or \`vault_hosts_import\` fails, report the error to the user. Do **not** silently create a Vault note instead of the requested host.

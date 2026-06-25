@@ -44,7 +44,6 @@ export class CattyTurnDriver implements TurnDriver {
 async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Promise<void> {
   const {
     chatSessionId: sessionId,
-    sendScopeKey,
     userText: trimmed,
     signal,
     currentSession,
@@ -60,6 +59,9 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
   await clearChatSessionCancelled(sessionId, netcattyBridge);
   if (netcattyBridge.aiMcpUpdateSessions) {
     await netcattyBridge.aiMcpUpdateSessions(context.terminalSessions, sessionId);
+  }
+  if (attachments?.length && netcattyBridge.aiMcpUpdateAttachments) {
+    await netcattyBridge.aiMcpUpdateAttachments(attachments, sessionId);
   }
   const userSkillsContext = await resolveUserSkillsContext(
     netcattyBridge,

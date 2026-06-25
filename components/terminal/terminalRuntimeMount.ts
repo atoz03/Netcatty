@@ -199,7 +199,6 @@ export async function wakeTerminalFromHibernate(
     scrollbackChars: initialPayload.scrollbackSnapshot?.length ?? 0,
     pendingChars: replayedPendingLength,
     alternateScreen: initialPayload.alternateScreen,
-    mirrorPreferred: initialPayload.mirrorPreferred === true,
   });
   return true;
 }

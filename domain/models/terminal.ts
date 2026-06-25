@@ -130,8 +130,6 @@ export interface TerminalSettings {
   hibernateSkipAltScreen: boolean;
   /** Hidden tabs whose renderer is kept alive (WebGL suspended) before full hibernate. */
   hibernateKeepRendererCount: number;
-  /** Mirror PTY output in a main-process headless xterm for faster wake snapshots. */
-  hibernateUseHeadlessMirror: boolean;
   /** Bytes per animation frame when replaying hibernate snapshots in the renderer. */
   hibernateReplayChunkBytes: number;
   /** Prefer WASM terminal serialize when available (falls back to JS). */
@@ -355,7 +353,6 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   hibernateHiddenTabsDelaySec: 5,
   hibernateSkipAltScreen: true,
   hibernateKeepRendererCount: 2,
-  hibernateUseHeadlessMirror: true,
   hibernateReplayChunkBytes: 16 * 1024,
   hibernatePreferWasmSerialize: false,
   showLineTimestamps: false, // Opt-in: shows output timestamps beside terminal lines

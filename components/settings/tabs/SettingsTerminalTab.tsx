@@ -1039,15 +1039,6 @@ function SettingsTerminalTab(props: {
             />
           </SettingRow>
           <SettingRow
-            label={t("settings.terminal.rendering.hibernateUseHeadlessMirror")}
-            description={t("settings.terminal.rendering.hibernateUseHeadlessMirror.desc")}
-          >
-            <Toggle
-              checked={terminalSettings.hibernateUseHeadlessMirror}
-              onChange={(v) => updateTerminalSetting("hibernateUseHeadlessMirror", v)}
-            />
-          </SettingRow>
-          <SettingRow
             label={t("settings.terminal.rendering.hibernateReplayChunkBytes")}
             description={t("settings.terminal.rendering.hibernateReplayChunkBytes.desc")}
           >

@@ -208,7 +208,6 @@ export function nudgeAlternateScreenRedraw(term: XTerm): void {
 export function buildHibernateWakePayload(
   snapshot: TerminalHibernateSnapshot,
   pendingBuffer: string,
-  mirrorPreferred = false,
 ): TerminalHibernateWakePayload {
   return {
     snapshot: snapshot.snapshot,
@@ -216,6 +215,5 @@ export function buildHibernateWakePayload(
     scrollbackSnapshot: snapshot.scrollbackSnapshot,
     pendingBuffer,
     alternateScreen: snapshot.alternateScreen,
-    mirrorPreferred,
   };
 }

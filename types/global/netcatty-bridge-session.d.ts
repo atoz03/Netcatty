@@ -274,10 +274,6 @@ declare global {
       action: "overwrite" | "skip" | "cancel";
       applyToRest: boolean;
     }): void;
-    getTerminalMirrorSnapshot?(sessionId: string): Promise<{
-      snapshot: string;
-      alternateScreen: boolean;
-    }>;
     onSessionData(sessionId: string, cb: (data: string) => void): () => void;
     onSessionExit(
       sessionId: string,

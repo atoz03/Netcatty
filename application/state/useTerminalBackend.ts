@@ -100,16 +100,6 @@ export const useTerminalBackend = () => {
     return bridge.setSessionEncoding(sessionId, encoding);
   }, []);
 
-  const getTerminalMirrorSnapshot = useCallback(async (sessionId: string) => {
-    const bridge = netcattyBridge.get();
-    if (!bridge?.getTerminalMirrorSnapshot) return null;
-    try {
-      return await bridge.getTerminalMirrorSnapshot(sessionId);
-    } catch {
-      return null;
-    }
-  }, []);
-
   const onSessionData = useCallback((sessionId: string, cb: (data: string) => void) => {
     const bridge = netcattyBridge.get();
     if (!bridge?.onSessionData) throw new Error("onSessionData unavailable");
@@ -338,7 +328,6 @@ export const useTerminalBackend = () => {
       setSessionFlowPaused,
       closeSession,
       setSessionEncoding,
-      getTerminalMirrorSnapshot,
       onSessionData,
       onSessionExit,
       onTelnetAutoLoginComplete,
@@ -387,7 +376,6 @@ export const useTerminalBackend = () => {
       setSessionFlowPaused,
       closeSession,
       setSessionEncoding,
-      getTerminalMirrorSnapshot,
       onSessionData,
       onSessionExit,
       onTelnetAutoLoginComplete,

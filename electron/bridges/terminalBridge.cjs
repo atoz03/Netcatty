@@ -13,8 +13,7 @@ const { promisify } = require("node:util");
 const { StringDecoder } = require("node:string_decoder");
 const pty = require("node-pty");
 const { SerialPort } = require("serialport");
-const { emitTerminalSessionData, disposeMirror } = require("./emitTerminalSessionData.cjs");
-const { resizeMirror } = require("./terminalHeadlessMirror.cjs");
+const { emitTerminalSessionData } = require("./emitTerminalSessionData.cjs");
 const iconv = require("iconv-lite");
 const ptyProcessTree = require("./ptyProcessTree.cjs");
 
@@ -952,9 +951,6 @@ function resizeSession(event, payload) {
   if (!session) return;
   if (Number.isFinite(payload.cols)) session.cols = payload.cols;
   if (Number.isFinite(payload.rows)) session.rows = payload.rows;
-  if (Number.isFinite(payload.cols) && Number.isFinite(payload.rows)) {
-    resizeMirror(payload.sessionId, payload.cols, payload.rows);
-  }
   
   try {
     if (session.stream) {
@@ -991,7 +987,6 @@ function resizeSession(event, payload) {
 function closeSession(event, payload) {
   const session = sessions.get(payload.sessionId);
   if (!session) return;
-  disposeMirror(payload.sessionId);
   session.closed = true;
   
   try {

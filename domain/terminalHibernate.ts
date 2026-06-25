@@ -115,12 +115,6 @@ export function resolveHibernateSkipAltScreen(
   return settings?.hibernateSkipAltScreen !== false;
 }
 
-export function resolveHibernateUseHeadlessMirror(
-  settings?: Pick<TerminalSettings, "hibernateUseHeadlessMirror"> | null,
-): boolean {
-  return settings?.hibernateUseHeadlessMirror !== false;
-}
-
 export function resolveHibernatePreferWasmSerialize(
   settings?: Pick<TerminalSettings, "hibernatePreferWasmSerialize"> | null,
 ): boolean {
@@ -145,6 +139,4 @@ export type TerminalHibernateWakePayload = {
   pendingBuffer: string;
   /** True when the pane was hibernated while a full-screen app owned the alt buffer. */
   alternateScreen: boolean;
-  /** When true, snapshot was sourced from the main-process headless mirror. */
-  mirrorPreferred?: boolean;
 };

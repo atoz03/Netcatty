@@ -359,8 +359,6 @@ export const zhCNTerminalMessages: Messages = {
   'settings.terminal.rendering.hibernateSkipAltScreen.desc': 'vim、htop 或 Agent TUI 占用 alternate screen 时保持终端渲染器，避免慢恢复。',
   'settings.terminal.rendering.hibernateKeepRendererCount': '保留隐藏渲染器数量',
   'settings.terminal.rendering.hibernateKeepRendererCount.desc': '多少个不可见标签页仅暂停 WebGL、不销毁 xterm，超出后才完整休眠。',
-  'settings.terminal.rendering.hibernateUseHeadlessMirror': '主进程终端镜像',
-  'settings.terminal.rendering.hibernateUseHeadlessMirror.desc': '在主进程用 headless xterm 镜像 PTY 输出，加快休眠唤醒时的快照获取。',
   'settings.terminal.rendering.hibernateReplayChunkBytes': '唤醒分片大小',
   'settings.terminal.rendering.hibernateReplayChunkBytes.desc': '恢复休眠终端时每帧回放的 ANSI 字节数（4–64 KB）。',
   'settings.terminal.rendering.hibernatePreferWasmSerialize': '优先 WASM 序列化',

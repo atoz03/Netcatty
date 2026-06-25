@@ -5,7 +5,6 @@ import {
   normalizeHibernateKeepRendererCount,
   normalizeHibernateReplayChunkBytes,
   resolveHibernateSkipAltScreen,
-  resolveHibernateUseHeadlessMirror,
 } from "./terminalHibernate.ts";
 
 test("normalizeHibernateReplayChunkBytes clamps to allowed range", () => {
@@ -25,9 +24,4 @@ test("normalizeHibernateKeepRendererCount clamps to allowed range", () => {
 test("resolveHibernateSkipAltScreen defaults to enabled", () => {
   assert.equal(resolveHibernateSkipAltScreen(), true);
   assert.equal(resolveHibernateSkipAltScreen({ hibernateSkipAltScreen: false }), false);
-});
-
-test("resolveHibernateUseHeadlessMirror defaults to enabled", () => {
-  assert.equal(resolveHibernateUseHeadlessMirror(), true);
-  assert.equal(resolveHibernateUseHeadlessMirror({ hibernateUseHeadlessMirror: false }), false);
 });

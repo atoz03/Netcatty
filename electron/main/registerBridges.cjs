@@ -170,8 +170,6 @@ function createBridgeRegistrar(context) {
     transferBridge.registerHandlers(ipcMain);
     portForwardingBridge.registerHandlers(ipcMain);
     terminalBridge.registerHandlers(ipcMain);
-    const { registerTerminalMirrorHandlers } = require("../bridges/emitTerminalSessionData.cjs");
-    registerTerminalMirrorHandlers(ipcMain);
 
     const { createSystemManagerBridge } = require("../bridges/systemManagerBridge.cjs");
     const systemManagerBridge = createSystemManagerBridge({

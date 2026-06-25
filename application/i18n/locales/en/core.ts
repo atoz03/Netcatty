@@ -487,8 +487,6 @@ export const enCoreMessages: Messages = {
   'settings.terminal.rendering.hibernateSkipAltScreen.desc': 'Keep the terminal renderer alive while vim, htop, or agent TUIs own the alternate screen buffer.',
   'settings.terminal.rendering.hibernateKeepRendererCount': 'Keep hidden renderers',
   'settings.terminal.rendering.hibernateKeepRendererCount.desc': 'How many off-screen tabs keep their renderer alive (WebGL suspended) before full hibernate.',
-  'settings.terminal.rendering.hibernateUseHeadlessMirror': 'Main-process terminal mirror',
-  'settings.terminal.rendering.hibernateUseHeadlessMirror.desc': 'Mirror PTY output in a headless xterm on the main process for faster wake snapshots.',
   'settings.terminal.rendering.hibernateReplayChunkBytes': 'Wake replay chunk size',
   'settings.terminal.rendering.hibernateReplayChunkBytes.desc': 'Bytes replayed per animation frame when restoring a hibernated terminal (4–64 KB).',
   'settings.terminal.rendering.hibernatePreferWasmSerialize': 'Prefer WASM serialize',

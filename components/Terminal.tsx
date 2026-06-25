@@ -96,14 +96,12 @@ import {
   resolveHibernateKeepRendererCount,
   resolveHibernatePreferWasmSerialize,
   resolveHibernateSkipAltScreen,
-  resolveHibernateUseHeadlessMirror,
   resolveTerminalHibernateDelayMs,
   resolveTerminalHibernateEnabled,
   resolveTerminalHibernateReplayChunkBytes,
   type TerminalHibernateWakePayload,
 } from "../domain/terminalHibernate";
 import { terminalHiddenRendererStore } from "../application/state/terminalHiddenRendererStore";
-import { mirrorSnapshotToHibernateSnapshot } from "../application/state/terminalMirrorSnapshot";
 import {
   wakeTerminalFromHibernate,
   type TerminalRuntimeRefs,
@@ -243,7 +241,6 @@ const TerminalComponent: React.FC<TerminalProps> = ({
   const hibernateSnapshotRef = useRef("");
   const hibernateViewportSnapshotRef = useRef("");
   const hibernateScrollbackSnapshotRef = useRef("");
-  const hibernateMirrorPreferredRef = useRef(false);
   const hibernatePendingBufferRef = useRef("");
   const hibernateAlternateScreenRef = useRef(false);
   const wakeInProgressRef = useRef(false);
@@ -843,7 +840,6 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     hibernateSnapshotRef.current = "";
     hibernateViewportSnapshotRef.current = "";
     hibernateScrollbackSnapshotRef.current = "";
-    hibernateMirrorPreferredRef.current = false;
     hibernatePendingBufferRef.current = "";
     hibernateAlternateScreenRef.current = false;
     terminalHiddenRendererStore.clearSoftHidden(sessionId);
@@ -881,13 +877,11 @@ const TerminalComponent: React.FC<TerminalProps> = ({
       scrollbackSnapshot: string;
       alternateScreen: boolean;
     },
-    mirrorPreferred: boolean,
   ) => {
     hibernateSnapshotRef.current = snapshot.snapshot;
     hibernateViewportSnapshotRef.current = snapshot.viewportSnapshot;
     hibernateScrollbackSnapshotRef.current = snapshot.scrollbackSnapshot;
     hibernateAlternateScreenRef.current = snapshot.alternateScreen;
-    hibernateMirrorPreferredRef.current = mirrorPreferred;
   }, []);
 
   const fullHibernateRuntime = useCallback(async () => {
@@ -898,27 +892,18 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     terminalHiddenRendererStore.clearSoftHidden(sessionId);
     softHiddenRef.current = false;
 
-    let snapshot = await serializeTerminalForHibernate(
+    const snapshot = await serializeTerminalForHibernate(
       termRef.current,
       serializeAddonRef.current,
       { preferWasm: resolveHibernatePreferWasmSerialize(terminalSettings) },
     );
-    let mirrorPreferred = false;
-
-    if (resolveHibernateUseHeadlessMirror(terminalSettings)) {
-      const mirror = await terminalBackend.getTerminalMirrorSnapshot(backendId);
-      if (mirror && mirror.snapshot.length > 0) {
-        snapshot = mirrorSnapshotToHibernateSnapshot(mirror);
-        mirrorPreferred = true;
-      }
-    }
 
     if (snapshot.alternateScreen && snapshot.snapshot.length === 0) {
       logger.info("[Terminal] Skipping hibernate: alternate screen snapshot unavailable", { sessionId });
       return;
     }
 
-    applyHibernateSnapshot(snapshot, mirrorPreferred);
+    applyHibernateSnapshot(snapshot);
     isBootActiveRef.current = false;
     disposeRuntimeOnly();
     beginHibernatedSessionListeners(backendId);
@@ -929,13 +914,11 @@ const TerminalComponent: React.FC<TerminalProps> = ({
       viewportChars: hibernateViewportSnapshotRef.current.length,
       scrollbackChars: hibernateScrollbackSnapshotRef.current.length,
       alternateScreen: snapshot.alternateScreen,
-      mirrorPreferred,
     });
   }, [
     applyHibernateSnapshot,
     beginHibernatedSessionListeners,
     sessionId,
-    terminalBackend,
     terminalSettings,
   ]);
 
@@ -1796,7 +1779,6 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     hibernateSnapshotRef,
     hibernateViewportSnapshotRef,
     hibernateScrollbackSnapshotRef,
-    hibernateMirrorPreferredRef,
     hibernateAlternateScreenRef,
     hasRuntimeRef,
     onHibernate: hibernateRuntime,

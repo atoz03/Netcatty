@@ -26,7 +26,6 @@ type UseTerminalHibernateEffectOptions = {
   hibernateSnapshotRef: React.MutableRefObject<string>;
   hibernateViewportSnapshotRef: React.MutableRefObject<string>;
   hibernateScrollbackSnapshotRef: React.MutableRefObject<string>;
-  hibernateMirrorPreferredRef: React.MutableRefObject<boolean>;
   hibernateAlternateScreenRef: React.MutableRefObject<boolean>;
   hasRuntimeRef: React.MutableRefObject<boolean>;
   onHibernate: () => void;
@@ -53,7 +52,6 @@ export function useTerminalHibernateEffect({
   hibernateSnapshotRef,
   hibernateViewportSnapshotRef,
   hibernateScrollbackSnapshotRef,
-  hibernateMirrorPreferredRef,
   hibernateAlternateScreenRef,
   hasRuntimeRef,
   onHibernate,
@@ -86,7 +84,6 @@ export function useTerminalHibernateEffect({
       hibernateScrollbackSnapshotRef.current = "";
       hibernatePendingBufferRef.current = "";
       hibernateAlternateScreenRef.current = false;
-      hibernateMirrorPreferredRef.current = false;
       hibernatedRef.current = false;
     };
 
@@ -123,7 +120,6 @@ export function useTerminalHibernateEffect({
         scrollbackSnapshot: hibernateScrollbackSnapshotRef.current,
         pendingBuffer: hibernatePendingBufferRef.current,
         alternateScreen: hibernateAlternateScreenRef.current,
-        mirrorPreferred: hibernateMirrorPreferredRef.current,
       });
       logger.info("[Terminal] Waking from hibernate", {
         sessionId,
@@ -191,7 +187,6 @@ export function useTerminalHibernateEffect({
     hibernateAlternateScreenRef,
     hibernateDelayMs,
     hibernateEnabled,
-    hibernateMirrorPreferredRef,
     hibernatePendingBufferRef,
     hibernateScrollbackSnapshotRef,
     hibernateSnapshotRef,

@@ -2,21 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 import type { KnownHost } from "../../domain/models";
 import { netcattyBridge } from "../../infrastructure/services/netcattyBridge";
 import type { HostKeyInfo } from "../../components/terminal/TerminalHostKeyVerification";
-import { toHostKeyInfo, type HostKeyVerificationRequest } from "../../components/terminal/hostKeyVerification";
 import {
   createKnownHostFromPortForwardHostKeyInfo,
-  isPortForwardHostKeySessionId,
+  enqueuePortForwardHostKeyVerification,
+  removePortForwardHostKeyVerification,
+  toPendingPortForwardHostKeyVerification,
+  type PendingPortForwardHostKeyVerification,
+  type PortForwardHostKeyRequest,
 } from "../../components/port-forwarding/hostKeyVerification";
-
-type PortForwardHostKeyRequest = HostKeyVerificationRequest & {
-  requestId: string;
-  sessionId?: string;
-};
-
-interface PendingHostKeyVerification {
-  requestId: string;
-  hostKeyInfo: HostKeyInfo;
-}
 
 export interface PortForwardHostKeyVerificationState {
   hostKeyInfo: HostKeyInfo;
@@ -25,15 +18,14 @@ export interface PortForwardHostKeyVerificationState {
 export const usePortForwardHostKeyVerification = (
   onAddKnownHost?: (knownHost: KnownHost) => void,
 ) => {
-  const [pending, setPending] = useState<PendingHostKeyVerification | null>(null);
+  const [pendingQueue, setPendingQueue] = useState<PendingPortForwardHostKeyVerification[]>([]);
+  const pending = pendingQueue[0] ?? null;
 
   useEffect(() => {
     const dispose = netcattyBridge.get()?.onHostKeyVerification?.((request: PortForwardHostKeyRequest) => {
-      if (!isPortForwardHostKeySessionId(request.sessionId)) return;
-      setPending({
-        requestId: request.requestId,
-        hostKeyInfo: toHostKeyInfo(request),
-      });
+      const next = toPendingPortForwardHostKeyVerification(request);
+      if (!next) return;
+      setPendingQueue((queue) => enqueuePortForwardHostKeyVerification(queue, next));
     });
 
     return () => {
@@ -51,7 +43,7 @@ export const usePortForwardHostKeyVerification = (
       accept,
       addToKnownHosts,
     );
-    setPending(null);
+    setPendingQueue((queue) => removePortForwardHostKeyVerification(queue, pending.requestId));
   }, [onAddKnownHost, pending]);
 
   return {

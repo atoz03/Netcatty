@@ -25,7 +25,12 @@ export const PortForwardHostKeyDialog: React.FC<PortForwardHostKeyDialogProps> =
         if (!open) rejectHostKeyVerification();
       }}
     >
-      <DialogContent className="max-w-lg" hideCloseButton>
+      <DialogContent
+        className="max-w-lg"
+        overlayClassName="port-forward-host-key-dialog-layer"
+        data-port-forward-host-key-dialog="true"
+        hideCloseButton
+      >
         <DialogTitle className="sr-only">Confirm host key</DialogTitle>
         {hostKeyVerification && (
           <TerminalHostKeyVerification

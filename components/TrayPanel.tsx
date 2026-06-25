@@ -200,6 +200,12 @@ const TrayPanelContent: React.FC<TrayPanelContentProps> = ({ terminalSettings })
       if (target instanceof HTMLElement && target.closest("button,a,input,select,textarea,[role='button']")) {
         return;
       }
+      if (
+        target instanceof HTMLElement &&
+        target.closest("[data-port-forward-host-key-dialog='true'],.port-forward-host-key-dialog-layer")
+      ) {
+        return;
+      }
       // Clicking on background should close panel
       const root = document.getElementById("tray-panel-root");
       if (root && !root.contains(target)) {

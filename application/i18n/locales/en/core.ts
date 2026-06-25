@@ -457,6 +457,8 @@ export const enCoreMessages: Messages = {
   'settings.terminal.localShell.startDir.notFound': 'Directory not found',
   'settings.terminal.localShell.startDir.isFile': 'Path is a file, not a directory',
   'settings.terminal.section.connection': 'Connection',
+  'settings.terminal.connection.verifyHostKeys': 'Verify SSH host keys',
+  'settings.terminal.connection.verifyHostKeys.desc': 'Ask before connecting to a new or changed SSH host key. Turn this off only for trusted private networks.',
   'settings.terminal.connection.keepaliveInterval': 'Keepalive Interval',
   'settings.terminal.connection.keepaliveInterval.desc': 'How often (in seconds) to send SSH-level keepalive packets. Set to 0 to disable globally — note that individual hosts can override this in their own settings.',
   'settings.terminal.connection.keepaliveCountMax': 'Max unanswered keepalives',

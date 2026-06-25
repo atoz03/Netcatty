@@ -79,6 +79,7 @@ export interface TerminalSettings {
   localStartDir: string; // Starting directory for local terminal (empty = home directory)
 
   // SSH Connection
+  verifyHostKeys: boolean; // Verify SSH host keys before authenticating
   keepaliveInterval: number; // Seconds between SSH-level keepalive packets (0 = disabled)
   keepaliveCountMax: number; // Unanswered keepalives before declaring the connection dead
   x11Display: string; // Optional local X11 DISPLAY override (empty = use system DISPLAY/default)
@@ -346,6 +347,7 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   // before declaring the session dead (~5 min). Hosts whose SSH stack doesn't
   // reply to keepalive@openssh.com (older routers/switches) should set their
   // own per-host keepaliveOverride and dial these values down.
+  verifyHostKeys: true,
   keepaliveInterval: 30,
   keepaliveCountMax: 10,
   x11Display: '', // Empty = use DISPLAY/default local X server

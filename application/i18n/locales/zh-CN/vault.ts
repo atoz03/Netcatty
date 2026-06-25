@@ -315,6 +315,8 @@ export const zhCNVaultMessages: Messages = {
   'terminal.toolbar.terminalSettings': '终端设置',
   'terminal.toolbar.searchTerminal': '搜索终端',
   'terminal.toolbar.search': '搜索',
+  'terminal.toolbar.startSessionLog': '开始会话日志',
+  'terminal.toolbar.stopSessionLog': '停止会话日志',
   'terminal.toolbar.broadcast': '广播',
   'terminal.toolbar.broadcastEnable': '启用广播模式',
   'terminal.toolbar.broadcastDisable': '关闭广播模式',

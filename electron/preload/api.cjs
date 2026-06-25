@@ -751,6 +751,12 @@ function createPreloadApi(ctx) {
     ipcRenderer.invoke("netcatty:sessionLogs:autoSave", payload),
   openSessionLogsDir: (directory) =>
     ipcRenderer.invoke("netcatty:sessionLogs:openDir", { directory }),
+  startManualSessionLog: (payload) =>
+    ipcRenderer.invoke("netcatty:sessionLog:manualStart", payload),
+  stopManualSessionLog: (payload) =>
+    ipcRenderer.invoke("netcatty:sessionLog:manualStop", payload),
+  getManualSessionLogStatus: (payload) =>
+    ipcRenderer.invoke("netcatty:sessionLog:manualStatus", payload),
 
   // Crash Logs
   getCrashLogs: () =>

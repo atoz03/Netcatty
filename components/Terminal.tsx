@@ -29,6 +29,7 @@ import { classifyDistroId, shouldProbeSessionCwd } from "../domain/host";
 import { supportsZmodemTerminalDragDrop } from "../lib/zmodemDragDrop";
 import { resolveHostAuth } from "../domain/sshAuth";
 import { useTerminalBackend } from "../application/state/useTerminalBackend";
+import { useSessionLogBackend } from "../application/state/useSessionLogBackend";
 import { useTerminalLayoutSuppressActive } from "../application/state/terminalLayoutSuppressStore";
 // SFTPModal removed - SFTP is now handled by SftpSidePanel in TerminalLayer
 import { Button } from "./ui/button";
@@ -53,6 +54,7 @@ import { ZmodemProgressIndicator } from "./terminal/ZmodemProgressIndicator";
 import { createReplaySafeTerminalLogSanitizer } from "./terminal/replaySafeTerminalLog";
 import { createConnectionLogBuffer } from "./terminal/connectionLogBuffer";
 import { createProgrammaticCommandLogRewriter, type ProgrammaticCommandLogRewrite } from "./terminal/programmaticCommandLog";
+import { getSessionLogInitialLine } from "./terminal/sessionLogInitialLine";
 import { useZmodemTransfer } from "./terminal/hooks/useZmodemTransfer";
 import { createTerminalSessionStarters, type PendingAuth } from "./terminal/runtime/createTerminalSessionStarters";
 import { createXTermRuntime, type XTermRuntime } from "./terminal/runtime/createXTermRuntime";
@@ -348,6 +350,7 @@ const TerminalComponent: React.FC<TerminalProps> = ({
   const sudoHintRef = useRef<((active: boolean) => boolean) | undefined>(undefined);
 
   const terminalBackend = useTerminalBackend();
+  const { startManualSessionLog, stopManualSessionLog, getManualSessionLogStatus } = useSessionLogBackend();
   const {
     resizeSession,
     receiveSerialYmodem,
@@ -374,6 +377,7 @@ const TerminalComponent: React.FC<TerminalProps> = ({
   const [timeLeft, setTimeLeft] = useState(CONNECTION_TIMEOUT / 1000);
   const [isCancelling, setIsCancelling] = useState(false);
   const [showSFTP, setShowSFTP] = useState(false);
+  const [isSessionLogging, setIsSessionLogging] = useState(false);
   const [progressValue, setProgressValue] = useState(15);
   const [hasSelection, setHasSelection] = useState(false);
   const [selectionOverlayPosition, setSelectionOverlayPosition] = useState<{ left: number; top: number } | null>(null);
@@ -1554,6 +1558,70 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     containerRef,
   });
 
+  const handleToggleSessionLog = useCallback(async () => {
+    const currentSessionId = sessionRef.current ?? sessionId;
+    if (!currentSessionId) {
+      toast.error("Session log bridge is unavailable");
+      return;
+    }
+
+    try {
+      const currentStatus = await getManualSessionLogStatus({ sessionId: currentSessionId });
+      if (currentStatus?.isLogging) {
+        const stopResult = await stopManualSessionLog({ sessionId: currentSessionId });
+        if (stopResult?.success) {
+          setIsSessionLogging(false);
+        } else {
+          toast.error(stopResult?.error || "Failed to stop session log");
+        }
+        return;
+      }
+
+      const startResult = await startManualSessionLog({
+        sessionId: currentSessionId,
+        sessionName: host.label || host.hostname || currentSessionId,
+        preferredDirectory: sessionLog?.directory,
+        initialLine: termRef.current ? getSessionLogInitialLine(termRef.current) : "",
+      });
+      if (startResult?.success) {
+        if (!startResult?.started && startResult?.canceled) return;
+        setIsSessionLogging(!!startResult?.started);
+      } else {
+        toast.error(startResult?.error || "Failed to start session log");
+      }
+    } catch (err) {
+      logger.error("[Terminal] Failed to toggle manual session log:", err);
+      toast.error("Failed to toggle session log");
+    }
+  }, [
+    getManualSessionLogStatus,
+    host.hostname,
+    host.label,
+    sessionId,
+    sessionLog?.directory,
+    startManualSessionLog,
+    stopManualSessionLog,
+  ]);
+
+  useEffect(() => {
+    const currentSessionId = sessionRef.current ?? sessionId;
+    if (!currentSessionId) {
+      setIsSessionLogging(false);
+      return;
+    }
+
+    let cancelled = false;
+    void getManualSessionLogStatus({ sessionId: currentSessionId }).then((result) => {
+      if (!cancelled) setIsSessionLogging(!!result?.isLogging);
+    }).catch(() => {
+      if (!cancelled) setIsSessionLogging(false);
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [getManualSessionLogStatus, sessionId, status]);
+
   const renderControls = useCallback((opts?: { showClose?: boolean }) => (
     <TerminalToolbar
       status={status}
@@ -1579,6 +1647,10 @@ const TerminalComponent: React.FC<TerminalProps> = ({
       onClose={() => onCloseSession?.(sessionId)}
       isSearchOpen={isSearchOpen}
       onToggleSearch={handleToggleSearch}
+      showLogButton
+      onToggleSessionLog={handleToggleSessionLog}
+      isSessionLogging={isSessionLogging}
+      isSessionLogDisabled={status !== "connected" && !isSessionLogging}
       isComposeBarOpen={inWorkspace ? isWorkspaceComposeBarOpen : isComposeBarOpen}
       onToggleComposeBar={inWorkspace ? onToggleComposeBar : () => setIsComposeBarOpen(prev => !prev)}
       terminalEncoding={terminalEncoding}
@@ -1591,6 +1663,7 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     handleReceiveYmodem,
     handleSendYmodem,
     handleSetTerminalEncoding,
+    handleToggleSessionLog,
     handleToggleSearch,
     host,
     inWorkspace,
@@ -1599,6 +1672,7 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     isSerialConnection,
     isComposeBarOpen,
     isSearchOpen,
+    isSessionLogging,
     isWorkspaceComposeBarOpen,
     onCloseSession,
     onOpenScripts,

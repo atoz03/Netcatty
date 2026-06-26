@@ -963,12 +963,16 @@ const TerminalComponent: React.FC<TerminalProps> = ({
   const beginHibernatedSessionListeners = useCallback((backendId: string) => {
     disposeDataRef.current?.();
     hibernatePendingBufferRef.current = "";
-    disposeDataRef.current = terminalBackend.onSessionData(backendId, (chunk) => {
-      hibernatePendingBufferRef.current = appendHibernatePendingBuffer(
-        hibernatePendingBufferRef.current,
-        chunk,
-      );
-    });
+    disposeDataRef.current = terminalBackend.onSessionData(
+      backendId,
+      (chunk) => {
+        hibernatePendingBufferRef.current = appendHibernatePendingBuffer(
+          hibernatePendingBufferRef.current,
+          chunk,
+        );
+      },
+      { replayBacklog: true },
+    );
 
     disposeExitRef.current?.();
     disposeExitRef.current = terminalBackend.onSessionExit(backendId, (evt) => {

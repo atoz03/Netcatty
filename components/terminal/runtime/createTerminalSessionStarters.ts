@@ -1158,24 +1158,28 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       resetTerminalWriteCoalescer(term);
       resetTerminalSyncBlockFilter(term);
       resetTerminalLineTimestampState(term);
-      ctx.disposeDataRef.current = ctx.terminalBackend.onSessionData(id, (chunk) => {
-        writeSessionData(ctx, term, chunk);
-        ctx.onTerminalOutput?.(chunk);
-        if (!ctx.hasConnectedRef.current) {
-          ctx.updateStatus("connected");
-          setTimeout(() => {
-            if (!ctx.fitAddonRef.current) return;
-            try {
-              ctx.fitAddonRef.current.fit();
-              if (ctx.sessionRef.current) {
-                ctx.terminalBackend.resizeSession(ctx.sessionRef.current, term.cols, term.rows);
+      ctx.disposeDataRef.current = ctx.terminalBackend.onSessionData(
+        id,
+        (chunk) => {
+          writeSessionData(ctx, term, chunk);
+          ctx.onTerminalOutput?.(chunk);
+          if (!ctx.hasConnectedRef.current) {
+            ctx.updateStatus("connected");
+            setTimeout(() => {
+              if (!ctx.fitAddonRef.current) return;
+              try {
+                ctx.fitAddonRef.current.fit();
+                if (ctx.sessionRef.current) {
+                  ctx.terminalBackend.resizeSession(ctx.sessionRef.current, term.cols, term.rows);
+                }
+              } catch (err) {
+                logger.warn("Post-connect fit failed", err);
               }
-            } catch (err) {
-              logger.warn("Post-connect fit failed", err);
-            }
-          }, 100);
-        }
-      });
+            }, 100);
+          }
+        },
+        { replayBacklog: true },
+      );
 
       ctx.disposeExitRef.current = ctx.terminalBackend.onSessionExit(id, (evt) => {
         ctx.updateStatus("disconnected");

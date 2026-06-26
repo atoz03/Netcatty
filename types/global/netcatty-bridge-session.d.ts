@@ -277,7 +277,11 @@ declare global {
       action: "overwrite" | "skip" | "cancel";
       applyToRest: boolean;
     }): void;
-    onSessionData(sessionId: string, cb: (data: string) => void): () => void;
+    onSessionData(
+      sessionId: string,
+      cb: (data: string) => void,
+      options?: { replayBacklog?: boolean },
+    ): () => void;
     onSessionExit(
       sessionId: string,
       cb: (evt: { exitCode?: number; signal?: number; error?: string; reason?: "exited" | "error" | "timeout" | "closed" }) => void

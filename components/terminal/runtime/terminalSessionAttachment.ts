@@ -285,33 +285,37 @@ export const attachSessionToTerminal = (
     ctx.sudoAutofillRef.current = sudoAutofill;
   }
 
-  ctx.disposeDataRef.current = ctx.terminalBackend.onSessionData(id, (chunk) => {
-    let data = chunk;
-    // Convert lone LF (\n) to CRLF (\r\n) for proper terminal display
-    // This prevents the "staircase effect" common in serial terminals
-    if (opts?.convertLfToCrlf) {
-      // Replace \n that is not preceded by \r with \r\n
-      data = data.replace(/(?<!\r)\n/g, "\r\n");
-    }
-    data = sudoAutofill?.handleOutput(data) ?? data;
-    writeSessionData(ctx, term, data);
-    ctx.onTerminalOutput?.(data);
-    if (!ctx.hasConnectedRef.current) {
-      ctx.updateStatus("connected");
-      opts?.onConnected?.();
-      setTimeout(() => {
-        if (!ctx.fitAddonRef.current) return;
-        try {
-          ctx.fitAddonRef.current.fit();
-          if (ctx.sessionRef.current) {
-            ctx.terminalBackend.resizeSession(ctx.sessionRef.current, term.cols, term.rows);
+  ctx.disposeDataRef.current = ctx.terminalBackend.onSessionData(
+    id,
+    (chunk) => {
+      let data = chunk;
+      // Convert lone LF (\n) to CRLF (\r\n) for proper terminal display
+      // This prevents the "staircase effect" common in serial terminals
+      if (opts?.convertLfToCrlf) {
+        // Replace \n that is not preceded by \r with \r\n
+        data = data.replace(/(?<!\r)\n/g, "\r\n");
+      }
+      data = sudoAutofill?.handleOutput(data) ?? data;
+      writeSessionData(ctx, term, data);
+      ctx.onTerminalOutput?.(data);
+      if (!ctx.hasConnectedRef.current) {
+        ctx.updateStatus("connected");
+        opts?.onConnected?.();
+        setTimeout(() => {
+          if (!ctx.fitAddonRef.current) return;
+          try {
+            ctx.fitAddonRef.current.fit();
+            if (ctx.sessionRef.current) {
+              ctx.terminalBackend.resizeSession(ctx.sessionRef.current, term.cols, term.rows);
+            }
+          } catch (err) {
+            logger.warn("Post-connect fit failed", err);
           }
-        } catch (err) {
-          logger.warn("Post-connect fit failed", err);
-        }
-      }, 100);
-    }
-  });
+        }, 100);
+      }
+    },
+    { replayBacklog: true },
+  );
 
   ctx.disposeExitRef.current = ctx.terminalBackend.onSessionExit(id, (evt) => {
     ctx.updateStatus("disconnected");

@@ -2,8 +2,15 @@ const { ipcRenderer, contextBridge, webUtils } = require("electron");
 const os = require("node:os");
 const { randomUUID } = require("node:crypto");
 const { createPreloadApi } = require("./preload/api.cjs");
+const {
+  clearTerminalDataSession,
+  createTerminalDataBacklog,
+  createTerminalDataDispatcher,
+} = require("./preload/terminalDataBacklog.cjs");
 
 const dataListeners = new Map();
+const displayDataListeners = new Map();
+const terminalDataBacklog = createTerminalDataBacklog();
 const exitListeners = new Map();
 const transferProgressListeners = new Map();
 const transferCompleteListeners = new Map();
@@ -120,13 +127,11 @@ function filterMcpChunk(sessionId, chunk) {
  * Deliver data to session listeners.  Used both by the normal data path
  * and by the delayed-flush timer.
  */
-function _deliverToListeners(sessionId, data) {
-  const set = dataListeners.get(sessionId);
-  if (!set || !data) return;
-  set.forEach((cb) => {
-    try { cb(data); } catch (err) { console.error("Data callback failed", err); }
-  });
-}
+const _deliverToListeners = createTerminalDataDispatcher({
+  dataListeners,
+  displayDataListeners,
+  terminalDataBacklog,
+});
 
 // ZMODEM file transfer events
 ipcRenderer.on("netcatty:zmodem:detect", (_event, payload) => {
@@ -169,21 +174,13 @@ ipcRenderer.on("netcatty:zmodem:overwrite-request", (_event, payload) => {
 });
 
 ipcRenderer.on("netcatty:data", (_event, payload) => {
-  const set = dataListeners.get(payload.sessionId);
-  if (!set) return;
   if (payload?.syntheticEcho) {
     _deliverToListeners(payload.sessionId, payload.data);
     return;
   }
   const data = filterMcpChunk(payload.sessionId, payload.data);
   if (data) {
-    set.forEach((cb) => {
-      try {
-        cb(data);
-      } catch (err) {
-        console.error("Data callback failed", err);
-      }
-    });
+    _deliverToListeners(payload.sessionId, data);
   }
   // If there is buffered content waiting for more data (e.g. a prompt
   // right after a dropped marker line), schedule a delayed flush so it
@@ -214,7 +211,11 @@ ipcRenderer.on("netcatty:exit", (_event, payload) => {
       }
     });
   }
-  dataListeners.delete(payload.sessionId);
+  clearTerminalDataSession({
+    dataListeners,
+    displayDataListeners,
+    terminalDataBacklog,
+  }, payload.sessionId);
   exitListeners.delete(payload.sessionId);
   telnetAutoLoginCompleteListeners.delete(payload.sessionId);
   telnetAutoLoginCancelledListeners.delete(payload.sessionId);
@@ -661,6 +662,7 @@ const api = createPreloadApi({
   webUtils,
   randomUUID,
   dataListeners,
+  displayDataListeners,
   exitListeners,
   transferProgressListeners,
   transferCompleteListeners,
@@ -675,6 +677,7 @@ const api = createPreloadApi({
   telnetAutoLoginCompleteListeners,
   telnetAutoLoginCancelledListeners,
   telnetEchoModeListeners,
+  terminalDataBacklog,
   languageChangeListeners,
   fullscreenChangeListeners,
   keyboardInteractiveListeners,

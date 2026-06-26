@@ -1,5 +1,7 @@
  
 function createPreloadApi(ctx) {
+  const terminalDataBacklog = ctx.terminalDataBacklog || null;
+  const displayDataListeners = ctx.displayDataListeners || new Map();
   with (ctx) {
     return {
   getWindowsPtyInfo: () => {
@@ -210,10 +212,32 @@ function createPreloadApi(ctx) {
   respondZmodemOverwrite: (payload) => {
     ipcRenderer.send("netcatty:zmodem:overwrite-response", payload);
   },
-  onSessionData: (sessionId, cb) => {
+  onSessionData: (sessionId, cb, options) => {
+    const replayBacklog = options?.replayBacklog === true;
     if (!dataListeners.has(sessionId)) dataListeners.set(sessionId, new Set());
     dataListeners.get(sessionId).add(cb);
-    return () => dataListeners.get(sessionId)?.delete(cb);
+    if (replayBacklog) {
+      if (!displayDataListeners.has(sessionId)) displayDataListeners.set(sessionId, new Set());
+      displayDataListeners.get(sessionId).add(cb);
+      const pendingData = terminalDataBacklog?.take?.(sessionId);
+      if (pendingData) {
+        try {
+          cb(pendingData);
+        } catch (err) {
+          console.error("Data callback failed", err);
+        }
+      }
+    }
+    return () => {
+      const dataSet = dataListeners.get(sessionId);
+      dataSet?.delete(cb);
+      if (dataSet?.size === 0) dataListeners.delete(sessionId);
+
+      if (!replayBacklog) return;
+      const displaySet = displayDataListeners.get(sessionId);
+      displaySet?.delete(cb);
+      if (displaySet?.size === 0) displayDataListeners.delete(sessionId);
+    };
   },
   onSessionExit: (sessionId, cb) => {
     if (!exitListeners.has(sessionId)) exitListeners.set(sessionId, new Set());

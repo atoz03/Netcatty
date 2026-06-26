@@ -571,13 +571,14 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
   }, [effectiveFontSize, effectiveFontWeight, resolvedFontFamily, terminalSettings]);
 
 
-  const runImmediateRefit = (options?: { force?: boolean }) => {
+  const runImmediateRefit = (options?: { force?: boolean; repeatOnNextFrame?: boolean }) => {
     const force = options?.force === true;
+    const repeatOnNextFrame = options?.repeatOnNextFrame ?? force;
     if (force) {
       lastFittedSizeRef.current = null;
     }
     safeFit({ force, requireVisible: true });
-    if (force && typeof requestAnimationFrame === 'function') {
+    if (force && repeatOnNextFrame && typeof requestAnimationFrame === 'function') {
       requestAnimationFrame(() => {
         safeFit({ force: true, requireVisible: true });
       });
@@ -596,13 +597,13 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
   // Re-fit after the app returns from the background, macOS fullscreen toggles,
   // or other layout changes that do not reliably fire window.resize /
   // ResizeObserver (common after App Nap / GPU context eviction).
-  const scheduleLayoutRecoveryRefit = (delaysMs: number[] = [0, 100, 350]) => {
+  const scheduleLayoutRecoveryRefit = (delaysMs: number[] = [80, 250]) => {
     clearLayoutRecoveryTimers();
     for (const delayMs of delaysMs) {
       const timerId = setTimeout(() => {
         layoutRecoveryTimersRef.current = layoutRecoveryTimersRef.current.filter((id) => id !== timerId);
         if (!isVisibleRef.current) return;
-        runImmediateRefit({ force: true });
+        runImmediateRefit({ force: true, repeatOnNextFrame: false });
       }, delayMs);
       layoutRecoveryTimersRef.current.push(timerId);
     }

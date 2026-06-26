@@ -100,10 +100,14 @@ export const useTerminalBackend = () => {
     return bridge.setSessionEncoding(sessionId, encoding);
   }, []);
 
-  const onSessionData = useCallback((sessionId: string, cb: (data: string) => void) => {
+  const onSessionData = useCallback((
+    sessionId: string,
+    cb: (data: string) => void,
+    options?: Parameters<NetcattyBridge["onSessionData"]>[2],
+  ) => {
     const bridge = netcattyBridge.get();
     if (!bridge?.onSessionData) throw new Error("onSessionData unavailable");
-    return bridge.onSessionData(sessionId, cb);
+    return bridge.onSessionData(sessionId, cb, options);
   }, []);
 
   const onSessionExit = useCallback((sessionId: string, cb: (evt: { exitCode?: number; signal?: number; error?: string; reason?: "exited" | "error" | "timeout" | "closed" }) => void) => {

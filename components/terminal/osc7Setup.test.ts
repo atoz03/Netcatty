@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
@@ -42,6 +42,27 @@ const extractOsc7Path = (output: string) => {
   assert.ok(fileUrl.startsWith("file://"), "expected OSC 7 file URL");
 
   return decodeURIComponent(new URL(fileUrl).pathname);
+};
+
+const runInteractiveHistoryProbe = ({
+  shellPath,
+  shellArgs,
+  historyCommand,
+  env,
+}: {
+  shellPath: string;
+  shellArgs: string[];
+  historyCommand: string;
+  env: NodeJS.ProcessEnv;
+}) => {
+  const result = spawnSync(shellPath, shellArgs, {
+    env: { ...process.env, ZDOTDIR: "", XDG_CONFIG_HOME: "", ...env },
+    input: `${buildOsc7SetupCommand()}\n${historyCommand}\nexit\n`,
+    encoding: "utf8",
+  });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  return `${result.stdout ?? ""}${result.stderr ?? ""}`;
 };
 
 test("shouldOfferOsc7SetupAction only allows remote shell-style sessions", () => {
@@ -161,6 +182,47 @@ test("buildOsc7SetupCommand can be pasted into supported shells", () => {
       assert.equal(realpathSync(extractOsc7Path(output)), realpathSync(specialCwd), shellPath);
     });
   }
+});
+
+test("buildOsc7SetupCommand does not leave setup payload in bash history", () => {
+  withTempHome("netcatty-osc7-history-bash-", (home) => {
+    const output = runInteractiveHistoryProbe({
+      shellPath: "/bin/bash",
+      shellArgs: ["--noprofile", "--norc", "-i"],
+      historyCommand: "history",
+      env: {
+        HOME: home,
+        HISTFILE: join(home, ".bash_history"),
+        SHELL: "/bin/bash",
+      },
+    });
+
+    assert.doesNotMatch(output, /Netcatty OSC 7 cwd tracking|osc7_cwd|printf "%s\\n"/);
+  });
+});
+
+test("buildOsc7SetupCommand does not leave setup payload in zsh history", (t) => {
+  const zshPath = existingShells(["/bin/zsh", "/usr/bin/zsh"])[0];
+  if (!zshPath) {
+    t.skip("zsh is not installed on this runner");
+    return;
+  }
+
+  withTempHome("netcatty-osc7-history-zsh-", (home) => {
+    const output = runInteractiveHistoryProbe({
+      shellPath: zshPath,
+      shellArgs: ["-f", "-i"],
+      historyCommand: "fc -l 1",
+      env: {
+        HOME: home,
+        HISTFILE: join(home, ".zsh_history"),
+        SHELL: zshPath,
+        ZDOTDIR: home,
+      },
+    });
+
+    assert.doesNotMatch(output, /Netcatty OSC 7 cwd tracking|osc7_cwd|printf "%s\\n"/);
+  });
 });
 
 test("buildOsc7SetupCommand runs under strict unset-variable mode", () => {

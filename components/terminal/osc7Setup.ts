@@ -52,6 +52,10 @@ const quoteForSingleQuotedShellString = (value: string): string =>
 
 const URL_PATH_AWK_SCRIPT_QUOTED = quoteForSingleQuotedShellString(URL_PATH_AWK_SCRIPT);
 
+const BASH_DELETE_CURRENT_HISTORY = String.raw`test -n "$BASH_VERSION" && history -d $(history 1 | sed "s/^ *\([0-9][0-9]*\).*/\1/") 2>/dev/null || true`;
+const ZSH_SUPPRESS_NEXT_HISTORY = String.raw`test -n "$ZSH_VERSION" && eval 'zshaddhistory(){ return 1; }' || true`;
+const ZSH_RESTORE_HISTORY_HOOK = String.raw`test -n "$ZSH_VERSION" && eval 'unfunction zshaddhistory 2>/dev/null || true' || true`;
+
 const POSIX_SETUP_SCRIPT = String.raw`set -eu
 marker="# >>> Netcatty OSC 7 cwd tracking >>>"
 parent_shell=$(ps -p "$PPID" -o comm= 2>/dev/null | sed "s/^-//" | tr -d "[:space:]")
@@ -147,4 +151,8 @@ host=$(hostname 2>/dev/null || printf localhost)
 printf '\033]7;file://%s%s\a' "$host" "$(__netcatty_osc7_url_path "$PWD")"`;
 
 export const buildOsc7SetupCommand = (): string =>
-  `set +u 2>/dev/null || true; printf "%s\\n" ${quoteForSingleQuotedShellString(POSIX_SETUP_SCRIPT)} | env NETCATTY_ZDOTDIR="$ZDOTDIR" NETCATTY_XDG_CONFIG_HOME="$XDG_CONFIG_HOME" sh\n`;
+  [
+    `set +u 2>/dev/null || true; ${ZSH_SUPPRESS_NEXT_HISTORY}; ${BASH_DELETE_CURRENT_HISTORY}`,
+    `set +u 2>/dev/null || true; printf "%s\\n" ${quoteForSingleQuotedShellString(POSIX_SETUP_SCRIPT)} | env NETCATTY_ZDOTDIR="$ZDOTDIR" NETCATTY_XDG_CONFIG_HOME="$XDG_CONFIG_HOME" sh; ${BASH_DELETE_CURRENT_HISTORY}`,
+    `${ZSH_RESTORE_HISTORY_HOOK}; ${BASH_DELETE_CURRENT_HISTORY}`,
+  ].join("\n") + "\n";

@@ -81,7 +81,10 @@ import {
 } from "./terminalInterruptDiagnostics";
 import { clearTerminalInputStateForInterrupt } from "./terminalInterruptInputState";
 import { getFlowControllerForTerm } from "./terminalSessionAttachment";
-import { prioritizeTerminalInput } from "./terminalOutputPipeline";
+import {
+  prioritizeTerminalInput,
+  shouldArmTerminalInterruptDisplayGateForProtocol,
+} from "./terminalOutputPipeline";
 import {
   markExpectedTerminalCursorPositionReport,
   pasteTextIntoTerminal,
@@ -807,11 +810,15 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
         const rendererKeyAt = Date.now();
         e.preventDefault();
         e.stopPropagation();
+        const priorityOptions = shouldArmTerminalInterruptDisplayGateForProtocol(ctx.host.protocol)
+          ? { reason: "interrupt" as const }
+          : undefined;
         const priority = prioritizeTerminalInput(
           term,
           id,
           getFlowControllerForTerm(term),
           ctx.terminalBackend,
+          priorityOptions,
         );
         const interruptTrace = createTerminalInterruptTrace({
           sessionId: id,

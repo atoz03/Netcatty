@@ -25,6 +25,35 @@ class FakeChild extends EventEmitter {
   }
 }
 
+class FakePort extends EventEmitter {
+  constructor(label) {
+    super();
+    this.label = label;
+    this.messages = [];
+    this.closed = false;
+    this.started = false;
+  }
+
+  postMessage(message) {
+    this.messages.push(message);
+  }
+
+  start() {
+    this.started = true;
+  }
+
+  close() {
+    this.closed = true;
+  }
+}
+
+class FakeMessageChannelMain {
+  constructor() {
+    this.port1 = new FakePort("port1");
+    this.port2 = new FakePort("port2");
+  }
+}
+
 test("isTerminalWorkerEnabled defaults on and honors NETCATTY_TERMINAL_WORKER=0", () => {
   assert.equal(isTerminalWorkerEnabled({ env: {} }), true);
   assert.equal(isTerminalWorkerEnabled({ env: { NETCATTY_TERMINAL_WORKER: "0" } }), false);
@@ -138,6 +167,46 @@ test("request transfers the output port to the worker when available", async () 
     bufferedOutput: ["early"],
   });
   assert.deepEqual(child.transferLists[1], [outputPort]);
+});
+
+test("request transfers a dedicated urgent input port to the worker and renderer", async () => {
+  const child = new FakeChild();
+  const rendererMessages = [];
+  const manager = createTerminalWorkerManager({
+    utilityProcess: {
+      fork() {
+        return child;
+      },
+    },
+    MessageChannelMain: FakeMessageChannelMain,
+    electronModule: {
+      webContents: {
+        fromId(id) {
+          return {
+            id,
+            postMessage(channel, payload, transferList) {
+              rendererMessages.push({ id, channel, payload, transferList });
+            },
+          };
+        },
+      },
+    },
+    workerScriptPath: "/worker.cjs",
+  });
+
+  const promise = manager.request("netcatty:local:start", {}, { webContentsId: 7 });
+  child.emit("message", {
+    kind: "response",
+    requestId: child.messages[0].requestId,
+    result: { sessionId: "local-1" },
+  });
+  await promise;
+
+  assert.equal(child.messages[1].kind, "urgent-input-port");
+  assert.equal(child.messages[1].webContentsId, 7);
+  assert.deepEqual(child.transferLists[1].map((port) => port.label), ["port1"]);
+  assert.equal(rendererMessages[0].channel, "netcatty:terminal-urgent-input-port");
+  assert.deepEqual(rendererMessages[0].transferList.map((port) => port.label), ["port2"]);
 });
 
 test("output-port-ready flushes output that arrived during port transfer", async () => {

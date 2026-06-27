@@ -90,6 +90,57 @@ function createOutputPortRegistry(parentPort) {
   };
 }
 
+function addPortMessageListener(port, callback) {
+  if (typeof port?.on === "function") {
+    port.on("message", callback);
+    return;
+  }
+  if (port) {
+    port.onmessage = callback;
+  }
+}
+
+function createUrgentInputPortRegistry(dispatch) {
+  const ports = new Map();
+
+  function close(webContentsId) {
+    const port = ports.get(webContentsId);
+    if (!port) return;
+    ports.delete(webContentsId);
+    try {
+      port.close?.();
+    } catch {
+      // Ignore stale urgent input port close races.
+    }
+  }
+
+  function open(webContentsId, port) {
+    if (!webContentsId || !port) return;
+    close(webContentsId);
+    ports.set(webContentsId, port);
+    addPortMessageListener(port, (eventOrMessage) => {
+      const { message } = normalizeMessageEvent(eventOrMessage);
+      dispatch(webContentsId, message);
+    });
+    try {
+      port.start?.();
+    } catch {
+      // Some Electron MessagePort implementations do not require start().
+    }
+  }
+
+  function closeAll() {
+    for (const webContentsId of Array.from(ports.keys())) {
+      close(webContentsId);
+    }
+  }
+
+  return {
+    open,
+    closeAll,
+  };
+}
+
 function createSender(parentPort, webContentsId, outputPorts) {
   return {
     id: webContentsId,
@@ -129,6 +180,7 @@ function createTerminalWorkerRuntime(options = {}) {
   const ipcMain = createIpcMainHarness();
   let started = false;
   const outputPorts = createOutputPortRegistry(parentPort);
+  let urgentInputPorts = null;
 
   async function handleRequest(message) {
     const handler = ipcMain.handlers.get(message.channel);
@@ -176,8 +228,25 @@ function createTerminalWorkerRuntime(options = {}) {
     }, message.payload);
   }
 
+  function handleUrgentInput(webContentsId, message) {
+    if (message?.kind !== "interrupt" || !message.sessionId) return;
+    handleSend({
+      channel: "netcatty:interrupt",
+      payload: {
+        sessionId: message.sessionId,
+        trace: message.trace,
+        urgentInputPort: true,
+      },
+      webContentsId,
+    });
+  }
+
   function handleMessage(eventOrMessage) {
     const { message, ports } = normalizeMessageEvent(eventOrMessage);
+    if (message?.kind === "urgent-input-port") {
+      urgentInputPorts?.open(message.webContentsId, ports?.[0]);
+      return;
+    }
     if (message?.kind === "output-port") {
       outputPorts.open(message.sessionId, ports?.[0], message.bufferedOutput);
       return;
@@ -202,6 +271,7 @@ function createTerminalWorkerRuntime(options = {}) {
   function start() {
     if (started) return;
     started = true;
+    urgentInputPorts = createUrgentInputPortRegistry(handleUrgentInput);
     registerBridges?.(ipcMain);
     parentPort.on("message", handleMessage);
   }
@@ -211,6 +281,9 @@ function createTerminalWorkerRuntime(options = {}) {
     ipcMain,
     createSender(webContentsId) {
       return createSender(parentPort, webContentsId, outputPorts);
+    },
+    closeUrgentInputPortsForTest() {
+      urgentInputPorts?.closeAll();
     },
   };
 }

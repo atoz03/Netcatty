@@ -6,6 +6,9 @@ const {
   logTerminalInterruptDebug,
   normalizeTrace,
 } = require("./terminalInterruptDiagnostics.cjs");
+const {
+  TERMINAL_URGENT_INPUT_PORT_CHANNEL,
+} = require("./terminalUrgentInputChannel.cjs");
 
 function isTerminalWorkerEnabled(options = {}) {
   const env = options.env || process.env;
@@ -20,6 +23,7 @@ function createTerminalWorkerManager(options = {}) {
   const {
     utilityProcess,
     terminalOutputChannel = null,
+    MessageChannelMain = null,
     workerScriptPath = defaultWorkerScriptPath(),
     electronModule = null,
     onRendererEvent = null,
@@ -31,6 +35,7 @@ function createTerminalWorkerManager(options = {}) {
   const outputPortPending = new Set();
   const outputPortReady = new Set();
   const sessionWebContentsIds = new Map();
+  const urgentInputWebContentsIds = new Set();
   const maxPendingOutputChunks = Number.isFinite(options.maxPendingOutputChunks)
     ? Math.max(0, Math.trunc(options.maxPendingOutputChunks))
     : 512;
@@ -100,6 +105,7 @@ function createTerminalWorkerManager(options = {}) {
     }
     sessionWebContentsIds.set(sessionId, webContentsId);
     const contents = electronModule?.webContents?.fromId?.(webContentsId);
+    openUrgentInputPort(webContentsId, contents);
     const outputPort = terminalOutputChannel?.openSession?.(sessionId, contents, {
       transferToWorker: true,
     });
@@ -128,6 +134,27 @@ function createTerminalWorkerManager(options = {}) {
       // The worker may already be gone while closing a tab or quitting.
     }
     terminalOutputChannel?.closeSession?.(sessionId);
+  }
+
+  function openUrgentInputPort(webContentsId, contents) {
+    if (!webContentsId || urgentInputWebContentsIds.has(webContentsId)) return false;
+    if (typeof MessageChannelMain !== "function" || !contents?.postMessage || !child?.postMessage) {
+      return false;
+    }
+    const { port1, port2 } = new MessageChannelMain();
+    try {
+      child.postMessage({
+        kind: "urgent-input-port",
+        webContentsId,
+      }, [port1]);
+      contents.postMessage(TERMINAL_URGENT_INPUT_PORT_CHANNEL, {}, [port2]);
+      urgentInputWebContentsIds.add(webContentsId);
+      return true;
+    } catch {
+      try { port1?.close?.(); } catch {}
+      try { port2?.close?.(); } catch {}
+      return false;
+    }
   }
 
   function flushOutputToWorker(sessionId) {
@@ -221,6 +248,7 @@ function createTerminalWorkerManager(options = {}) {
     outputPortPending.clear();
     outputPortReady.clear();
     sessionWebContentsIds.clear();
+    urgentInputWebContentsIds.clear();
     terminalOutputChannel?.closeAll?.();
     rejectAllPending(error);
   }
@@ -287,6 +315,7 @@ function createTerminalWorkerManager(options = {}) {
       outputPortPending.clear();
       outputPortReady.clear();
       sessionWebContentsIds.clear();
+      urgentInputWebContentsIds.clear();
       terminalOutputChannel?.closeAll?.();
       rejectAllPending(new Error("Terminal worker stopped"));
     }

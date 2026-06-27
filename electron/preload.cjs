@@ -10,6 +10,9 @@ const {
 const {
   createTerminalOutputPortRegistry,
 } = require("./preload/terminalOutputPorts.cjs");
+const {
+  createTerminalUrgentInputPortRegistry,
+} = require("./preload/terminalUrgentInputPorts.cjs");
 
 const dataListeners = new Map();
 const displayDataListeners = new Map();
@@ -183,6 +186,11 @@ const terminalOutputPorts = createTerminalOutputPortRegistry({
   closedTerminalDataSessions,
 });
 terminalOutputPorts.register();
+
+const terminalUrgentInputPorts = createTerminalUrgentInputPortRegistry({
+  ipcRenderer,
+});
+terminalUrgentInputPorts.register();
 
 // ZMODEM file transfer events
 ipcRenderer.on("netcatty:zmodem:detect", (_event, payload) => {
@@ -732,6 +740,7 @@ const api = createPreloadApi({
   telnetEchoModeListeners,
   terminalDataBacklog,
   terminalOutputPorts,
+  terminalUrgentInputPorts,
   languageChangeListeners,
   fullscreenChangeListeners,
   windowShownListeners,

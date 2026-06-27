@@ -4,6 +4,9 @@ const test = require("node:test");
 const {
   createTerminalOutputPortRegistry,
 } = require("./preload/terminalOutputPorts.cjs");
+const {
+  createTerminalUrgentInputPortRegistry,
+} = require("./preload/terminalUrgentInputPorts.cjs");
 
 function createFakeIpcRenderer() {
   const handlers = new Map();
@@ -14,12 +17,23 @@ function createFakeIpcRenderer() {
     emitPort(sessionId, port) {
       handlers.get("netcatty:terminal-output-port")?.({ ports: [port] }, { sessionId });
     },
+    emitUrgentPort(port) {
+      handlers.get("netcatty:terminal-urgent-input-port")?.({ ports: [port] }, {});
+    },
   };
 }
 
 function createFakePort() {
   return {
+    messages: [],
     closed: false,
+    started: false,
+    postMessage(message) {
+      this.messages.push(message);
+    },
+    start() {
+      this.started = true;
+    },
     close() {
       this.closed = true;
     },
@@ -144,4 +158,24 @@ test("closeSession closes and removes a terminal output port", () => {
 
   assert.equal(port.closed, true);
   assert.equal(registry.hasSessionForTest("session-1"), false);
+});
+
+test("urgent input port posts interrupt messages over the transferred port", () => {
+  const ipcRenderer = createFakeIpcRenderer();
+  const registry = createTerminalUrgentInputPortRegistry({ ipcRenderer });
+  const port = createFakePort();
+
+  registry.register();
+  ipcRenderer.emitUrgentPort(port);
+  const sent = registry.postInterrupt("session-1", { traceId: "trace-1" });
+
+  assert.equal(sent, true);
+  assert.equal(port.started, true);
+  assert.deepEqual(port.messages, [
+    {
+      kind: "interrupt",
+      sessionId: "session-1",
+      trace: { traceId: "trace-1" },
+    },
+  ]);
 });

@@ -261,6 +261,56 @@ test("closeSession clears terminal data state and marks the session closed", () 
   ]);
 });
 
+test("interruptSession uses the urgent input port before falling back to IPC", () => {
+  const sent = [];
+  const urgent = [];
+  const api = createPreloadApi({
+    ipcRenderer: {
+      invoke() {},
+      send(channel, payload) {
+        sent.push({ channel, payload });
+      },
+      on() {},
+      removeListener() {},
+    },
+    os: {
+      release: () => "10.0.19045",
+    },
+    dataListeners: new Map(),
+    displayDataListeners: new Map(),
+    terminalDataBacklog: createTerminalDataBacklog(),
+    terminalUrgentInputPorts: {
+      postInterrupt(sessionId, trace) {
+        urgent.push({ sessionId, trace });
+        return true;
+      },
+    },
+  });
+
+  api.interruptSession("session-1", {
+    traceId: "trace-1",
+    rendererKeyAt: 123,
+  });
+
+  assert.deepEqual(urgent, [
+    {
+      sessionId: "session-1",
+      trace: {
+        traceId: "trace-1",
+        rendererKeyAt: 123,
+        rendererHasSelection: false,
+        debug: false,
+        rendererPriority: undefined,
+        rendererSendAt: undefined,
+        rendererStatus: undefined,
+        sessionId: undefined,
+        source: undefined,
+      },
+    },
+  ]);
+  assert.deepEqual(sent, []);
+});
+
 test("startLocalSession reopens a previously closed terminal data session", async () => {
   const closedTerminalDataSessions = new Set(["session-1"]);
   const invoked = [];

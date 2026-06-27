@@ -129,7 +129,11 @@ function createPreloadApi(ctx) {
     });
   },
   interruptSession: (sessionId, trace) => {
-    ipcRenderer.send("netcatty:interrupt", { sessionId, trace: sanitizeInterruptTrace(trace) });
+    const sanitizedTrace = sanitizeInterruptTrace(trace);
+    if (ctx.terminalUrgentInputPorts?.postInterrupt?.(sessionId, sanitizedTrace)) {
+      return;
+    }
+    ipcRenderer.send("netcatty:interrupt", { sessionId, trace: sanitizedTrace });
   },
   execCommand: async (options) => {
     return ipcRenderer.invoke("netcatty:ssh:exec", options);

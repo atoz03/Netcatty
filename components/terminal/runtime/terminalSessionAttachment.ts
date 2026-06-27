@@ -52,6 +52,7 @@ import {
   setTerminalWriteQueueDropHandler,
 } from "./terminalWriteQueue";
 import {
+  filterTerminalInterruptDisplayOutput,
   releaseTerminalFlowOutputForTerm,
   teardownTerminalOutputPipeline,
 } from "./terminalOutputPipeline";
@@ -135,6 +136,19 @@ export const getFlowController = (
 };
 
 export const resetTerminalLineTimestampState = resetTerminalLineTimestamps;
+
+const acknowledgeDroppedTerminalDisplayBytes = (
+  ctx: TerminalSessionStartersContext,
+  bytes: number,
+): void => {
+  if (bytes <= 0) return;
+  const sessionId = ctx.sessionRef.current;
+  ackTerminalSessionFlow(ctx.terminalBackend, sessionId, bytes);
+  if (sessionId) {
+    flushTerminalSessionFlowAck(sessionId);
+    ctx.terminalBackend.setSessionFlowPaused?.(sessionId, false);
+  }
+};
 
 export const writeTerminalLine = (
   ctx: TerminalSessionStartersContext,
@@ -341,8 +355,12 @@ export const attachSessionToTerminal = (
   ctx.disposeDataRef.current = ctx.terminalBackend.onSessionData(
     id,
     (chunk) => {
-      const ingressBytes = chunk.length;
-      let data = chunk;
+      const filtered = filterTerminalInterruptDisplayOutput(term, chunk);
+      acknowledgeDroppedTerminalDisplayBytes(ctx, filtered.droppedBytes);
+      if (!filtered.accepted) return;
+
+      const ingressBytes = filtered.acceptedBytes ?? filtered.data.length;
+      let data = filtered.data;
       if (opts?.convertLfToCrlf) {
         data = data.replace(/(?<!\r)\n/g, "\r\n");
       }

@@ -151,6 +151,7 @@ function createBridgeRegistrar(context) {
           utilityProcess: electronModule.utilityProcess,
           electronModule,
           terminalOutputChannel,
+          MessageChannelMain: electronModule.MessageChannelMain,
         })
       : null;
     const deps = {

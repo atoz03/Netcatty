@@ -8,6 +8,7 @@ class FakePort {
     this.messages = [];
     this.closed = false;
     this.started = false;
+    this.listeners = new Map();
   }
 
   postMessage(message) {
@@ -20,6 +21,19 @@ class FakePort {
 
   close() {
     this.closed = true;
+  }
+
+  on(channel, callback) {
+    this.listeners.set(channel, callback);
+  }
+
+  emitMessage(message) {
+    const callback = this.listeners.get("message");
+    if (callback) {
+      callback({ data: message });
+      return;
+    }
+    this.onmessage?.({ data: message });
   }
 }
 
@@ -87,6 +101,46 @@ test("runtime invokes fire-and-forget listeners", () => {
   });
 
   assert.deepEqual(calls, [{ sessionId: "s1", data: "x" }]);
+});
+
+test("runtime routes urgent input port interrupts to the interrupt listener", () => {
+  const parentPort = createParentPort();
+  const urgentPort = new FakePort();
+  const calls = [];
+  const runtime = createTerminalWorkerRuntime({
+    parentPort,
+    registerBridges(ipcMain) {
+      ipcMain.on("netcatty:interrupt", (event, payload) => {
+        calls.push({ senderId: event.sender.id, payload });
+      });
+    },
+  });
+  runtime.start();
+
+  parentPort.emitMessage({
+    data: {
+      kind: "urgent-input-port",
+      webContentsId: 7,
+    },
+    ports: [urgentPort],
+  });
+  urgentPort.emitMessage({
+    kind: "interrupt",
+    sessionId: "s1",
+    trace: { traceId: "trace-1" },
+  });
+
+  assert.equal(urgentPort.started, true);
+  assert.deepEqual(calls, [
+    {
+      senderId: 7,
+      payload: {
+        sessionId: "s1",
+        trace: { traceId: "trace-1" },
+        urgentInputPort: true,
+      },
+    },
+  ]);
 });
 
 test("runtime routes terminal data over output messages", async () => {

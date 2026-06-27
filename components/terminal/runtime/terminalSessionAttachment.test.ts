@@ -2,7 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { Terminal as XTerm } from "@xterm/xterm";
 
-import { FLOW_CHAR_COUNT_ACK_SIZE, XTERM_WRITE_CALLBACK_BATCH_BYTES } from "./terminalFlowConstants.ts";
+import {
+  FLOW_CHAR_COUNT_ACK_SIZE,
+  FLOW_LOW_WATER_MARK,
+  XTERM_WRITE_CALLBACK_BATCH_BYTES,
+} from "./terminalFlowConstants.ts";
 import {
   attachSessionToTerminal,
   getFlowController,
@@ -18,6 +22,7 @@ import {
   clearDeferredTerminalWriteAck,
   getDeferredTerminalWriteAckBytes,
 } from "./terminalWriteAckDeferral.ts";
+import { prioritizeTerminalInput } from "./terminalOutputPipeline";
 
 const createFakeTerm = (activeType = "normal") => {
   const writes: string[] = [];
@@ -307,6 +312,83 @@ test("attachSessionToTerminal resets timestamp state for a reused terminal", () 
 
   assert.equal(writes.length, 2);
   assert.equal(writes[1], "fresh");
+});
+
+test("attachSessionToTerminal drops interrupt-stale output before terminal, AI, and log side effects", () => {
+  clearTerminalSessionFlowAck("session-1");
+  const { term, writes } = createFakeTerm();
+  const acked: number[] = [];
+  const output: string[] = [];
+  const logs: string[] = [];
+  let onData: ((data: string) => void) | null = null;
+  const ctx = {
+    ...createContext(false),
+    sessionId: "session-1",
+    sessionRef: { current: null },
+    hasConnectedRef: { current: true },
+    hasRunStartupCommandRef: { current: false },
+    disposeDataRef: { current: null },
+    disposeExitRef: { current: null },
+    fitAddonRef: { current: null },
+    serializeAddonRef: { current: null },
+    pendingAuthRef: { current: null },
+    onTerminalOutput: (chunk: string) => output.push(chunk),
+    onTerminalLogData: (chunk: string) => logs.push(chunk),
+    terminalBackend: {
+      onSessionData: (_id: string, cb: (data: string) => void) => {
+        onData = cb;
+        return () => {};
+      },
+      onSessionExit: () => () => {},
+      ackSessionFlow: (_sessionId: string, bytes: number) => {
+        acked.push(bytes);
+      },
+      setSessionFlowPaused: () => {},
+    },
+    updateStatus: () => {},
+    setError: () => {},
+    onSessionExit: () => {},
+  };
+
+  attachSessionToTerminal(ctx as never, term, "session-1");
+  const flow = getFlowController(ctx as never, term);
+  flow.received(FLOW_LOW_WATER_MARK + 1);
+  prioritizeTerminalInput(
+    term,
+    "session-1",
+    flow,
+    ctx.terminalBackend,
+    (callback: () => void) => callback(),
+    { reason: "interrupt", quietMs: 500, promptQuietMs: 80, maxDrainMs: 1000 },
+  );
+
+  onData?.("old output");
+  flushTerminalWriteCoalescer(term);
+
+  assert.deepEqual(writes, []);
+  assert.deepEqual(output, []);
+  assert.deepEqual(logs, []);
+  assert.deepEqual(acked, [10]);
+
+  onData?.("^");
+  flushTerminalWriteCoalescer(term);
+
+  assert.deepEqual(writes, []);
+  assert.deepEqual(output, []);
+  assert.deepEqual(logs, []);
+  assert.deepEqual(acked, [10, 1]);
+
+  onData?.("C\r\n$ ");
+  flushTerminalWriteCoalescer(term);
+  flushTerminalSessionFlowAck("session-1");
+
+  assert.equal(writes.join(""), "^C\r\n$ ");
+  assert.equal(output.join(""), "^C\r\n$ ");
+  assert.equal(logs.join(""), "^C\r\n$ ");
+  assert.deepEqual(acked, [10, 1]);
+  assert.equal(getDeferredTerminalWriteAckBytes(term), 5);
+  clearDeferredTerminalWriteAck(term);
+  clearTerminalSessionFlowAck("session-1");
 });
 
 test("attachSessionToTerminal hints for sudo password prompts and fills on confirm", () => {

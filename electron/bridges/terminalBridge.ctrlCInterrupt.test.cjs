@@ -18,7 +18,7 @@ function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-test("SSH Ctrl+C signals INT immediately and still writes the original byte", () => {
+test("SSH Ctrl+C writes the original byte without sending a channel signal", () => {
   const calls = [];
   const sessions = new Map();
   sessions.set("ssh-1", {
@@ -36,7 +36,6 @@ test("SSH Ctrl+C signals INT immediately and still writes the original byte", ()
   terminalBridge.writeToSession({ sender: {} }, { sessionId: "ssh-1", data: "\x03" });
 
   assert.deepEqual(calls, [
-    ["signal", "INT"],
     ["write", "\x03"],
   ]);
 });
@@ -63,7 +62,6 @@ test("interruptSession discards pending output before sending SSH Ctrl+C", () =>
 
   assert.deepEqual(calls, [
     ["discard"],
-    ["signal", "INT"],
     ["write", "\x03"],
   ]);
 });
@@ -98,7 +96,6 @@ test("interruptSession sends SSH Ctrl+C before resuming a paused output flood", 
   assert.deepEqual(calls, [
     ["pause"],
     ["discard"],
-    ["signal", "INT"],
     ["write", "\x03"],
   ]);
 
@@ -106,10 +103,74 @@ test("interruptSession sends SSH Ctrl+C before resuming a paused output flood", 
   assert.deepEqual(calls, [
     ["pause"],
     ["discard"],
-    ["signal", "INT"],
     ["write", "\x03"],
     ["resume"],
   ]);
+});
+
+test("interruptSession pauses SSH output before sending Ctrl+C even without existing backpressure", async () => {
+  const calls = [];
+  const sessions = new Map();
+  sessions.set("ssh-1", {
+    discardPendingData() {
+      calls.push(["discard"]);
+    },
+    stream: {
+      pause() {
+        calls.push(["pause"]);
+      },
+      resume() {
+        calls.push(["resume"]);
+      },
+      signal(signalName) {
+        calls.push(["signal", signalName]);
+      },
+      write(data) {
+        calls.push(["write", data]);
+      },
+    },
+  });
+  initBridge(sessions);
+
+  terminalBridge.interruptSession({ sender: {} }, { sessionId: "ssh-1" });
+
+  assert.deepEqual(calls, [
+    ["pause"],
+    ["discard"],
+    ["write", "\x03"],
+  ]);
+
+  await delay(0);
+  assert.deepEqual(calls, [
+    ["pause"],
+    ["discard"],
+    ["write", "\x03"],
+    ["resume"],
+  ]);
+});
+
+test("interruptSession arms SSH output drain even for tiny in-flight echo", () => {
+  const sessions = new Map();
+  const session = {
+    discardPendingData() {},
+    flowState: {
+      rendererPaused: false,
+      unackedBytes: 119,
+      appliedPause: false,
+    },
+    stream: {
+      pause() {},
+      resume() {},
+      signal() {},
+      write() {},
+    },
+  };
+  sessions.set("ssh-1", session);
+  initBridge(sessions);
+
+  terminalBridge.interruptSession({ sender: {} }, { sessionId: "ssh-1" });
+
+  assert.equal(session._interruptOutputGate?.active, true);
 });
 
 test("interruptSession arms SSH output drain when interrupting a paused output flood", () => {
@@ -135,7 +196,7 @@ test("interruptSession arms SSH output drain when interrupting a paused output f
   assert.equal(session._interruptOutputGate?.active, true);
 });
 
-test("interruptSession does not arm SSH output drain for tiny in-flight echo", () => {
+test("ordinary SSH input disarms a pending interrupt output drain", () => {
   const sessions = new Map();
   const session = {
     discardPendingData() {},
@@ -154,11 +215,14 @@ test("interruptSession does not arm SSH output drain for tiny in-flight echo", (
   initBridge(sessions);
 
   terminalBridge.interruptSession({ sender: {} }, { sessionId: "ssh-1" });
+  assert.equal(session._interruptOutputGate?.active, true);
 
-  assert.equal(session._interruptOutputGate, undefined);
+  terminalBridge.writeToSession({ sender: {} }, { sessionId: "ssh-1", data: "l" });
+
+  assert.equal(session._interruptOutputGate?.active, false);
 });
 
-test("SSH Ctrl+C still writes when the server does not support channel signals", () => {
+test("SSH Ctrl+C does not use channel signals even when the stream exposes them", () => {
   const calls = [];
   const sessions = new Map();
   sessions.set("ssh-1", {
@@ -177,7 +241,6 @@ test("SSH Ctrl+C still writes when the server does not support channel signals",
   terminalBridge.writeToSession({ sender: {} }, { sessionId: "ssh-1", data: "\x03" });
 
   assert.deepEqual(calls, [
-    ["signal", "INT"],
     ["write", "\x03"],
   ]);
 });

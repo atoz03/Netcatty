@@ -40,6 +40,7 @@ const {
 } = require("./terminalFlowAck.cjs");
 const {
   armTerminalInterruptOutputGate,
+  disarmTerminalInterruptOutputGate,
   shouldArmTerminalInterruptOutputGate,
 } = require("./terminalInterruptOutputGate.cjs");
 const iconv = require("iconv-lite");
@@ -749,21 +750,35 @@ function cancelActiveYmodemSession(session) {
   session.ymodemAbortController?.abort();
 }
 
-function signalSshInterruptIfNeeded(session, data, trace) {
-  if (data !== '\x03' || !session?.stream || typeof session.stream.signal !== "function") return;
-  logTerminalInterruptDebug("ssh-signal-int-start", {
+function pauseSshOutputForInterrupt(session, trace) {
+  const stream = session?.stream;
+  if (!stream || typeof stream.pause !== "function") return false;
+  const flowState = session.flowState;
+  let alreadyPaused = Boolean(flowState?.appliedPause || flowState?.rendererPaused);
+  try {
+    if (typeof stream.isPaused === "function") {
+      alreadyPaused = alreadyPaused || stream.isPaused();
+    }
+  } catch {
+    // Treat unreadable pause state as not paused; a best-effort pause is fine.
+  }
+  if (alreadyPaused) return false;
+  logTerminalInterruptDebug("interrupt-output-pause-before-write-start", {
     session: getSessionSnapshot(session),
   }, trace);
   try {
-    session.stream.signal("INT");
-    logTerminalInterruptDebug("ssh-signal-int-done", {
+    stream.pause();
+    logTerminalInterruptDebug("interrupt-output-pause-before-write-done", {
       session: getSessionSnapshot(session),
     }, trace);
-  } catch {
-    logTerminalInterruptDebug("ssh-signal-int-failed", {
+    return true;
+  } catch (err) {
+    logTerminalInterruptDebug("interrupt-output-pause-before-write-failed", {
+      error: err?.message || String(err),
+      code: err?.code,
       session: getSessionSnapshot(session),
     }, trace);
-    // Keep the legacy Ctrl+C byte write as the compatibility fallback.
+    return false;
   }
 }
 
@@ -856,6 +871,9 @@ function writeToSessionNow(payload, data, logRewrite = payload.logRewrite) {
     }, trace);
     return;
   }
+  if (data !== "\x03" && !payload.automated && !isTerminalReportSequence(data)) {
+    disarmTerminalInterruptOutputGate(session);
+  }
 
   try {
     if (session.type === 'telnet-native' && !payload.automated) {
@@ -877,7 +895,6 @@ function writeToSessionNow(payload, data, logRewrite = payload.logRewrite) {
     const outgoing = encodeTerminalInput(inputData, session.encoding);
 
     if (session.stream) {
-      signalSshInterruptIfNeeded(session, data, trace);
       const shouldLogInterruptWrite = data === "\x03" || trace;
       if (shouldLogInterruptWrite) {
         logTerminalInterruptDebug("ssh-stream-write-start", {
@@ -984,12 +1001,13 @@ function interruptSession(event, payload) {
   }, trace);
 
   clearPendingAutomatedWrites(session);
+  const pausedForInterrupt = pauseSshOutputForInterrupt(session, trace);
   const discardedBytes = session.discardPendingData?.() || 0;
   logTerminalInterruptDebug("interrupt-discard-pending-output", {
     discardedBytes,
     session: getSessionSnapshot(session),
   }, trace);
-  const shouldDrainOldOutput = shouldArmTerminalInterruptOutputGate(session);
+  const shouldDrainOldOutput = Boolean(session.stream) || shouldArmTerminalInterruptOutputGate(session);
   if (shouldDrainOldOutput) {
     armTerminalInterruptOutputGate(session);
     logTerminalInterruptDebug("interrupt-output-drain-armed", {
@@ -1004,7 +1022,7 @@ function interruptSession(event, payload) {
     session: getSessionSnapshot(session),
   }, trace);
   writeToSessionNow({ sessionId: payload.sessionId, interruptTrace: trace }, "\x03");
-  if (shouldDrainOldOutput) {
+  if (shouldDrainOldOutput || pausedForInterrupt) {
     queueMicrotask(() => {
       if (sessions.get(payload.sessionId) !== session) return;
       try {

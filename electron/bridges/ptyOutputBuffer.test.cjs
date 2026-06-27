@@ -110,6 +110,18 @@ test("discard() drops pending data and cancels the pending turn", async () => {
   assert.deepEqual(sends, []);
 });
 
+test("takePending() returns pending data without sending it", async () => {
+  const sends = [];
+  const buffer = createPtyOutputBuffer((data) => sends.push(data));
+
+  buffer.bufferData("tail");
+
+  assert.equal(buffer.takePending(), "tail");
+  assert.deepEqual(sends, []);
+  await tick();
+  assert.deepEqual(sends, []);
+});
+
 test("drops incoming data when shouldAcceptOutput returns false", async () => {
   const sends = [];
   let accept = true;

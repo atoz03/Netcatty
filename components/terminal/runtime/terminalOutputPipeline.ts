@@ -32,6 +32,7 @@ type TerminalInputPriorityReason = "interrupt" | "input";
 
 export type TerminalInputPriorityOptions = {
   reason?: TerminalInputPriorityReason;
+  drainStaleOutput?: boolean;
   now?: number;
   quietMs?: number;
   promptQuietMs?: number;
@@ -63,7 +64,7 @@ export type TerminalInputPrioritySnapshot = {
   deferredAckBytes: number;
   ackAfterInputBytes: number;
   scheduledBackendResume: boolean;
-  skippedReason?: "missing-session" | "below-threshold";
+  skippedReason?: "missing-session" | "below-threshold" | "interrupt-priority-disabled";
 };
 
 const scheduleAfterCurrentInput: ResumeScheduler = (callback) => {
@@ -86,6 +87,7 @@ type TerminalInterruptDisplayGate = {
   droppedBytes: number;
   droppedChunks: number;
   pendingInterruptCaret: boolean;
+  pendingDisplayControl: string;
 };
 
 const TERMINAL_INTERRUPT_DISPLAY_GATE_KEY = Symbol.for("netcatty.terminalInterruptDisplayGate");
@@ -135,9 +137,139 @@ const charLength = (value: string): number => value.length;
 
 const ANSI_ESCAPE = String.fromCharCode(27);
 const ANSI_SEQUENCE_PATTERN = new RegExp(`${ANSI_ESCAPE}\\[[0-?]*[ -/]*[@-~]`, "g");
+const OSC_SEQUENCE_PATTERN = new RegExp(
+  `${ANSI_ESCAPE}\\][\\s\\S]*?(?:\\x07|${ANSI_ESCAPE}\\\\)`,
+  "g",
+);
 
 const stripAnsi = (value: string): string =>
-  value.replace(ANSI_SEQUENCE_PATTERN, "");
+  value
+    .replace(OSC_SEQUENCE_PATTERN, "")
+    .replace(ANSI_SEQUENCE_PATTERN, "");
+
+const TERMINAL_STATE_RESTORE_SEQUENCE_PATTERN = new RegExp(
+  `${ANSI_ESCAPE}\\[[0-?]*[ -/]*[@-~]|${ANSI_ESCAPE}[=>]`,
+  "g",
+);
+const RESTORE_PRIVATE_MODE_PARAMS = new Set([
+  1,
+  47,
+  1000,
+  1002,
+  1003,
+  1004,
+  1005,
+  1006,
+  1015,
+  1047,
+  1048,
+  1049,
+  2004,
+]);
+const SHOW_CURSOR_PRIVATE_MODE_PARAM = 25;
+const PRIVATE_MODE_PATTERN = new RegExp(`^${ANSI_ESCAPE}\\[\\?([0-9;:]*)([hl])$`);
+const TRAILING_RESTORE_CONTROL_PREFIX_PATTERN = new RegExp(
+  `^${ANSI_ESCAPE}\\[\\?[0-9;:]*$`,
+);
+
+const getPrivateModeParams = (raw: string): { params: number[]; final: "h" | "l" } | null => {
+  const match = PRIVATE_MODE_PATTERN.exec(raw);
+  if (!match) return null;
+  const params = match[1]!
+    .split(/[;:]/)
+    .map((param) => Number(param))
+    .filter((param) => Number.isFinite(param));
+  if (params.length === 0) return null;
+  return { params, final: match[2] as "h" | "l" };
+};
+
+const shouldPreserveTerminalStateRestore = (raw: string): boolean => {
+  if (raw === "\x1b>") return true;
+  const privateModes = getPrivateModeParams(raw);
+  if (!privateModes) return false;
+  if (privateModes.final === "h") {
+    return privateModes.params.every((param) => param === SHOW_CURSOR_PRIVATE_MODE_PARAM);
+  }
+  return privateModes.params.every((param) => RESTORE_PRIVATE_MODE_PARAMS.has(param));
+};
+
+const getTrailingRestoreControlPrefix = (text: string): string => {
+  const escapeIndex = text.lastIndexOf(ANSI_ESCAPE);
+  if (escapeIndex < 0) return "";
+  const suffix = text.slice(escapeIndex);
+  if (suffix === ANSI_ESCAPE) return suffix;
+  if (suffix === `${ANSI_ESCAPE}[`) return suffix;
+  if (
+    suffix.startsWith(`${ANSI_ESCAPE}[?`)
+    && TRAILING_RESTORE_CONTROL_PREFIX_PATTERN.test(suffix)
+  ) {
+    return suffix;
+  }
+  return "";
+};
+
+const getTrailingOscControlPrefix = (text: string): string => {
+  const oscIndex = text.lastIndexOf(`${ANSI_ESCAPE}]`);
+  if (oscIndex < 0) return "";
+  const suffix = text.slice(oscIndex);
+  if (suffix.includes("\x07") || suffix.includes(`${ANSI_ESCAPE}\\`)) return "";
+  return suffix;
+};
+
+const getTrailingDisplayControlPrefix = (text: string): string =>
+  getTrailingRestoreControlPrefix(text) || getTrailingOscControlPrefix(text);
+
+const extractTerminalStateRestoreControls = (
+  text: string,
+  options: { holdTrailingPartial?: boolean } = {},
+): { preserved: string; pending: string; droppedBytes: number } => {
+  const pending = options.holdTrailingPartial ? getTrailingDisplayControlPrefix(text) : "";
+  const searchableText = pending ? text.slice(0, -pending.length) : text;
+  let preserved = "";
+  for (const match of searchableText.matchAll(TERMINAL_STATE_RESTORE_SEQUENCE_PATTERN)) {
+    const raw = match[0];
+    if (shouldPreserveTerminalStateRestore(raw)) {
+      preserved += raw;
+    }
+  }
+  return {
+    preserved,
+    pending,
+    droppedBytes: Math.max(0, charLength(text) - charLength(preserved) - charLength(pending)),
+  };
+};
+
+const takePendingDisplayControl = (gate: TerminalInterruptDisplayGate): string => {
+  const pending = gate.pendingDisplayControl;
+  gate.pendingDisplayControl = "";
+  return pending;
+};
+
+const finalizeAcceptedTextAfterPendingDisplayControl = (
+  pending: string,
+  text: string,
+): { data: string; droppedBytes: number } => {
+  if (!pending) return { data: text, droppedBytes: 0 };
+  const combined = `${pending}${text}`;
+  TERMINAL_STATE_RESTORE_SEQUENCE_PATTERN.lastIndex = 0;
+  const restoreMatch = TERMINAL_STATE_RESTORE_SEQUENCE_PATTERN.exec(combined);
+  TERMINAL_STATE_RESTORE_SEQUENCE_PATTERN.lastIndex = 0;
+  if (restoreMatch?.index === 0 && restoreMatch[0].length > pending.length) {
+    const raw = restoreMatch[0];
+    const remainder = combined.slice(raw.length);
+    if (shouldPreserveTerminalStateRestore(raw)) {
+      return { data: `${raw}${remainder}`, droppedBytes: 0 };
+    }
+    return { data: remainder, droppedBytes: charLength(raw) };
+  }
+  OSC_SEQUENCE_PATTERN.lastIndex = 0;
+  const oscMatch = OSC_SEQUENCE_PATTERN.exec(combined);
+  OSC_SEQUENCE_PATTERN.lastIndex = 0;
+  if (oscMatch?.index === 0 && oscMatch[0].length > pending.length) {
+    return { data: combined, droppedBytes: 0 };
+  }
+  return { data: text, droppedBytes: charLength(pending) };
+};
 
 export const shouldArmTerminalInterruptDisplayGateForProtocol = (
   protocol: string | null | undefined,
@@ -156,6 +288,7 @@ const getPromptCandidateSuffix = (text: string): string | null => {
   const looksLikePrompt = (
     /^[#$>%]\s*$/.test(candidate)
     || /^[^ \t\r\n<>]{1,80}[#$>%]\s*$/.test(candidate)
+    || /^[^\r\n<>]{1,120}[#$>%]\s*$/.test(candidate)
     || /^<[^>\r\n]{1,80}>\s*$/.test(candidate)
     || /^\[[^\]\r\n]{1,120}\]\s*[#$>%]\s*$/.test(candidate)
   );
@@ -188,6 +321,7 @@ export const armTerminalInterruptDisplayGate = (
     droppedBytes: 0,
     droppedChunks: 0,
     pendingInterruptCaret: false,
+    pendingDisplayControl: "",
   });
 };
 
@@ -207,7 +341,9 @@ export const filterTerminalInterruptDisplayOutput = (
   }
 
   const now = nowFromPriorityOptions(options);
-  const bytes = charLength(text);
+  const pendingDisplayControl = takePendingDisplayControl(gate);
+  const combinedText = `${pendingDisplayControl}${text}`;
+  const bytes = charLength(combinedText);
   const quietGapMs = gate.lastDroppedAt > 0 ? now - gate.lastDroppedAt : 0;
 
   if (gate.pendingInterruptCaret) {
@@ -224,64 +360,94 @@ export const filterTerminalInterruptDisplayOutput = (
     }
   }
 
-  const interruptEchoIndex = text.indexOf("^C");
+  const interruptEchoIndex = combinedText.indexOf("^C");
   if (interruptEchoIndex >= 0) {
-    const droppedBytes = charLength(text.slice(0, interruptEchoIndex));
+    const droppedPrefix = combinedText.slice(0, interruptEchoIndex);
+    const restoreControls = extractTerminalStateRestoreControls(droppedPrefix);
+    const droppedBytes = restoreControls.droppedBytes;
     gate.droppedBytes += droppedBytes;
     gate.droppedChunks += droppedBytes > 0 ? 1 : 0;
     disarmTerminalInterruptDisplayGate(term);
     return {
       accepted: true,
-      data: text.slice(interruptEchoIndex),
+      data: `${restoreControls.preserved}${combinedText.slice(interruptEchoIndex)}`,
       droppedBytes,
       reason: "interrupt-echo",
     };
   }
 
   const promptCandidate = bytes <= gate.promptCandidateBytes
-    ? getPromptCandidateSuffix(text)
+    ? getPromptCandidateSuffix(combinedText)
     : null;
   if (promptCandidate && gate.droppedBytes === 0) {
-    const droppedBytes = charLength(text.slice(0, text.length - promptCandidate.length));
+    const droppedPrefix = combinedText.slice(0, combinedText.length - promptCandidate.length);
+    const restoreControls = extractTerminalStateRestoreControls(droppedPrefix);
+    const droppedBytes = restoreControls.droppedBytes;
     gate.droppedBytes += droppedBytes;
     gate.droppedChunks += droppedBytes > 0 ? 1 : 0;
     disarmTerminalInterruptDisplayGate(term);
     return {
       accepted: true,
-      data: promptCandidate,
+      data: `${restoreControls.preserved}${promptCandidate}`,
       droppedBytes,
       reason: "prompt-candidate",
     };
   }
 
   if (promptCandidate && quietGapMs >= gate.promptQuietMs) {
-    const droppedBytes = charLength(text.slice(0, text.length - promptCandidate.length));
+    const droppedPrefix = combinedText.slice(0, combinedText.length - promptCandidate.length);
+    const restoreControls = extractTerminalStateRestoreControls(droppedPrefix);
+    const droppedBytes = restoreControls.droppedBytes;
     gate.droppedBytes += droppedBytes;
     gate.droppedChunks += droppedBytes > 0 ? 1 : 0;
     disarmTerminalInterruptDisplayGate(term);
     return {
       accepted: true,
-      data: promptCandidate,
+      data: `${restoreControls.preserved}${promptCandidate}`,
       droppedBytes,
       reason: "prompt-gap",
     };
   }
 
   if (quietGapMs >= gate.quietMs) {
+    const accepted = finalizeAcceptedTextAfterPendingDisplayControl(pendingDisplayControl, text);
+    gate.droppedBytes += accepted.droppedBytes;
+    gate.droppedChunks += accepted.droppedBytes > 0 ? 1 : 0;
     disarmTerminalInterruptDisplayGate(term);
-    return { accepted: true, data: text, droppedBytes: 0, reason: "quiet-gap" };
+    return {
+      accepted: true,
+      data: accepted.data,
+      droppedBytes: accepted.droppedBytes,
+      reason: "quiet-gap",
+    };
   }
 
   if (now - gate.startedAt >= gate.maxDrainMs) {
+    const accepted = finalizeAcceptedTextAfterPendingDisplayControl(pendingDisplayControl, text);
+    gate.droppedBytes += accepted.droppedBytes;
+    gate.droppedChunks += accepted.droppedBytes > 0 ? 1 : 0;
     disarmTerminalInterruptDisplayGate(term);
-    return { accepted: true, data: text, droppedBytes: 0, reason: "max-drain" };
+    return {
+      accepted: true,
+      data: accepted.data,
+      droppedBytes: accepted.droppedBytes,
+      reason: "max-drain",
+    };
   }
 
+  const restoreControls = extractTerminalStateRestoreControls(combinedText, {
+    holdTrailingPartial: true,
+  });
+  const droppedBytes = restoreControls.droppedBytes;
+  gate.pendingDisplayControl = restoreControls.pending;
   gate.pendingInterruptCaret = text.endsWith("^");
   gate.lastDroppedAt = now;
-  gate.droppedBytes += bytes;
-  gate.droppedChunks += 1;
-  return { accepted: false, data: "", droppedBytes: bytes, reason: "draining" };
+  gate.droppedBytes += droppedBytes;
+  gate.droppedChunks += droppedBytes > 0 ? 1 : 0;
+  if (restoreControls.preserved) {
+    return { accepted: true, data: restoreControls.preserved, droppedBytes, reason: "draining" };
+  }
+  return { accepted: false, data: "", droppedBytes, reason: "draining" };
 };
 
 const resolvePrioritizeTerminalInputArgs = (
@@ -367,9 +533,7 @@ export const prioritizeTerminalInput = (
     maybeOptions,
   );
   const isInterrupt = options.reason === "interrupt";
-  if (!isInterrupt) {
-    disarmTerminalInterruptDisplayGate(term);
-  }
+  disarmTerminalInterruptDisplayGate(term);
 
   if (!sessionId) {
     disarmTerminalInterruptDisplayGate(term);
@@ -387,7 +551,18 @@ export const prioritizeTerminalInput = (
   const backlog = flow?.pendingBytes() ?? 0;
   const queueDepth = getTerminalWriteQueueDepth(term);
   const deferredAck = getDeferredTerminalWriteAckBytes(term);
-  const hasVisibleBacklog = backlog > FLOW_LOW_WATER_MARK || queueDepth > 0;
+  if (isInterrupt && !options.drainStaleOutput) {
+    return {
+      sessionId,
+      backlogBytes: backlog,
+      writeQueueDepth: queueDepth,
+      deferredAckBytes: deferredAck,
+      ackAfterInputBytes: 0,
+      scheduledBackendResume: false,
+      skippedReason: "interrupt-priority-disabled",
+    };
+  }
+
   if (backlog <= FLOW_LOW_WATER_MARK && queueDepth === 0 && deferredAck === 0) {
     disarmTerminalInterruptDisplayGate(term);
     return {
@@ -401,10 +576,9 @@ export const prioritizeTerminalInput = (
     };
   }
 
+  const hasVisibleBacklog = backlog > FLOW_LOW_WATER_MARK || queueDepth > 0;
   if (isInterrupt && hasVisibleBacklog) {
     armTerminalInterruptDisplayGate(term, options);
-  } else if (isInterrupt) {
-    disarmTerminalInterruptDisplayGate(term);
   }
 
   let ackAfterInput = 0;

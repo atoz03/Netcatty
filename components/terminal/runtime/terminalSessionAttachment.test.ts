@@ -314,7 +314,7 @@ test("attachSessionToTerminal resets timestamp state for a reused terminal", () 
   assert.equal(writes[1], "fresh");
 });
 
-test("attachSessionToTerminal drops interrupt-stale output before terminal, AI, and log side effects", () => {
+test("attachSessionToTerminal keeps interrupt-time output visible", () => {
   clearTerminalSessionFlowAck("session-1");
   const { term, writes } = createFakeTerm();
   const acked: number[] = [];
@@ -365,28 +365,28 @@ test("attachSessionToTerminal drops interrupt-stale output before terminal, AI, 
   onData?.("old output");
   flushTerminalWriteCoalescer(term);
 
-  assert.deepEqual(writes, []);
-  assert.deepEqual(output, []);
-  assert.deepEqual(logs, []);
-  assert.deepEqual(acked, [10]);
+  assert.equal(writes.join(""), "old output");
+  assert.equal(output.join(""), "old output");
+  assert.equal(logs.join(""), "old output");
+  assert.deepEqual(acked, []);
 
   onData?.("^");
   flushTerminalWriteCoalescer(term);
 
-  assert.deepEqual(writes, []);
-  assert.deepEqual(output, []);
-  assert.deepEqual(logs, []);
-  assert.deepEqual(acked, [10, 1]);
+  assert.equal(writes.join(""), "old output^");
+  assert.equal(output.join(""), "old output^");
+  assert.equal(logs.join(""), "old output^");
+  assert.deepEqual(acked, []);
 
   onData?.("C\r\n$ ");
   flushTerminalWriteCoalescer(term);
   flushTerminalSessionFlowAck("session-1");
 
-  assert.equal(writes.join(""), "^C\r\n$ ");
-  assert.equal(output.join(""), "^C\r\n$ ");
-  assert.equal(logs.join(""), "^C\r\n$ ");
-  assert.deepEqual(acked, [10, 1]);
-  assert.equal(getDeferredTerminalWriteAckBytes(term), 5);
+  assert.equal(writes.join(""), "old output^C\r\n$ ");
+  assert.equal(output.join(""), "old output^C\r\n$ ");
+  assert.equal(logs.join(""), "old output^C\r\n$ ");
+  assert.deepEqual(acked, []);
+  assert.equal(getDeferredTerminalWriteAckBytes(term), 16);
   clearDeferredTerminalWriteAck(term);
   clearTerminalSessionFlowAck("session-1");
 });

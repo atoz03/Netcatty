@@ -1377,15 +1377,15 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
     const prioritizeBroadcastInterrupt = () => {
       const term = termRef.current;
       if (!term) return;
-      const priorityOptions = shouldArmTerminalInterruptDisplayGateForProtocol(host.protocol)
-        ? { reason: "interrupt" as const }
-        : undefined;
       prioritizeTerminalInput(
         term,
         sessionId,
         getFlowControllerForTerm(term),
         terminalBackend,
-        priorityOptions,
+        {
+          reason: "interrupt",
+          drainStaleOutput: shouldArmTerminalInterruptDisplayGateForProtocol(host.protocol),
+        },
       );
     };
     onBroadcastInterruptPriorityChange?.(sessionId, prioritizeBroadcastInterrupt);

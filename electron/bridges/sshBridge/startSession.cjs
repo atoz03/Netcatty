@@ -110,6 +110,7 @@ function createStartSessionApi(ctx) {
       const {
         bufferData,
         flush: flushBuffer,
+        takePending: takePendingBuffer,
         discard: discardBuffer,
       } = createPtyOutputBuffer((data) => {
         const contents = event.sender;
@@ -122,6 +123,7 @@ function createStartSessionApi(ctx) {
         shouldAcceptOutput: () => shouldAcceptSessionOutput(sessions.get(sessionId)),
       });
       session.flushPendingData = flushBuffer;
+      session.takePendingData = takePendingBuffer;
       session.discardPendingData = discardBuffer;
 
       const sshZmodemSentry = createZmodemSentry({

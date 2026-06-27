@@ -810,15 +810,15 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
         const rendererKeyAt = Date.now();
         e.preventDefault();
         e.stopPropagation();
-        const priorityOptions = shouldArmTerminalInterruptDisplayGateForProtocol(ctx.host.protocol)
-          ? { reason: "interrupt" as const }
-          : undefined;
         const priority = prioritizeTerminalInput(
           term,
           id,
           getFlowControllerForTerm(term),
           ctx.terminalBackend,
-          priorityOptions,
+          {
+            reason: "interrupt",
+            drainStaleOutput: shouldArmTerminalInterruptDisplayGateForProtocol(ctx.host.protocol),
+          },
         );
         const interruptTrace = createTerminalInterruptTrace({
           sessionId: id,

@@ -24,7 +24,7 @@
  *   floodFlushDelayMs?: number,
  *   maxFloodBufferSize?: number,
  * }} [options]
- * @returns {{ bufferData: (data: string) => void, flush: () => void, discard: () => void }}
+ * @returns {{ bufferData: (data: string) => void, flush: () => void, takePending: () => string, discard: () => number }}
  */
 function createPtyOutputBuffer(sendFn, options = {}) {
   const maxBufferSize = options.maxBufferSize ?? 16384; // 16KB
@@ -91,14 +91,19 @@ function createPtyOutputBuffer(sendFn, options = {}) {
     flushNow();
   };
 
-  const discard = () => {
+  const takePending = () => {
     cancelScheduled();
-    const discardedBytes = dataBuffer.length;
+    const pending = dataBuffer;
     dataBuffer = "";
-    return discardedBytes;
+    return pending;
   };
 
-  return { bufferData, flush, discard };
+  const discard = () => {
+    const pending = takePending();
+    return pending.length;
+  };
+
+  return { bufferData, flush, takePending, discard };
 }
 
 module.exports = { createPtyOutputBuffer };

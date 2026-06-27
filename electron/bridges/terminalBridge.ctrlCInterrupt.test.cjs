@@ -3,12 +3,16 @@ const assert = require("node:assert/strict");
 
 const terminalBridge = require("./terminalBridge.cjs");
 
-function initBridge(sessions) {
+function initBridge(sessions, sent = []) {
   terminalBridge.init({
     sessions,
     electronModule: {
       webContents: {
-        fromId: () => ({ send() {} }),
+        fromId: () => ({
+          send(channel, payload) {
+            sent.push([channel, payload]);
+          },
+        }),
       },
     },
   });
@@ -40,7 +44,7 @@ test("SSH Ctrl+C writes the original byte without sending a channel signal", () 
   ]);
 });
 
-test("interruptSession discards pending output before sending SSH Ctrl+C", () => {
+test("interruptSession sends SSH Ctrl+C without discarding pending output", () => {
   const calls = [];
   const sessions = new Map();
   sessions.set("ssh-1", {
@@ -61,7 +65,6 @@ test("interruptSession discards pending output before sending SSH Ctrl+C", () =>
   terminalBridge.interruptSession({ sender: {} }, { sessionId: "ssh-1" });
 
   assert.deepEqual(calls, [
-    ["discard"],
     ["write", "\x03"],
   ]);
 });
@@ -95,25 +98,32 @@ test("interruptSession sends SSH Ctrl+C before resuming a paused output flood", 
 
   assert.deepEqual(calls, [
     ["pause"],
-    ["discard"],
     ["write", "\x03"],
   ]);
 
   await delay(0);
   assert.deepEqual(calls, [
     ["pause"],
-    ["discard"],
     ["write", "\x03"],
     ["resume"],
   ]);
 });
 
-test("interruptSession pauses SSH output before sending Ctrl+C even without existing backpressure", async () => {
+test("interruptSession sends SSH Ctrl+C without fastpath under low output pressure", async () => {
   const calls = [];
   const sessions = new Map();
   sessions.set("ssh-1", {
+    takePendingData() {
+      calls.push(["take-pending"]);
+      return "Type  :qa  and press <Enter> to exit Vim";
+    },
     discardPendingData() {
       calls.push(["discard"]);
+    },
+    flowState: {
+      rendererPaused: false,
+      unackedBytes: 119,
+      appliedPause: false,
     },
     stream: {
       pause() {
@@ -135,21 +145,64 @@ test("interruptSession pauses SSH output before sending Ctrl+C even without exis
   terminalBridge.interruptSession({ sender: {} }, { sessionId: "ssh-1" });
 
   assert.deepEqual(calls, [
-    ["pause"],
-    ["discard"],
     ["write", "\x03"],
   ]);
 
   await delay(0);
   assert.deepEqual(calls, [
-    ["pause"],
-    ["discard"],
     ["write", "\x03"],
-    ["resume"],
   ]);
 });
 
-test("interruptSession arms SSH output drain even for tiny in-flight echo", () => {
+test("interruptSession filters pending SSH output under high output pressure", () => {
+  const calls = [];
+  const sent = [];
+  const sessions = new Map();
+  sessions.set("ssh-1", {
+    cols: 80,
+    rows: 24,
+    webContentsId: 1,
+    takePendingData() {
+      calls.push(["take-pending"]);
+      return "stale frame\x1b[?1049l";
+    },
+    discardPendingData() {
+      calls.push(["discard"]);
+    },
+    flowState: {
+      rendererPaused: false,
+      unackedBytes: 34068,
+      appliedPause: false,
+    },
+    stream: {
+      pause() {
+        calls.push(["pause"]);
+      },
+      resume() {},
+      signal(signalName) {
+        calls.push(["signal", signalName]);
+      },
+      write(data) {
+        calls.push(["write", data]);
+      },
+    },
+  });
+  initBridge(sessions, sent);
+
+  terminalBridge.interruptSession({ sender: {} }, { sessionId: "ssh-1" });
+
+  assert.deepEqual(calls, [
+    ["pause"],
+    ["take-pending"],
+    ["pause"],
+    ["write", "\x03"],
+  ]);
+  assert.deepEqual(sent, [
+    ["netcatty:data", { sessionId: "ssh-1", data: "\x1b[?1049l" }],
+  ]);
+});
+
+test("interruptSession does not arm SSH output drain for tiny in-flight echo", () => {
   const sessions = new Map();
   const session = {
     discardPendingData() {},
@@ -170,7 +223,7 @@ test("interruptSession arms SSH output drain even for tiny in-flight echo", () =
 
   terminalBridge.interruptSession({ sender: {} }, { sessionId: "ssh-1" });
 
-  assert.equal(session._interruptOutputGate?.active, true);
+  assert.notEqual(session._interruptOutputGate?.active, true);
 });
 
 test("interruptSession arms SSH output drain when interrupting a paused output flood", () => {
@@ -196,7 +249,7 @@ test("interruptSession arms SSH output drain when interrupting a paused output f
   assert.equal(session._interruptOutputGate?.active, true);
 });
 
-test("ordinary SSH input disarms a pending interrupt output drain", () => {
+test("ordinary SSH input still disarms a pending interrupt output drain", () => {
   const sessions = new Map();
   const session = {
     discardPendingData() {},
@@ -214,7 +267,7 @@ test("ordinary SSH input disarms a pending interrupt output drain", () => {
   sessions.set("ssh-1", session);
   initBridge(sessions);
 
-  terminalBridge.interruptSession({ sender: {} }, { sessionId: "ssh-1" });
+  session._interruptOutputGate = { active: true };
   assert.equal(session._interruptOutputGate?.active, true);
 
   terminalBridge.writeToSession({ sender: {} }, { sessionId: "ssh-1", data: "l" });
@@ -283,6 +336,28 @@ test("local Ctrl+C behavior is unchanged", () => {
   assert.deepEqual(calls, [["write", "\x03"]]);
 });
 
+test("local interruptSession writes Ctrl+C without fastpath", () => {
+  const calls = [];
+  const sessions = new Map();
+  sessions.set("local-1", {
+    type: "local",
+    takePendingData() {
+      calls.push(["take-pending"]);
+      return "pending";
+    },
+    proc: {
+      write(data) {
+        calls.push(["write", data]);
+      },
+    },
+  });
+  initBridge(sessions);
+
+  terminalBridge.interruptSession({ sender: {} }, { sessionId: "local-1" });
+
+  assert.deepEqual(calls, [["write", "\x03"]]);
+});
+
 test("telnet Ctrl+C behavior is unchanged", () => {
   const calls = [];
   const sessions = new Map();
@@ -301,6 +376,28 @@ test("telnet Ctrl+C behavior is unchanged", () => {
   assert.deepEqual(calls, [["write", "\x03"]]);
 });
 
+test("telnet interruptSession writes Ctrl+C without fastpath", () => {
+  const calls = [];
+  const sessions = new Map();
+  sessions.set("telnet-1", {
+    type: "telnet-native",
+    takePendingData() {
+      calls.push(["take-pending"]);
+      return "pending";
+    },
+    socket: {
+      write(data) {
+        calls.push(["write", data]);
+      },
+    },
+  });
+  initBridge(sessions);
+
+  terminalBridge.interruptSession({ sender: {} }, { sessionId: "telnet-1" });
+
+  assert.deepEqual(calls, [["write", "\x03"]]);
+});
+
 test("serial Ctrl+C behavior is unchanged", () => {
   const calls = [];
   const sessions = new Map();
@@ -315,6 +412,28 @@ test("serial Ctrl+C behavior is unchanged", () => {
   initBridge(sessions);
 
   terminalBridge.writeToSession({ sender: {} }, { sessionId: "serial-1", data: "\x03" });
+
+  assert.deepEqual(calls, [["write", "\x03"]]);
+});
+
+test("serial interruptSession writes Ctrl+C without fastpath", () => {
+  const calls = [];
+  const sessions = new Map();
+  sessions.set("serial-1", {
+    type: "serial",
+    takePendingData() {
+      calls.push(["take-pending"]);
+      return "pending";
+    },
+    serialPort: {
+      write(data) {
+        calls.push(["write", data]);
+      },
+    },
+  });
+  initBridge(sessions);
+
+  terminalBridge.interruptSession({ sender: {} }, { sessionId: "serial-1" });
 
   assert.deepEqual(calls, [["write", "\x03"]]);
 });

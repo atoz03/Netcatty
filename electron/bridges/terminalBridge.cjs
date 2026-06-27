@@ -41,6 +41,7 @@ const {
 const {
   armTerminalInterruptOutputGate,
   disarmTerminalInterruptOutputGate,
+  filterTerminalInterruptOutput,
   shouldArmTerminalInterruptOutputGate,
 } = require("./terminalInterruptOutputGate.cjs");
 const iconv = require("iconv-lite");
@@ -450,6 +451,7 @@ function startLocalSession(event, payload) {
   const {
     bufferData: bufferLocalData,
     flush: flushLocal,
+    takePending: takePendingLocal,
     discard: discardLocal,
   } = createPtyOutputBuffer((data) => {
     const contents = electronModule.webContents.fromId(session.webContentsId);
@@ -461,6 +463,7 @@ function startLocalSession(event, payload) {
     shouldAcceptOutput: () => shouldAcceptSessionOutput(session),
   });
   session.flushPendingData = flushLocal;
+  session.takePendingData = takePendingLocal;
   session.discardPendingData = discardLocal;
 
   // On Windows, node-pty ignores encoding: null and still emits UTF-8
@@ -981,6 +984,27 @@ function writeToSession(event, payload) {
   writeToSessionNow(payload, payload.data);
 }
 
+function drainPendingOutputForInterrupt(sessionId, session, trace) {
+  if (typeof session?.takePendingData !== "function") return;
+  const pending = session.takePendingData();
+  if (!pending) return;
+  const output = filterTerminalInterruptOutput(session, pending);
+  if (!output.accepted || output.droppedBytes > 0) {
+    logTerminalInterruptDebug("interrupt-pending-output-filtered", {
+      session: getSessionSnapshot(session),
+      droppedBytes: output.droppedBytes,
+      reason: output.reason,
+      accepted: output.accepted,
+    }, trace);
+  }
+  if (!output.accepted || !output.data) return;
+  const contents = electronModule.webContents.fromId(session.webContentsId);
+  emitTerminalSessionData(contents, sessionId, output.data, {
+    cols: session.cols,
+    rows: session.rows,
+  });
+}
+
 function interruptSession(event, payload) {
   const session = sessions.get(payload.sessionId);
   const trace = normalizeTrace(payload);
@@ -1001,18 +1025,16 @@ function interruptSession(event, payload) {
   }, trace);
 
   clearPendingAutomatedWrites(session);
-  const pausedForInterrupt = pauseSshOutputForInterrupt(session, trace);
-  const discardedBytes = session.discardPendingData?.() || 0;
-  logTerminalInterruptDebug("interrupt-discard-pending-output", {
-    discardedBytes,
-    session: getSessionSnapshot(session),
-  }, trace);
-  const shouldDrainOldOutput = Boolean(session.stream) || shouldArmTerminalInterruptOutputGate(session);
+  const shouldDrainOldOutput = shouldArmTerminalInterruptOutputGate(session);
+  const pausedForInterrupt = shouldDrainOldOutput
+    ? pauseSshOutputForInterrupt(session, trace)
+    : false;
   if (shouldDrainOldOutput) {
     armTerminalInterruptOutputGate(session);
     logTerminalInterruptDebug("interrupt-output-drain-armed", {
       session: getSessionSnapshot(session),
     }, trace);
+    drainPendingOutputForInterrupt(payload.sessionId, session, trace);
   }
   logTerminalInterruptDebug("interrupt-clear-flow-start", {
     session: getSessionSnapshot(session),

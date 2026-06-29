@@ -15,7 +15,8 @@
  * Once a burst reaches the soft cap, switch to a very short timer. That gives
  * urgent control input (Ctrl+C/close) room to run instead of letting a flood
  * repeatedly send synchronously. A larger hard cap still flushes immediately so
- * the process cannot grow the buffer without bound.
+ * buffered sends stay bounded even if a source emits while renderer flow is
+ * paused.
  *
  * @param {(data: string) => void} sendFn delivers an accumulated batch
  * @param {{
@@ -33,6 +34,7 @@ function createPtyOutputBuffer(sendFn, options = {}) {
   const shouldAcceptOutput = options.shouldAcceptOutput ?? (() => true);
 
   let dataBuffer = "";
+  const queuedBuffers = [];
   let scheduled = null;
   let scheduledType = null;
 
@@ -54,6 +56,9 @@ function createPtyOutputBuffer(sendFn, options = {}) {
     if (!shouldAcceptOutput()) {
       return;
     }
+    while (queuedBuffers.length > 0) {
+      sendFn(queuedBuffers.shift());
+    }
     if (dataBuffer.length > 0) {
       while (dataBuffer.length > maxFloodBufferSize) {
         const chunk = dataBuffer.slice(0, maxFloodBufferSize);
@@ -64,6 +69,24 @@ function createPtyOutputBuffer(sendFn, options = {}) {
         const pending = dataBuffer;
         dataBuffer = "";
         sendFn(pending);
+      }
+    }
+  };
+
+  const appendBoundedData = (data) => {
+    let remaining = data;
+    while (remaining.length > 0) {
+      const available = maxFloodBufferSize - dataBuffer.length;
+      if (available <= 0) {
+        queuedBuffers.push(dataBuffer);
+        dataBuffer = "";
+        continue;
+      }
+      dataBuffer += remaining.slice(0, available);
+      remaining = remaining.slice(available);
+      if (dataBuffer.length >= maxFloodBufferSize && remaining.length > 0) {
+        queuedBuffers.push(dataBuffer);
+        dataBuffer = "";
       }
     }
   };
@@ -82,11 +105,11 @@ function createPtyOutputBuffer(sendFn, options = {}) {
   };
 
   const bufferData = (data) => {
-    dataBuffer += data;
+    appendBoundedData(data);
     if (!shouldAcceptOutput()) {
       return;
     }
-    if (dataBuffer.length >= maxFloodBufferSize) {
+    if (queuedBuffers.length > 0 || dataBuffer.length >= maxFloodBufferSize) {
       cancelScheduled();
       flushNow();
     } else if (dataBuffer.length >= maxBufferSize) {
@@ -103,7 +126,8 @@ function createPtyOutputBuffer(sendFn, options = {}) {
 
   const takePending = () => {
     cancelScheduled();
-    const pending = dataBuffer;
+    const pending = `${queuedBuffers.join("")}${dataBuffer}`;
+    queuedBuffers.length = 0;
     dataBuffer = "";
     return pending;
   };

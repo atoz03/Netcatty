@@ -462,6 +462,8 @@ export const zhCNTerminalMessages: Messages = {
   'hostDetails.proxyPanel.usernamePlaceholder': '用户名',
   'hostDetails.proxyPanel.passwordPlaceholder': '密码',
   'hostDetails.proxyPanel.identities': '身份',
+  'hostDetails.proxyPanel.keychainIdentity': '钥匙串身份',
+  'hostDetails.proxyPanel.manualCredentials': '手动凭据',
   'hostDetails.proxyPanel.remove': '移除代理',
   'hostDetails.proxyPanel.savedProxy': '已保存代理',
   'hostDetails.proxyPanel.selectSaved': '选择已保存代理',

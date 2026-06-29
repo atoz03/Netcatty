@@ -8,7 +8,11 @@ import { Host, Identity, KnownHost, PortForwardingRule, SSHKey, TerminalSettings
 import { isEncryptedCredentialPlaceholder, sanitizeCredentialValue } from '../../domain/credentials';
 import { resolveBridgeKeyAuth, resolveHostAuth } from '../../domain/sshAuth';
 import { resolveHostKeepalive } from '../../domain/host';
-import { hasUsableProxyConfig } from '../../domain/proxyProfiles';
+import {
+  hasUnreadableProxyCredential,
+  hasUsableProxyConfig,
+  resolveProxyConfigAuth,
+} from '../../domain/proxyProfiles';
 
 // Fallback matching DEFAULT_TERMINAL_SETTINGS so older call sites that don't
 // thread terminalSettings still get the cloud-friendly defaults.
@@ -398,14 +402,7 @@ export const startPortForward = async (
     const resolved = resolveHostAuth({ host, keys, identities });
     const key = resolved.key;
     const proxy = host.proxyConfig
-      ? {
-        type: host.proxyConfig.type,
-        host: host.proxyConfig.host,
-        port: host.proxyConfig.port,
-        command: host.proxyConfig.command,
-        username: host.proxyConfig.username,
-        password: sanitizeCredentialValue(host.proxyConfig.password),
-      }
+      ? resolveProxyConfigAuth(host.proxyConfig, identities)
       : undefined;
     let jumpHosts: NetcattyJumpHost[] | undefined;
     if (host.hostChain?.hostIds?.length) {
@@ -427,9 +424,7 @@ export const startPortForward = async (
             hasUsableProxyConfig(jumpHost.proxyConfig);
           if (
             hasConfiguredJumpProxyEndpoint &&
-            jumpHost.proxyConfig?.username &&
-            isEncryptedCredentialPlaceholder(jumpHost.proxyConfig.password) &&
-            !sanitizeCredentialValue(jumpHost.proxyConfig.password)
+            hasUnreadableProxyCredential(jumpHost.proxyConfig, identities)
           ) {
             throw new Error(`Proxy credentials for jump host "${jumpHost.label || jumpHost.hostname}" cannot be decrypted on this device. Open host settings and re-enter the proxy password.`);
           }
@@ -468,14 +463,7 @@ export const startPortForward = async (
             keySource: jumpKey?.source,
             label: jumpHost.label,
             proxy: hasUsableProxyConfig(jumpHost.proxyConfig)
-              ? {
-                type: jumpHost.proxyConfig.type,
-                host: jumpHost.proxyConfig.host,
-                port: jumpHost.proxyConfig.port,
-                command: jumpHost.proxyConfig.command,
-                username: jumpHost.proxyConfig.username,
-                password: sanitizeCredentialValue(jumpHost.proxyConfig.password),
-              }
+              ? resolveProxyConfigAuth(jumpHost.proxyConfig, identities)
               : undefined,
             identityFilePaths: jumpKeyAuth.identityFilePaths,
             keepaliveInterval: hopKeepalive.interval,
@@ -488,7 +476,7 @@ export const startPortForward = async (
         });
     }
     const usesTargetProxyForFirstHop = !!proxy && !jumpHosts?.[0]?.proxy;
-    if (usesTargetProxyForFirstHop && host.proxyConfig?.username && isEncryptedCredentialPlaceholder(host.proxyConfig.password) && !proxy?.password) {
+    if (usesTargetProxyForFirstHop && hasUnreadableProxyCredential(host.proxyConfig, identities)) {
       throw new Error('Proxy credentials cannot be decrypted on this device. Open host settings and re-enter the proxy password.');
     }
     

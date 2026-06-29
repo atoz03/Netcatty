@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { Host, ProxyProfile } from "./models.ts";
+import type { Host, Identity, ProxyProfile } from "./models.ts";
 import {
   formatProxyConfigEndpoint,
   formatProxyConfigType,
@@ -9,6 +9,7 @@ import {
   normalizeManualProxyConfig,
   materializeHostProxyProfile,
   removeProxyProfileReferences,
+  resolveProxyConfigAuth,
 } from "./proxyProfiles.ts";
 
 const profile = (overrides: Partial<ProxyProfile> = {}): ProxyProfile => ({
@@ -146,5 +147,57 @@ test("formatProxyConfigType labels command proxies without uppercasing", () => {
       command: "cloudflared access ssh --hostname %h",
     }),
     "ProxyCommand",
+  );
+});
+
+test("resolveProxyConfigAuth uses a selected identity for proxy credentials", () => {
+  const identities: Identity[] = [{
+    id: "identity-1",
+    label: "Proxy login",
+    username: "proxy-user",
+    authMethod: "password",
+    password: "proxy-secret",
+    created: 1,
+  }];
+
+  assert.deepEqual(
+    resolveProxyConfigAuth(
+      {
+        type: "socks5",
+        host: "proxy.example.com",
+        port: 1080,
+        identityId: "identity-1",
+      },
+      identities,
+    ),
+    {
+      type: "socks5",
+      host: "proxy.example.com",
+      port: 1080,
+      username: "proxy-user",
+      password: "proxy-secret",
+    },
+  );
+});
+
+test("resolveProxyConfigAuth keeps manual proxy credentials without an identity", () => {
+  assert.deepEqual(
+    resolveProxyConfigAuth(
+      {
+        type: "http",
+        host: "proxy.example.com",
+        port: 3128,
+        username: "manual-user",
+        password: "manual-secret",
+      },
+      [],
+    ),
+    {
+      type: "http",
+      host: "proxy.example.com",
+      port: 3128,
+      username: "manual-user",
+      password: "manual-secret",
+    },
   );
 });

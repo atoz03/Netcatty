@@ -462,6 +462,8 @@ export const zhTWTerminalMessages: Messages = {
   'hostDetails.proxyPanel.usernamePlaceholder': '使用者名稱',
   'hostDetails.proxyPanel.passwordPlaceholder': '密碼',
   'hostDetails.proxyPanel.identities': '身份',
+  'hostDetails.proxyPanel.keychainIdentity': '鑰匙串身份',
+  'hostDetails.proxyPanel.manualCredentials': '手動憑證',
   'hostDetails.proxyPanel.remove': '移除代理',
   'hostDetails.proxyPanel.savedProxy': '已儲存代理',
   'hostDetails.proxyPanel.selectSaved': '選擇已儲存代理',

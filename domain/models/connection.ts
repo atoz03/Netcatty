@@ -11,6 +11,7 @@ export interface ProxyConfig {
   host: string;
   port: number;
   command?: string;
+  identityId?: string;
   username?: string;
   password?: string;
 }

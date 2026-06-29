@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { buildSftpHostCredentials } from "./useSftpHostCredentials.ts";
-import type { Host, KnownHost, SSHKey } from "../../../domain/models.ts";
+import type { Host, Identity, KnownHost, SSHKey } from "../../../domain/models.ts";
 
 const host = (overrides: Partial<Host> = {}): Host => ({
   id: "host-1",
@@ -75,6 +75,64 @@ test("buildSftpHostCredentials forwards custom ProxyCommand settings", () => {
     username: undefined,
     password: undefined,
   });
+});
+
+test("buildSftpHostCredentials resolves proxy credentials from a selected identity", () => {
+  const identity: Identity = {
+    id: "identity-1",
+    label: "Proxy login",
+    username: "proxy-user",
+    authMethod: "password",
+    password: "proxy-secret",
+    created: 1,
+  };
+  const credentials = buildSftpHostCredentials({
+    host: host({
+      proxyConfig: {
+        type: "socks5",
+        host: "proxy.example.com",
+        port: 1080,
+        identityId: identity.id,
+      },
+    }),
+    hosts: [],
+    keys: [],
+    identities: [identity],
+  });
+
+  assert.deepEqual(credentials.proxy, {
+    type: "socks5",
+    host: "proxy.example.com",
+    port: 1080,
+    username: "proxy-user",
+    password: "proxy-secret",
+  });
+});
+
+test("buildSftpHostCredentials rejects undecryptable proxy identity passwords", () => {
+  assert.throws(
+    () => buildSftpHostCredentials({
+      host: host({
+        proxyConfig: {
+          type: "http",
+          host: "proxy.example.com",
+          port: 3128,
+          identityId: "identity-1",
+        },
+      }),
+      hosts: [],
+      keys: [],
+      identities: [{
+        id: "identity-1",
+        label: "Proxy login",
+        username: "proxy-user",
+        authMethod: "password",
+        password: "enc:v1:djEwAAAA",
+        created: 1,
+      }],
+    }),
+    /Proxy credentials cannot be decrypted/,
+  );
 });
 
 test("buildSftpHostCredentials passes reference keys as identity file paths", () => {

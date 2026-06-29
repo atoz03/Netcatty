@@ -327,18 +327,25 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
   }, []);
 
   const updateProxyConfig = useCallback(
-    (field: keyof ProxyConfig, value: string | number) => {
+    (field: keyof ProxyConfig, value: ProxyConfig[keyof ProxyConfig]) => {
       setForm((prev) => {
         const { proxyProfileId: _proxyProfileId, ...rest } = prev;
+        const nextProxyConfig = {
+          type: prev.proxyConfig?.type || "http",
+          host: prev.proxyConfig?.host || "",
+          port: prev.proxyConfig?.port || 8080,
+          ...prev.proxyConfig,
+          [field]: value,
+        };
+        if (field === "identityId") {
+          delete nextProxyConfig.username;
+          delete nextProxyConfig.password;
+        } else if (field === "username" || field === "password") {
+          delete nextProxyConfig.identityId;
+        }
         return {
           ...rest,
-          proxyConfig: {
-            type: prev.proxyConfig?.type || "http",
-            host: prev.proxyConfig?.host || "",
-            port: prev.proxyConfig?.port || 8080,
-            ...prev.proxyConfig,
-            [field]: value,
-          },
+          proxyConfig: nextProxyConfig,
         } as Host;
       });
     },
@@ -661,6 +668,7 @@ const HostDetailsPanel: React.FC<HostDetailsPanelPropsWithResize> = ({
       <ProxyPanel
         proxyConfig={form.proxyConfig}
         proxyProfiles={proxyProfiles}
+        identities={identities}
         selectedProxyProfileId={form.proxyProfileId}
         onUpdateProxy={updateProxyConfig}
         onSelectProxyProfile={selectProxyProfile}

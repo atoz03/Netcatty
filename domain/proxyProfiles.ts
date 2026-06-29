@@ -1,4 +1,5 @@
-import type { GroupConfig, Host, ProxyConfig, ProxyProfile } from "./models";
+import { isEncryptedCredentialPlaceholder, sanitizeCredentialValue } from "./credentials";
+import type { GroupConfig, Host, Identity, ProxyConfig, ProxyProfile } from "./models";
 
 const cloneProxyConfig = (config: ProxyConfig): ProxyConfig => ({
   ...config,
@@ -39,9 +40,58 @@ export const normalizeManualProxyConfig = (
   return {
     ...config,
     host: config.host.trim(),
+    identityId: config.identityId || undefined,
     username: config.username?.trim() || undefined,
     password: config.password || undefined,
   };
+};
+
+const findIdentity = (
+  identityId: string | undefined,
+  identities: Identity[] = [],
+): Identity | undefined => {
+  if (!identityId) return undefined;
+  return identities.find((identity) => identity.id === identityId);
+};
+
+export const resolveProxyConfigAuth = (
+  config: ProxyConfig,
+  identities?: Identity[],
+): ProxyConfig => {
+  const identity = findIdentity(config.identityId, identities);
+  const username = config.identityId
+    ? identity?.username?.trim()
+    : config.username?.trim();
+  const password = config.identityId
+    ? sanitizeCredentialValue(identity?.password)
+    : sanitizeCredentialValue(config.password);
+
+  const resolved: ProxyConfig = {
+    type: config.type,
+    host: config.host,
+    port: config.port,
+    username: username || undefined,
+    password,
+  };
+  if (config.command !== undefined) {
+    resolved.command = config.command;
+  }
+  return resolved;
+};
+
+export const hasUnreadableProxyCredential = (
+  config: ProxyConfig | undefined,
+  identities?: Identity[],
+): boolean => {
+  if (!config) return false;
+  const identity = findIdentity(config.identityId, identities);
+  const username = config.identityId
+    ? identity?.username?.trim()
+    : config.username?.trim();
+  const rawPassword = config.identityId ? identity?.password : config.password;
+  return Boolean(username) &&
+    isEncryptedCredentialPlaceholder(rawPassword) &&
+    !sanitizeCredentialValue(rawPassword);
 };
 
 export const hasUsableProxyConfig = (config: ProxyConfig | undefined): boolean => {

@@ -32,7 +32,11 @@ import {
   resolveTelnetPort,
   resolveTelnetUsername,
 } from "../../../domain/host";
-import { hasUsableProxyConfig } from "../../../domain/proxyProfiles";
+import {
+  hasUnreadableProxyCredential,
+  hasUsableProxyConfig,
+  resolveProxyConfigAuth,
+} from "../../../domain/proxyProfiles";
 import { hasConnectionPassedTcpDial } from "../connectionTimeouts";
 
 const TELNET_SESSION_REPLACED_ERROR = "Telnet session start was replaced";
@@ -184,7 +188,6 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       );
     };
 
-    const rawProxyPassword = ctx.host.proxyConfig?.password;
     if (ctx.host.proxyProfileId && !ctx.host.proxyConfig) {
       const message = `Saved proxy for host "${ctx.host.label || ctx.host.hostname}" is missing. Open host settings and select a valid proxy.`;
       ctx.setError(message);
@@ -192,16 +195,8 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       ctx.updateStatus("disconnected");
       return;
     }
-    const hasEncryptedProxyPassword = isEncryptedCredentialPlaceholder(rawProxyPassword);
     const proxyConfig = ctx.host.proxyConfig
-      ? {
-        type: ctx.host.proxyConfig.type,
-        host: ctx.host.proxyConfig.host,
-        port: ctx.host.proxyConfig.port,
-        command: ctx.host.proxyConfig.command,
-        username: ctx.host.proxyConfig.username,
-        password: sanitizeCredentialValue(rawProxyPassword),
-      }
+      ? resolveProxyConfigAuth(ctx.host.proxyConfig, ctx.identities)
       : undefined;
 
     const jumpHostsWithUnavailableCredentials: string[] = [];
@@ -243,8 +238,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         hasUsableProxyConfig(jumpHost.proxyConfig);
       const hasEncryptedJumpProxyCredential =
         hasConfiguredJumpProxyEndpoint &&
-        Boolean(jumpHost.proxyConfig?.username) &&
-        isEncryptedCredentialPlaceholder(jumpHost.proxyConfig?.password);
+        hasUnreadableProxyCredential(jumpHost.proxyConfig, ctx.identities);
 
       const hasEncryptedJumpCredential =
         isEncryptedCredentialPlaceholder(rawJumpPassword) ||
@@ -273,14 +267,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         keySource: jumpKey?.source,
         label: jumpHost.label,
         proxy: hasUsableProxyConfig(jumpHost.proxyConfig)
-          ? {
-            type: jumpHost.proxyConfig.type,
-            host: jumpHost.proxyConfig.host,
-            port: jumpHost.proxyConfig.port,
-            command: jumpHost.proxyConfig.command,
-            username: jumpHost.proxyConfig.username,
-            password: sanitizeCredentialValue(jumpHost.proxyConfig.password),
-          }
+          ? resolveProxyConfigAuth(jumpHost.proxyConfig, ctx.identities)
           : undefined,
         identityFilePaths: jumpIdentityFilePaths,
         keepaliveInterval: hopKeepalive.interval,
@@ -293,7 +280,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
     });
 
     const usesTargetProxyForFirstHop = !!proxyConfig && !jumpHosts[0]?.proxy;
-    if (usesTargetProxyForFirstHop && hasEncryptedProxyPassword && !proxyConfig?.password && proxyConfig?.username) {
+    if (usesTargetProxyForFirstHop && hasUnreadableProxyCredential(ctx.host.proxyConfig, ctx.identities)) {
       const message = tr(
         "terminal.auth.proxyCredentialsUnavailable",
         "Proxy credentials cannot be decrypted on this device. Open host settings and re-enter the proxy password.",
@@ -655,8 +642,17 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
     };
     try {
       const telnetEnv = buildTermEnv(ctx.host, ctx.terminalSettings);
-      const telnetUsername = resolveTelnetUsername(ctx.host);
-      const rawTelnetPassword = resolveTelnetPassword(ctx.host);
+      const resolvedAuth = resolveHostAuth({
+        host: ctx.host,
+        keys: ctx.keys,
+        identities: ctx.identities,
+      });
+      const telnetUsername = ctx.host.telnetUsername !== undefined
+        ? resolveTelnetUsername(ctx.host)
+        : resolvedAuth.username;
+      const rawTelnetPassword = ctx.host.telnetPassword !== undefined
+        ? resolveTelnetPassword(ctx.host)
+        : resolvedAuth.password;
       const telnetPassword = sanitizeCredentialValue(rawTelnetPassword);
       const hasTelnetPasswordForAutoLogin = rawTelnetPassword !== undefined;
       if (isEncryptedCredentialPlaceholder(rawTelnetPassword)) {

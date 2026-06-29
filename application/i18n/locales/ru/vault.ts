@@ -710,6 +710,8 @@ export const ruVaultMessages: Messages = {
   'hostDetails.proxyPanel.usernamePlaceholder': 'Имя пользователя',
   'hostDetails.proxyPanel.passwordPlaceholder': 'Пароль',
   'hostDetails.proxyPanel.identities': 'Идентификаторы',
+  'hostDetails.proxyPanel.keychainIdentity': 'Идентификатор из связки ключей',
+  'hostDetails.proxyPanel.manualCredentials': 'Ввести вручную',
   'hostDetails.proxyPanel.remove': 'Удалить прокси',
   'hostDetails.proxyPanel.savedProxy': 'Сохранённый прокси',
   'hostDetails.proxyPanel.selectSaved': 'Выбрать сохранённый прокси',

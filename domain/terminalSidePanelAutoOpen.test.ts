@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  TERMINAL_SIDE_PANEL_AUTO_OPEN_TABS,
   resolveTerminalSidePanelAutoOpen,
   type TerminalSidePanelAutoOpenTab,
 } from "./terminalSidePanelAutoOpen.ts";
@@ -42,6 +43,8 @@ test("terminal side panel auto-open skips SFTP when the session cannot use it", 
 
 test("terminal side panel auto-open accepts every selectable side pane", () => {
   const tabs: TerminalSidePanelAutoOpenTab[] = [...TERMINAL_SIDE_PANEL_TAB_DEFAULT_ORDER];
+
+  assert.deepEqual(TERMINAL_SIDE_PANEL_AUTO_OPEN_TABS, TERMINAL_SIDE_PANEL_TAB_DEFAULT_ORDER);
 
   assert.deepEqual(
     tabs.map((selectedTab) =>

@@ -438,6 +438,7 @@ export const zhTWVaultMessages: Messages = {
   'terminal.auth.keyUnavailableFallbackPassword': '已儲存 SSH 金鑰在目前裝置不可用，改用密碼認證。',
   'terminal.connectionErrorTitle': '連線錯誤',
   'terminal.progress.timeoutIn': '將在 {seconds}s 後超時',
+  'terminal.progress.waitingForUserInput': '等待使用者輸入',
   'terminal.progress.disconnected': '已斷開',
   'terminal.progress.cancelling': '正在取消...',
   'terminal.progress.startOver': '重新開始',

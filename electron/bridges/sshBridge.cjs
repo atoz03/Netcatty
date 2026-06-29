@@ -53,6 +53,8 @@ const {
 const PREFERRED_KEY_NAMES = ["id_ed25519", "id_ecdsa", "id_rsa"];
 // Match any private key file: id_* but not *.pub
 const SSH_KEY_PATTERN = /^id_[\w-]+$/;
+const SSH_TCP_CONNECT_TIMEOUT_MS = 20000;
+const SSH_AUTH_READY_TIMEOUT_MS = 120000;
 
 function quoteShellArg(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
@@ -537,7 +539,8 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
         host: jump.hostname,
         port: jump.port || 22,
         username: jump.username || 'root',
-        readyTimeout: 120000, // 2 minutes to allow for keyboard-interactive (2FA/MFA)
+        timeout: SSH_TCP_CONNECT_TIMEOUT_MS,
+        readyTimeout: SSH_AUTH_READY_TIMEOUT_MS, // 2 minutes to allow for keyboard-interactive (2FA/MFA)
         keepaliveInterval: hopInterval > 0 ? hopInterval * 1000 : 0,
         keepaliveCountMax: hopInterval > 0 ? hopCountMax : 0,
         // Enable keyboard-interactive authentication (required for 2FA/MFA)
@@ -596,6 +599,12 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
           initialPassphrase: jump.passphrase,
           passphraseSignal: options._passphraseSignal,
           logPrefix: `[Chain] Hop ${i + 1}:`,
+          onPassphrasePromptShown: () => sendProgress(
+            i + 1, totalHops + 1, hopLabel, "auth-attempt", "waiting for user input...",
+          ),
+          onPassphrasePromptResolved: () => sendProgress(
+            i + 1, totalHops + 1, hopLabel, "auth-attempt", "user responded",
+          ),
           onLoaded: (loaded) => {
             if (loaded.passphrase) {
               sendProgress(i + 1, totalHops + 1, hopLabel, 'auth-attempt', 'passphrase required');
@@ -617,6 +626,12 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
           initialPassphrase: jump.passphrase,
           passphraseSignal: options._passphraseSignal,
           logPrefix: `[Chain] Hop ${i + 1}:`,
+          onPassphrasePromptShown: () => sendProgress(
+            i + 1, totalHops + 1, hopLabel, "auth-attempt", "waiting for user input...",
+          ),
+          onPassphrasePromptResolved: () => sendProgress(
+            i + 1, totalHops + 1, hopLabel, "auth-attempt", "user responded",
+          ),
         })
         : null;
       const effectivePrivateKey = inlineKey?.privateKey || identityFile?.privateKey;
@@ -642,7 +657,7 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
         } else if (jump.privateKey && isKeyEncrypted(jump.privateKey)) {
           // Key is encrypted but no passphrase provided — prompt the user
           console.log(`[Chain] Hop ${i + 1}: key is encrypted, requesting passphrase`);
-          sendProgress(i + 1, totalHops + 1, hopLabel, 'auth-attempt', 'passphrase required');
+          sendProgress(i + 1, totalHops + 1, hopLabel, 'auth-attempt', 'waiting for user input...');
           const keyLabel = jump.label || hopLabel;
           const result = await passphraseHandler.requestPassphrase(
             sender,
@@ -652,6 +667,7 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
             false,
             { signal: options._passphraseSignal }
           );
+          sendProgress(i + 1, totalHops + 1, hopLabel, 'auth-attempt', 'user responded');
           if (result?.passphrase) {
             connOpts.passphrase = result.passphrase;
           } else {
@@ -692,6 +708,7 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
       const effectiveHopProxy = isFirst ? ((hasUsableJumpProxy ? jump.proxy : null) || options.proxy) : null;
       if (effectiveHopProxy) {
         currentSocket = await createProxySocket(effectiveHopProxy, jump.hostname, jump.port || 22, {
+          timeoutMs: SSH_TCP_CONNECT_TIMEOUT_MS,
           onSocket: (socket) => {
             if (options?._tunnelRef) {
               options._tunnelRef.pendingConn = socket;
@@ -737,6 +754,7 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
           console.error(`[Chain] Hop ${i + 1}/${totalHops}: ${hopLabel} timeout`);
           const errMsg = `Connection timeout to ${hopLabel}`;
           sendProgress(i + 1, totalHops + 1, hopLabel, 'error', errMsg);
+          try { conn.destroy(); } catch { }
           reject(new Error(errMsg));
         });
         // Handle keyboard-interactive authentication for jump hosts (2FA/MFA)
@@ -758,7 +776,11 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
           ),
         }));
         console.log(`[Chain] Hop ${i + 1}/${totalHops}: Connecting to ${hopLabel}...`);
-        conn.once('connect', () => enableSshNoDelay(conn));
+        conn.once('connect', () => {
+          try { conn._sock?.setTimeout?.(0); } catch { }
+          sendProgress(i + 1, totalHops + 1, hopLabel, 'tcp-connected');
+          enableSshNoDelay(conn);
+        });
         if (connOpts.sock) enableTcpNoDelay(connOpts.sock);
         conn.connect(connOpts);
       });
@@ -782,7 +804,25 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
       console.log(`[Chain] Hop ${i + 1}/${totalHops}: Forwarding from ${hopLabel} to ${nextHost}:${nextPort}...`);
       sendProgress(i + 1, totalHops + 1, hopLabel, 'forwarding');
       currentSocket = await new Promise((resolve, reject) => {
+        const forwardTimeoutMs = options?._forwardTimeoutMs || SSH_TCP_CONNECT_TIMEOUT_MS;
+        let settled = false;
+        const timeout = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          const errMsg = `Connection timeout from ${hopLabel} to ${nextHost}:${nextPort}`;
+          console.error(`[Chain] Hop ${i + 1}/${totalHops}: forwardOut from ${hopLabel} to ${nextHost}:${nextPort} TIMEOUT`);
+          sendProgress(i + 1, totalHops + 1, hopLabel, 'error', errMsg);
+          try { conn.destroy(); } catch { }
+          reject(new Error(errMsg));
+        }, forwardTimeoutMs);
+        if (!options?._forwardTimeoutMs) timeout.unref?.();
         conn.forwardOut('127.0.0.1', 0, nextHost, nextPort, (err, stream) => {
+          if (settled) {
+            try { stream?.destroy?.(); } catch { }
+            return;
+          }
+          settled = true;
+          clearTimeout(timeout);
           if (err) {
             console.error(`[Chain] Hop ${i + 1}/${totalHops}: forwardOut from ${hopLabel} to ${nextHost}:${nextPort} FAILED:`, err.message);
             reject(err);

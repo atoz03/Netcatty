@@ -33,6 +33,7 @@ import {
   resolveTelnetUsername,
 } from "../../../domain/host";
 import { hasUsableProxyConfig } from "../../../domain/proxyProfiles";
+import { hasConnectionPassedTcpDial } from "../connectionTimeouts";
 
 const TELNET_SESSION_REPLACED_ERROR = "Telnet session start was replaced";
 
@@ -129,6 +130,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       ctx.updateStatus("disconnected");
       return;
     }
+    ctx.setIsConnectionAwaitingUserInput?.(false);
 
     const missingChainHostIds = getMissingChainHostIds(ctx.host, ctx.resolvedChainHosts);
     if (missingChainHostIds.length > 0) {
@@ -326,6 +328,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
     const totalHops = jumpHosts.length + 1;
     let unsubscribeChainProgress: (() => void) | undefined;
 
+    ctx.setIsConnectionPastTcpDial?.(false);
     if (jumpHosts.length > 0) {
       ctx.setChainProgress({
         currentHop: 1,
@@ -356,6 +359,9 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         switch (status) {
           case 'connecting':
             logLine = `${prefix}${tr("terminal.progress.connecting", "Connecting to")} ${label}...`;
+            break;
+          case 'tcp-connected':
+            logLine = `${prefix}${label} - ${tr("terminal.progress.tcpConnected", "TCP connected")}`;
             break;
           case 'authenticating':
             logLine = `${prefix}${label} - ${tr("terminal.progress.keyExchangeComplete", "Key exchange complete")}`;
@@ -390,6 +396,20 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
             logLine = `${prefix}${label} - ${status}${error ? `: ${error}` : ''}`;
         }
 
+        if (status === 'connecting' || status === 'forwarding') {
+          ctx.setIsConnectionPastTcpDial?.(false);
+        }
+        if (status === 'auth-attempt' && error === 'waiting for user input...') {
+          ctx.setIsConnectionAwaitingUserInput?.(true);
+        } else if (status === 'auth-attempt' && error === 'user responded') {
+          ctx.setIsConnectionAwaitingUserInput?.(false);
+        } else if (status === 'authenticated' || status === 'connected' || status === 'shell' || status === 'error') {
+          ctx.setIsConnectionAwaitingUserInput?.(false);
+        }
+        if (hasConnectionPassedTcpDial(status)) {
+          ctx.setIsConnectionPastTcpDial?.(true);
+        }
+
         ctx.setProgressLogs((prev) => [...prev, logLine]);
         const hopProgress = (hop / total) * 80 + 10;
         ctx.setProgressValue(Math.min(95, hopProgress));
@@ -416,6 +436,8 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         key?: SSHKey;
         useIdentityFiles?: boolean;
       }): Promise<string> => {
+        ctx.setIsConnectionAwaitingUserInput?.(false);
+        ctx.setIsConnectionPastTcpDial?.(false);
         // Resolve keepalive per-host: a host can opt into its own values
         // (e.g. set interval=0 on an embedded device whose SSH stack
         // doesn't reply to keepalive@openssh.com) while everything else
@@ -529,6 +551,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       }
 
       if (unsubscribeChainProgress) unsubscribeChainProgress();
+      ctx.setIsConnectionAwaitingUserInput?.(false);
 
       if (!tryAttachSessionToTerminal(ctx, term, id, {
         onConnected: () => ctx.setChainProgress(null),
@@ -579,6 +602,8 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       }
 
       ctx.setChainProgress(null);
+      ctx.setIsConnectionAwaitingUserInput?.(false);
+      ctx.setIsConnectionPastTcpDial?.(false);
       if (unsubscribeChainProgress) unsubscribeChainProgress();
     }
   };

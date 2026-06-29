@@ -239,6 +239,140 @@ test("startSSH sends key and password together in one connection for publickey+p
   assert.deepEqual(capturedOptions?.identityFilePaths, ["/Users/me/.ssh/key"]);
 });
 
+test("startSSH resets the TCP dial timeout state before password fallback", async () => {
+  let chainProgressListener: (
+    sessionId: string,
+    hop: number,
+    total: number,
+    label: string,
+    status: string,
+    error?: string,
+  ) => void = noop;
+  let startCalls = 0;
+  const tcpDialState: boolean[] = [];
+  const terminalBackend = {
+    backendAvailable: () => true,
+    telnetAvailable: () => true,
+    moshAvailable: () => true,
+    localAvailable: () => true,
+    serialAvailable: () => true,
+    execAvailable: () => true,
+    startSSHSession: async () => {
+      startCalls += 1;
+      if (startCalls === 1) {
+        chainProgressListener("session-1", 1, 1, "target.example.test", "tcp-connected");
+        throw new Error("Authentication failed");
+      }
+      return "ssh-session";
+    },
+    startTelnetSession: async () => "telnet-session",
+    startMoshSession: async () => "mosh-session",
+    startLocalSession: async () => "local-session",
+    startSerialSession: async () => "serial-session",
+    execCommand: async () => ({}),
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: (listener: typeof chainProgressListener) => {
+      chainProgressListener = listener;
+      return noop;
+    },
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+  const ctx = createStarterContext({
+    host: {
+      id: "host-1",
+      label: "Target",
+      hostname: "target.example.test",
+      username: "alice",
+      port: 22,
+      authMethod: "key",
+      identityFileId: "key-1",
+      password: "login-secret",
+    },
+    keys: [{
+      id: "key-1",
+      name: "Key",
+      privateKey: "plain-private-key",
+      publicKey: "",
+      source: "embedded",
+    }],
+    terminalBackend,
+    setIsConnectionPastTcpDial: (value: boolean) => {
+      tcpDialState.push(value);
+    },
+  });
+
+  await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
+
+  assert.equal(startCalls, 2);
+  assert.deepEqual(tcpDialState, [false, false, true, false]);
+});
+
+test("startSSH resets the TCP dial timeout state when a jump host starts forwarding", async () => {
+  let chainProgressListener: (
+    sessionId: string,
+    hop: number,
+    total: number,
+    label: string,
+    status: string,
+    error?: string,
+  ) => void = noop;
+  const tcpDialState: boolean[] = [];
+  const terminalBackend = {
+    backendAvailable: () => true,
+    telnetAvailable: () => true,
+    moshAvailable: () => true,
+    localAvailable: () => true,
+    serialAvailable: () => true,
+    execAvailable: () => true,
+    startSSHSession: async () => {
+      chainProgressListener("session-1", 1, 2, "bastion.example.test", "tcp-connected");
+      chainProgressListener("session-1", 1, 2, "bastion.example.test", "forwarding");
+      chainProgressListener("session-1", 2, 2, "target.example.test", "tcp-connected");
+      return "ssh-session";
+    },
+    startTelnetSession: async () => "telnet-session",
+    startMoshSession: async () => "mosh-session",
+    startLocalSession: async () => "local-session",
+    startSerialSession: async () => "serial-session",
+    execCommand: async () => ({}),
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: (listener: typeof chainProgressListener) => {
+      chainProgressListener = listener;
+      return noop;
+    },
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+  const ctx = createStarterContext({
+    host: {
+      id: "host-1",
+      label: "Target",
+      hostname: "target.example.test",
+      username: "alice",
+      password: "login-secret",
+      hostChain: { hostIds: ["jump-1"] },
+    },
+    resolvedChainHosts: [{
+      id: "jump-1",
+      label: "Bastion",
+      hostname: "bastion.example.test",
+      username: "alice",
+      password: "jump-secret",
+    }],
+    terminalBackend,
+    setIsConnectionPastTcpDial: (value: boolean) => {
+      tcpDialState.push(value);
+    },
+  });
+
+  await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
+
+  assert.deepEqual(tcpDialState, [false, false, true, false, true]);
+});
+
 test("startSSH forwards the saved sudo autofill password to the SSH bridge", async () => {
   let capturedOptions: Record<string, unknown> | null = null;
   const terminalBackend = {

@@ -154,6 +154,8 @@ export type TerminalSessionStartersContext = {
   setProgressLogs: Dispatch<SetStateAction<string[]>>;
   setProgressValue: Dispatch<SetStateAction<number>>;
   setChainProgress: Dispatch<SetStateAction<ChainProgressState>>;
+  setIsConnectionAwaitingUserInput?: Dispatch<SetStateAction<boolean>>;
+  setIsConnectionPastTcpDial?: Dispatch<SetStateAction<boolean>>;
   t?: (key: string) => string;
 
   onSessionAttached?: (sessionId: string) => void;

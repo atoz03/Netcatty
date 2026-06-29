@@ -182,6 +182,7 @@ export const ruTerminalMessages: Messages = {
   'terminal.auth.proxyCredentialsUnavailable': 'Учётные данные прокси не могут быть расшифрованы на этом устройстве. Откройте настройки хоста и заново введите пароль прокси.',
   'terminal.auth.keyUnavailableFallbackPassword': 'Сохранённый SSH-ключ недоступен на этом устройстве. Выполняется переход на аутентификацию по паролю.',
   'terminal.progress.timeoutIn': 'Тайм-аут через {seconds}с',
+  'terminal.progress.waitingForUserInput': 'Ожидание ввода пользователя',
   'terminal.progress.disconnected': 'Отключено',
   'terminal.progress.cancelling': 'Отмена...',
   'terminal.progress.startOver': 'Начать заново',

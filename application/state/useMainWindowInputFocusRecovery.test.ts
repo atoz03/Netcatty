@@ -105,12 +105,59 @@ test("main-window input focus recovery ignores generic focus and visible visibil
   cleanup();
 });
 
+test("main-window input focus recovery retries an explicit show when visibility catches up", () => {
+  let visibilityState: DocumentVisibilityState = "hidden";
+  let scheduleFocusCalls = 0;
+  let hiddenCalls = 0;
+  let shownHandler: Listener | null = null;
+
+  const documentTarget = createEventTargetStub();
+
+  const cleanup = startMainWindowInputFocusRecovery(
+    { onPageHidden: () => { hiddenCalls += 1; } },
+    {
+      documentRef: {
+        ...documentTarget,
+        get visibilityState() {
+          return visibilityState;
+        },
+      },
+      bridge: {
+        onWindowShown(cb: Listener) {
+          shownHandler = cb;
+          return () => { shownHandler = null; };
+        },
+      },
+      scheduleFocus: () => {
+        scheduleFocusCalls += 1;
+        return { cancel: () => undefined };
+      },
+    },
+  );
+
+  shownHandler?.();
+
+  assert.equal(scheduleFocusCalls, 0);
+
+  visibilityState = "visible";
+  documentTarget.dispatch("visibilitychange");
+
+  assert.equal(scheduleFocusCalls, 1);
+  assert.equal(hiddenCalls, 0);
+
+  documentTarget.dispatch("visibilitychange");
+
+  assert.equal(scheduleFocusCalls, 1);
+
+  cleanup();
+});
+
 test("useMainWindowInputFocusRecovery restores input focus only after explicit window-shown IPC", () => {
   const source = readProjectFile("application/state/useMainWindowInputFocusRecovery.ts");
 
   assert.match(source, /visibilityState !== "visible"/);
   assert.match(source, /scheduleFocus\(\)/);
-  assert.match(source, /onWindowShown\?\.\(\(\) => \{\s*recoverFocus\(\);\s*\}\)/);
+  assert.match(source, /onWindowShown\?\.\(\(\) => \{\s*pendingExplicitShowRecovery = true;\s*recoverFocus\(\);\s*\}\)/);
   assert.doesNotMatch(source, /window\.addEventListener\("focus"/);
   assert.doesNotMatch(source, /window\.removeEventListener\("focus"/);
 });
@@ -127,7 +174,8 @@ test("useMainWindowInputFocusRecovery uses visibility changes only to dismiss tr
   assert.match(source, /onWindowWillHide/);
   assert.match(source, /cancelPendingFocusRecovery/);
   assert.match(visibilityHandler, /dismissTransientUi\(\)/);
-  assert.doesNotMatch(visibilityHandler, /recoverFocus\(\)/);
+  assert.doesNotMatch(visibilityHandler, /else\s*\{\s*recoverFocus\(\);\s*\}/);
+  assert.doesNotMatch(visibilityHandler, /visibilityState !== "hidden"[\s\S]*recoverFocus\(\)/);
 });
 
 test("scheduleWindowInputFocus skips deferred focus when the page is hidden", () => {

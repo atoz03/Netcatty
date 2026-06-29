@@ -53,19 +53,23 @@ export function startMainWindowInputFocusRecovery(
   } = dependencies;
 
   let pendingFocusRecovery: ScheduledWindowInputFocus | null = null;
+  let pendingExplicitShowRecovery = false;
 
   const cancelPendingFocusRecovery = () => {
     pendingFocusRecovery?.cancel();
     pendingFocusRecovery = null;
   };
 
-  const recoverFocus = () => {
-    if (documentRef.visibilityState !== "visible") return;
+  const recoverFocus = (): boolean => {
+    if (documentRef.visibilityState !== "visible") return false;
+    pendingExplicitShowRecovery = false;
     cancelPendingFocusRecovery();
     pendingFocusRecovery = scheduleFocus();
+    return true;
   };
 
   const dismissTransientUi = () => {
+    pendingExplicitShowRecovery = false;
     cancelPendingFocusRecovery();
     onPageHidden?.();
   };
@@ -73,12 +77,17 @@ export function startMainWindowInputFocusRecovery(
   const onVisibilityChange = () => {
     if (documentRef.visibilityState === "hidden") {
       dismissTransientUi();
+      return;
+    }
+    if (pendingExplicitShowRecovery) {
+      recoverFocus();
     }
   };
 
   documentRef.addEventListener("visibilitychange", onVisibilityChange);
 
   const unsubscribeShown = bridge?.onWindowShown?.(() => {
+    pendingExplicitShowRecovery = true;
     recoverFocus();
   });
   const unsubscribeWillHide = bridge?.onWindowWillHide?.(() => {
@@ -86,6 +95,7 @@ export function startMainWindowInputFocusRecovery(
   });
 
   return () => {
+    pendingExplicitShowRecovery = false;
     cancelPendingFocusRecovery();
     documentRef.removeEventListener("visibilitychange", onVisibilityChange);
     unsubscribeShown?.();

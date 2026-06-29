@@ -24,6 +24,15 @@ import {
   resolveHostTerminalThemeId,
   type TerminalHostUpdate,
 } from "../domain/terminalAppearance";
+import {
+  createTerminalEncodingStorageKey,
+  isTerminalEncodingPreference,
+  resolveInitialTerminalEncoding,
+  shouldSyncTerminalEncodingOnAttach,
+  terminalEncodingPreferenceToCharset,
+  type TerminalEncodingPreference,
+  type TerminalEncodingAttachConnection,
+} from "../domain/terminalEncodingPreference";
 import { resolveRestoreCwdIntent } from "../domain/sessionRestore";
 import {
   buildTerminalContextReadResult,
@@ -37,6 +46,7 @@ import { supportsZmodemTerminalDragDrop } from "../lib/zmodemDragDrop";
 import { resolveHostAuth } from "../domain/sshAuth";
 import { useTerminalBackend } from "../application/state/useTerminalBackend";
 import { useStoredBoolean } from "../application/state/useStoredBoolean";
+import { readOptionalStoredStringValue, useStoredString } from "../application/state/useStoredString";
 import { useSessionLogBackend } from "../application/state/useSessionLogBackend";
 import { useTerminalLayoutSuppressActive } from "../application/state/terminalLayoutSuppressStore";
 // SFTPModal removed - SFTP is now handled by SftpSidePanel in TerminalLayer
@@ -48,7 +58,10 @@ import { useAvailableFonts } from "../application/state/fontStore";
 import { composeFontFamilyStack, type SupportedPlatform } from "../infrastructure/config/cjkFonts";
 import { resolveTerminalFontFamilyId } from "../infrastructure/config/fonts";
 import { getBuiltinTerminalThemeById } from "../infrastructure/config/terminalThemes";
-import { STORAGE_KEY_TERMINAL_COMPOSE_BAR_OPEN } from "../infrastructure/config/storageKeys";
+import {
+  STORAGE_KEY_TERMINAL_COMPOSE_BAR_OPEN,
+  STORAGE_KEY_TERMINAL_ENCODING_BY_HOST_PREFIX,
+} from "../infrastructure/config/storageKeys";
 import { useCustomThemes } from "../application/state/customThemeStore";
 
 import { TerminalConnectionDialog } from "./terminal/TerminalConnectionDialog";
@@ -162,19 +175,6 @@ import {
   type TerminalProps,
 } from "./terminal/terminalHelpers";
 import { terminalPropsAreEqual } from "./terminal/terminalMemo";
-
-const resolveInitialTerminalEncoding = (charset?: string): 'utf-8' | 'gb18030' => {
-  if (!charset) return 'utf-8';
-  const raw = String(charset).trim().toLowerCase();
-  const localeCodeset = raw.match(/\.([^@]+)(?:@.*)?$/)?.[1];
-  const candidates = [raw, localeCodeset].filter((value): value is string => Boolean(value));
-  return candidates.some((candidate) => {
-    const normalized = candidate.replace(/[^a-z0-9]/g, "");
-    return ["gb18030", "gbk", "gb2312", "cp936", "ms936"].includes(normalized);
-  })
-    ? 'gb18030'
-    : 'utf-8';
-};
 
 const TerminalComponent: React.FC<TerminalProps> = ({
   host,
@@ -590,11 +590,28 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     STORAGE_KEY_TERMINAL_COMPOSE_BAR_OPEN,
     false,
   );
-  const [terminalEncoding, setTerminalEncoding] = useState<'utf-8' | 'gb18030'>(() => {
-    return resolveInitialTerminalEncoding(host?.charset);
+  const terminalEncodingStorageKey = createTerminalEncodingStorageKey(
+    STORAGE_KEY_TERMINAL_ENCODING_BY_HOST_PREFIX,
+    host,
+  );
+  const initialRememberedTerminalEncoding = readOptionalStoredStringValue(
+    terminalEncodingStorageKey,
+    isTerminalEncodingPreference,
+  );
+  const [, setRememberedTerminalEncoding] = useStoredString(
+    terminalEncodingStorageKey,
+    'utf-8',
+    isTerminalEncodingPreference,
+  );
+  const [terminalEncoding, setTerminalEncoding] = useState<TerminalEncodingPreference>(() => {
+    return resolveInitialTerminalEncoding(
+      host?.charset,
+      initialRememberedTerminalEncoding,
+    );
   });
   const terminalEncodingRef = useRef(terminalEncoding);
   terminalEncodingRef.current = terminalEncoding;
+  const hasRememberedTerminalEncodingRef = useRef(initialRememberedTerminalEncoding !== null);
   // True only after the user actively picks an encoding from the toolbar.
   // onSessionAttached uses this to decide whether to override the backend's
   // initial charset for telnet/serial reconnects — on a first attach we
@@ -1321,17 +1338,24 @@ const TerminalComponent: React.FC<TerminalProps> = ({
       const isMosh = host.protocol === 'mosh' || host.moshEnabled;
       const isEt = host.protocol === 'et' || host.etEnabled;
       const isSSH = !isLocal && !isSerial && !isTelnet && !isMosh && !isEt;
-      if (isSSH) {
-        setSessionEncoding(id, terminalEncodingRef.current);
-        return;
-      }
-      // Telnet / serial: the backend already applied host.charset
+      const encodingAttachConnection: TerminalEncodingAttachConnection = isSSH
+        ? 'ssh'
+        : isTelnet
+          ? 'telnet'
+          : isSerial
+            ? 'serial'
+            : 'other';
+      // Telnet / serial: the backend already applied host.charset unless
+      // a remembered per-host choice exists. Remembered choices are explicit
+      // user preferences and must win on reconnect, including saved serial hosts.
       // (including arbitrary iconv labels like latin1 / shift_jis that
       // the UI's two-value state can't represent) through start*Session
-      // options, so don't clobber it on first attach. Only re-sync once
-      // the user has explicitly picked from the toolbar menu — that's
-      // the signal they want the UI choice to win on reconnect.
-      if ((isTelnet || isSerial) && userPickedEncodingRef.current) {
+      // options, so don't clobber it on first attach without a stored choice.
+      if (shouldSyncTerminalEncodingOnAttach({
+        connection: encodingAttachConnection,
+        userPickedEncoding: userPickedEncodingRef.current,
+        hasRememberedEncoding: hasRememberedTerminalEncodingRef.current,
+      })) {
         setSessionEncoding(id, terminalEncodingRef.current);
       }
     },
@@ -1815,13 +1839,20 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     onAddSelectionToAI?.(sessionId, selection);
   }, [onAddSelectionToAI, sessionId]);
 
-  const handleSetTerminalEncoding = useCallback((encoding: 'utf-8' | 'gb18030') => {
+  const handleSetTerminalEncoding = useCallback((encoding: TerminalEncodingPreference) => {
     setTerminalEncoding(encoding);
+    setRememberedTerminalEncoding(encoding);
     userPickedEncodingRef.current = true;
+    if (host.id && host.protocol !== 'local' && !host.id.startsWith('local-') && !host.id.startsWith('serial-')) {
+      handleUpdateHostFromTerminal({
+        id: host.id,
+        charset: terminalEncodingPreferenceToCharset(encoding),
+      });
+    }
     if (sessionRef.current) {
       setSessionEncoding(sessionRef.current, encoding);
     }
-  }, [setSessionEncoding]);
+  }, [handleUpdateHostFromTerminal, host.id, host.protocol, setRememberedTerminalEncoding, setSessionEncoding]);
 
   const handleOpenSFTP = useCallback(async () => {
     if (onOpenSftp) {

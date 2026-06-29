@@ -1359,7 +1359,7 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
 
     const handleWindowFocus = () => {
       if (!shouldRecoverOnAppResume()) return;
-      const term = termRef.current;
+      let term = termRef.current;
       if (term) {
         cancelScheduledUnfocusedRepaint(term);
         forceTerminalRepaintBypassingAnimationFrame(term);

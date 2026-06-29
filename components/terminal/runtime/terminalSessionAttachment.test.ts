@@ -128,8 +128,14 @@ test("writeSessionData flushes deferred IPC acks before small output can leave t
     },
   };
   const chunk = "x".repeat(512);
+  const firstThresholdFlushBytes = Math.ceil(XTERM_WRITE_CALLBACK_BATCH_BYTES / chunk.length) * chunk.length;
+  const expectedDeferredBytes = Math.floor((FLOW_HIGH_WATER_MARK - FLOW_LOW_WATER_MARK) / chunk.length) * chunk.length;
+  const writeCount = (firstThresholdFlushBytes + expectedDeferredBytes) / chunk.length;
+  assert.ok(expectedDeferredBytes > 0);
+  assert.ok(expectedDeferredBytes < FLOW_HIGH_WATER_MARK);
+  assert.equal(Number.isInteger(writeCount), true);
 
-  for (let index = 0; index < 120; index += 1) {
+  for (let index = 0; index < writeCount; index += 1) {
     mainUnackedBytes += chunk.length;
     if (mainUnackedBytes >= FLOW_HIGH_WATER_MARK) {
       mainPaused = true;
@@ -139,8 +145,8 @@ test("writeSessionData flushes deferred IPC acks before small output can leave t
   flushTerminalWriteCoalescer(term);
 
   assert.equal(mainPaused, false);
-  assert.equal(mainUnackedBytes, 28672);
-  assert.equal(getDeferredTerminalWriteAckBytes(term), 28672);
+  assert.equal(mainUnackedBytes, expectedDeferredBytes);
+  assert.equal(getDeferredTerminalWriteAckBytes(term), expectedDeferredBytes);
 
   await new Promise((resolve) => { setTimeout(resolve, 25); });
 

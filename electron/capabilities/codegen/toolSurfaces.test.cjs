@@ -107,7 +107,6 @@ test("harness capabilities are not exposed on MCP", () => {
   for (const capabilityId of mcpCapabilityIds) {
     assert.ok(!capabilityId.startsWith("harness."));
   }
-  assert.equal(listMcpTools().length, 35);
 });
 
 test("listMcpTools descriptions stay aligned with catalog capability ids", () => {

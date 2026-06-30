@@ -273,8 +273,8 @@ const TerminalHostTreeHostHoverCard: React.FC<{ host: Host }> = ({ host }) => {
           size="sm"
           fallback={host.label.slice(0, 1).toUpperCase()}
         />
-        <div className="flex h-5 min-w-0 items-center">
-          <div className="translate-y-px truncate text-[15px] font-semibold leading-none">{host.label}</div>
+        <div className="flex min-h-6 min-w-0 items-center">
+          <div className="truncate text-[15px] font-semibold leading-5">{host.label}</div>
         </div>
       </div>
       <div className="mt-3 space-y-1.5">
@@ -419,14 +419,14 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
           />
         ) : (
           <span
-            className="flex min-w-0 flex-1 items-center truncate leading-none"
+            className="flex min-w-0 flex-1 items-center truncate leading-5"
             style={{ color: theme.termFg }}
           >
             {row.host.label}
           </span>
         )}
         {row.host.protocol && row.host.protocol !== 'ssh' && (
-          <span className="flex shrink-0 items-center text-[10px] leading-none uppercase opacity-70" style={{ color: theme.mutedFg }}>
+          <span className="flex shrink-0 items-center text-[10px] leading-4 uppercase opacity-70" style={{ color: theme.mutedFg }}>
             {row.host.protocol}
           </span>
         )}
@@ -554,7 +554,7 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
           style={{ color: theme.termFg }}
         />
       ) : (
-        <span className="flex min-w-0 flex-1 items-center truncate leading-none">{node.name}</span>
+        <span className="flex min-w-0 flex-1 items-center truncate leading-5">{node.name}</span>
       )}
     </div>
   );

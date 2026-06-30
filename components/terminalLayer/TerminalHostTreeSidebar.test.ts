@@ -183,8 +183,8 @@ test('host tree hover card renders markdown notes and keeps host details out of 
   assert.match(source, /<LazyMessageResponse/);
   assert.match(source, /size="sm"/);
   assert.match(source, /items-center gap-2/);
-  assert.match(source, /flex h-5 min-w-0 items-center/);
-  assert.match(source, /translate-y-px truncate text-\[15px\] font-semibold leading-none/);
+  assert.match(source, /flex min-h-6 min-w-0 items-center/);
+  assert.match(source, /truncate text-\[15px\] font-semibold leading-5/);
   assert.match(source, /details\.host/);
   assert.doesNotMatch(source, /text-muted-foreground">\{host\.hostname\}/);
   assert.match(source, /host-tree-notes-scroll/);
@@ -196,9 +196,9 @@ test('host tree row icons, labels, and protocol badges share centered line boxes
   const source = readFileSync(new URL('./TerminalHostTreeSidebar.tsx', import.meta.url), 'utf8');
 
   assert.match(source, /flex h-5 shrink-0 items-center justify-center">\s*<DistroAvatar/);
-  assert.match(source, /flex min-w-0 flex-1 items-center truncate leading-none/);
-  assert.match(source, /flex shrink-0 items-center text-\[10px\] leading-none uppercase/);
+  assert.match(source, /flex min-w-0 flex-1 items-center truncate leading-5/);
+  assert.match(source, /flex shrink-0 items-center text-\[10px\] leading-4 uppercase/);
   assert.match(source, /flex h-5 w-4 shrink-0 items-center/);
   assert.match(source, /flex h-5 shrink-0 items-center">\s*\{isExpanded/);
-  assert.match(source, /flex min-w-0 flex-1 items-center truncate leading-none">\{node\.name\}/);
+  assert.match(source, /flex min-w-0 flex-1 items-center truncate leading-5">\{node\.name\}/);
 });

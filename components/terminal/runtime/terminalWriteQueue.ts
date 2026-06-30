@@ -20,6 +20,7 @@ type QueuedWrite = {
 type QueuedWriteStep = {
   bytes: number;
   write: (done: () => void) => void;
+  yieldAfter: boolean;
 };
 
 type TerminalWriteQueue = {
@@ -89,32 +90,46 @@ const scheduleNextTerminalWrite = (term: XTerm, queue: TerminalWriteQueue) => {
 
 const runQueuedWrite = (item: QueuedWrite, done: () => void): void => {
   let index = 0;
-  let inCallback = false;
-  let continueRequested = false;
+  let completed = false;
 
   const runNext = (): void => {
-    if (inCallback) {
-      continueRequested = true;
+    if (completed) {
+      return;
+    }
+    if (item.cancelled) {
+      completed = true;
+      done();
+      return;
+    }
+    const step = item.steps[index];
+    index += 1;
+    item.nextIndex = index;
+    if (!step) {
+      completed = true;
+      done();
       return;
     }
 
-    do {
-      continueRequested = false;
-      if (item.cancelled) {
-        done();
+    let callbackCalledSynchronously = false;
+    let insideWrite = true;
+    const continueAfterStep = (): void => {
+      if ((step.yieldAfter || item.yieldAfter) && index < item.steps.length) {
+        setTimeout(runNext, 0);
         return;
       }
-      const step = item.steps[index];
-      index += 1;
-      item.nextIndex = index;
-      if (!step) {
-        done();
+      runNext();
+    };
+    step.write(() => {
+      if (insideWrite) {
+        callbackCalledSynchronously = true;
         return;
       }
-      inCallback = true;
-      step.write(runNext);
-      inCallback = false;
-    } while (continueRequested);
+      continueAfterStep();
+    });
+    insideWrite = false;
+    if (callbackCalledSynchronously) {
+      continueAfterStep();
+    }
   };
 
   runNext();
@@ -191,7 +206,7 @@ export const enqueueTerminalWrite = (
 
   queue.pending.push({
     bytes,
-    steps: [{ bytes, write }],
+    steps: [{ bytes, write, yieldAfter: Boolean(options.yieldAfter) }],
     nextIndex: 0,
     cancelled: false,
     yieldAfter: Boolean(options.yieldAfter),

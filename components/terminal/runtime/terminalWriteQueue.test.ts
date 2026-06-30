@@ -13,6 +13,14 @@ import {
 } from "./terminalWriteQueue.ts";
 
 const createFakeTerm = () => ({}) as XTerm;
+const waitForQueuedWriteYield = async () => {
+  await new Promise((resolve) => { setTimeout(resolve, 0); });
+};
+const waitForQueuedWrites = async (count: number) => {
+  for (let index = 0; index < count; index += 1) {
+    await waitForQueuedWriteYield();
+  }
+};
 
 test("enqueueTerminalWrite serializes writes in order", () => {
   const term = createFakeTerm();
@@ -57,13 +65,13 @@ test("yieldAfter lets the event loop run between queued write chunks", async () 
     done();
   });
 
-  await new Promise((resolve) => { setTimeout(resolve, 0); });
+  await waitForQueuedWriteYield();
   assert.deepEqual(order, [1]);
-  await new Promise((resolve) => { setTimeout(resolve, 0); });
+  await waitForQueuedWriteYield();
   assert.deepEqual(order, [1, 2]);
 });
 
-test("marks flood mode and coalesces queued writes when item cap is exceeded", () => {
+test("marks flood mode and coalesces queued writes when item cap is exceeded", async () => {
   const term = createFakeTerm();
   const dropped: number[] = [];
   const order: number[] = [];
@@ -89,6 +97,7 @@ test("marks flood mode and coalesces queued writes when item cap is exceeded", (
   assert.equal(isTerminalWriteQueueInFloodMode(term), true);
   assert.equal(getTerminalWriteQueueDepth(term), 1);
   releaseFirst?.();
+  await waitForQueuedWrites(MAX_WRITE_QUEUE_ITEMS + 1);
   assert.deepEqual(order, Array.from({ length: MAX_WRITE_QUEUE_ITEMS + 1 }, (_, index) => index));
 });
 
@@ -148,7 +157,7 @@ test("abortTerminalWriteQueue cancels remaining merged writes while one is in fl
   assert.deepEqual(dropped, [MAX_WRITE_QUEUE_ITEMS * 10]);
 });
 
-test("merges passive flood backlog items without dropping output", () => {
+test("merges passive flood backlog items without dropping output", async () => {
   const term = createFakeTerm();
   const dropped: number[] = [];
   const order: number[] = [];
@@ -173,7 +182,31 @@ test("merges passive flood backlog items without dropping output", () => {
   assert.equal(getTerminalWriteQueueDepth(term) < MAX_WRITE_QUEUE_ITEMS + 10, true);
   assert.deepEqual(dropped, []);
   releaseFirst?.();
+  await waitForQueuedWrites(MAX_WRITE_QUEUE_ITEMS + 10);
   assert.deepEqual(order, Array.from({ length: MAX_WRITE_QUEUE_ITEMS + 10 }, (_, index) => index));
+});
+
+test("merged flood backlog still yields between synchronous write steps", async () => {
+  const term = createFakeTerm();
+  const order: number[] = [];
+
+  for (let index = 0; index < MAX_WRITE_QUEUE_ITEMS + 1; index += 1) {
+    enqueueTerminalWrite(
+      term,
+      10,
+      (done) => {
+        order.push(index);
+        done();
+      },
+      { deferStart: true, yieldAfter: true },
+    );
+  }
+
+  assert.equal(getTerminalWriteQueueDepth(term), 1);
+  await waitForQueuedWriteYield();
+  assert.deepEqual(order, [0]);
+  await waitForQueuedWriteYield();
+  assert.deepEqual(order, [0, 1]);
 });
 
 test("abortTerminalWriteQueue drops pending bytes and reports dropped count", () => {

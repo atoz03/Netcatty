@@ -7,6 +7,7 @@ export type TerminalLineTimestampSegment =
 export type TerminalLineTimestampSegmenter = {
   append: (data: string) => TerminalLineTimestampSegment[];
   reset: () => void;
+  flushPendingEscapeSequence: () => string;
   setAlternateScreenActive: (active: boolean) => void;
 };
 
@@ -31,6 +32,7 @@ type TimestampStore = {
   segmenter: TerminalLineTimestampSegmenter;
   entries: TimestampEntry[];
   listeners: Set<() => void>;
+  timestampOnlyPrefix: string;
 };
 
 export type TerminalTimestampGutterEntry = {
@@ -44,6 +46,7 @@ export type TerminalTimestampGutterRow = {
 };
 
 const stores = new WeakMap<XTerm, TimestampStore>();
+const MAX_SEGMENTED_TIMESTAMP_WRITES = 64;
 
 const pad2 = (value: number): string => value.toString().padStart(2, "0");
 
@@ -52,6 +55,34 @@ export const formatTerminalLineTimestamp = (date: Date): string => (
 );
 
 const isCsiFinalByte = (char: string): boolean => char >= "@" && char <= "~";
+const STRING_TERMINATOR = "\u009c";
+
+const readStringTerminatedSequence = (
+  data: string,
+  startIndex: number,
+): { sequence: string; endIndex: number; complete: boolean } => {
+  for (let index = startIndex + 2; index < data.length; index += 1) {
+    if (data[index] === "\u0007" || data[index] === STRING_TERMINATOR) {
+      return {
+        sequence: data.slice(startIndex, index + 1),
+        endIndex: index,
+        complete: true,
+      };
+    }
+    if (data[index] === "\x1b" && data[index + 1] === "\\") {
+      return {
+        sequence: data.slice(startIndex, index + 2),
+        endIndex: index + 1,
+        complete: true,
+      };
+    }
+  }
+  return {
+    sequence: data.slice(startIndex),
+    endIndex: data.length - 1,
+    complete: false,
+  };
+};
 
 const readEscapeSequence = (
   data: string,
@@ -81,44 +112,11 @@ const readEscapeSequence = (
   }
 
   if (next === "]") {
-    for (let index = startIndex + 2; index < data.length; index += 1) {
-      if (data[index] === "\u0007") {
-        return {
-          sequence: data.slice(startIndex, index + 1),
-          endIndex: index,
-          complete: true,
-        };
-      }
-      if (data[index] === "\x1b" && data[index + 1] === "\\") {
-        return {
-          sequence: data.slice(startIndex, index + 2),
-          endIndex: index + 1,
-          complete: true,
-        };
-      }
-    }
-    return {
-      sequence: data.slice(startIndex),
-      endIndex: data.length - 1,
-      complete: false,
-    };
+    return readStringTerminatedSequence(data, startIndex);
   }
 
   if (next === "P" || next === "^" || next === "_" || next === "X") {
-    for (let index = startIndex + 2; index < data.length; index += 1) {
-      if (data[index] === "\x1b" && data[index + 1] === "\\") {
-        return {
-          sequence: data.slice(startIndex, index + 2),
-          endIndex: index + 1,
-          complete: true,
-        };
-      }
-    }
-    return {
-      sequence: data.slice(startIndex),
-      endIndex: data.length - 1,
-      complete: false,
-    };
+    return readStringTerminatedSequence(data, startIndex);
   }
 
   return {
@@ -153,10 +151,40 @@ const getAlternateScreenAction = (sequence: string): "enter" | "leave" | null =>
   return final === "h" ? "enter" : "leave";
 };
 
+const getWraparoundAction = (sequence: string): boolean | null => {
+  const final = getCsiFinal(sequence);
+  if (final !== "h" && final !== "l") return null;
+
+  const params = sequence.slice(2, -1);
+  if (!params.startsWith("?")) return null;
+
+  const modes = params
+    .slice(1)
+    .split(";")
+    .map((part) => Number.parseInt(part, 10))
+    .filter(Number.isFinite);
+
+  return modes.includes(7) ? final === "h" : null;
+};
+
+const isPotentialAlternateScreenSequence = (sequence: string): boolean => {
+  if (!sequence.startsWith("\x1b[?")) return false;
+
+  const params = sequence.slice(3).split(";");
+  const alternateScreenModes = ["47", "1047", "1049"];
+  return params.some((part) => (
+    part === ""
+    || alternateScreenModes.some((mode) => mode.startsWith(part) || part.startsWith(mode))
+  ));
+};
+
 const isPrintableOutput = (char: string): boolean => {
   if (char === "\t") return true;
   const code = char.codePointAt(0);
-  return code !== undefined && code >= 0x20 && code !== 0x7f;
+  return code !== undefined
+    && code >= 0x20
+    && code !== 0x7f
+    && (code < 0x80 || code > 0x9f);
 };
 
 const pushDataSegment = (
@@ -257,6 +285,11 @@ export const createTerminalLineTimestampSegmenter = (
       pendingEscapeSequence = "";
       suspendedForAlternateScreen = false;
     },
+    flushPendingEscapeSequence() {
+      const sequence = pendingEscapeSequence;
+      pendingEscapeSequence = "";
+      return sequence;
+    },
     setAlternateScreenActive(active: boolean) {
       suspendedForAlternateScreen = active;
       if (active) {
@@ -279,6 +312,7 @@ const getTimestampStore = (term: XTerm): TimestampStore => {
       segmenter: createTerminalLineTimestampSegmenter(),
       entries: [],
       listeners: new Set(),
+      timestampOnlyPrefix: "",
     };
     stores.set(term, store);
   }
@@ -296,6 +330,7 @@ const resetTimestampStore = (store: TimestampStore) => {
   }
   store.entries = [];
   store.segmenter.reset();
+  store.timestampOnlyPrefix = "";
   notifyTimestampStore(store);
 };
 
@@ -303,10 +338,12 @@ const recordTerminalLineTimestamp = (
   term: XTerm,
   store: TimestampStore,
   label: string,
-) => {
+  notify = true,
+  cursorYOffset = 0,
+): boolean => {
   const registerMarker = (term as XTerm & { registerMarker?: (offset: number) => TimestampMarker | undefined }).registerMarker;
-  const marker = registerMarker?.call(term, 0);
-  if (!marker) return;
+  const marker = registerMarker?.call(term, cursorYOffset);
+  if (!marker) return false;
 
   const entry: TimestampEntry = { marker, label };
   entry.disposeListener = marker.onDispose?.(() => {
@@ -315,7 +352,176 @@ const recordTerminalLineTimestamp = (
     notifyTimestampStore(store);
   });
   store.entries.push(entry);
-  notifyTimestampStore(store);
+  if (notify) {
+    notifyTimestampStore(store);
+  }
+  return true;
+};
+
+const countLineFeeds = (data: string): number => {
+  let count = 0;
+  for (const char of data) {
+    if (char === "\n") count += 1;
+  }
+  return count;
+};
+
+const getTerminalColumnCount = (term: XTerm): number => {
+  const columns = (term as XTerm & { cols?: number }).cols;
+  return Number.isFinite(columns) && Number(columns) > 0
+    ? Math.floor(Number(columns))
+    : Number.POSITIVE_INFINITY;
+};
+
+const getTerminalCursorColumn = (term: XTerm): number => {
+  const cursorX = ((term.buffer?.active as { cursorX?: number } | undefined)?.cursorX);
+  return Number.isFinite(cursorX) && Number(cursorX) >= 0
+    ? Math.floor(Number(cursorX))
+    : 0;
+};
+
+const getTerminalWraparoundMode = (term: XTerm): boolean => (
+  ((term as XTerm & { modes?: { wraparoundMode?: boolean } }).modes?.wraparoundMode) !== false
+);
+
+const canMeasureVisualRows = (data: string): boolean => {
+  for (let index = 0; index < data.length; index += 1) {
+    if (data.charCodeAt(index) > 0x7f) return false;
+  }
+  return true;
+};
+
+const advanceMeasuredColumns = (
+  column: number,
+  rowOffset: number,
+  columns: number,
+  width: number,
+  wraparoundMode: boolean,
+): { column: number; rowOffset: number } => {
+  if (!Number.isFinite(columns)) {
+    return { column, rowOffset };
+  }
+  if (!wraparoundMode) {
+    return {
+      column: Math.min(columns, column + width),
+      rowOffset,
+    };
+  }
+  let nextRowOffset = rowOffset;
+  let nextColumn = column;
+  if (nextColumn + width > columns) {
+    nextRowOffset += 1;
+    nextColumn = 0;
+  }
+  nextColumn += width;
+  while (nextColumn > columns) {
+    nextRowOffset += 1;
+    nextColumn -= columns;
+  }
+  return { column: nextColumn, rowOffset: nextRowOffset };
+};
+
+const advanceMeasuredTab = (
+  column: number,
+  columns: number,
+): number => {
+  if (!Number.isFinite(columns) || column >= columns) {
+    return column;
+  }
+  const tabStopWidth = 8;
+  const nextTabStop = column + (tabStopWidth - (column % tabStopWidth));
+  return Math.min(nextTabStop, columns - 1);
+};
+
+const measureTerminalRows = (
+  data: string,
+  startColumn: number,
+  columns: number,
+  startWraparoundMode: boolean,
+): { rowOffset: number; column: number; wraparoundMode: boolean } => {
+  let rowOffset = 0;
+  let column = startColumn;
+  let wraparoundMode = startWraparoundMode;
+
+  for (let index = 0; index < data.length; index += 1) {
+    const sequence = readEscapeSequence(data, index);
+    if (sequence?.complete) {
+      wraparoundMode = getWraparoundAction(sequence.sequence) ?? wraparoundMode;
+      index = sequence.endIndex;
+      continue;
+    }
+
+    const char = data[index];
+    if (char === "\n") {
+      rowOffset += 1;
+      if (Number.isFinite(columns) && column >= columns) {
+        column = columns - 1;
+      }
+      continue;
+    }
+    if (char === "\r") {
+      column = 0;
+      continue;
+    }
+    if (char === "\b") {
+      column = Math.max(0, column - 1);
+      continue;
+    }
+    if (char === "\t") {
+      column = advanceMeasuredTab(column, columns);
+      continue;
+    }
+    if (char < " " || char === "\u007f") {
+      continue;
+    }
+    ({ column, rowOffset } = advanceMeasuredColumns(column, rowOffset, columns, 1, wraparoundMode));
+  }
+
+  return { rowOffset, column, wraparoundMode };
+};
+
+const writeBatchedTimestampSegments = (
+  term: XTerm,
+  store: TimestampStore,
+  data: string,
+  segments: TerminalLineTimestampSegment[],
+  done: () => void,
+): void => {
+  const timestamps: Array<{ label: string; rowOffset: number }> = [];
+  const columns = getTerminalColumnCount(term);
+  let column = getTerminalCursorColumn(term);
+  let wraparoundMode = getTerminalWraparoundMode(term);
+  let rowOffset = 0;
+
+  for (const segment of segments) {
+    if (segment.kind === "timestamp") {
+      timestamps.push({ label: segment.label, rowOffset });
+      continue;
+    }
+    const measured = Number.isFinite(columns) && canMeasureVisualRows(segment.data)
+      ? measureTerminalRows(segment.data, column, columns, wraparoundMode)
+      : { rowOffset: countLineFeeds(segment.data), column, wraparoundMode };
+    rowOffset += measured.rowOffset;
+    column = measured.column;
+    wraparoundMode = measured.wraparoundMode;
+  }
+
+  term.write(data, () => {
+    let timestampRecorded = false;
+    for (const timestamp of timestamps) {
+      timestampRecorded = recordTerminalLineTimestamp(
+        term,
+        store,
+        timestamp.label,
+        false,
+        timestamp.rowOffset - rowOffset,
+      ) || timestampRecorded;
+    }
+    if (timestampRecorded) {
+      notifyTimestampStore(store);
+    }
+    done();
+  });
 };
 
 export const resetTerminalLineTimestamps = (term: XTerm) => {
@@ -344,10 +550,29 @@ export const resolveTerminalTimestampGutterRows = ({
   entries: readonly TerminalTimestampGutterEntry[];
   isWrappedLine?: (line: number) => boolean;
 }): TerminalTimestampGutterRow[] => {
+  const viewportEnd = viewportY + rows - 1;
+  let firstRelevantLine = viewportY;
+  const wrappedSourceLineByRow = new Map<number, number>();
+
+  if (isWrappedLine) {
+    for (let row = 0; row < rows; row += 1) {
+      const line = viewportY + row;
+      if (!isWrappedLine(line)) continue;
+      let sourceLine = line;
+      while (sourceLine > 0 && isWrappedLine(sourceLine)) {
+        sourceLine -= 1;
+      }
+      wrappedSourceLineByRow.set(row, sourceLine);
+      firstRelevantLine = Math.min(firstRelevantLine, sourceLine);
+    }
+  }
+
   const labelByLine = new Map<number, string>();
   for (const entry of entries) {
     if (entry.marker.isDisposed) continue;
-    labelByLine.set(entry.marker.line, entry.label);
+    const line = entry.marker.line;
+    if (line < firstRelevantLine || line > viewportEnd) continue;
+    labelByLine.set(line, entry.label);
   }
 
   const rowLabels = new Map<number, string>();
@@ -359,11 +584,8 @@ export const resolveTerminalTimestampGutterRows = ({
       continue;
     }
 
-    if (!isWrappedLine?.(line)) continue;
-    let sourceLine = line;
-    while (sourceLine > 0 && isWrappedLine(sourceLine)) {
-      sourceLine -= 1;
-    }
+    const sourceLine = wrappedSourceLineByRow.get(row);
+    if (sourceLine === undefined) continue;
     const wrappedLabel = labelByLine.get(sourceLine);
     if (wrappedLabel) {
       rowLabels.set(row, wrappedLabel);
@@ -406,31 +628,90 @@ export const writeTerminalDataWithLineTimestamps = (
   store.segmenter.setAlternateScreenActive(
     ((term.buffer?.active as { type?: string } | undefined)?.type) === "alternate",
   );
-  const segments = store.segmenter.append(data);
-  let index = 0;
+  const timestampOnlyPrefix = store.timestampOnlyPrefix;
+  store.timestampOnlyPrefix = "";
+  const dataForTimestamps = `${timestampOnlyPrefix}${data}`;
+  const segments = store.segmenter.append(dataForTimestamps);
+  const parsedData = segments
+    .filter((segment): segment is { kind: "data"; data: string } => segment.kind === "data")
+    .map((segment) => segment.data)
+    .join("");
+  const dataSegmentCount = segments.reduce((count, segment) => (
+    segment.kind === "data" && segment.data ? count + 1 : count
+  ), 0);
+  if (
+    timestampOnlyPrefix.length === 0
+    && parsedData === dataForTimestamps
+    && dataSegmentCount > MAX_SEGMENTED_TIMESTAMP_WRITES
+  ) {
+    writeBatchedTimestampSegments(term, store, data, segments, done);
+    return;
+  }
+  const writeSegments = (
+    onComplete: () => void,
+    skipLeadingDataLength = 0,
+  ) => {
+    let index = 0;
+    let remainingSkipLength = skipLeadingDataLength;
+    let timestampRecorded = false;
 
-  const writeNext = () => {
-    const segment = segments[index];
-    index += 1;
+    const complete = () => {
+      if (timestampRecorded) {
+        notifyTimestampStore(store);
+      }
+      onComplete();
+    };
 
-    if (!segment) {
-      done();
-      return;
-    }
+    const writeNext = () => {
+      const segment = segments[index];
+      index += 1;
 
-    if (segment.kind === "timestamp") {
-      recordTerminalLineTimestamp(term, store, segment.label);
-      writeNext();
-      return;
-    }
+      if (!segment) {
+        complete();
+        return;
+      }
 
-    if (!segment.data) {
-      writeNext();
-      return;
-    }
+      if (segment.kind === "timestamp") {
+        timestampRecorded = recordTerminalLineTimestamp(term, store, segment.label, false)
+          || timestampRecorded;
+        writeNext();
+        return;
+      }
 
-    term.write(segment.data, writeNext);
+      let segmentData = segment.data;
+      if (remainingSkipLength > 0) {
+        const skippedLength = Math.min(remainingSkipLength, segmentData.length);
+        segmentData = segmentData.slice(skippedLength);
+        remainingSkipLength -= skippedLength;
+      }
+
+      if (!segmentData) {
+        writeNext();
+        return;
+      }
+
+      term.write(segmentData, writeNext);
+    };
+
+    writeNext();
   };
 
-  writeNext();
+  if (parsedData !== dataForTimestamps) {
+    const pendingEscapeSequence = store.segmenter.flushPendingEscapeSequence();
+    if (isPotentialAlternateScreenSequence(pendingEscapeSequence)) {
+      store.timestampOnlyPrefix = pendingEscapeSequence;
+    }
+    if (!parsedData || !dataForTimestamps.startsWith(parsedData)) {
+      term.write(data, done);
+      return;
+    }
+
+    const parsedCurrentDataLength = Math.max(0, parsedData.length - timestampOnlyPrefix.length);
+    writeSegments(
+      () => term.write(data.slice(parsedCurrentDataLength), done),
+      timestampOnlyPrefix.length,
+    );
+    return;
+  }
+  writeSegments(done, timestampOnlyPrefix.length);
 };

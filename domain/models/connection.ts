@@ -11,6 +11,7 @@ export interface ProxyConfig {
   host: string;
   port: number;
   command?: string;
+  identityId?: string;
   username?: string;
   password?: string;
 }
@@ -28,6 +29,8 @@ export interface ProxyProfile {
 export interface HostChainConfig {
   hostIds: string[]; // Array of host IDs in order (first = closest to client)
 }
+
+export type MultiLineRunMode = 'lineDelay' | 'paste';
 
 // Per-host SSH algorithm override lists (advanced). Each property, when
 // present and non-empty, fully replaces the offered list for that category.
@@ -49,6 +52,46 @@ export interface EnvVar {
 
 // Protocol type for connections
 export type HostProtocol = 'ssh' | 'telnet' | 'mosh' | 'et' | 'local' | 'serial';
+export type HostIconMode = 'auto' | 'custom';
+export type HostIconColorMode = 'auto' | 'manual';
+export type HostIconId =
+  | 'server'
+  | 'terminal'
+  | 'database'
+  | 'cloud'
+  | 'router'
+  | 'shield'
+  | 'code'
+  | 'box'
+  | 'globe'
+  | 'cpu'
+  | 'hard-drive'
+  | 'network'
+  | 'wifi'
+  | 'lock'
+  | 'key'
+  | 'monitor'
+  | 'container'
+  | 'activity'
+  | 'zap'
+  | 'server-cog';
+export type HostIconColorId =
+  | 'blue'
+  | 'green'
+  | 'red'
+  | 'amber'
+  | 'purple'
+  | 'cyan'
+  | 'orange'
+  | 'slate'
+  | 'violet'
+  | 'pink'
+  | 'rose'
+  | 'lime'
+  | 'teal'
+  | 'sky'
+  | 'indigo'
+  | 'zinc';
 
 // Serial port configuration
 export type SerialParity = 'none' | 'even' | 'odd' | 'mark' | 'space';
@@ -108,6 +151,13 @@ export interface Host {
   x11Forwarding?: boolean;
   createdAt?: number; // Timestamp when host was created
   startupCommand?: string;
+  startupCommandRunMode?: MultiLineRunMode;
+  /** Script id (kind=script) to run automatically after connect. */
+  loginScriptId?: string;
+  /** Ordered onConnect script IDs for this host (canonical run order). */
+  connectScriptIds?: string[];
+  /** Output regex triggers that launch scripts on terminal output. */
+  outputTriggers?: HostOutputTrigger[];
   hostChaining?: string; // Deprecated: use hostChain instead
   proxy?: string; // Deprecated: use proxyConfig instead
   proxyProfileId?: string; // Reference to reusable proxy profile
@@ -131,10 +181,16 @@ export interface Host {
   distro?: string; // detected distro id (e.g., ubuntu, debian)
   distroMode?: 'auto' | 'manual'; // whether distro icon comes from detection or manual override
   manualDistro?: string; // manually selected distro id when distroMode='manual'
+  iconMode?: HostIconMode; // Optional host icon mode. Missing/auto preserves distro detection.
+  iconId?: HostIconId; // Curated icon override used when iconMode='custom'
+  iconColorMode?: HostIconColorMode; // Whether icon color follows the icon default or a manual override
+  iconColor?: HostIconColorId; // Palette color used when iconColorMode='manual'
+  iconColorCustom?: string; // Custom hex color used when iconColorMode='manual'
   // Multi-protocol support
   protocols?: ProtocolConfig[]; // Multiple protocol configurations
   telnetPort?: number; // Telnet-specific port (for quick access)
   telnetEnabled?: boolean; // Is Telnet enabled for this host
+  telnetIdentityId?: string; // Reference to a Telnet-specific reusable identity
   telnetUsername?: string; // Telnet-specific username
   telnetPassword?: string; // Telnet-specific password
   // Serial-specific configuration (for protocol='serial' hosts)
@@ -143,6 +199,7 @@ export interface Host {
   sftpSudo?: boolean; // Use sudo for SFTP operations (requires password)
   sftpEncoding?: SftpFilenameEncoding; // Filename encoding for SFTP operations
   sftpBookmarks?: SftpBookmark[]; // Bookmarked SFTP paths for quick navigation
+  sftpFollowTerminalCwd?: boolean; // Overrides global SFTP follow-terminal-directory setting
   // Managed source: if this host is managed by an external file (e.g., ~/.ssh/config)
   managedSourceId?: string; // Reference to ManagedSource.id
   // Host-level keyword highlighting (overrides/extends global settings)
@@ -173,6 +230,10 @@ export interface Host {
   showLineTimestamps?: boolean;
   // What the Backspace key sends: undefined = xterm default (no interception), 'ctrl-h' = ^H (0x08)
   backspaceBehavior?: 'ctrl-h';
+  // When true, tab titles stay on the connection label instead of following the
+  // shell-reported window title (OSC 0/2). Useful when many hosts share one
+  // bastion profile name.
+  disableDynamicTabTitle?: boolean;
   // Local SSH key file paths (from SSH config IdentityFile or user-added)
   // Resolved at connection time — the app reads the file content when connecting.
   identityFilePaths?: string[];
@@ -224,15 +285,48 @@ export interface Identity {
   order?: number;
 }
 
+export type SnippetKind = 'snippet' | 'script';
+export type SnippetMultiLineRunMode = MultiLineRunMode;
+export type ScriptLanguage = 'javascript' | 'python';
+export type ScriptTrigger = 'manual' | 'onConnect' | 'onOutput';
+
 export interface Snippet {
   id: string;
   label: string;
-  command: string; // Multi-line script
+  command: string; // Multi-line script or automation script source
   tags?: string[];
   package?: string; // package path
   targets?: string[]; // host ids
+  /** When true, script/snippet applies to every connectable host (no per-host picker). */
+  targetsAllHosts?: boolean;
   shortkey?: string; // Keyboard shortcut to send this snippet in terminal (e.g., "F1", "Ctrl + F1")
   noAutoRun?: boolean; // If true, paste command without executing (no trailing Enter)
+  multiLineRunMode?: SnippetMultiLineRunMode; // Multi-line auto-run behavior; default is paste.
+  order?: number;
+  /** Default 'snippet' — static text paste. 'script' runs via nct automation engine. */
+  kind?: SnippetKind;
+  language?: ScriptLanguage;
+  description?: string;
+  trigger?: ScriptTrigger;
+  /** Regex pattern when trigger is 'onOutput'. */
+  triggerPattern?: string;
+}
+
+export interface HostOutputTrigger {
+  id: string;
+  pattern: string;
+  scriptId: string;
+}
+
+export interface VaultNote {
+  id: string;
+  title: string;
+  content: string;
+  group?: string;
+  tags?: string[];
+  linkedHostIds?: string[];
+  createdAt: number;
+  updatedAt: number;
   order?: number;
 }
 
@@ -263,11 +357,14 @@ export interface GroupConfig {
   identityFilePaths?: string[];
   port?: number;
   protocol?: 'ssh' | 'telnet';
+  deviceType?: 'general' | 'network';
   agentForwarding?: boolean;
   proxyProfileId?: string;
   proxyConfig?: ProxyConfig;
   hostChain?: HostChainConfig;
   startupCommand?: string;
+  startupCommandRunMode?: MultiLineRunMode;
+  loginScriptId?: string;
   legacyAlgorithms?: boolean;
   skipEcdsaHostKey?: boolean;
   algorithms?: HostAlgorithmOverrides;

@@ -2,6 +2,7 @@
 import type React from 'react';
 
 import type { DropEntry } from '../../lib/sftpFileUtils';
+import type { ProgrammaticCommandLogRewrite } from '../terminal/programmaticCommandLog';
 import type {
   GroupConfig,
   Host,
@@ -12,6 +13,7 @@ import type {
   Snippet,
   TerminalSession,
   TerminalTheme,
+  VaultNote,
   Workspace,
 } from '../../types';
 import type {
@@ -37,10 +39,12 @@ export type TerminalLayerStableSnapshot = {
   effectiveHosts: Host[];
   sessionHostsMap: Map<string, Host>;
   sessionHostsMapRef: React.MutableRefObject<Map<string, Host>>;
+  resolvedSessionHostIds: Set<string>;
   sessionChainHostsMap: Map<string, Host[]>;
   sessionSudoAutofillPasswordsMap: Map<string, string | undefined>;
   workspaceById: Map<string, Workspace>;
   snippetExecutorsRef: React.MutableRefObject<Map<string, SnippetExecutor>>;
+  programmaticCommandLogRewriteHandlersRef: React.MutableRefObject<Map<string, (rewrite: ProgrammaticCommandLogRewrite) => void>>;
   activeTabIdRef: React.MutableRefObject<string>;
   activeWorkspaceRef: React.MutableRefObject<Workspace | undefined>;
   activeSessionRef: React.MutableRefObject<TerminalSession | undefined>;
@@ -48,6 +52,8 @@ export type TerminalLayerStableSnapshot = {
   sessionsRef: React.MutableRefObject<TerminalSession[]>;
   workspacesRef: React.MutableRefObject<Workspace[]>;
   hostsRef: React.MutableRefObject<Host[]>;
+  portForwardingRules: import('../../domain/models').PortForwardingRule[];
+  portForwardingRulesRef: React.MutableRefObject<import('../../domain/models').PortForwardingRule[]>;
   onSetWorkspaceFocusedSessionRef: React.MutableRefObject<TerminalLayerProps['onSetWorkspaceFocusedSession']>;
   sidePanelOpenTabs: Map<string, SidePanelTab>;
   setSidePanelOpenTabs: React.Dispatch<React.SetStateAction<Map<string, SidePanelTab>>>;
@@ -66,6 +72,10 @@ export type TerminalLayerStableSnapshot = {
   pendingTerminalSelectionForAI: PendingTerminalSelectionForAI | null;
   setPendingTerminalSelectionForAI: React.Dispatch<React.SetStateAction<PendingTerminalSelectionForAI | null>>;
   lastSidePanelTabRef: React.MutableRefObject<Map<string, SidePanelTab>>;
+  notesMountedTabIds: string[];
+  setNotesMountedTabIds: React.Dispatch<React.SetStateAction<string[]>>;
+  notesOpenNoteByTab: Map<string, { noteId: string; requestId: number }>;
+  setNotesOpenNoteByTab: React.Dispatch<React.SetStateAction<Map<string, { noteId: string; requestId: number }>>>;
   isComposeBarOpen: boolean;
   setIsComposeBarOpen: React.Dispatch<React.SetStateAction<boolean>>;
   splitHorizontalHandlersRef: React.MutableRefObject<Map<string, () => void>>;
@@ -87,11 +97,17 @@ export type TerminalLayerStableSnapshot = {
   handleCommandExecuted: (command: string, hostId: string, hostLabel: string, sessionId: string) => void;
   handleTerminalDataCapture: (sessionId: string, data: string) => void;
   handleBroadcastInput: (data: string, sourceSessionId: string) => void;
+  handleBroadcastInterruptPriorityChange: (sessionId: string, prioritize: (() => void) | null) => void;
   handleSnippetExecutorChange: (sessionId: string, executor: SnippetExecutor | null) => void;
+  handleProgrammaticCommandLogRewriteChange: (
+    sessionId: string,
+    queueRewrite: ((rewrite: ProgrammaticCommandLogRewrite) => void) | null,
+  ) => void;
   handleTerminalFontSizeChange: (sessionId: string, nextFontSize: number) => void;
   handleOpenSftp: (host: Host, initialPath?: string, pendingUploadEntries?: DropEntry[], sourceSessionId?: string) => void;
   handlePendingUploadHandled: (tabId: string, requestId: string) => void;
   handleSftpInitialLocationApplied: (tabId: string, location: { hostId: string; path: string }) => void;
+  handleSftpCurrentPathChange: (memoryKey: string, location: { hostId: string; path: string }) => void;
   handleSidePanelResizeStart: (e: React.MouseEvent) => void;
   handleToggleWorkspaceComposeBar: () => void;
   handleSwitchSidePanelTab: (tab: SidePanelTab) => void;
@@ -105,6 +121,9 @@ export type TerminalLayerStableSnapshot = {
   handleOpenTheme: () => void;
   handleOpenAI: () => void;
   handleOpenSystem: () => void;
+  handleOpenNotes: () => void;
+  handleBackFromNotes: () => void;
+  handleOpenHostFromNotes: (host: Host, source?: { noteId?: string }) => void;
   handleAddSelectionToAI: (sourceSessionId: string, selection: string) => void;
   handlePendingTerminalSelectionConsumed: (requestId: string) => void;
   handleToggleAiFromTopBar: () => void;
@@ -129,9 +148,12 @@ export type TerminalLayerStableSnapshot = {
   identities: Identity[];
   snippets: Snippet[];
   snippetPackages: string[];
+  notes: VaultNote[];
+  noteGroups: string[];
   knownHosts: KnownHost[];
   hotkeyScheme: TerminalLayerProps['hotkeyScheme'];
   disableTerminalFontZoom: TerminalLayerProps['disableTerminalFontZoom'];
+  restoreTerminalCwd: TerminalLayerProps['restoreTerminalCwd'];
   keyBindings: TerminalLayerProps['keyBindings'];
   onHotkeyAction: TerminalLayerProps['onHotkeyAction'];
   onConnectToHost: TerminalLayerProps['onConnectToHost'];
@@ -141,6 +163,9 @@ export type TerminalLayerStableSnapshot = {
   onCopySession: TerminalLayerProps['onCopySession'];
   onOpenManagedTerminal: TerminalLayerProps['onOpenManagedTerminal'];
   onCopySessionToNewWindow: TerminalLayerProps['onCopySessionToNewWindow'];
+  onUpdateSessionRestoreCwd: TerminalLayerProps['onUpdateSessionRestoreCwd'];
+  onUpdateSessionDynamicTitle: TerminalLayerProps['onUpdateSessionDynamicTitle'];
+  onUpdateSessionCodingCliProvider: TerminalLayerProps['onUpdateSessionCodingCliProvider'];
   onRequestAddToWorkspace: TerminalLayerProps['onRequestAddToWorkspace'];
   onSetWorkspaceFocusedSession: TerminalLayerProps['onSetWorkspaceFocusedSession'];
   onToggleWorkspaceViewMode: TerminalLayerProps['onToggleWorkspaceViewMode'];
@@ -149,6 +174,8 @@ export type TerminalLayerStableSnapshot = {
   updateHosts: TerminalLayerProps['updateHosts'];
   updateSnippets: TerminalLayerProps['updateSnippets'];
   updateSnippetPackages: TerminalLayerProps['updateSnippetPackages'];
+  updateNotes: TerminalLayerProps['updateNotes'];
+  updateNoteGroups: TerminalLayerProps['updateNoteGroups'];
   sftpDefaultViewMode: TerminalLayerProps['sftpDefaultViewMode'];
   sftpDoubleClickBehavior: TerminalLayerProps['sftpDoubleClickBehavior'];
   sftpAutoSync: TerminalLayerProps['sftpAutoSync'];

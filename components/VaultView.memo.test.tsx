@@ -11,6 +11,8 @@ test("VaultView re-renders when an external section navigation request changes",
     proxyProfiles: [],
     snippets: [],
     snippetPackages: [],
+    notes: [],
+    noteGroups: [],
     customGroups: [],
     knownHosts: [],
     shellHistory: [],
@@ -40,6 +42,8 @@ test("VaultView re-renders when proxy profiles change", () => {
     proxyProfiles: [],
     snippets: [],
     snippetPackages: [],
+    notes: [],
+    noteGroups: [],
     customGroups: [],
     knownHosts: [],
     shellHistory: [],
@@ -65,6 +69,48 @@ test("VaultView re-renders when proxy profiles change", () => {
             createdAt: 1,
           },
         ],
+      } as never,
+    ),
+    false,
+  );
+});
+
+test("VaultView re-renders when host-key verification setting changes", () => {
+  const baseProps = {
+    hosts: [],
+    keys: [],
+    identities: [],
+    proxyProfiles: [],
+    snippets: [],
+    snippetPackages: [],
+    notes: [],
+    noteGroups: [],
+    customGroups: [],
+    knownHosts: [],
+    shellHistory: [],
+    connectionLogs: [],
+    sessions: [],
+    managedSources: [],
+    groupConfigs: {},
+    terminalThemeId: "default",
+    terminalFontSize: 14,
+    navigateToSection: null,
+    terminalSettings: {
+      verifyHostKeys: true,
+      keepaliveInterval: 30,
+      keepaliveCountMax: 10,
+    },
+  };
+
+  assert.equal(
+    vaultViewAreEqual(
+      baseProps as never,
+      {
+        ...baseProps,
+        terminalSettings: {
+          ...baseProps.terminalSettings,
+          verifyHostKeys: false,
+        },
       } as never,
     ),
     false,

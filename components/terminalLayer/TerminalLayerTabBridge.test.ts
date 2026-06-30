@@ -12,9 +12,29 @@ test('terminal layer is visible only for terminal sessions or workspaces', () =>
   assert.match(source, /const isVisible = Boolean\(activeSession \|\| activeWorkspace \|\| s\.draggingSessionId\)/);
 });
 
+test('terminal panes can gate cwd restore per session host resolution', () => {
+  const supportSource = readFileSync(new URL('./TerminalLayerSupport.tsx', import.meta.url), 'utf8');
+  const layerSource = readFileSync(new URL('../TerminalLayer.tsx', import.meta.url), 'utf8');
+
+  assert.match(supportSource, /sessionHostResolved: boolean/);
+  assert.match(supportSource, /restoreTerminalCwd=\{restoreTerminalCwd && sessionHostResolved\}/);
+  assert.match(layerSource, /session\.protocol === 'local'/);
+});
+
+test('terminal layer bridge refreshes when terminal settings change', () => {
+  assert.match(source, /terminalSettings: s\.terminalSettings/);
+  assert.match(source, /\[\s*[\s\S]*s\.terminalSettings[\s\S]*\]\);/);
+});
+
 test('managed terminal opener is included in memoized view deps', () => {
   assert.match(source, /onOpenManagedTerminal: s\.onOpenManagedTerminal/);
   const depsIndex = source.indexOf('  }), [');
   assert.notEqual(depsIndex, -1);
   assert.notEqual(source.indexOf('s.onOpenManagedTerminal', depsIndex), -1);
+});
+
+test('terminal layer bridge passes vault open callbacks into the side panel context', () => {
+  assert.match(source, /onOpenVaultNoteFromChat: s\.onOpenVaultNoteFromChat/);
+  assert.match(source, /onOpenVaultHostFromChat: s\.onOpenVaultHostFromChat/);
+  assert.match(source, /onOpenVaultSectionFromChat: s\.onOpenVaultSectionFromChat/);
 });

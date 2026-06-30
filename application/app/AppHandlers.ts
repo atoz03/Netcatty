@@ -3,16 +3,25 @@ import type React from 'react';
 import type { Host, HostProtocol } from '../../types';
 import type { PassphraseRequest } from '../../components/PassphraseModal';
 import { getEffectiveHostDistro } from '../../domain/host';
+import { sanitizeHostIconFields } from '../../domain/hostIcon';
 import { getTerminalPassthroughActions } from '../state/useGlobalHotkeys';
 import { buildNumberShortcutTabTargets } from './tabShortcutTargets';
 
 type AppContextGetter = () => Record<string, any>;
 const TERMINAL_PASSTHROUGH_ACTIONS = getTerminalPassthroughActions();
 
-const getLogHostVisualSnapshot = (host: Host) => ({
-  hostOs: host.os,
-  hostDistro: getEffectiveHostDistro(host) || undefined,
-});
+export const getLogHostVisualSnapshot = (host: Host) => {
+  const icon = sanitizeHostIconFields(host);
+  return {
+    hostOs: host.os,
+    hostDistro: getEffectiveHostDistro(host) || undefined,
+    hostIconMode: icon.iconMode,
+    hostIconId: icon.iconId,
+    ...(icon.iconColorMode ? { hostIconColorMode: icon.iconColorMode } : {}),
+    ...(icon.iconColor ? { hostIconColor: icon.iconColor } : {}),
+    ...(icon.iconColorCustom ? { hostIconColorCustom: icon.iconColorCustom } : {}),
+  };
+};
 
 export function handleTrayJumpToSessionImpl(getCtx: AppContextGetter, sessionId: string) {
   const { sessions, setActiveTabId, setWorkspaceFocusedSession } = getCtx();
@@ -28,7 +37,7 @@ export function handleTrayJumpToSessionImpl(getCtx: AppContextGetter, sessionId:
 }
 
 export function handleTrayTogglePortForwardImpl(getCtx: AppContextGetter, ruleId: string, start: boolean) {
-  const { hosts, identities, keys, portForwardingRules, resolveEffectiveHost, startTunnel, stopTunnel, t, terminalSettings, toast } = getCtx();
+  const { hosts, identities, keys, knownHosts, portForwardingRules, resolveEffectiveHost, startTunnel, stopTunnel, t, terminalSettings, toast } = getCtx();
 {
     const rule = portForwardingRules.find((item) => item.id === ruleId);
     if (!rule) return;
@@ -42,7 +51,7 @@ export function handleTrayTogglePortForwardImpl(getCtx: AppContextGetter, ruleId
       const effectiveHost = resolveEffectiveHost(host);
       void startTunnel(rule, effectiveHost, hosts.map(resolveEffectiveHost), keys, identities, (status, error) => {
         if (status === "error" && error) toast.error(error);
-      }, rule.autoStart, terminalSettings);
+      }, rule.autoStart, terminalSettings, knownHosts);
       return;
     }
 
@@ -78,7 +87,7 @@ export function handleTrayPanelConnectImpl(getCtx: AppContextGetter, hostId: str
         localHostname: localHost,
         saved: false,
       });
-      return;
+      return sessionId;
     }
 
     const protocol = effectiveHost.etEnabled ? 'et' : effectiveHost.moshEnabled ? 'mosh' : (effectiveHost.protocol || 'ssh');
@@ -97,6 +106,7 @@ export function handleTrayPanelConnectImpl(getCtx: AppContextGetter, hostId: str
       localHostname: localHost,
       saved: false,
     });
+    return sessionId;
   }
 }
 
@@ -466,14 +476,7 @@ export async function closeTabsBatchImpl(getCtx: AppContextGetter, targetIds: st
 export function executeHotkeyActionImpl(getCtx: AppContextGetter, action: string, e: KeyboardEvent) {
   const { IS_DEV, MOVE_FOCUS_DEBOUNCE_MS, activeTabStore, addConnectionLogRef, closeSession, closeTabInFlightRef, closeWorkspace, collectSessionIds, confirmIfBusyLocalTerminal, createLocalTerminalWithCurrentShell, editorTabs, fromEditorTabId, handleOpenSettingsRef, handleRequestCloseEditorTabRef, isEditorTabId, isQuickSwitcherOpen, lastMoveFocusTimeRef, moveFocusInWorkspace, orderedTabs, resolveCloseIntent, resolveSnippetsShortcutIntent, sessions, setActiveTabId, setAddToWorkspaceDialog, setIsQuickSwitcherOpen, setNavigateToSection, settings, splitSessionWithCurrentShell, systemInfoRef, toEditorTabId, toggleBroadcast, toggleScriptsSidePanelRef, toggleSidePanelRef, toggleWorkspaceViewMode, workspaces } = getCtx();
 {
-    // Build complete tab list: vault + (sftp when visible) + sessions/workspaces + editor tabs.
-    // Hiding the SFTP tab must also remove it from keyboard cycling so nextTab
-    // doesn't land on a hidden tab (which would get redirected back) and so
-    // number shortcuts don't shift.
-    const allTabs = settings.showSftpTab
-      ? ['vault', 'sftp', ...orderedTabs, ...editorTabs.map((t) => toEditorTabId(t.id))]
-      : ['vault', ...orderedTabs, ...editorTabs.map((t) => toEditorTabId(t.id))];
-    const numberShortcutTabs = buildNumberShortcutTabTargets({
+    const shortcutTabs = buildNumberShortcutTabTargets({
       showSftpTab: settings.showSftpTab ?? true,
       shellOnlyTabNumberShortcuts: settings.shellOnlyTabNumberShortcuts ?? false,
       orderedTabs,
@@ -484,31 +487,31 @@ export function executeHotkeyActionImpl(getCtx: AppContextGetter, action: string
         // Get the number key pressed (1-9)
         const num = parseInt(e.key, 10);
         if (num >= 1 && num <= 9) {
-          if (num <= numberShortcutTabs.length) {
-            setActiveTabId(numberShortcutTabs[num - 1]);
+          if (num <= shortcutTabs.length) {
+            setActiveTabId(shortcutTabs[num - 1]);
           }
         }
         break;
       }
       case 'nextTab': {
         const currentId = activeTabStore.getActiveTabId();
-        const currentIdx = allTabs.indexOf(currentId);
-        if (currentIdx !== -1 && allTabs.length > 0) {
-          const nextIdx = (currentIdx + 1) % allTabs.length;
-          setActiveTabId(allTabs[nextIdx]);
-        } else if (allTabs.length > 0) {
-          setActiveTabId(allTabs[0]);
+        const currentIdx = shortcutTabs.indexOf(currentId);
+        if (currentIdx !== -1 && shortcutTabs.length > 0) {
+          const nextIdx = (currentIdx + 1) % shortcutTabs.length;
+          setActiveTabId(shortcutTabs[nextIdx]);
+        } else if (shortcutTabs.length > 0) {
+          setActiveTabId(shortcutTabs[0]);
         }
         break;
       }
       case 'prevTab': {
         const currentId = activeTabStore.getActiveTabId();
-        const currentIdx = allTabs.indexOf(currentId);
-        if (currentIdx !== -1 && allTabs.length > 0) {
-          const prevIdx = (currentIdx - 1 + allTabs.length) % allTabs.length;
-          setActiveTabId(allTabs[prevIdx]);
-        } else if (allTabs.length > 0) {
-          setActiveTabId(allTabs[allTabs.length - 1]);
+        const currentIdx = shortcutTabs.indexOf(currentId);
+        if (currentIdx !== -1 && shortcutTabs.length > 0) {
+          const prevIdx = (currentIdx - 1 + shortcutTabs.length) % shortcutTabs.length;
+          setActiveTabId(shortcutTabs[prevIdx]);
+        } else if (shortcutTabs.length > 0) {
+          setActiveTabId(shortcutTabs[shortcutTabs.length - 1]);
         }
         break;
       }
@@ -598,9 +601,10 @@ export function executeHotkeyActionImpl(getCtx: AppContextGetter, action: string
         break;
       }
       case 'newTab':
-      case 'openLocal':
-        // Add connection log for local terminal
+      case 'openLocal': {
+        const sessionId = createLocalTerminalWithCurrentShell();
         addConnectionLogRef.current({
+          sessionId,
           hostId: '',
           hostLabel: 'Local Terminal',
           hostname: 'localhost',
@@ -611,8 +615,8 @@ export function executeHotkeyActionImpl(getCtx: AppContextGetter, action: string
           localHostname: systemInfoRef.current.hostname,
           saved: false,
         });
-        createLocalTerminalWithCurrentShell();
         break;
+      }
       case 'openHosts':
         setActiveTabId('vault');
         break;
@@ -802,7 +806,7 @@ export function handleConnectToHostImpl(getCtx: AppContextGetter, host: Host) {
         localHostname: localHost,
         saved: false,
       });
-      return;
+      return sessionId;
     }
 
     const protocol = effectiveHost.etEnabled ? 'et' : effectiveHost.moshEnabled ? 'mosh' : (effectiveHost.protocol || 'ssh');
@@ -821,6 +825,7 @@ export function handleConnectToHostImpl(getCtx: AppContextGetter, host: Host) {
       localHostname: localHost,
       saved: false,
     });
+    return sessionId;
   }
 }
 

@@ -13,6 +13,41 @@ test("normalizeTerminalSettings defaults startupCommandDelayMs to 600", () => {
   assert.equal(normalizeTerminalSettings().startupCommandDelayMs, 600);
 });
 
+test("normalizeTerminalSettings defaults dynamic tab titles to agent mode", () => {
+  assert.equal(normalizeTerminalSettings().dynamicTabTitleMode, "agent");
+});
+
+test("normalizeTerminalSettings preserves supported dynamic tab title modes", () => {
+  assert.equal(normalizeTerminalSettings({ dynamicTabTitleMode: "off" }).dynamicTabTitleMode, "off");
+  assert.equal(normalizeTerminalSettings({ dynamicTabTitleMode: "agent" }).dynamicTabTitleMode, "agent");
+  assert.equal(normalizeTerminalSettings({ dynamicTabTitleMode: "all" }).dynamicTabTitleMode, "all");
+});
+
+test("normalizeTerminalSettings falls back for unsupported dynamic tab title modes", () => {
+  assert.equal(
+    normalizeTerminalSettings({ dynamicTabTitleMode: "legacy" as never }).dynamicTabTitleMode,
+    "agent",
+  );
+});
+
+test("normalizeTerminalSettings enables font smoothing by default", () => {
+  assert.equal(normalizeTerminalSettings().fontSmoothing, true);
+});
+
+test("normalizeTerminalSettings disables hibernate for hidden tabs by default", () => {
+  assert.equal(normalizeTerminalSettings().hibernateHiddenTabs, false);
+  assert.equal(normalizeTerminalSettings().hibernateHiddenTabsDelaySec, 5);
+});
+
+test("normalizeTerminalSettings clamps hibernate delay seconds", () => {
+  assert.equal(normalizeTerminalSettings({ hibernateHiddenTabsDelaySec: 120 }).hibernateHiddenTabsDelaySec, 120);
+  assert.equal(normalizeTerminalSettings({ hibernateHiddenTabsDelaySec: 2 }).hibernateHiddenTabsDelaySec, 5);
+});
+
+test("normalizeTerminalSettings preserves disabled font smoothing", () => {
+  assert.equal(normalizeTerminalSettings({ fontSmoothing: false }).fontSmoothing, false);
+});
+
 test("normalizeTerminalSettings preserves a provided startupCommandDelayMs", () => {
   assert.equal(normalizeTerminalSettings({ startupCommandDelayMs: 0 }).startupCommandDelayMs, 0);
   assert.equal(normalizeTerminalSettings({ startupCommandDelayMs: 1500 }).startupCommandDelayMs, 1500);

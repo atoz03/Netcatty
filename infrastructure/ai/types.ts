@@ -152,6 +152,8 @@ export interface ToolCall {
 
 export interface ToolResult {
   toolCallId: string;
+  /** Optional tool name carried by external SDK/MCP result streams. */
+  toolName?: string;
   content: string;
   isError?: boolean;
 }
@@ -198,7 +200,7 @@ export interface AISessionScope {
 }
 
 // Permission model
-export type AIPermissionMode = 'observer' | 'confirm' | 'autonomous';
+export type AIPermissionMode = 'observer' | 'confirm' | 'auto';
 export type AIToolIntegrationMode = 'mcp' | 'skills';
 
 export interface HostAIPermission {
@@ -233,8 +235,10 @@ export interface ExternalAgentConfig {
   icon?: string;
   enabled: boolean;
   available?: boolean;
-  /** SDK backend key for managed agents (claude|codex|copilot|cursor|codebuddy). */
+  /** SDK backend key for managed agents (claude|codex|copilot|cursor|codebuddy|opencode). */
   sdkBackend?: string;
+  /** Internal: whether the managed command was set manually or auto-detected. */
+  commandSource?: "manual" | "auto";
   /** @deprecated Legacy persisted field from the pre-SDK migration. Read only for compatibility. */
   acpCommand?: string;
   /** @deprecated Legacy persisted field from the pre-SDK migration. */
@@ -256,8 +260,8 @@ export interface DiscoveredAgent {
   /** @deprecated Legacy discovery field from the pre-SDK migration. */
   acpCommand?: string;
   acpArgs?: string[];
-  /** SDK backend key (claude|codex|copilot|cursor|codebuddy) — the routing value. */
-  sdkBackend?: 'claude' | 'codex' | 'copilot' | 'cursor' | 'codebuddy';
+  /** SDK backend key (claude|codex|copilot|cursor|codebuddy|opencode) — the routing value. */
+  sdkBackend?: 'claude' | 'codex' | 'copilot' | 'cursor' | 'codebuddy' | 'opencode';
   /** Absolute resolved CLI path (preferred over `path`). */
   binPath?: string;
   installed?: boolean;
@@ -316,6 +320,14 @@ export const DEFAULT_COMMAND_BLOCKLIST = [
   ...defaultCommandBlocklist,
 ];
 
+export const DEFAULT_COMMAND_TIMEOUT_SECONDS = 60;
+export const MAX_COMMAND_TIMEOUT_SECONDS = 24 * 60 * 60;
+
+export function normalizeCommandTimeoutSeconds(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_COMMAND_TIMEOUT_SECONDS;
+  return Math.min(MAX_COMMAND_TIMEOUT_SECONDS, Math.max(1, value));
+}
+
 export const DEFAULT_AI_SETTINGS: AISettings = {
   providers: [],
   activeProviderId: '',
@@ -325,7 +337,7 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
   externalAgents: [],
   defaultAgentId: 'catty',
   commandBlocklist: [...DEFAULT_COMMAND_BLOCKLIST],
-  commandTimeout: 60,
+  commandTimeout: DEFAULT_COMMAND_TIMEOUT_SECONDS,
   maxIterations: 20,
 };
 
@@ -475,6 +487,14 @@ export const CODEBUDDY_MODEL_PRESETS: AgentModelPreset[] = [
   { id: 'hy3-preview', name: 'Hy3 Preview' },
 ];
 
+export const OPENCODE_MODEL_PRESETS: AgentModelPreset[] = [
+  { id: 'openai/gpt-5.1', name: 'OpenAI GPT-5.1' },
+  { id: 'anthropic/claude-sonnet-4-6', name: 'Claude Sonnet 4.6' },
+  { id: 'deepseek/deepseek-chat', name: 'DeepSeek Chat' },
+  { id: 'openrouter/openai/gpt-5.1', name: 'OpenRouter GPT-5.1' },
+  { id: 'ollama/llama3.3', name: 'Ollama Llama 3.3' },
+];
+
 export function getAgentModelPresets(agentCommand?: string): AgentModelPreset[] {
   if (!agentCommand) return [];
   // Split on both POSIX (/) and Windows (\) separators so command paths like
@@ -486,6 +506,7 @@ export function getAgentModelPresets(agentCommand?: string): AgentModelPreset[] 
   if (basename.startsWith('codex')) return CODEX_MODEL_PRESETS;
   if (basename.startsWith('cursor')) return CURSOR_MODEL_PRESETS;
   if (basename.startsWith('codebuddy')) return CODEBUDDY_MODEL_PRESETS;
+  if (basename.startsWith('opencode')) return OPENCODE_MODEL_PRESETS;
   return [];
 }
 

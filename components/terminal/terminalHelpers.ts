@@ -1,8 +1,12 @@
 import type { DragEvent, PointerEvent } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 
+import type { TerminalContextReader } from "../../domain/terminalContextRead";
+import { getSessionConnectionLabel, resolveSessionTabTitle } from "../../domain/sessionTabTitle";
 import { logger } from "../../lib/logger";
 import { getPathForFile, type DropEntry } from "../../lib/sftpFileUtils";
+import { normalizeLineEndings } from "../../lib/utils";
+import { resolveSnippetMultiLineRunMode } from "../../domain/snippetRunMode";
 import type {
   Host,
   Identity,
@@ -17,14 +21,22 @@ import type {
 } from "../../types";
 
 export const MAX_CONNECTION_LOG_DATA_CHARS = 1_000_000;
+export const AUTO_RUN_SNIPPET_LINE_DELAY_MS = 250;
+
+export interface TerminalBroadcastInputOptions {
+  noAutoRun?: boolean;
+  lineDelayMs?: number;
+}
 
 /**
- * Get the display name for a terminal session.
+ * Get the static connection label for a terminal session.
  * Uses customName if set, otherwise falls back to hostLabel.
  */
 export function getSessionDisplayName(session: TerminalSession): string {
-  return session.customName || session.hostLabel || '';
+  return getSessionConnectionLabel(session);
 }
+
+export { resolveSessionTabTitle };
 
 /**
  * Extract unique root paths from drop entries for local terminal path insertion.
@@ -103,7 +115,7 @@ export interface TerminalProps {
   /** Line timestamps are unavailable in popup terminals that stream shell output without timestamp metadata. */
   lineTimestampsAvailable?: boolean;
   chainHosts?: Host[];
-  themePreviewId?: string;
+  appearanceTheme?: TerminalTheme;
   knownHosts?: KnownHost[];
   isVisible: boolean;
   /** Changes when split-pane bounds update; triggers xterm refit after tab switches. */
@@ -120,8 +132,15 @@ export interface TerminalProps {
   customAccent?: string;
   terminalSettings?: TerminalSettings;
   sessionId: string;
+  restoreState?: TerminalSession["restoreState"];
+  shellType?: TerminalSession["shellType"];
+  lastCwd?: string;
+  restoreTerminalCwd?: boolean;
   startupCommand?: string;
   noAutoRun?: boolean;
+  multiLineRunMode?: Snippet["multiLineRunMode"];
+  pendingScriptId?: string;
+  pendingScript?: Snippet;
   // When this tab was created from a connected SSH session, the id of the
   // source session whose authenticated connection should be reused for a new
   // shell channel — skipping a second MFA prompt (issue #1204).
@@ -160,7 +179,11 @@ export interface TerminalProps {
     pendingUploadEntries?: DropEntry[],
     sourceSessionId?: string,
   ) => void;
-  onTerminalCwdChange?: (sessionId: string, cwd: string | null) => void;
+  onTerminalCwdChange?: (sessionId: string, cwd: string | null, meta?: { source?: 'osc7' }) => void;
+  onTerminalTitleChange?: (sessionId: string, title: string | null) => void;
+  onTerminalBell?: (sessionId: string) => void;
+  onTerminalOutput?: (sessionId: string, chunk: string) => void;
+  onTerminalContextReaderChange?: (sessionId: string, reader: TerminalContextReader | null) => void;
   onOpenScripts?: () => void;
   onOpenHistory?: () => void;
   onOpenTheme?: () => void;
@@ -169,10 +192,26 @@ export interface TerminalProps {
   onToggleBroadcast?: () => void;
   onToggleComposeBar?: () => void;
   isWorkspaceComposeBarOpen?: boolean;
-  onBroadcastInput?: (data: string, sourceSessionId: string) => void;
+  onBroadcastInput?: (
+    data: string,
+    sourceSessionId: string,
+    options?: TerminalBroadcastInputOptions,
+  ) => void;
   onSnippetExecutorChange?: (
     sessionId: string,
-    executor: ((command: string, noAutoRun?: boolean) => void) | null,
+    executor: ((
+      command: string,
+      noAutoRun?: boolean,
+      options?: { broadcast?: boolean; multiLineRunMode?: Snippet["multiLineRunMode"] },
+    ) => void) | null,
+  ) => void;
+  onBroadcastInterruptPriorityChange?: (
+    sessionId: string,
+    prioritize: (() => void) | null,
+  ) => void;
+  onProgrammaticCommandLogRewriteChange?: (
+    sessionId: string,
+    queueRewrite: ((rewrite: ProgrammaticCommandLogRewrite) => void) | null,
   ) => void;
   sessionLog?: { enabled: boolean; directory: string; format: string; timestampsEnabled?: boolean };
   sshDebugLogEnabled?: boolean;
@@ -221,6 +260,17 @@ export function shouldShowTerminalConnectionDialog({
     && !(!!hideConnectingDialogForConnectionReuse && status === "connecting")
     && !((isLocalConnection || isSerialConnection) && status === "connecting")
     && !(status === "disconnected" && isDisconnectedDialogDismissed);
+}
+
+export function shouldDelayAutoRunSnippetInput(
+  data: string,
+  opts: { noAutoRun?: boolean; multiLineRunMode?: Snippet["multiLineRunMode"] },
+): boolean {
+  if (opts.noAutoRun) return false;
+  if (resolveSnippetMultiLineRunMode(opts.multiLineRunMode) === "paste") return false;
+  const normalized = normalizeLineEndings(String(data ?? "")).replace(/\r/g, "\n");
+  const withoutSubmitEnter = normalized.endsWith("\n") ? normalized.slice(0, -1) : normalized;
+  return withoutSubmitEnter.includes("\n");
 }
 
 export function shouldHideConnectingDialogForConnectionReuse({

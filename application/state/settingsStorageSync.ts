@@ -16,6 +16,9 @@ import {
   STORAGE_KEY_SESSION_LOGS_FORMAT,
   STORAGE_KEY_SESSION_LOGS_TIMESTAMPS_ENABLED,
   STORAGE_KEY_SSH_DEBUG_LOGS_ENABLED,
+  STORAGE_KEY_SSH_DEEP_LINK_ENABLED,
+  STORAGE_KEY_RESTORE_PREVIOUS_SESSION,
+  STORAGE_KEY_RESTORE_TERMINAL_CWD,
   STORAGE_KEY_SFTP_AUTO_OPEN_SIDEBAR,
   STORAGE_KEY_SFTP_FOLLOW_TERMINAL_CWD,
   STORAGE_KEY_SFTP_AUTO_SYNC,
@@ -28,6 +31,8 @@ import {
   STORAGE_KEY_SHOW_RECENT_HOSTS,
   STORAGE_KEY_SHOW_SFTP_TAB,
   STORAGE_KEY_SHOW_HOST_TREE_SIDEBAR,
+  STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN,
+  STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN_TAB,
   STORAGE_KEY_SHELL_ONLY_TAB_NUMBER_SHORTCUTS,
   STORAGE_KEY_DISABLE_TERMINAL_FONT_ZOOM,
   STORAGE_KEY_TERM_FOLLOW_APP_THEME,
@@ -44,7 +49,9 @@ import {
   STORAGE_KEY_UI_THEME_LIGHT,
   STORAGE_KEY_WORKSPACE_FOCUS_STYLE,
   STORAGE_KEY_WINDOW_OPACITY,
+  STORAGE_KEY_APP_ICON_VARIANT,
 } from '../../infrastructure/config/storageKeys';
+import { resolveAppIconVariant, type AppIconVariant } from '../../domain/appIconVariant';
 import {
   clampWindowOpacity,
   isValidHslToken,
@@ -53,8 +60,10 @@ import {
   isValidUiThemeId,
   migrateIncomingTerminalFontId,
 } from './settingsStateDefaults';
+import { isTerminalSidePanelAutoOpenTab, type TerminalSidePanelAutoOpenTab } from '../../domain/terminalSidePanelAutoOpen';
 
 interface UseSettingsStorageSyncParams {
+  enabled?: boolean;
   theme: 'dark' | 'light' | 'system';
   lightUiThemeId: string;
   darkUiThemeId: string;
@@ -79,17 +88,23 @@ interface UseSettingsStorageSyncParams {
   showOnlyUngroupedHostsInRoot: boolean;
   showSftpTab: boolean;
   showHostTreeSidebar: boolean;
+  terminalSidePanelAutoOpen: boolean;
+  terminalSidePanelAutoOpenTab: TerminalSidePanelAutoOpenTab;
   shellOnlyTabNumberShortcuts: boolean;
   disableTerminalFontZoom: boolean;
+  restorePreviousSession: boolean;
+  restoreTerminalCwd: boolean;
   editorWordWrap: boolean;
   sessionLogsEnabled: boolean;
   sessionLogsDir: string;
   sessionLogsFormat: SessionLogFormat;
   sessionLogsTimestampsEnabled: boolean;
   sshDebugLogsEnabled: boolean;
+  sshDeepLinkEnabled: boolean;
   globalHotkeyEnabled: boolean;
   autoUpdateEnabled: boolean;
   windowOpacity: number;
+  appIconVariant: AppIconVariant;
   setTheme: Dispatch<SetStateAction<'dark' | 'light' | 'system'>>;
   setLightUiThemeId: Dispatch<SetStateAction<string>>;
   setDarkUiThemeId: Dispatch<SetStateAction<string>>;
@@ -116,16 +131,22 @@ interface UseSettingsStorageSyncParams {
   setShowOnlyUngroupedHostsInRootState: Dispatch<SetStateAction<boolean>>;
   setShowSftpTabState: Dispatch<SetStateAction<boolean>>;
   setShowHostTreeSidebarState: Dispatch<SetStateAction<boolean>>;
+  setTerminalSidePanelAutoOpenState: Dispatch<SetStateAction<boolean>>;
+  setTerminalSidePanelAutoOpenTabState: Dispatch<SetStateAction<TerminalSidePanelAutoOpenTab>>;
   setShellOnlyTabNumberShortcutsState: Dispatch<SetStateAction<boolean>>;
   setDisableTerminalFontZoomState: Dispatch<SetStateAction<boolean>>;
+  setRestorePreviousSessionState: Dispatch<SetStateAction<boolean>>;
+  setRestoreTerminalCwdState: Dispatch<SetStateAction<boolean>>;
   setEditorWordWrapState: Dispatch<SetStateAction<boolean>>;
   setSessionLogsEnabled: Dispatch<SetStateAction<boolean>>;
   setSessionLogsDir: Dispatch<SetStateAction<string>>;
   setSessionLogsFormat: Dispatch<SetStateAction<SessionLogFormat>>;
   setSessionLogsTimestampsEnabled: Dispatch<SetStateAction<boolean>>;
   setSshDebugLogsEnabled: Dispatch<SetStateAction<boolean>>;
+  setSshDeepLinkEnabledState: (enabled: boolean) => void;
   setGlobalHotkeyEnabled: Dispatch<SetStateAction<boolean>>;
   setWindowOpacity: Dispatch<SetStateAction<number>>;
+  setAppIconVariant: Dispatch<SetStateAction<AppIconVariant>>;
   setAutoUpdateEnabled: Dispatch<SetStateAction<boolean>>;
   setWorkspaceFocusStyleState: Dispatch<SetStateAction<'dim' | 'border'>>;
   setSftpTransferConcurrencyState: Dispatch<SetStateAction<number>>;
@@ -134,23 +155,24 @@ interface UseSettingsStorageSyncParams {
 }
 
 export function useSettingsStorageSync({
+  enabled = true,
   theme, lightUiThemeId, darkUiThemeId, accentMode, customAccent,
   customCSS, uiFontFamilyId, hotkeyScheme, uiLanguage,
   terminalThemeId, followAppTerminalTheme, terminalFontFamilyId, terminalFontSize,
   sftpDoubleClickBehavior, sftpAutoSync, sftpShowHiddenFiles,
   sftpUseCompressedUpload, sftpAutoOpenSidebar, sftpFollowTerminalCwd, sftpDefaultViewMode,
-  showRecentHosts, showOnlyUngroupedHostsInRoot, showSftpTab, showHostTreeSidebar, shellOnlyTabNumberShortcuts, disableTerminalFontZoom,
-  editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat, sessionLogsTimestampsEnabled, sshDebugLogsEnabled,
-  globalHotkeyEnabled, autoUpdateEnabled, windowOpacity,
+  showRecentHosts, showOnlyUngroupedHostsInRoot, showSftpTab, showHostTreeSidebar, terminalSidePanelAutoOpen, terminalSidePanelAutoOpenTab, shellOnlyTabNumberShortcuts, disableTerminalFontZoom, restorePreviousSession, restoreTerminalCwd,
+  editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat, sessionLogsTimestampsEnabled, sshDebugLogsEnabled, sshDeepLinkEnabled,
+  globalHotkeyEnabled, autoUpdateEnabled, windowOpacity, appIconVariant,
   setTheme, setLightUiThemeId, setDarkUiThemeId, setAccentMode, setCustomAccent,
   setCustomCSS, setUiFontFamilyId, setHotkeyScheme, setUiLanguage,
   setTerminalThemeId, setTerminalThemeDarkId, setTerminalThemeLightId,
   setFollowAppTerminalThemeState, setTerminalFontFamilyId, setTerminalFontSize,
   setSftpDoubleClickBehavior, setSftpAutoSync, setSftpShowHiddenFiles,
   setSftpUseCompressedUpload, setSftpAutoOpenSidebar, setSftpFollowTerminalCwd, setSftpDefaultViewMode,
-  setShowRecentHostsState, setShowOnlyUngroupedHostsInRootState, setShowSftpTabState, setShowHostTreeSidebarState, setShellOnlyTabNumberShortcutsState, setDisableTerminalFontZoomState,
-  setEditorWordWrapState, setSessionLogsEnabled, setSessionLogsDir, setSessionLogsFormat, setSessionLogsTimestampsEnabled, setSshDebugLogsEnabled,
-  setGlobalHotkeyEnabled, setWindowOpacity, setAutoUpdateEnabled, setWorkspaceFocusStyleState,
+  setShowRecentHostsState, setShowOnlyUngroupedHostsInRootState, setShowSftpTabState, setShowHostTreeSidebarState, setTerminalSidePanelAutoOpenState, setTerminalSidePanelAutoOpenTabState, setShellOnlyTabNumberShortcutsState, setDisableTerminalFontZoomState, setRestorePreviousSessionState, setRestoreTerminalCwdState,
+  setEditorWordWrapState, setSessionLogsEnabled, setSessionLogsDir, setSessionLogsFormat, setSessionLogsTimestampsEnabled, setSshDebugLogsEnabled, setSshDeepLinkEnabledState,
+  setGlobalHotkeyEnabled, setWindowOpacity, setAppIconVariant, setAutoUpdateEnabled, setWorkspaceFocusStyleState,
   setSftpTransferConcurrencyState, applyIncomingCustomKeyBindings, mergeIncomingTerminalSettings,
 }: UseSettingsStorageSyncParams) {
   // Fix 4: Keep a ref snapshot of current settings so the storage event handler
@@ -162,9 +184,9 @@ export function useSettingsStorageSync({
     terminalThemeId, followAppTerminalTheme, terminalFontFamilyId, terminalFontSize,
     sftpDoubleClickBehavior, sftpAutoSync, sftpShowHiddenFiles,
     sftpUseCompressedUpload, sftpAutoOpenSidebar, sftpFollowTerminalCwd, sftpDefaultViewMode,
-    showRecentHosts, showOnlyUngroupedHostsInRoot, showSftpTab, showHostTreeSidebar, shellOnlyTabNumberShortcuts, disableTerminalFontZoom,
-    editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat, sessionLogsTimestampsEnabled, sshDebugLogsEnabled,
-    globalHotkeyEnabled, autoUpdateEnabled, windowOpacity,
+    showRecentHosts, showOnlyUngroupedHostsInRoot, showSftpTab, showHostTreeSidebar, terminalSidePanelAutoOpen, terminalSidePanelAutoOpenTab, shellOnlyTabNumberShortcuts, disableTerminalFontZoom, restorePreviousSession, restoreTerminalCwd,
+    editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat, sessionLogsTimestampsEnabled, sshDebugLogsEnabled, sshDeepLinkEnabled,
+    globalHotkeyEnabled, autoUpdateEnabled, windowOpacity, appIconVariant,
   });
   settingsSnapshotRef.current = {
     theme, lightUiThemeId, darkUiThemeId, accentMode, customAccent,
@@ -172,13 +194,14 @@ export function useSettingsStorageSync({
     terminalThemeId, followAppTerminalTheme, terminalFontFamilyId, terminalFontSize,
     sftpDoubleClickBehavior, sftpAutoSync, sftpShowHiddenFiles,
     sftpUseCompressedUpload, sftpAutoOpenSidebar, sftpFollowTerminalCwd, sftpDefaultViewMode,
-    showRecentHosts, showOnlyUngroupedHostsInRoot, showSftpTab, showHostTreeSidebar, shellOnlyTabNumberShortcuts, disableTerminalFontZoom,
-    editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat, sessionLogsTimestampsEnabled, sshDebugLogsEnabled,
-    globalHotkeyEnabled, autoUpdateEnabled, windowOpacity,
+    showRecentHosts, showOnlyUngroupedHostsInRoot, showSftpTab, showHostTreeSidebar, terminalSidePanelAutoOpen, terminalSidePanelAutoOpenTab, shellOnlyTabNumberShortcuts, disableTerminalFontZoom, restorePreviousSession, restoreTerminalCwd,
+    editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat, sessionLogsTimestampsEnabled, sshDebugLogsEnabled, sshDeepLinkEnabled,
+    globalHotkeyEnabled, autoUpdateEnabled, windowOpacity, appIconVariant,
   };
 
   // Listen for storage changes from other windows (cross-window sync)
   useEffect(() => {
+    if (!enabled) return;
     const handleStorageChange = (e: StorageEvent) => {
       const s = settingsSnapshotRef.current;
       if (e.key === STORAGE_KEY_THEME && e.newValue) {
@@ -336,6 +359,12 @@ export function useSettingsStorageSync({
           setSshDebugLogsEnabled(newValue);
         }
       }
+      if (e.key === STORAGE_KEY_SSH_DEEP_LINK_ENABLED && e.newValue !== null) {
+        const newValue = e.newValue === 'true';
+        if (newValue !== s.sshDeepLinkEnabled) {
+          setSshDeepLinkEnabledState(newValue);
+        }
+      }
       // Sync SFTP compressed upload setting from other windows
       if (e.key === STORAGE_KEY_SFTP_USE_COMPRESSED_UPLOAD && e.newValue !== null) {
         const newValue = e.newValue === 'true' || e.newValue === 'enabled';
@@ -386,6 +415,17 @@ export function useSettingsStorageSync({
           setShowHostTreeSidebarState(newValue);
         }
       }
+      if (e.key === STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN && e.newValue !== null) {
+        const newValue = e.newValue === 'true';
+        if (newValue !== s.terminalSidePanelAutoOpen) {
+          setTerminalSidePanelAutoOpenState(newValue);
+        }
+      }
+      if (e.key === STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN_TAB && e.newValue !== null) {
+        if (isTerminalSidePanelAutoOpenTab(e.newValue) && e.newValue !== s.terminalSidePanelAutoOpenTab) {
+          setTerminalSidePanelAutoOpenTabState(e.newValue);
+        }
+      }
       if (e.key === STORAGE_KEY_SHELL_ONLY_TAB_NUMBER_SHORTCUTS && e.newValue !== null) {
         const newValue = e.newValue === 'true';
         if (newValue !== s.shellOnlyTabNumberShortcuts) {
@@ -396,6 +436,18 @@ export function useSettingsStorageSync({
         const newValue = e.newValue === 'true';
         if (newValue !== s.disableTerminalFontZoom) {
           setDisableTerminalFontZoomState(newValue);
+        }
+      }
+      if (e.key === STORAGE_KEY_RESTORE_PREVIOUS_SESSION && e.newValue !== null) {
+        const newValue = e.newValue === 'true';
+        if (newValue !== s.restorePreviousSession) {
+          setRestorePreviousSessionState(newValue);
+        }
+      }
+      if (e.key === STORAGE_KEY_RESTORE_TERMINAL_CWD && e.newValue !== null) {
+        const newValue = e.newValue === 'true';
+        if (newValue !== s.restoreTerminalCwd) {
+          setRestoreTerminalCwdState(newValue);
         }
       }
       // Sync global hotkey enabled setting from other windows
@@ -418,6 +470,12 @@ export function useSettingsStorageSync({
           setWindowOpacity(newValue);
         }
       }
+      if (e.key === STORAGE_KEY_APP_ICON_VARIANT && e.newValue !== null) {
+        const newValue = resolveAppIconVariant(e.newValue);
+        if (newValue !== s.appIconVariant) {
+          setAppIconVariant(newValue);
+        }
+      }
       // Sync workspace focus style from other windows
       if (e.key === STORAGE_KEY_WORKSPACE_FOCUS_STYLE && e.newValue !== null) {
         if (e.newValue === 'dim' || e.newValue === 'border') {
@@ -436,6 +494,7 @@ export function useSettingsStorageSync({
     window.addEventListener('storage', handleStorageChange);
     return () => window.removeEventListener('storage', handleStorageChange);
   }, [
+    enabled,
     applyIncomingCustomKeyBindings,
     mergeIncomingTerminalSettings,
     setAccentMode,
@@ -447,12 +506,14 @@ export function useSettingsStorageSync({
     setFollowAppTerminalThemeState,
     setGlobalHotkeyEnabled,
     setWindowOpacity,
+    setAppIconVariant,
     setHotkeyScheme,
     setLightUiThemeId,
     setSessionLogsDir,
     setSessionLogsEnabled,
     setSessionLogsFormat,
     setSessionLogsTimestampsEnabled,
+    setSshDeepLinkEnabledState,
     setSshDebugLogsEnabled,
     setSftpAutoOpenSidebar,
     setSftpFollowTerminalCwd,
@@ -464,10 +525,14 @@ export function useSettingsStorageSync({
     setSftpUseCompressedUpload,
     setShowOnlyUngroupedHostsInRootState,
     setShowHostTreeSidebarState,
+    setTerminalSidePanelAutoOpenState,
+    setTerminalSidePanelAutoOpenTabState,
     setShowRecentHostsState,
     setShowSftpTabState,
     setShellOnlyTabNumberShortcutsState,
     setDisableTerminalFontZoomState,
+    setRestorePreviousSessionState,
+    setRestoreTerminalCwdState,
     setTerminalFontFamilyId,
     setTerminalFontSize,
     setTerminalThemeDarkId,

@@ -1,5 +1,25 @@
 
 declare global {
+  interface NetcattyTerminalInterruptTrace {
+    debug?: boolean;
+    traceId?: string;
+    source?: string;
+    sessionId?: string;
+    rendererKeyAt?: number;
+    rendererSendAt?: number;
+    rendererStatus?: string;
+    rendererHasSelection?: boolean;
+    rendererPriority?: {
+      sessionId: string | null;
+      backlogBytes: number;
+      writeQueueDepth: number;
+      deferredAckBytes: number;
+      ackAfterInputBytes: number;
+      scheduledBackendResume: boolean;
+      skippedReason?: string;
+    };
+  }
+
   interface NetcattyBridge {
     getWindowsPtyInfo?(): NetcattyWindowsPtyInfo | null;
     startSSHSession(options: NetcattySSHOptions): Promise<string>;
@@ -39,6 +59,7 @@ declare global {
       // Known hosts, used to verify the host key before the stats companion
       // connection (issue #1198) sends a saved password.
       knownHosts?: import("../../domain/models").KnownHost[];
+      verifyHostKeys?: boolean;
       cols?: number;
       rows?: number;
       charset?: string;
@@ -62,6 +83,7 @@ declare global {
       skipEcdsaHostKey?: boolean;
       algorithmOverrides?: import("../../domain/models").HostAlgorithmOverrides;
       knownHosts?: import("../../domain/models").KnownHost[];
+      verifyHostKeys?: boolean;
       jumpHosts?: NetcattyJumpHost[];
       agentForwarding?: boolean;
       sudoAutofillPassword?: string;
@@ -216,6 +238,7 @@ declare global {
         }>;
         netRxSpeed: number;           // Total network receive speed (bytes/sec)
         netTxSpeed: number;           // Total network transmit speed (bytes/sec)
+        latencyMs: number | null;     // Approximate SSH stats round-trip latency
         netInterfaces: Array<{        // Per-interface network stats
           name: string;               // Interface name (e.g., eth0, ens33)
           rxBytes: number;            // Total received bytes
@@ -226,9 +249,19 @@ declare global {
       };
     }>;
     setSessionEncoding?(sessionId: string, encoding: string): Promise<{ ok: boolean; encoding: string }>;
-    writeToSession(sessionId: string, data: string, options?: { automated?: boolean }): void;
+    writeToSession(
+      sessionId: string,
+      data: string,
+      options?: {
+        automated?: boolean;
+        lineDelayMs?: number;
+        logRewrite?: { sentCommand: string; displayCommand: string };
+      },
+    ): void;
+    interruptSession?(sessionId: string, trace?: NetcattyTerminalInterruptTrace): void;
     resizeSession(sessionId: string, cols: number, rows: number): void;
     setSessionFlowPaused(sessionId: string, paused: boolean): void;
+    ackSessionFlow(sessionId: string, bytes: number): void;
     closeSession(sessionId: string): void;
     // ZMODEM file transfer
     onZmodemEvent?(
@@ -266,7 +299,11 @@ declare global {
       action: "overwrite" | "skip" | "cancel";
       applyToRest: boolean;
     }): void;
-    onSessionData(sessionId: string, cb: (data: string) => void): () => void;
+    onSessionData(
+      sessionId: string,
+      cb: (data: string) => void,
+      options?: { replayBacklog?: boolean },
+    ): () => void;
     onSessionExit(
       sessionId: string,
       cb: (evt: { exitCode?: number; signal?: number; error?: string; reason?: "exited" | "error" | "timeout" | "closed" }) => void
@@ -278,6 +315,10 @@ declare global {
     onTelnetAutoLoginCancelled?(
       sessionId: string,
       cb: (evt: { sessionId: string }) => void
+    ): () => void;
+    onTelnetEchoMode?(
+      sessionId: string,
+      cb: (evt: { sessionId: string; remoteEcho: boolean; localEcho: boolean }) => void
     ): () => void;
     onAuthFailed?(
       sessionId: string,
@@ -294,6 +335,7 @@ declare global {
         prompts: Array<{ prompt: string; echo: boolean }>;
         hostname: string;
         savedPassword?: string | null;
+        scope?: "terminal" | "external";
       }) => void
     ): () => void;
     respondKeyboardInteractive?(

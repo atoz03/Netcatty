@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import type { Host } from "./models.ts";
 import {
+  classifyDistroId,
   detectVendorFromSshVersion,
   migrateHostsFromLegacyLineTimestamps,
   normalizeDistroId,
@@ -23,7 +24,9 @@ const makeHost = (overrides: Partial<Host> = {}): Host => ({
   hostname: "127.0.0.1",
   port: 22,
   username: "root",
-  authType: "password",
+  authMethod: "password",
+  tags: [],
+  os: "linux",
   createdAt: 1,
   protocol: "ssh",
   ...overrides,
@@ -136,6 +139,49 @@ test("migrateHostsFromLegacyLineTimestamps fills only missing host choices", () 
   ]);
 });
 
+test("sanitizeHost preserves valid custom host icon fields", () => {
+  const sanitized = sanitizeHost(makeHost({
+    iconMode: "custom",
+    iconId: "database",
+    iconColor: "blue",
+  }));
+
+  assert.equal(sanitized.iconMode, "custom");
+  assert.equal(sanitized.iconId, "database");
+  assert.equal(sanitized.iconColor, "blue");
+});
+
+test("sanitizeHost preserves automatic host icon color fields", () => {
+  const sanitized = sanitizeHost(makeHost({
+    iconMode: "auto",
+    iconColor: "violet",
+  }));
+
+  assert.equal(sanitized.iconMode, "auto");
+  assert.equal(sanitized.iconId, undefined);
+  assert.equal(sanitized.iconColor, "violet");
+});
+
+test("sanitizeHost removes invalid custom host icon fields", () => {
+  const sanitized = sanitizeHost(makeHost({
+    iconMode: "custom",
+    iconId: "bad",
+    iconColor: "blue",
+  } as unknown as Partial<Host>));
+
+  assert.equal(sanitized.iconMode, undefined);
+  assert.equal(sanitized.iconId, undefined);
+  assert.equal(sanitized.iconColor, undefined);
+});
+
+test("sanitizeHost trims leading whitespace before extracting the hostname", () => {
+  const sanitized = sanitizeHost(makeHost({
+    hostname: " 127.0.0.1",
+  }));
+
+  assert.equal(sanitized.hostname, "127.0.0.1");
+});
+
 test("preserves a concurrent terminal timestamp toggle when host details did not edit it", () => {
   const openedHost = makeHost({ showLineTimestamps: false });
   const latestHost = makeHost({ showLineTimestamps: true });
@@ -154,6 +200,28 @@ test("keeps host details timestamp value when the details form edits it", () => 
 
   assert.equal(
     preserveConcurrentHostLineTimestampUpdate({ draft, openedHost, latestHost }).showLineTimestamps,
+    true,
+  );
+});
+
+test("preserves a concurrent SFTP follow-terminal-directory toggle when host details did not edit it", () => {
+  const openedHost = makeHost({ sftpFollowTerminalCwd: undefined });
+  const latestHost = makeHost({ sftpFollowTerminalCwd: true });
+  const draft = makeHost({ label: "Edited label", sftpFollowTerminalCwd: undefined });
+
+  assert.deepEqual(
+    preserveConcurrentHostLineTimestampUpdate({ draft, openedHost, latestHost }),
+    { ...draft, sftpFollowTerminalCwd: true },
+  );
+});
+
+test("keeps host details SFTP follow-terminal-directory value when the details form edits it", () => {
+  const openedHost = makeHost({ sftpFollowTerminalCwd: false });
+  const latestHost = makeHost({ sftpFollowTerminalCwd: false });
+  const draft = makeHost({ sftpFollowTerminalCwd: true });
+
+  assert.equal(
+    preserveConcurrentHostLineTimestampUpdate({ draft, openedHost, latestHost }).sftpFollowTerminalCwd,
     true,
   );
 });
@@ -220,6 +288,16 @@ test("detectVendorFromSshVersion recognizes Ruijie RGOS banner", () => {
   assert.equal(detectVendorFromSshVersion("SSH-2.0-RGOS_SSH"), "ruijie");
 });
 
+test("detectVendorFromSshVersion recognizes H3C and Comware banners", () => {
+  assert.equal(detectVendorFromSshVersion("H3C-Comware-7.1.064"), "h3c");
+  assert.equal(detectVendorFromSshVersion("SSH-2.0-Comware-7.1.064"), "h3c");
+  assert.equal(detectVendorFromSshVersion("SSH-2.0-3Com OS"), "h3c");
+});
+
+test("detectVendorFromSshVersion maps mpSSH banners to HPE iLO", () => {
+  assert.equal(detectVendorFromSshVersion("SSH-2.0-mpSSH_0.2.1"), "hpe");
+});
+
 test("normalizeDistroId maps Alibaba Cloud Linux os-release ID to alinux", () => {
   // /etc/os-release ID="alinux" — the canonical signal from Alibaba Cloud
   // Linux 3 (issue #1200). Regression guard: 'alinux'.includes('linux') is
@@ -247,6 +325,18 @@ test("normalizeDistroId maps openEuler before the generic Linux fallback", () =>
   assert.equal(normalizeDistroId("openeuler"), "openeuler");
   assert.equal(normalizeDistroId("openEuler"), "openeuler");
   assert.notEqual(normalizeDistroId("openeuler"), "linux");
+});
+
+test("normalizeDistroId maps Darwin and macOS labels to macos", () => {
+  assert.equal(normalizeDistroId("Darwin"), "macos");
+  assert.equal(normalizeDistroId("Darwin Kernel Version 24.5.0"), "macos");
+  assert.equal(normalizeDistroId("macOS"), "macos");
+  assert.equal(normalizeDistroId("Mac OS X"), "macos");
+});
+
+test("classifyDistroId treats macos as a POSIX stats target", () => {
+  assert.equal(classifyDistroId("macos"), "linux-like");
+  assert.equal(classifyDistroId("Darwin"), "linux-like");
 });
 
 test("shouldProbeSessionCwd allows the probe on a plain Linux host", () => {

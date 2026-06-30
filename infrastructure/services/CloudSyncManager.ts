@@ -137,6 +137,8 @@ export interface SyncManagerState {
   autoSyncInterval: number;
   syncStrategy: CloudSyncStrategy;
   syncHistory: SyncHistoryEntry[];
+  /** True when local vault data differs from the last successful sync snapshot. */
+  pendingLocalSync: boolean;
   /** Last shrink finding that put us into BLOCKED state, retained until
    * a sync actually succeeds (SYNC_COMPLETED with result.success) or
    * `clearShrinkBlockedState()` is called. Renderer hydrates the banner
@@ -702,6 +704,7 @@ export class CloudSyncManager {
       hostCount: number;
       keyCount: number;
       snippetCount: number;
+      noteCount: number;
       identityCount: number;
       portForwardingRuleCount: number;
     };
@@ -773,6 +776,14 @@ export class CloudSyncManager {
   setSyncStrategy(strategy: CloudSyncStrategy): void {
     this.state.syncStrategy = strategy;
     this.saveSyncConfig();
+    this.notifyStateChange();
+  }
+
+  setPendingLocalSync(pending: boolean): void {
+    if (this.state.pendingLocalSync === pending) {
+      return;
+    }
+    this.state.pendingLocalSync = pending;
     this.notifyStateChange();
   }
 

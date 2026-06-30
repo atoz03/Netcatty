@@ -3,6 +3,8 @@ import React, { memo, useCallback, useMemo, useState, type DragEvent, type Mouse
 
 import { useStoredNumber } from '../../application/state/useStoredNumber';
 import { resolveWorkspaceFocusSessionOrder } from '../../domain/workspace';
+import { resolveSessionTabTitle } from '../../domain/sessionTabTitle';
+import type { DynamicTabTitleMode } from '../../domain/models';
 import { STORAGE_KEY_WORKSPACE_FOCUS_SIDEBAR_WIDTH } from '../../infrastructure/config/storageKeys';
 import { cn } from '../../lib/utils';
 import type { Host, TerminalSession, TerminalTheme, Workspace } from '../../types';
@@ -30,6 +32,7 @@ interface TerminalFocusSidebarProps {
   resolvedPreviewTheme: TerminalTheme;
   sessionHostsMap: Map<string, Host>;
   sessions: TerminalSession[];
+  dynamicTabTitleMode?: DynamicTabTitleMode;
   t: (key: string) => string;
 }
 
@@ -65,6 +68,7 @@ type WorkspaceFocusSessionRowProps = {
   onDragOver: (event: DragEvent, sessionId: string) => void;
   onDrop: (event: DragEvent, sessionId: string) => void;
   onDragEnd: () => void;
+  dynamicTabTitleMode?: DynamicTabTitleMode;
   t: (key: string) => string;
 };
 
@@ -89,6 +93,7 @@ const WorkspaceFocusSessionRow = memo<WorkspaceFocusSessionRowProps>(({
   onDragOver,
   onDrop,
   onDragEnd,
+  dynamicTabTitleMode,
   t,
 }) => {
   const {
@@ -183,7 +188,7 @@ const WorkspaceFocusSessionRow = memo<WorkspaceFocusSessionRowProps>(({
                     onStartRename(session.id);
                   }}
                 >
-                  {session.customName || session.hostLabel}
+                  {resolveSessionTabTitle(session, dynamicTabTitleMode)}
                 </div>
                 <div className="mt-0.5 truncate text-[10px] leading-none" style={{ color: mutedFg }}>
                   {session.username}@{session.hostname}
@@ -225,6 +230,7 @@ const WorkspaceFocusSessionRow = memo<WorkspaceFocusSessionRowProps>(({
   && prev.onDragOver === next.onDragOver
   && prev.onDrop === next.onDrop
   && prev.onDragEnd === next.onDragEnd
+  && prev.dynamicTabTitleMode === next.dynamicTabTitleMode
   && prev.t === next.t
 ));
 WorkspaceFocusSessionRow.displayName = 'WorkspaceFocusSessionRow';
@@ -244,6 +250,7 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
   resolvedPreviewTheme,
   sessionHostsMap,
   sessions,
+  dynamicTabTitleMode,
   t,
 }) => {
   const [focusSidebarSearch, setFocusSidebarSearch] = useState('');
@@ -287,6 +294,7 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
     return workspaceSessions.filter((session) => (
       session.customName?.toLowerCase().includes(term)
       || session.hostLabel?.toLowerCase().includes(term)
+      || session.dynamicTitle?.toLowerCase().includes(term)
       || session.hostname?.toLowerCase().includes(term)
       || session.username?.toLowerCase().includes(term)
     ));
@@ -544,6 +552,7 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
               onDragOver={handleFocusSidebarDragOver}
               onDrop={handleFocusSidebarDrop}
               onDragEnd={handleFocusSidebarDragEnd}
+              dynamicTabTitleMode={dynamicTabTitleMode}
               t={t}
             />
           ))}
@@ -566,6 +575,7 @@ function terminalFocusSidebarPropsEqual(
   if (prev.resolvedPreviewTheme !== next.resolvedPreviewTheme) return false;
   if (prev.sessionHostsMap !== next.sessionHostsMap) return false;
   if (prev.sessions !== next.sessions) return false;
+  if (prev.dynamicTabTitleMode !== next.dynamicTabTitleMode) return false;
   if (prev.t !== next.t) return false;
   if (prev.onReorderWorkspaceSessions !== next.onReorderWorkspaceSessions) return false;
   if (prev.onRequestAddToWorkspace !== next.onRequestAddToWorkspace) return false;

@@ -5,7 +5,7 @@ import { UnicodeGraphemesAddon } from "@xterm/addon-unicode-graphemes";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal as XTerm } from "@xterm/xterm";
-import type { Dispatch, RefObject, SetStateAction } from "react";
+import type { RefObject } from "react";
 import {
   checkAppShortcut,
   getAppLevelActions,
@@ -15,6 +15,7 @@ import { fontStore } from "../../../application/state/fontStore";
 import { KeywordHighlighter } from "../keywordHighlight";
 import {
   XTERM_PERFORMANCE_CONFIG,
+  resolveXTermScrollback,
   type XTermPlatform,
   resolveXTermPerformanceConfig,
 } from "../../../infrastructure/config/xtermPerformance";
@@ -29,14 +30,16 @@ import {
   resolveHostTerminalFontWeight,
 } from "../../../domain/terminalAppearance";
 import { resolveFontWeightBold } from "../../../lib/fontWeightAvailability";
+import { resolveTerminalFontFamilyId } from "../../../infrastructure/config/fonts";
 import { logger } from "../../../lib/logger";
 import { isMacPlatform } from "../../../lib/utils";
 import { netcattyBridge } from "../../../infrastructure/services/netcattyBridge";
 import {
   clearTerminalViewport,
-  isEraseViewportSequence,
   isEraseScrollbackSequence,
+  isEraseViewportSequence,
   preserveTerminalViewportInScrollback,
+  shouldPreserveViewportBeforeFullErase,
 } from "../clearTerminalViewport";
 import {
   createKittyKeyboardModeState,
@@ -54,6 +57,7 @@ import {
   resolveMiddleClickBehavior,
 } from "./middleClickBehavior";
 import { handleSerialLineModeInput } from "./serialLineInput";
+import { formatTelnetLocalEcho } from "./telnetLocalEcho";
 import {
   isTerminalFontSizeAction,
   nextTerminalFontSizeForAction,
@@ -61,7 +65,26 @@ import {
   shouldHandleTerminalFontSizeAction,
   terminalFontSizeWheelListenerOptions,
 } from "./terminalFontZoom";
+import {
+  getHistoryPreviewLines,
+  forcedHistoryScrollLinesForWheel,
+  forcedHistoryScrollPageToLines,
+  forcedHistoryScrollPagesForKey,
+  forcedHistoryScrollWheelListenerOptions,
+  nextHistoryPreviewTop,
+} from "./terminalHistoryScrollOverride";
 import { shouldPassThroughCopyShortcut } from "./terminalCopyShortcut";
+import { shouldUseUrgentTerminalInterrupt } from "./terminalInterruptShortcut";
+import {
+  createTerminalInterruptTrace,
+  logTerminalInterruptTrace,
+} from "./terminalInterruptDiagnostics";
+import { clearTerminalInputStateForInterrupt } from "./terminalInterruptInputState";
+import { getFlowControllerForTerm } from "./terminalSessionAttachment";
+import {
+  prioritizeTerminalInput,
+  shouldArmTerminalInterruptDisplayGateForProtocol,
+} from "./terminalOutputPipeline";
 import {
   markExpectedTerminalCursorPositionReport,
   pasteTextIntoTerminal,
@@ -91,7 +114,9 @@ type TerminalBackendApi = {
   openExternalAvailable: () => boolean;
   openExternal: (url: string) => Promise<void>;
   writeToSession: (sessionId: string, data: string) => void;
+  interruptSession?: (sessionId: string, trace?: NetcattyTerminalInterruptTrace) => void;
   resizeSession: (sessionId: string, cols: number, rows: number) => void;
+  setSessionFlowPaused?: (sessionId: string, paused: boolean) => void;
 };
 
 export type XTermRuntime = {
@@ -116,6 +141,8 @@ export type XTermRuntime = {
    * active. Called when a deferred pane first becomes visible.
    */
   ensureWebglRenderer: () => void;
+  /** Drop the WebGL addon while keeping the terminal alive (soft-hide). */
+  suspendWebglRenderer: () => void;
 };
 
 export type CreateXTermRuntimeContext = {
@@ -143,7 +170,7 @@ export type CreateXTermRuntimeContext = {
   >;
 
   // Snippets for shortkey support
-  snippetsRef?: RefObject<{ id: string; command: string; shortkey?: string; noAutoRun?: boolean }[]>;
+  snippetsRef?: RefObject<Snippet[]>;
   onSnippetShortkeyRef?: RefObject<((snippet: Snippet) => void) | undefined>;
 
   sessionId: string;
@@ -162,17 +189,36 @@ export type CreateXTermRuntimeContext = {
   ) => void;
   commandBufferRef: RefObject<string>;
   promptLineBreakStateRef?: RefObject<PromptLineBreakState>;
+  scriptRecorderRef?: RefObject<{
+    isRecording: boolean;
+    recordInput: (data: string) => void;
+    recordBackspace: () => void;
+    recordClearLine: () => void;
+    recordEnter: (options?: { sensitive?: boolean }) => Promise<void>;
+  } | undefined>;
+  passwordPromptActiveRef?: RefObject<boolean>;
+  onOutputTriggerUserInputRef?: RefObject<((data: string) => void) | undefined>;
   sudoAutofillRef?: RefObject<SudoPasswordAutofill | null>;
-  setIsSearchOpen: Dispatch<SetStateAction<boolean>>;
+  // Opens the search bar, or refocuses its input if already open. Used by the
+  // searchTerminal hotkey so Cmd/Ctrl+F re-grabs focus when the bar is open but
+  // unfocused (issue #1789).
+  requestSearchFocus: () => void;
 
   // Serial-specific options
   serialLocalEcho?: boolean;
   serialLineMode?: boolean;
   serialLineBufferRef?: RefObject<string>;
+  telnetLocalEchoRef?: RefObject<boolean>;
   onTerminalLogData?: (data: string) => void;
 
   // Callback when shell reports CWD change via OSC 7
   onCwdChange?: (cwd: string) => void;
+
+  // Callback when shell reports window/icon title via OSC 0/2
+  onTitleChange?: (title: string | null) => void;
+
+  // Callback when the shell rings the terminal bell
+  onBell?: () => void;
 
   // Callback when remote requests clipboard read in 'prompt' mode; resolves to user's decision
   onOsc52ReadRequest?: () => Promise<boolean>;
@@ -196,6 +242,8 @@ export type CreateXTermRuntimeContext = {
   // background tabs) to avoid spinning up many WebGL contexts at once. Defaults
   // to visible (immediate WebGL) when omitted.
   initiallyVisible?: boolean;
+  /** When true, keep the DOM renderer until replay completes (hibernate wake). */
+  deferWebglUntilReplayComplete?: boolean;
 };
 
 const detectPlatform = (): XTermPlatform => {
@@ -261,7 +309,10 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
     rendererType,
   });
 
-  const hostFontId = resolveHostTerminalFontFamilyId(ctx.host, ctx.fontFamilyId) || "menlo";
+  const hostFontId = resolveTerminalFontFamilyId(
+    resolveHostTerminalFontFamilyId(ctx.host, ctx.fontFamilyId),
+    typeof navigator !== "undefined" ? navigator.platform : "",
+  );
   // Use fontStore for font lookup - guarantees non-empty result
   const fontObj = fontStore.getFontById(hostFontId);
   const fontFamily = ctx.resolvedFontFamily || fontObj.family;
@@ -270,11 +321,8 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
 
   const cursorStyle = settings?.cursorShape ?? "block";
   const cursorBlink = settings?.cursorBlink ?? true;
-  // xterm.js treats scrollback=0 as "no scrollback buffer", which breaks mouse
-  // wheel scrolling (events become arrow-key sequences).  The UI uses 0 to mean
-  // "no limit", so map it to a large value instead.
   const rawScrollback = settings?.scrollback ?? 10000;
-  const scrollback = rawScrollback === 0 ? 999999 : rawScrollback;
+  const scrollback = resolveXTermScrollback(rawScrollback);
   const drawBoldTextInBrightColors = settings?.drawBoldInBrightColors ?? true;
   const fontWeight = resolveHostTerminalFontWeight(ctx.host, settings?.fontWeight ?? 400);
   const fontWeightBold = settings?.fontWeightBold ?? 700;
@@ -426,6 +474,8 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
       webglAddon.onContextLoss(() => {
         logger.warn("[XTerm] WebGL context loss detected, disposing addon");
         webglAddon?.dispose();
+        webglAddon = null;
+        webglLoaded = false;
       });
       term.loadAddon(webglAddon);
       webglLoaded = true;
@@ -438,6 +488,22 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
     scopedWindow.__xtermWebGLLoaded = webglLoaded;
   };
 
+  const suspendWebglRenderer = () => {
+    if (!webglAddon) {
+      webglLoaded = false;
+      scopedWindow.__xtermWebGLLoaded = false;
+      return;
+    }
+    try {
+      webglAddon.dispose();
+    } catch (webglErr) {
+      logger.warn("[XTerm] Failed to suspend WebGL renderer", webglErr);
+    }
+    webglAddon = null;
+    webglLoaded = false;
+    scopedWindow.__xtermWebGLLoaded = false;
+  };
+
   if (!performanceConfig.useWebGLAddon) {
     logger.info(
       "[XTerm] Skipping WebGL addon (DOM preferred for low-memory devices)",
@@ -446,9 +512,9 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
     shouldDeferWebglUntilVisible({
       useWebGLAddon: performanceConfig.useWebGLAddon,
       initiallyVisible: ctx.initiallyVisible ?? true,
-    })
+    }) || ctx.deferWebglUntilReplayComplete
   ) {
-    logger.info("[XTerm] Deferring WebGL addon until pane becomes visible");
+    logger.info("[XTerm] Deferring WebGL addon until pane becomes visible or replay completes");
   } else {
     loadWebglRenderer();
   }
@@ -583,11 +649,83 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
     event.stopPropagation();
     applyTerminalFontSize(nextFontSize);
   };
+  let historyPreviewOverlay: HTMLPreElement | null = null;
+  let historyPreviewTop: number | null = null;
+  const hideHistoryPreview = () => {
+    historyPreviewOverlay?.remove();
+    historyPreviewOverlay = null;
+    historyPreviewTop = null;
+  };
+  const ensureHistoryPreviewOverlay = () => {
+    if (historyPreviewOverlay) return historyPreviewOverlay;
+    const overlay = document.createElement("pre");
+    overlay.setAttribute("aria-hidden", "true");
+    Object.assign(overlay.style, {
+      position: "absolute",
+      inset: "0",
+      zIndex: "8",
+      margin: "0",
+      padding: "0 6px",
+      overflow: "hidden",
+      pointerEvents: "none",
+      whiteSpace: "pre",
+      fontFamily: String(term.options.fontFamily ?? fontFamily),
+      fontSize: `${currentTerminalFontSize()}px`,
+      lineHeight: String(term.options.lineHeight ?? lineHeight),
+      color: ctx.terminalTheme.colors.foreground,
+      background: ctx.terminalTheme.colors.background,
+    } satisfies Partial<CSSStyleDeclaration>);
+    ctx.container.appendChild(overlay);
+    historyPreviewOverlay = overlay;
+    return overlay;
+  };
+  const showAlternateScreenHistoryPreview = (lines: number) => {
+    if (term.buffer.active.type !== "alternate") return false;
+    const normalBuffer = term.buffer.normal;
+    historyPreviewTop = nextHistoryPreviewTop({
+      buffer: normalBuffer,
+      currentTop: historyPreviewTop,
+      lines,
+    });
+    const overlay = ensureHistoryPreviewOverlay();
+    overlay.style.fontSize = `${currentTerminalFontSize()}px`;
+    overlay.style.fontFamily = String(term.options.fontFamily ?? fontFamily);
+    overlay.style.lineHeight = String(term.options.lineHeight ?? lineHeight);
+    overlay.textContent = getHistoryPreviewLines({
+      buffer: normalBuffer,
+      rows: term.rows,
+      top: historyPreviewTop,
+    }).join("\n");
+    return true;
+  };
+  const scrollForcedHistoryLines = (lines: number) => {
+    if (showAlternateScreenHistoryPreview(lines)) return;
+    hideHistoryPreview();
+    term.scrollLines(lines);
+  };
+  const handleForcedHistoryScrollWheel = (event: WheelEvent) => {
+    const lines = forcedHistoryScrollLinesForWheel(event);
+    if (lines === null) {
+      hideHistoryPreview();
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    scrollForcedHistoryLines(lines);
+  };
+  ctx.container.addEventListener(
+    "wheel",
+    handleForcedHistoryScrollWheel,
+    forcedHistoryScrollWheelListenerOptions,
+  );
   ctx.container.addEventListener(
     "wheel",
     handleFontSizeWheel,
     terminalFontSizeWheelListenerOptions,
   );
+  const historyPreviewBufferChangeDisposable = term.buffer.onBufferChange(() => {
+    hideHistoryPreview();
+  });
 
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
     // Preserve mouse selection across keystrokes when enabled. xterm.js
@@ -636,6 +774,20 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
       return true;
     }
 
+    const forcedHistoryScrollPages = forcedHistoryScrollPagesForKey(e);
+    if (forcedHistoryScrollPages !== null) {
+      e.preventDefault();
+      e.stopPropagation();
+      const lines = forcedHistoryScrollPageToLines(forcedHistoryScrollPages, term.rows);
+      if (showAlternateScreenHistoryPreview(lines)) {
+        return false;
+      }
+      hideHistoryPreview();
+      term.scrollPages(forcedHistoryScrollPages);
+      return false;
+    }
+    hideHistoryPreview();
+
     // Sudo password hint: while a hint is pending, Enter confirms (paste the
     // saved password + submit); any other visible key dismisses it so the user
     // can type the password manually. Checked before autocomplete so Enter
@@ -664,6 +816,50 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
       if (!consumed) return false; // Event was consumed by autocomplete
     }
 
+    if (shouldUseUrgentTerminalInterrupt(e, { hasSelection: term.hasSelection() })) {
+      const id = ctx.sessionRef.current;
+      if (id && ctx.statusRef.current === "connected") {
+        const rendererKeyAt = Date.now();
+        e.preventDefault();
+        e.stopPropagation();
+        const priority = prioritizeTerminalInput(
+          term,
+          id,
+          getFlowControllerForTerm(term),
+          ctx.terminalBackend,
+          {
+            reason: "interrupt",
+            drainStaleOutput: shouldArmTerminalInterruptDisplayGateForProtocol(ctx.host.protocol),
+          },
+        );
+        const interruptTrace = createTerminalInterruptTrace({
+          sessionId: id,
+          rendererKeyAt,
+          status: ctx.statusRef.current,
+          hasSelection: false,
+          priority,
+        });
+        logTerminalInterruptTrace("renderer-keydown-send", interruptTrace, {
+          priority,
+        });
+        clearTerminalInputStateForInterrupt({
+          commandBufferRef: ctx.commandBufferRef,
+          serialLineBufferRef: ctx.serialLineBufferRef,
+          onAutocompleteInput: ctx.onAutocompleteInput,
+        });
+        if (ctx.terminalBackend.interruptSession) {
+          ctx.terminalBackend.interruptSession(id, interruptTrace);
+        } else {
+          ctx.terminalBackend.writeToSession(id, "\x03");
+        }
+        if (ctx.isBroadcastEnabledRef.current && ctx.onBroadcastInputRef.current) {
+          ctx.onBroadcastInputRef.current("\x03", ctx.sessionId);
+        }
+        scrollToBottomAfterInput("\x03");
+        return false;
+      }
+    }
+
     const currentScheme = ctx.hotkeySchemeRef.current;
     // Use shared utility for platform detection when hotkey scheme is disabled
     const isMac = currentScheme === "mac" || (currentScheme === "disabled" && isMacPlatform());
@@ -679,7 +875,7 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
             e.stopPropagation();
             const runSnippet = ctx.onSnippetShortkeyRef?.current;
             if (runSnippet) {
-              void runSnippet(snippet as Snippet);
+              void runSnippet(snippet);
             }
             return false;
           }
@@ -746,11 +942,13 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
               break;
             }
             case "clearBuffer": {
-              clearTerminalViewport(term);
+              clearTerminalViewport(term, {
+                wipeScrollback: ctx.terminalSettingsRef.current?.clearWipesScrollback ?? true,
+              });
               break;
             }
             case "searchTerminal": {
-              ctx.setIsSearchOpen(true);
+              ctx.requestSearchFocus();
               break;
             }
             case "increaseTerminalFontSize":
@@ -841,6 +1039,7 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
 
   ctx.container.addEventListener("mousedown", captureMiddleClickTerminalMouseEvent, true);
   ctx.container.addEventListener("mouseup", captureMiddleClickTerminalMouseEvent, true);
+  ctx.container.addEventListener("mousedown", hideHistoryPreview, true);
   ctx.container.addEventListener("auxclick", handleMiddleClick);
 
   fitAddon.fit();
@@ -862,6 +1061,14 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
       hasBroadcastInputHandler: !!onBroadcastInput,
     });
     if (ctx.statusRef.current === "connected" && (data === "\r" || data === "\n")) {
+      if (ctx.scriptRecorderRef?.current?.isRecording) {
+        void ctx.scriptRecorderRef.current.recordEnter({
+          sensitive: ctx.passwordPromptActiveRef?.current,
+        });
+        if (ctx.passwordPromptActiveRef) {
+          ctx.passwordPromptActiveRef.current = false;
+        }
+      }
       const recordedCommand = recordTerminalCommandExecution(ctx.commandBufferRef.current, ctx, term);
       handledSubmittedInput = true;
       if (!willBroadcastInput) {
@@ -887,12 +1094,22 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
     }
 
     if (id) {
+      prioritizeTerminalInput(
+        term,
+        id,
+        getFlowControllerForTerm(term),
+        ctx.terminalBackend,
+      );
+
       // Serial line mode: buffer input and send on Enter
       if (ctx.host.protocol === "serial" && ctx.serialLineMode && ctx.serialLineBufferRef) {
         handleSerialLineModeInput(dataToWrite, {
           bufferRef: ctx.serialLineBufferRef,
           localEcho: ctx.serialLocalEcho,
-          writeToSession: (nextData) => ctx.terminalBackend.writeToSession(id, nextData),
+          writeToSession: (nextData) => {
+            ctx.onOutputTriggerUserInputRef?.current?.(nextData);
+            ctx.terminalBackend.writeToSession(id, nextData);
+          },
           writeToTerminal: writeLocalTerminalData,
         });
       } else {
@@ -902,6 +1119,7 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
         if (dataToWrite === "\x7f" && ctx.host.backspaceBehavior === "ctrl-h") {
           outData = "\x08";
         }
+        ctx.onOutputTriggerUserInputRef?.current?.(outData);
         ctx.terminalBackend.writeToSession(id, outData);
 
         // Local echo for serial connections only when explicitly enabled
@@ -915,6 +1133,10 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
           } else if (dataToWrite.charCodeAt(0) >= 32 || dataToWrite.length > 1) {
             writeLocalTerminalData(dataToWrite);
           }
+        }
+        if (ctx.host.protocol === "telnet" && ctx.telnetLocalEchoRef?.current) {
+          const localEcho = formatTelnetLocalEcho(dataToWrite);
+          if (localEcho) writeLocalTerminalData(localEcho);
         }
       }
 
@@ -937,18 +1159,24 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
           // input is written so sudo can receive a one-time prompt marker.
         } else if (data === "\x7f" || data === "\b") {
           ctx.commandBufferRef.current = ctx.commandBufferRef.current.slice(0, -1);
+          ctx.scriptRecorderRef?.current?.recordBackspace();
         } else if (data === "\x03") {
           ctx.commandBufferRef.current = "";
+          ctx.scriptRecorderRef?.current?.recordClearLine();
         } else if (data === "\x15") {
           ctx.commandBufferRef.current = "";
+          ctx.scriptRecorderRef?.current?.recordClearLine();
         } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
           ctx.commandBufferRef.current += data;
+          ctx.scriptRecorderRef?.current?.recordInput(data);
         } else if (data.length > 1 && !data.startsWith("\x1b")) {
           ctx.commandBufferRef.current += data;
+          ctx.scriptRecorderRef?.current?.recordInput(data);
         } else {
           const pastedLine = getSingleBracketedPasteLine(data);
           if (pastedLine) {
             ctx.commandBufferRef.current += pastedLine;
+            ctx.scriptRecorderRef?.current?.recordInput(pastedLine);
           }
         }
       }
@@ -959,9 +1187,31 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
   // OSC 7 format: \x1b]7;file://hostname/path\x07 or \x1b]7;file://hostname/path\x1b\\
   let currentCwd: string | undefined = undefined;
 
+  // Track DEC 2026 synchronized-output blocks so CSI 2 J can erase in place for
+  // Codex/Claude Code TUIs instead of pushing visible rows into scrollback.
+  let inDec2026SyncBlock = false;
+
+  const dec2026SyncStartDisposable = term.parser.registerCsiHandler(
+    { prefix: "?", final: "h", params: [2026] },
+    () => {
+      inDec2026SyncBlock = true;
+      return false;
+    },
+  );
+  const dec2026SyncEndDisposable = term.parser.registerCsiHandler(
+    { prefix: "?", final: "l", params: [2026] },
+    () => {
+      inDec2026SyncBlock = false;
+      return false;
+    },
+  );
+
   const eraseScrollbackDisposable = term.parser.registerCsiHandler({ final: "J" }, (params) => {
+    const wipeAllowed = ctx.terminalSettingsRef.current?.clearWipesScrollback ?? true;
     if (isEraseViewportSequence(params)) {
-      preserveTerminalViewportInScrollback(term);
+      if (shouldPreserveViewportBeforeFullErase(term, inDec2026SyncBlock, wipeAllowed)) {
+        preserveTerminalViewportInScrollback(term);
+      }
       return false;
     }
     if (!isEraseScrollbackSequence(params)) {
@@ -969,7 +1219,6 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
     }
     // CSI 3 J — POSIX/ncurses default `clear` emits this to wipe scrollback.
     // Honor it unless the user opts into the legacy "preserve history" behavior.
-    const wipeAllowed = ctx.terminalSettingsRef.current?.clearWipesScrollback ?? true;
     return !wipeAllowed;
   });
 
@@ -1097,6 +1346,15 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
 
   const cursorPreferenceDisposable = installUserCursorPreferenceGuard(term, ctx.terminalSettingsRef);
 
+  const titleChangeDisposable = term.onTitleChange((title) => {
+    const trimmed = title.trim();
+    ctx.onTitleChange?.(trimmed.length > 0 ? trimmed : null);
+  });
+
+  const bellDisposable = term.onBell(() => {
+    ctx.onBell?.();
+  });
+
   let resizeTimeout: NodeJS.Timeout | null = null;
   const resizeDebounceMs = XTERM_PERFORMANCE_CONFIG.resize.debounceMs;
   term.onResize(({ cols, rows }) => {
@@ -1123,7 +1381,13 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
     keywordHighlighter,
     clearTextureAtlas: clearWebglTextureAtlas,
     ensureWebglRenderer: loadWebglRenderer,
+    suspendWebglRenderer,
     dispose: () => {
+      ctx.container.removeEventListener(
+        "wheel",
+        handleForcedHistoryScrollWheel,
+        forcedHistoryScrollWheelListenerOptions,
+      );
       ctx.container.removeEventListener(
         "wheel",
         handleFontSizeWheel,
@@ -1132,15 +1396,22 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
       ctx.container.removeEventListener("auxclick", handleMiddleClick);
       ctx.container.removeEventListener("mousedown", captureMiddleClickTerminalMouseEvent, true);
       ctx.container.removeEventListener("mouseup", captureMiddleClickTerminalMouseEvent, true);
+      ctx.container.removeEventListener("mousedown", hideHistoryPreview, true);
+      hideHistoryPreview();
+      historyPreviewBufferChangeDisposable.dispose();
       stopDprWatch();
       keywordHighlighter.dispose();
       eraseScrollbackDisposable.dispose();
+      dec2026SyncStartDisposable.dispose();
+      dec2026SyncEndDisposable.dispose();
       for (const disposable of cursorPositionReportRequestDisposables) {
         disposable.dispose();
       }
       kittyKeyboardDisposable.dispose();
       osc7Disposable.dispose();
       osc52Disposable.dispose();
+      titleChangeDisposable.dispose();
+      bellDisposable.dispose();
       cursorPreferenceDisposable?.dispose();
       try {
         term.dispose();

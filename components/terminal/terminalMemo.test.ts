@@ -23,3 +23,20 @@ test("terminal memo refreshes when selection AI action visibility changes", () =
     false,
   );
 });
+
+test("terminal memo refreshes when restored local shell type changes", () => {
+  assert.equal(
+    terminalPropsAreEqual(baseProps, { ...baseProps, shellType: "powershell" }),
+    false,
+  );
+});
+
+test("terminal memo refreshes when terminal context reader callback changes", () => {
+  assert.equal(
+    terminalPropsAreEqual(baseProps, {
+      ...baseProps,
+      onTerminalContextReaderChange: () => {},
+    }),
+    false,
+  );
+});

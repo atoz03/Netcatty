@@ -5,8 +5,10 @@ const path = require("node:path");
 const {
   appendData,
   hasStream,
+  registerProgrammaticCommandLogRewrite,
   registerSudoAutofillInput,
   startStream,
+  startStreamToFile,
   stopStream,
 } = require("./sessionLogStreamManager.cjs");
 
@@ -140,6 +142,98 @@ test("stopStream without a token still tears down the current stream (back-compa
   }
 });
 
+test("token-required explicit file streams ignore tokenless stale stops", async () => {
+  const directory = path.join(TEMP_ROOT, `manual-token-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const filePath = path.join(directory, "manual.log");
+  const sessionId = `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  let token;
+
+  try {
+    const result = startStreamToFile(sessionId, {
+      filePath,
+      format: "raw",
+      hostLabel: "manual",
+      startTime: Date.UTC(2026, 0, 2, 3, 4, 5),
+      stopRequiresToken: true,
+    });
+    assert.equal(result.ok, true);
+    token = result.token;
+
+    appendData(sessionId, "before-stale\n");
+    const staleResult = await stopStream(sessionId);
+    assert.equal(staleResult, null);
+    assert.equal(hasStream(sessionId), true);
+
+    appendData(sessionId, "after-stale\n");
+    const finalPath = await stopStream(sessionId, token);
+
+    assert.equal(finalPath, filePath);
+    assert.equal(fs.readFileSync(filePath, "utf8"), "before-stale\nafter-stale\n");
+  } finally {
+    if (hasStream(sessionId)) {
+      await stopStream(sessionId, token);
+    }
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("startStreamToFile writes to an explicit raw log file path", async () => {
+  const directory = path.join(TEMP_ROOT, `manual-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const filePath = path.join(directory, "manual.log");
+  const sessionId = `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  try {
+    const result = startStreamToFile(sessionId, {
+      filePath,
+      format: "raw",
+      hostLabel: "manual",
+      startTime: Date.UTC(2026, 0, 2, 3, 4, 5),
+      initialLine: "header\n",
+    });
+
+    assert.equal(result.ok, true);
+    appendData(sessionId, "body\n");
+    const finalPath = await stopStream(sessionId);
+
+    assert.equal(finalPath, filePath);
+    assert.equal(fs.readFileSync(filePath, "utf8"), "header\nbody\n");
+  } finally {
+    await stopStream(sessionId);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("startStreamToFile can write human-readable text logs from ANSI terminal output", async () => {
+  const directory = path.join(TEMP_ROOT, `manual-txt-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const filePath = path.join(directory, "manual.log");
+  const sessionId = `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  try {
+    const result = startStreamToFile(sessionId, {
+      filePath,
+      format: "txt",
+      hostLabel: "manual",
+      startTime: Date.UTC(2026, 0, 2, 3, 4, 5),
+    });
+
+    assert.equal(result.ok, true);
+    appendData(
+      sessionId,
+      "\x1b[01;32mroot@MyNAS\x1b[00m:\x1b[01;34m~\x1b[00m# ip a\r\n1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536\r\n\x1b[01;32mroot@MyNAS\x1b[00m:\x1b[01;34m~\x1b[00m# ",
+    );
+    const finalPath = await stopStream(sessionId);
+
+    assert.equal(finalPath, filePath);
+    assert.equal(
+      fs.readFileSync(filePath, "utf8"),
+      "root@MyNAS:~# ip a\n1: lo: <LOOPBACK,UP,LOWER_UP> mtu 65536\nroot@MyNAS:~#",
+    );
+  } finally {
+    await stopStream(sessionId);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("raw stream hides sudo autofill prompt markers and rewritten command echoes", async () => {
   const directory = path.join(TEMP_ROOT, `stream-sudo-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const sessionId = `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -167,6 +261,77 @@ test("raw stream hides sudo autofill prompt markers and rewritten command echoes
     assert.ok(!content.includes("sudo -p"));
   } finally {
     await stopStream(sessionId);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("raw stream rewrites protected snippet command echoes", async () => {
+  const directory = path.join(TEMP_ROOT, `stream-protected-snippet-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const sessionId = `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const sentCommand = "sh -c 'private setup' && eval 'wrapped command'";
+  const displayCommand = "sudo apt update && sudo apt upgrade -y";
+
+  try {
+    startStream(sessionId, {
+      hostLabel: "host",
+      hostname: "host.example",
+      directory,
+      format: "raw",
+      startTime: Date.UTC(2026, 0, 2, 3, 4, 5),
+    });
+    registerProgrammaticCommandLogRewrite(sessionId, { sentCommand, displayCommand });
+    appendData(sessionId, sentCommand.slice(0, 12));
+    appendData(sessionId, `${sentCommand.slice(12)}\r\nok\r\n`);
+
+    const finalPath = await stopStream(sessionId);
+    const content = fs.readFileSync(finalPath, "utf8");
+
+    assert.equal(content, `${displayCommand}\r\nok\r\n`);
+    assert.ok(!content.includes("private setup"));
+    assert.ok(!content.includes("wrapped command"));
+  } finally {
+    await stopStream(sessionId);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("raw stream keeps programmatic command rewrites isolated per session", async () => {
+  const directory = path.join(TEMP_ROOT, `stream-protected-snippet-isolated-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const rewrittenSessionId = `session-a-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const plainSessionId = `session-b-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const sentCommand = "sh -c 'private setup' && eval 'wrapped command'";
+  const displayCommand = "sudo apt update && sudo apt upgrade -y";
+
+  try {
+    startStream(rewrittenSessionId, {
+      hostLabel: "host-a",
+      hostname: "host-a.example",
+      directory,
+      format: "raw",
+      startTime: Date.UTC(2026, 0, 2, 3, 4, 5),
+    });
+    startStream(plainSessionId, {
+      hostLabel: "host-b",
+      hostname: "host-b.example",
+      directory,
+      format: "raw",
+      startTime: Date.UTC(2026, 0, 2, 3, 4, 6),
+    });
+    registerProgrammaticCommandLogRewrite(rewrittenSessionId, { sentCommand, displayCommand });
+
+    appendData(rewrittenSessionId, `${sentCommand}\r\nok-a\r\n`);
+    appendData(plainSessionId, `${sentCommand}\r\nok-b\r\n`);
+
+    const rewrittenPath = await stopStream(rewrittenSessionId);
+    const plainPath = await stopStream(plainSessionId);
+    const rewrittenContent = fs.readFileSync(rewrittenPath, "utf8");
+    const plainContent = fs.readFileSync(plainPath, "utf8");
+
+    assert.equal(rewrittenContent, `${displayCommand}\r\nok-a\r\n`);
+    assert.equal(plainContent, `${sentCommand}\r\nok-b\r\n`);
+  } finally {
+    await stopStream(rewrittenSessionId);
+    await stopStream(plainSessionId);
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });

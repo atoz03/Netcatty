@@ -15,6 +15,7 @@ import { usePortForwardingState } from "../application/state/usePortForwardingSt
 import {
   GroupConfig,
   Host,
+  KnownHost,
   ManagedSource,
   PortForwardingRule,
   PortForwardingType,
@@ -75,6 +76,7 @@ interface PortForwardingProps {
   keys: SSHKey[];
   identities?: import('../domain/models').Identity[];
   customGroups: string[];
+  knownHosts?: KnownHost[];
   managedSources?: ManagedSource[];
   groupConfigs?: GroupConfig[];
   proxyProfiles?: ProxyProfile[];
@@ -89,6 +91,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
   keys,
   identities = [],
   customGroups: _customGroups,
+  knownHosts = [],
   managedSources = [],
   groupConfigs = [],
   proxyProfiles = [],
@@ -130,6 +133,10 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
     () => new Set(proxyProfiles.map((profile) => profile.id)),
     [proxyProfiles],
   );
+  const hostById = useMemo(
+    () => new Map(hosts.map((host) => [host.id, host])),
+    [hosts],
+  );
   const ruleListRef = useRef<HTMLDivElement | null>(null);
 
   const ruleReorder = useVaultItemReorder({
@@ -154,7 +161,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
   // Start a port forwarding tunnel
   const handleStartTunnel = useCallback(
     async (rule: PortForwardingRule) => {
-      const _rawHost = hosts.find((h) => h.id === rule.hostId);
+      const _rawHost = hostById.get(rule.hostId);
       if (!_rawHost) {
         setRuleStatus(rule.id, "error", t("pf.error.hostNotFound"));
         toast.error(
@@ -189,6 +196,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
           },
           rule.autoStart, // Enable reconnect for auto-start rules
           terminalSettings,
+          knownHosts,
         );
         // Show error from result only if not already shown
         if (!result.success && result.error && !errorShown) {
@@ -206,7 +214,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
         });
       }
     },
-    [hosts, identities, keys, resolveEffectiveHost, setRuleStatus, startTunnel, t, terminalSettings],
+    [hostById, hosts, identities, keys, knownHosts, resolveEffectiveHost, setRuleStatus, startTunnel, t, terminalSettings],
   );
 
   // Stop a port forwarding tunnel
@@ -744,7 +752,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
                   <RuleCard
                     key={rule.id}
                     rule={rule}
-                    host={hosts.find((h) => h.id === rule.hostId)}
+                    host={hostById.get(rule.hostId)}
                     viewMode={viewMode}
                     isSelected={selectedRuleId === rule.id}
                     isPending={pendingOperations.has(rule.id)}

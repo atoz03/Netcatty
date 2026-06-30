@@ -1,4 +1,6 @@
-import { Host, TerminalSettings } from './models';
+import { Host, Snippet, TerminalSettings } from './models';
+import { sanitizeHostIconFields } from './hostIcon';
+import { migrateHostConnectScriptIds } from './hostConnectScripts.ts';
 import { migrateDeprecatedFontOverride } from '../infrastructure/config/fonts';
 
 export type HostLabelRenameResult =
@@ -50,6 +52,10 @@ export const LINUX_DISTRO_OPTIONS = [
   'openeuler',
 ] as const;
 
+export const POSIX_PLATFORM_OPTIONS = [
+  'macos',
+] as const;
+
 /**
  * Known network-device vendor IDs that Netcatty can detect from the SSH
  * server identification string. When a host is classified as one of these,
@@ -61,6 +67,7 @@ export const NETWORK_DEVICE_OPTIONS = [
   'cisco',
   'juniper',
   'huawei',
+  'h3c',
   'hpe',
   'mikrotik',
   'fortinet',
@@ -74,6 +81,17 @@ export type NetworkDeviceVendor = typeof NETWORK_DEVICE_OPTIONS[number];
 export const normalizeDistroId = (value?: string) => {
   const v = (value || '').toLowerCase().trim();
   if (!v) return '';
+  if (
+    v === 'darwin' ||
+    v === 'macos' ||
+    v === 'mac os' ||
+    v === 'mac os x' ||
+    v.includes('darwin kernel') ||
+    v.includes('macos') ||
+    v.includes('mac os')
+  ) {
+    return 'macos';
+  }
   if (v.includes('ubuntu')) return 'ubuntu';
   if (v.includes('debian')) return 'debian';
   if (v.includes('centos')) return 'centos';
@@ -141,9 +159,12 @@ export const detectVendorFromSshVersion = (softwareVersion?: string): '' | Netwo
   if (/^HUAWEI[-_]/i.test(s)) return 'huawei';
   if (/^VRP-/i.test(s)) return 'huawei';
 
-  // HPE / H3C — Comware switches, Integrated Lights-Out (iLO), legacy 3Com
-  if (/^Comware-/i.test(s)) return 'hpe';
-  if (/^3Com\s*OS/i.test(s)) return 'hpe';
+  // H3C / 3Com Comware switches
+  if (/^H3C[-_\s]/i.test(s)) return 'h3c';
+  if (/^Comware-/i.test(s)) return 'h3c';
+  if (/^3Com\s*OS/i.test(s)) return 'h3c';
+
+  // HPE iLO
   if (/^mpSSH_/i.test(s)) return 'hpe';
 
   // MikroTik RouterOS
@@ -172,10 +193,11 @@ export const detectVendorFromSshVersion = (softwareVersion?: string): '' | Netwo
 export type DeviceClass = 'linux-like' | 'network-device' | 'other';
 
 export const classifyDistroId = (distroId?: string): DeviceClass => {
-  const v = (distroId || '').toLowerCase().trim();
+  const v = normalizeDistroId(distroId) || (distroId || '').toLowerCase().trim();
   if (!v) return 'other';
   if ((NETWORK_DEVICE_OPTIONS as readonly string[]).includes(v)) return 'network-device';
   if ((LINUX_DISTRO_OPTIONS as readonly string[]).includes(v)) return 'linux-like';
+  if ((POSIX_PLATFORM_OPTIONS as readonly string[]).includes(v)) return 'linux-like';
   return 'other';
 };
 
@@ -270,9 +292,20 @@ export const preserveConcurrentHostLineTimestampUpdate = ({
 }): Host => {
   if (!openedHost || !latestHost) return draft;
   if (draft.id !== openedHost.id || draft.id !== latestHost.id) return draft;
-  if (draft.showLineTimestamps !== openedHost.showLineTimestamps) return draft;
-  if (latestHost.showLineTimestamps === openedHost.showLineTimestamps) return draft;
-  return { ...draft, showLineTimestamps: latestHost.showLineTimestamps };
+  let next = draft;
+  if (
+    draft.showLineTimestamps === openedHost.showLineTimestamps &&
+    latestHost.showLineTimestamps !== openedHost.showLineTimestamps
+  ) {
+    next = { ...next, showLineTimestamps: latestHost.showLineTimestamps };
+  }
+  if (
+    draft.sftpFollowTerminalCwd === openedHost.sftpFollowTerminalCwd &&
+    latestHost.sftpFollowTerminalCwd !== openedHost.sftpFollowTerminalCwd
+  ) {
+    next = { ...next, sftpFollowTerminalCwd: latestHost.sftpFollowTerminalCwd };
+  }
+  return next;
 };
 
 export const upsertHostById = (hosts: Host[], host: Host): Host[] => {
@@ -316,8 +349,8 @@ export const resolveHostKeepalive = (
   };
 };
 
-export const sanitizeHost = (host: Host): Host => {
-  const cleanHostname = (host.hostname || '').split(/\s+/)[0];
+export const sanitizeHost = (host: Host, snippets: Snippet[] = []): Host => {
+  const cleanHostname = (host.hostname || '').trim().split(/\s+/)[0];
   const cleanDistro = normalizeDistroId(host.distro);
   const cleanManualDistro = normalizeDistroId(host.manualDistro);
   const cleanDistroMode =
@@ -326,14 +359,29 @@ export const sanitizeHost = (host: Host): Host => {
       : host.distroMode === 'auto'
         ? 'auto'
         : undefined;
+  const cleanHostIcon = sanitizeHostIconFields(host);
   const migrated = migrateDeprecatedFontOverride(host);
   const cleanNotes = host.notes?.trim() || undefined;
+  const connectScriptIds = host.connectScriptIds ?? (
+    snippets.length > 0
+      ? migrateHostConnectScriptIds(host, snippets)
+      : host.loginScriptId
+        ? [host.loginScriptId]
+        : undefined
+  );
   return {
     ...migrated,
     hostname: cleanHostname,
     distro: cleanDistro,
     distroMode: cleanDistroMode,
     manualDistro: cleanManualDistro || undefined,
+    iconMode: undefined,
+    iconId: undefined,
+    iconColorMode: undefined,
+    iconColor: undefined,
+    iconColorCustom: undefined,
+    ...cleanHostIcon,
     notes: cleanNotes,
+    connectScriptIds: connectScriptIds && connectScriptIds.length > 0 ? connectScriptIds : undefined,
   };
 };

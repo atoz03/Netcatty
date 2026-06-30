@@ -276,6 +276,23 @@ export const ruCoreMessages: Messages = {
   'settings.appearance.uiFont.desc': 'Выберите шрифт для интерфейса приложения',
   'settings.appearance.windowOpacity': 'Прозрачность окна',
   'settings.appearance.windowOpacity.desc': 'Настройте прозрачность всего окна приложения. При низких значениях текст терминала тоже бледнеет. В некоторых средах Linux это может не поддерживаться.',
+  'settings.appearance.appIcon': 'Значок приложения',
+  'settings.appearance.appIcon.desc': 'Выберите стиль значка для Dock/панели задач, чтобы Netcatty было проще найти при переключении приложений. Применяется во время работы; значок установленного пакета не меняется.',
+  'settings.appearance.appIcon.original': 'Оригинал',
+  'settings.appearance.appIcon.bright': 'Яркий',
+  'settings.appearance.appIcon.dark': 'Тёмный',
+  'settings.appearance.appIcon.colorful': 'Цветной',
+  'settings.appearance.appIcon.highContrast': 'Высокий контраст',
+  'settings.appearance.appIcon.group.classic': 'Цветной фон',
+  'settings.appearance.appIcon.group.white': 'Белый фон',
+  'settings.appearance.appIcon.group.special': 'Скрытые',
+  'settings.appearance.appIcon.whiteNavy': 'Белый · синий кот',
+  'settings.appearance.appIcon.whiteSky': 'Белый · голубой кот',
+  'settings.appearance.appIcon.whiteRose': 'Белый · розовый кот',
+  'settings.appearance.appIcon.whiteEmerald': 'Белый · изумрудный кот',
+  'settings.appearance.appIcon.whiteAmber': 'Белый · янтарный кот',
+  'settings.appearance.appIcon.whiteViolet': 'Белый · фиолетовый кот',
+  'settings.appearance.appIcon.rainbow': 'Радужный кот',
   // Settings > Terminal
   'settings.terminal.section.theme': 'Тема терминала',
   'settings.terminal.themeModal.title': 'Выберите тему',
@@ -323,6 +340,8 @@ export const ruCoreMessages: Messages = {
   'settings.terminal.font.weight.black': 'Максимально жирный',
   'settings.terminal.font.weightBold': 'Толщина жирного шрифта',
   'settings.terminal.font.weightBold.desc': 'Толщина жирного текста (100-900)',
+  'settings.terminal.font.smoothing': 'Сглаживание шрифта',
+  'settings.terminal.font.smoothing.desc': 'Использовать родное сглаживание шрифтов macOS',
   'settings.terminal.font.linePadding': 'Межстрочный отступ',
   'settings.terminal.font.linePadding.desc': 'Дополнительное пространство между строками (0-10)',
   'settings.terminal.font.emulationType': 'Тип эмуляции терминала',
@@ -367,6 +386,12 @@ export const ruCoreMessages: Messages = {
   'settings.terminal.behavior.forcePromptNewLine': 'Переносить приглашение на новую строку',
   'settings.terminal.behavior.forcePromptNewLine.desc':
     'Если последняя строка вывода команды не завершена переводом строки, переносить распознанное приглашение оболочки на следующую визуальную строку.',
+  'settings.terminal.behavior.dynamicTabTitle': 'Динамический заголовок вкладки',
+  'settings.terminal.behavior.dynamicTabTitle.desc':
+    'Выберите, когда вкладки сеансов должны следовать заголовкам окна, сообщаемым оболочкой.',
+  'settings.terminal.behavior.dynamicTabTitle.off': 'Отключено',
+  'settings.terminal.behavior.dynamicTabTitle.agent': 'Только агенты',
+  'settings.terminal.behavior.dynamicTabTitle.all': 'Все сеансы',
   'settings.terminal.behavior.osc52Clipboard': 'Буфер обмена OSC-52',
   'settings.terminal.behavior.osc52Clipboard.desc':
     'Разрешить удалённым программам (tmux, vim и т. д.) доступ к локальному буферу обмена через escape-последовательности OSC-52.',
@@ -492,8 +517,8 @@ export const ruCoreMessages: Messages = {
   'settings.shortcuts.scheme.pc': 'PC (Ctrl)',
   'settings.shortcuts.disableTerminalFontZoom.label': 'Отключить масштаб терминала',
   'settings.shortcuts.disableTerminalFontZoom.desc': 'Отключает быстрый масштаб текста в терминале, включая Cmd/Ctrl + колесо мыши.',
-  'settings.shortcuts.shellOnlyTabNumberShortcuts.label': 'Цифры без закреплённых вкладок',
-  'settings.shortcuts.shellOnlyTabNumberShortcuts.desc': 'Если включено, Cmd/Ctrl+[1...9] переключает только рабочие вкладки (терминалы, рабочие области, редакторы), а не закреплённые Vault и SFTP.',
+  'settings.shortcuts.shellOnlyTabNumberShortcuts.label': 'Сочетания без закреплённых вкладок',
+  'settings.shortcuts.shellOnlyTabNumberShortcuts.desc': 'Если включено, Cmd/Ctrl+[1...9] и Ctrl+Tab переключают только рабочие вкладки (терминалы, рабочие области, редакторы), а не закреплённые Vault и SFTP.',
   'settings.shortcuts.section.custom': 'Пользовательские сочетания',
   'settings.shortcuts.resetAll': 'Сбросить все',
   'settings.shortcuts.recording': 'Нажмите клавиши...',
@@ -567,6 +592,7 @@ export const ruCoreMessages: Messages = {
   'sync.cloudSync': 'Облачная синхронизация',
   'sync.settings': 'Настройки синхронизации',
   'sync.active': 'Облачная синхронизация активна',
+  'sync.pending': 'Есть несинхронизированные изменения',
   'sync.syncing': 'Синхронизация...',
   'sync.error': 'Ошибка синхронизации',
   'sync.notConfigured': 'Не настроено',
@@ -603,7 +629,7 @@ export const ruCoreMessages: Messages = {
   'sync.autoSync.emptyVaultConflict.restoreDesc': 'Рекомендуется — восстановить ваши хосты, ключи и сниппеты из облачной резервной копии',
   'sync.autoSync.emptyVaultConflict.keepEmpty': 'Оставить пустым',
   'sync.autoSync.emptyVaultConflict.keepEmptyDesc': 'Начать заново с пустым хранилищем',
-  'sync.autoSync.emptyVaultConflict.cloudSummary': '{hosts} хостов, {keys} ключей, {snippets} сниппетов, {proxyProfiles} прокси',
+  'sync.autoSync.emptyVaultConflict.cloudSummary': '{hosts} хостов, {keys} ключей, {snippets} сниппетов, {notes} заметок, {proxyProfiles} прокси',
   'sync.autoSync.emptyVaultManual': 'Синхронизация невозможна: локальное хранилище пусто. Сначала восстановите его из локальной резервной копии или включите принудительную отправку в панели синхронизации.',
 
   'sync.blocked.title': 'Синхронизация приостановлена',
@@ -640,6 +666,7 @@ export const ruCoreMessages: Messages = {
   'vault.nav.proxies': 'Прокси',
   'vault.nav.portForwarding': 'Проброс портов',
   'vault.nav.snippets': 'Сниппеты',
+  'vault.nav.notes': 'Заметки',
   'vault.nav.knownHosts': 'Известные хосты',
   'vault.nav.logs': 'Журналы',
 
@@ -703,5 +730,6 @@ export const ruCoreMessages: Messages = {
 
   'vault.hosts.header.entries': 'Записей: {count}',
   'vault.hosts.header.live': 'Активных: {count}',
+  'deepLink.ssh.invalid': 'Недопустимая ссылка ssh://',
 
 };

@@ -7,7 +7,7 @@
  */
 
 import { AtSign, Check, ChevronDown, ChevronRight, Cpu, Expand, Eye, FileText, ImageIcon, MessageSquare, Package, Plus, ShieldCheck, SquareTerminal, X, Zap } from 'lucide-react';
-import { filterQuickMessages, buildSlashCommandItems, filterUserSkillsForSlash, getSlashCommandItemKey, type AIQuickMessage, type SlashCommandItem, type UserSkillSlashOption } from '../../infrastructure/ai/quickMessages';
+import { filterQuickMessages, buildSlashCommandItems, filterUserSkillsForSlash, getSlashCommandItemKey, isSystemStopSlashCommand, type AIQuickMessage, type SlashCommandItem, type UserSkillSlashOption } from '../../infrastructure/ai/quickMessages';
 import { SlashCommandPicker } from './SlashCommandPicker';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
@@ -163,7 +163,6 @@ const ChatInput: React.FC<ChatInputProps> = ({
   const modelBtnRef = useRef<HTMLButtonElement>(null);
   const permBtnRef = useRef<HTMLButtonElement>(null);
   const attachBtnRef = useRef<HTMLButtonElement>(null);
-  const quickMsgBtnRef = useRef<HTMLButtonElement>(null);
   const slashPickerListRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -257,28 +256,6 @@ const ChatInput: React.FC<ChatInputProps> = ({
     }
     setActiveMenu(menu);
   }, [findSlashTrigger, getInputPanelMenuPos, value]);
-
-  const openSlashCommandPicker = useCallback((anchor?: 'toolbar') => {
-    if (anchor === 'toolbar') {
-      const rect = quickMsgBtnRef.current?.getBoundingClientRect();
-      if (rect) {
-        setMenuPos({ left: rect.left, bottom: window.innerHeight - rect.top + 6 });
-      }
-      setInputPanelPos(null);
-      const caret = textareaRef.current?.selectionStart ?? value.length;
-      const trigger = findSlashTrigger(value, caret);
-      if (trigger) {
-        setSlashQuery(trigger.query);
-        setSlashRange({ start: trigger.start, end: trigger.end });
-      } else {
-        setSlashQuery('');
-        setSlashRange(null);
-      }
-      setActiveMenu('slashCommand');
-      return;
-    }
-    openInputPanelMenu('slashCommand');
-  }, [findSlashTrigger, openInputPanelMenu, value]);
 
   const userSkillOptions = useMemo<UserSkillSlashOption[]>(
     () => userSkills.map((skill) => ({
@@ -483,14 +460,19 @@ const ChatInput: React.FC<ChatInputProps> = ({
 
   const handleSubmit = useCallback(
     (_text: string, _event: FormEvent<HTMLFormElement>) => {
+      if (isSystemStopSlashCommand(value)) {
+        onStop?.();
+        onChange('');
+        return;
+      }
       onSend();
     },
-    [onSend],
+    [onSend, onStop, onChange, value],
   );
 
   const status: PromptInputStatus = isStreaming ? 'streaming' : 'idle';
 
-  // Permission mode chip removed — agents run in autonomous mode
+  // Permission mode chip removed — agents run in auto mode
 
   // selectedModelId may be "<modelId>/<thinkingLevel>" for codex ChatGPT models
   // (e.g. "gpt-5.4/high"). Note: custom config.toml / OpenRouter model ids
@@ -535,6 +517,9 @@ const ChatInput: React.FC<ChatInputProps> = ({
     : (selectedPreset
         ? selectedPreset.name + (selectedThinking ? ` / ${formatThinkingLabel(selectedThinking)}` : '')
         : modelName || providerName || t('ai.chat.noModel'));
+  const modelChipMaxWidth = hasProviderSwitcher
+    ? 'max-w-[180px]'
+    : (selectedThinking ? 'max-w-[148px]' : 'max-w-[82px]');
   const hasModelPicker = hasProviderSwitcher || (modelPresets.length > 0 && !!onModelSelect);
   const popoverMaxWidth = hasProviderSwitcher ? PROVIDER_PICKER_MAX_WIDTH : MODEL_PICKER_MAX_WIDTH;
   const chipClassName =
@@ -842,6 +827,9 @@ const ChatInput: React.FC<ChatInputProps> = ({
                     const left = Math.max(8, Math.min(rect.left, window.innerWidth - popoverMaxWidth - 8));
                     setMenuPos({ left, bottom: window.innerHeight - rect.top + 6 });
                   }
+                  if (selectedPreset?.thinkingLevels?.length) {
+                    setHoveredModelId(selectedPreset.id);
+                  }
                   setActiveMenu('model');
                 } else {
                   closeAllMenus();
@@ -856,7 +844,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
               ) : (
                 <Cpu size={11} className="text-muted-foreground/64" />
               )}
-              <span className={`truncate min-w-0 ${hasProviderSwitcher ? 'max-w-[180px]' : 'max-w-[82px]'}`}>{modelLabel}</span>
+              <span className={`truncate min-w-0 ${modelChipMaxWidth}`}>{modelLabel}</span>
               {hasModelPicker && <ChevronDown size={9} className="text-muted-foreground/50" />}
             </button>
             {showModelPicker && hasModelPicker && menuPos && createPortal(
@@ -916,13 +904,15 @@ const ChatInput: React.FC<ChatInputProps> = ({
                         );
                       })}
                     </div>
-                  ) : modelPresets.map(preset => {
+                  ) : (
+                    <div className="min-w-[260px] max-h-[320px] overflow-y-auto">
+                      {modelPresets.map(preset => {
                     const isSelected = preset.id === selectedBaseModelId;
                     const hasThinking = preset.thinkingLevels && preset.thinkingLevels.length > 0;
+                    const showThinkingLevels = hasThinking && hoveredModelId === preset.id;
                     return (
                       <div
                         key={preset.id}
-                        className="relative"
                         onMouseEnter={() => setHoveredModelId(hasThinking ? preset.id : null)}
                         onFocus={() => { if (hasThinking) setHoveredModelId(preset.id); }}
                         onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setHoveredModelId(null); }}
@@ -931,21 +921,29 @@ const ChatInput: React.FC<ChatInputProps> = ({
                           type="button"
                           role="option"
                           aria-selected={isSelected}
+                          aria-expanded={hasThinking ? showThinkingLevels : undefined}
                           onClick={() => {
                             if (!hasThinking) {
                               onModelSelect?.(preset.id);
                               closeAllMenus();
+                              return;
                             }
+                            setHoveredModelId(showThinkingLevels ? null : preset.id);
                           }}
                           className="w-full min-w-0 flex items-center gap-1.5 px-3 py-1.5 text-left text-[12px] hover:bg-muted/30 transition-colors cursor-pointer"
                         >
                           {isSelected ? <Check size={11} className="text-primary shrink-0" /> : <span className="w-[11px] shrink-0" />}
                           <span className="flex-1 min-w-0 truncate text-foreground/85">{preset.name}</span>
-                          {hasThinking && <ChevronRight size={10} className="text-muted-foreground/50 shrink-0" />}
+                          {hasThinking && (
+                            <ChevronRight
+                              size={10}
+                              className={`text-muted-foreground/50 shrink-0 transition-transform ${showThinkingLevels ? 'rotate-90' : ''}`}
+                            />
+                          )}
                         </button>
-                        {/* Thinking level sub-menu */}
-                        {hasThinking && hoveredModelId === preset.id && (
-                          <div role="listbox" aria-label="Thinking level" className="absolute left-full top-0 ml-1 min-w-[120px] rounded-lg border border-border/50 bg-popover shadow-lg py-1 z-[1001]">
+                        {/* Inline thinking levels — flyout submenus get clipped by overflow-y-auto above. */}
+                        {showThinkingLevels && (
+                          <div role="listbox" aria-label="Thinking level" className="border-t border-border/30 bg-muted/10 py-0.5">
                             {preset.thinkingLevels!.map(level => {
                               const fullId = `${preset.id}/${level}`;
                               const isLevelSelected = selectedModelId === fullId;
@@ -970,7 +968,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
                                       closeAllMenus();
                                     }
                                   }}
-                                  className="w-full flex items-center gap-1.5 px-3 py-1.5 text-left text-[12px] hover:bg-muted/30 transition-colors cursor-pointer whitespace-nowrap"
+                                  className="w-full flex items-center gap-1.5 pl-7 pr-3 py-1.5 text-left text-[12px] hover:bg-muted/30 transition-colors cursor-pointer whitespace-nowrap"
                                 >
                                   {isLevelSelected ? <Check size={11} className="text-primary shrink-0" /> : <span className="w-[11px] shrink-0" />}
                                   <span className="text-foreground/85">{formatThinkingLabel(level)}</span>
@@ -981,7 +979,9 @@ const ChatInput: React.FC<ChatInputProps> = ({
                         )}
                       </div>
                     );
-                  })}
+                      })}
+                    </div>
+                  )}
                 </div>
               </>,
               document.body,
@@ -1009,11 +1009,11 @@ const ChatInput: React.FC<ChatInputProps> = ({
                     >
                       {permissionMode === 'observer' && <Eye size={11} className="text-blue-400/70" />}
                       {permissionMode === 'confirm' && <ShieldCheck size={11} className="text-yellow-400/70" />}
-                      {permissionMode === 'autonomous' && <Zap size={11} className="text-green-400/70" />}
+                      {permissionMode === 'auto' && <Zap size={11} className="text-green-400/70" />}
                       <span className="truncate max-w-[72px]">
                         {permissionMode === 'observer' && t('ai.chat.permObserver')}
                         {permissionMode === 'confirm' && t('ai.chat.permConfirm')}
-                        {permissionMode === 'autonomous' && t('ai.chat.permAuto')}
+                        {permissionMode === 'auto' && t('ai.chat.permAuto')}
                       </span>
                       <ChevronDown size={9} className="text-muted-foreground/50" />
                     </button>
@@ -1031,7 +1031,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
                       style={{ left: menuPos.left, bottom: menuPos.bottom }}
                     >
                       {([
-                        { mode: 'autonomous' as const, icon: Zap, color: 'text-green-400/70', label: t('ai.chat.permAuto'), desc: t('ai.chat.permAutoDesc') },
+                        { mode: 'auto' as const, icon: Zap, color: 'text-green-400/70', label: t('ai.chat.permAuto'), desc: t('ai.chat.permAutoDesc') },
                         { mode: 'confirm' as const, icon: ShieldCheck, color: 'text-yellow-400/70', label: t('ai.chat.permConfirm'), desc: t('ai.chat.permConfirmDesc') },
                         { mode: 'observer' as const, icon: Eye, color: 'text-blue-400/70', label: t('ai.chat.permObserver'), desc: t('ai.chat.permObserverDesc') },
                       ]).map(({ mode, icon: Icon, color, label, desc }) => (
@@ -1068,30 +1068,6 @@ const ChatInput: React.FC<ChatInputProps> = ({
           <div className="flex-1 min-w-0" />
 
           <div className="flex items-center gap-1">
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  ref={quickMsgBtnRef}
-                  type="button"
-                  onClick={() => {
-                    if (!showSlashCommandPicker) {
-                      openSlashCommandPicker('toolbar');
-                    } else {
-                      closeAllMenus();
-                    }
-                  }}
-                  className={[
-                    iconButtonClassName,
-                    isSlashCatalogEmpty ? 'opacity-45 hover:opacity-80' : '',
-                  ].filter(Boolean).join(' ')}
-                  aria-label={t('ai.chat.slashCommands')}
-                  aria-expanded={showSlashCommandPicker}
-                >
-                  <MessageSquare size={13} />
-                </button>
-              </TooltipTrigger>
-              <TooltipContent>{t('ai.chat.slashCommands')}</TooltipContent>
-            </Tooltip>
             <PromptInputSubmit
               status={status}
               onStop={onStop}

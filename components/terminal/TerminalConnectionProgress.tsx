@@ -12,12 +12,14 @@ export interface TerminalConnectionProgressProps {
     status: 'connecting' | 'connected' | 'disconnected';
     error: string | null;
     timeLeft: number;
+    isAwaitingUserInput?: boolean;
     isCancelling: boolean;
     showLogs: boolean;
     progressLogs: string[];
     onCancelConnect: () => void;
     onCloseSession: () => void;
     onRetry: () => void;
+    reconnectLabel?: string;
 }
 
 export interface TerminalConnectionLogListProps {
@@ -53,12 +55,14 @@ export const TerminalConnectionProgress: React.FC<TerminalConnectionProgressProp
     status,
     error,
     timeLeft,
+    isAwaitingUserInput = false,
     isCancelling: _isCancelling,
     showLogs,
     progressLogs,
     onCancelConnect: _onCancelConnect,
     onCloseSession,
     onRetry,
+    reconnectLabel,
 }) => {
     const { t } = useI18n();
 
@@ -70,7 +74,9 @@ export const TerminalConnectionProgress: React.FC<TerminalConnectionProgressProp
                         <>
                             <Loader2 className="h-3 w-3 mt-0.5 flex-shrink-0 animate-spin" />
                             <span className="min-w-0 whitespace-pre-wrap break-words leading-5">
-                                {t('terminal.progress.timeoutIn', { seconds: timeLeft })}
+                                {isAwaitingUserInput
+                                    ? t('terminal.progress.waitingForUserInput')
+                                    : t('terminal.progress.timeoutIn', { seconds: timeLeft })}
                             </span>
                         </>
                     ) : (
@@ -95,7 +101,7 @@ export const TerminalConnectionProgress: React.FC<TerminalConnectionProgressProp
                             {t('terminal.toolbar.closeSession')}
                         </Button>
                         <Button size="sm" className="h-7 px-3 text-[11px]" onClick={onRetry}>
-                            <Play className="h-3 w-3 mr-1.5" /> {t('terminal.progress.startOver')}
+                            <Play className="h-3 w-3 mr-1.5" /> {reconnectLabel ?? t('terminal.progress.startOver')}
                         </Button>
                     </>
                 )}

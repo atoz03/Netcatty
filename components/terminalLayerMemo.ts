@@ -9,17 +9,29 @@ export const terminalLayerAreEqual = (
   prev.keys === next.keys &&
   prev.snippets === next.snippets &&
   prev.snippetPackages === next.snippetPackages &&
+  prev.notes === next.notes &&
+  prev.noteGroups === next.noteGroups &&
+  prev.openNoteRequest === next.openNoteRequest &&
+  prev.onOpenVaultNoteFromChat === next.onOpenVaultNoteFromChat &&
+  prev.onOpenVaultHostFromChat === next.onOpenVaultHostFromChat &&
+  prev.onOpenVaultSectionFromChat === next.onOpenVaultSectionFromChat &&
+  prev.onOpenVaultSnippetFromChat === next.onOpenVaultSnippetFromChat &&
   prev.sessions === next.sessions &&
   prev.workspaces === next.workspaces &&
   prev.knownHosts === next.knownHosts &&
   prev.draggingSessionId === next.draggingSessionId &&
   prev.terminalTheme === next.terminalTheme &&
+  prev.terminalThemeId === next.terminalThemeId &&
+  prev.followAppTerminalTheme === next.followAppTerminalTheme &&
+  prev.pickTerminalTheme === next.pickTerminalTheme &&
+  prev.resolveSessionAppearance === next.resolveSessionAppearance &&
   prev.accentMode === next.accentMode &&
   prev.customAccent === next.customAccent &&
   prev.terminalSettings === next.terminalSettings &&
   prev.fontSize === next.fontSize &&
   prev.hotkeyScheme === next.hotkeyScheme &&
   prev.disableTerminalFontZoom === next.disableTerminalFontZoom &&
+  prev.restoreTerminalCwd === next.restoreTerminalCwd &&
   prev.keyBindings === next.keyBindings &&
   prev.sftpDefaultViewMode === next.sftpDefaultViewMode &&
   prev.sftpDoubleClickBehavior === next.sftpDoubleClickBehavior &&
@@ -27,6 +39,8 @@ export const terminalLayerAreEqual = (
   prev.sftpShowHiddenFiles === next.sftpShowHiddenFiles &&
   prev.sftpUseCompressedUpload === next.sftpUseCompressedUpload &&
   prev.sftpAutoOpenSidebar === next.sftpAutoOpenSidebar &&
+  prev.terminalSidePanelAutoOpen === next.terminalSidePanelAutoOpen &&
+  prev.terminalSidePanelAutoOpenTab === next.terminalSidePanelAutoOpenTab &&
   prev.sftpFollowTerminalCwd === next.sftpFollowTerminalCwd &&
   prev.setSftpFollowTerminalCwd === next.setSftpFollowTerminalCwd &&
   prev.editorWordWrap === next.editorWordWrap &&
@@ -34,6 +48,7 @@ export const terminalLayerAreEqual = (
   prev.showHostTreeSidebar === next.showHostTreeSidebar &&
   prev.setEditorWordWrap === next.setEditorWordWrap &&
   prev.onHotkeyAction === next.onHotkeyAction &&
+  prev.onUpdateSessionRestoreCwd === next.onUpdateSessionRestoreCwd &&
   prev.onUpdateHost === next.onUpdateHost &&
   prev.onAddKnownHost === next.onAddKnownHost &&
   prev.onToggleWorkspaceViewMode === next.onToggleWorkspaceViewMode &&
@@ -48,6 +63,8 @@ export const terminalLayerAreEqual = (
   prev.onToggleBroadcast === next.onToggleBroadcast &&
   prev.updateSnippets === next.updateSnippets &&
   prev.updateSnippetPackages === next.updateSnippetPackages &&
+  prev.updateNotes === next.updateNotes &&
+  prev.updateNoteGroups === next.updateNoteGroups &&
   prev.toggleScriptsSidePanelRef === next.toggleScriptsSidePanelRef &&
   prev.toggleSidePanelRef === next.toggleSidePanelRef &&
   prev.identities === next.identities &&

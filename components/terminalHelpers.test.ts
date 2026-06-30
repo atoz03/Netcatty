@@ -3,7 +3,9 @@ import assert from "node:assert/strict";
 
 import type { Host } from "../domain/models";
 import {
+  AUTO_RUN_SNIPPET_LINE_DELAY_MS,
   shouldHideConnectingDialogForConnectionReuse,
+  shouldDelayAutoRunSnippetInput,
   shouldShowTerminalConnectionDialog,
 } from "./terminal/terminalHelpers";
 
@@ -125,4 +127,25 @@ test("connection reuse hides connecting dialog only while reuse is still possibl
     }),
     false,
   );
+});
+
+test("auto-run snippets only delay multi-line input in line-by-line mode", () => {
+  assert.equal(AUTO_RUN_SNIPPET_LINE_DELAY_MS > 0, true);
+  assert.equal(shouldDelayAutoRunSnippetInput("tthdf 0 2323\nadmin\ntest123", { noAutoRun: false }), false);
+  assert.equal(
+    shouldDelayAutoRunSnippetInput("sudo apt install gconf2-common -y\necho \"123456\"", {
+      noAutoRun: false,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldDelayAutoRunSnippetInput("tthdf 0 2323\nadmin\ntest123", {
+      noAutoRun: false,
+      multiLineRunMode: "lineDelay",
+    }),
+    true,
+  );
+  assert.equal(shouldDelayAutoRunSnippetInput("tthdf 0 2323\nadmin\ntest123", { noAutoRun: true }), false);
+  assert.equal(shouldDelayAutoRunSnippetInput("show version", { noAutoRun: false }), false);
+  assert.equal(shouldDelayAutoRunSnippetInput("show version\r", { noAutoRun: false }), false);
 });

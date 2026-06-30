@@ -7,6 +7,7 @@ import {
   themeFingerprint,
 } from "./useActiveChromeTheme.ts";
 import { TERMINAL_THEMES } from "../../infrastructure/config/terminalThemes.ts";
+import { readFileSync } from "node:fs";
 
 function createInlineStyle() {
   const values = new Map<string, string>();
@@ -60,7 +61,7 @@ test("chrome layout animations wait until theme settle frames complete", () => {
   cancel();
 });
 
-test("syncActiveChromeTheme refreshes top tabs when the active theme fingerprint is unchanged", () => {
+test("syncActiveChromeTheme skips surface refresh when the active theme fingerprint is unchanged", () => {
   const globalWithDocument = globalThis as typeof globalThis & { document?: Document };
   const originalDocument = globalWithDocument.document;
   const theme = TERMINAL_THEMES[0];
@@ -82,9 +83,9 @@ test("syncActiveChromeTheme refreshes top tabs when the active theme fingerprint
       throw new Error("app theme should not be restored for an unchanged active chrome theme");
     });
 
-    assert.notEqual(topTabsRoot.style.getPropertyValue("--top-tabs-bg"), "");
-    assert.notEqual(topTabsRoot.style.getPropertyValue("--top-tabs-active-bg"), "");
-    assert.notEqual(topTabsRoot.style.getPropertyValue("--top-tabs-accent"), "");
+    assert.equal(topTabsRoot.style.getPropertyValue("--top-tabs-bg"), "");
+    assert.equal(topTabsRoot.style.getPropertyValue("--top-tabs-active-bg"), "");
+    assert.equal(topTabsRoot.style.getPropertyValue("--top-tabs-accent"), "");
   } finally {
     if (originalDocument) {
       globalWithDocument.document = originalDocument;
@@ -92,4 +93,11 @@ test("syncActiveChromeTheme refreshes top tabs when the active theme fingerprint
       delete globalWithDocument.document;
     }
   }
+});
+
+test("active chrome theme foreground uses contrast calculation", () => {
+  const source = readFileSync(new URL("./useActiveChromeTheme.ts", import.meta.url), "utf8");
+
+  assert.match(source, /resolveReadableForegroundForHsl\(cursor\)/);
+  assert.doesNotMatch(source, /cursorLightness > 55/);
 });

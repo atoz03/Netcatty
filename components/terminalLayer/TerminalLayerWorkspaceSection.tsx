@@ -20,6 +20,7 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
     sessionHostsMap,
     sessionChainHostsMap,
     sessionSudoAutofillPasswordsMap,
+    resolvedSessionHostIds,
     workspaceById,
     workspaceRectsById,
     isTerminalLayerVisible,
@@ -27,7 +28,8 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
     workspaceBroadcastHandlersRef,
     splitHorizontalHandlersRef,
     splitVerticalHandlersRef,
-    themePreview,
+    resolveSessionAppearance,
+    hostMap,
     keys,
     identities,
     snippets,
@@ -41,6 +43,7 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
     terminalSettings,
     hotkeyScheme,
     disableTerminalFontZoom,
+    restoreTerminalCwd,
     keyBindings,
     resizing,
     isComposeBarOpen,
@@ -50,6 +53,10 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
     handleTerminalFontSizeChange,
     handleOpenSftp,
     handleTerminalCwdChange,
+    handleTerminalTitleChange,
+    handleTerminalBell,
+    handleTerminalOutput,
+    handleTerminalContextReaderChange,
     handleOpenScripts,
     handleOpenHistory,
     handleOpenSystem,
@@ -67,8 +74,10 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
     onSplitSession,
     isBroadcastEnabled,
     handleBroadcastInput,
+    handleBroadcastInterruptPriorityChange,
     handleToggleWorkspaceComposeBar,
     handleSnippetExecutorChange,
+    handleProgrammaticCommandLogRewriteChange,
     handleAddSelectionToAI,
     activeResizers,
     activeWorkspace,
@@ -135,6 +144,7 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
           sessionHostsMap={sessionHostsMap}
           sessionChainHostsMap={sessionChainHostsMap}
           sessionSudoAutofillPasswordsMap={sessionSudoAutofillPasswordsMap}
+          resolvedSessionHostIds={resolvedSessionHostIds}
           workspaceById={workspaceById}
           workspaceRectsById={workspaceRectsById}
           isTerminalLayerVisible={isTerminalLayerVisible}
@@ -142,7 +152,8 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
           workspaceBroadcastHandlersRef={workspaceBroadcastHandlersRef}
           splitHorizontalHandlersRef={splitHorizontalHandlersRef}
           splitVerticalHandlersRef={splitVerticalHandlersRef}
-          themePreview={themePreview}
+          resolveSessionAppearance={resolveSessionAppearance}
+          hostMap={hostMap}
           keys={keys}
           identities={identities}
           snippets={snippets}
@@ -156,6 +167,7 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
           terminalSettings={terminalSettings}
           hotkeyScheme={hotkeyScheme}
           disableTerminalFontZoom={disableTerminalFontZoom}
+          restoreTerminalCwd={restoreTerminalCwd}
           keyBindings={keyBindings}
           isResizing={!!resizing}
           isComposeBarOpen={isComposeBarOpen}
@@ -165,6 +177,10 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
           onTerminalFontSizeChange={handleTerminalFontSizeChange}
           onOpenSftp={handleOpenSftp}
           onTerminalCwdChange={handleTerminalCwdChange}
+          onTerminalTitleChange={handleTerminalTitleChange}
+          onTerminalBell={handleTerminalBell}
+          onTerminalOutput={handleTerminalOutput}
+          onTerminalContextReaderChange={handleTerminalContextReaderChange}
           onOpenScripts={handleOpenScripts}
           onOpenHistory={handleOpenHistory}
           onOpenSystem={handleOpenSystem}
@@ -182,8 +198,10 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
           onSplitSession={onSplitSession}
           isBroadcastEnabled={isBroadcastEnabled}
           onBroadcastInput={handleBroadcastInput}
+          onBroadcastInterruptPriorityChange={handleBroadcastInterruptPriorityChange}
           onToggleWorkspaceComposeBar={handleToggleWorkspaceComposeBar}
           onSnippetExecutorChange={handleSnippetExecutorChange}
+          onProgrammaticCommandLogRewriteChange={handleProgrammaticCommandLogRewriteChange}
           onAddSelectionToAI={handleAddSelectionToAI}
           onStartSessionRename={onStartSessionRename}
           onRemoveSessionFromWorkspace={onRemoveSessionFromWorkspace}

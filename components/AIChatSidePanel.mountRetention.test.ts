@@ -1,14 +1,54 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 
+import { I18nProvider } from '../application/i18n/I18nProvider.tsx';
 import type { AIDraft, AISession } from '../infrastructure/ai/types';
+import { TooltipProvider } from './ui/tooltip.tsx';
 import {
   aiChatSidePanelPropsAreEqual,
+  AIChatSidePanel,
   hasAIChatSidePanelRetainedContent,
-  resolveAIChatSidePanelActivationState,
   shouldKeepAIChatSidePanelMounted,
 } from './AIChatSidePanel.tsx';
 import type { AIChatSidePanelProps } from './AIChatSidePanel.types.ts';
+
+type LocalStorageMock = {
+  clear(): void;
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+};
+
+function installLocalStorage(): LocalStorageMock {
+  const store = new Map<string, string>();
+  const localStorage: LocalStorageMock = {
+    clear() {
+      store.clear();
+    },
+    getItem(key: string) {
+      return store.has(key) ? store.get(key)! : null;
+    },
+    setItem(key: string, value: string) {
+      store.set(key, String(value));
+    },
+    removeItem(key: string) {
+      store.delete(key);
+    },
+  };
+  Object.defineProperty(globalThis, 'localStorage', {
+    value: localStorage,
+    configurable: true,
+  });
+  return localStorage;
+}
+
+const localStorage = installLocalStorage();
+
+test.beforeEach(() => {
+  localStorage.clear();
+});
 
 const draft = (overrides: Partial<AIDraft> = {}): AIDraft => ({
   text: '',
@@ -60,7 +100,7 @@ const baseProps = (overrides: Partial<AIChatSidePanelProps> = {}): AIChatSidePan
   setAgentModel: () => undefined,
   agentProviderMap: {},
   setAgentProvider: () => undefined,
-  globalPermissionMode: 'autonomous',
+  globalPermissionMode: 'auto',
   scopeType: 'terminal',
   scopeTargetId: 'terminal-1',
   isVisible: false,
@@ -103,6 +143,32 @@ test('visible AI side panel is always mounted even when empty', () => {
   assert.equal(shouldKeepAIChatSidePanelMounted(baseProps({ isVisible: true })), true);
 });
 
+test('visible empty draft renders the input immediately without preparing state', () => {
+  const markup = renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      { locale: 'en' },
+      React.createElement(
+        TooltipProvider,
+        null,
+        React.createElement(AIChatSidePanel, baseProps({
+          isVisible: true,
+          sessions: [session({ id: 'session-history' })],
+          draftsByScope: {
+            'terminal:terminal-1': draft(),
+          },
+          panelViewByScope: {
+            'terminal:terminal-1': { mode: 'draft' },
+          },
+        })),
+      ),
+    ),
+  );
+
+  assert.match(markup, /textarea/);
+  assert.doesNotMatch(markup, /data-section="ai-chat-panel-preparing"/);
+});
+
 test('AI side panel re-renders when retained content becomes visible again', () => {
   const hiddenProps = baseProps({
     isVisible: false,
@@ -117,34 +183,14 @@ test('AI side panel re-renders when retained content becomes visible again', () 
   ), false);
 });
 
-test('activated empty AI side panel stays ready when draft text is cleared', () => {
-  const activationKey = 'terminal:terminal-1';
+test('AI side panel re-renders when command timeout changes', () => {
+  const props = baseProps({
+    isVisible: true,
+    commandTimeout: 60,
+  });
 
-  assert.deepEqual(
-    resolveAIChatSidePanelActivationState({
-      activationKey,
-      shouldDelayActivation: true,
-      activatedKey: activationKey,
-    }),
-    {
-      activationReady: true,
-      activatedKey: activationKey,
-      shouldScheduleActivation: false,
-    },
-  );
-});
-
-test('fresh empty AI side panel still schedules delayed activation', () => {
-  assert.deepEqual(
-    resolveAIChatSidePanelActivationState({
-      activationKey: 'terminal:terminal-1',
-      shouldDelayActivation: true,
-      activatedKey: null,
-    }),
-    {
-      activationReady: false,
-      activatedKey: null,
-      shouldScheduleActivation: true,
-    },
-  );
+  assert.equal(aiChatSidePanelPropsAreEqual(
+    props,
+    { ...props, commandTimeout: 86_400 },
+  ), false);
 });

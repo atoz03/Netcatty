@@ -93,10 +93,11 @@ test('host tree keeps shell width while hidden behind root pages', () => {
   assert.doesNotMatch(source, /if \(!surfaceVisible\) \{\s*setShellWidth\(0\);/);
 });
 
-test('host tree sidebar memo tracks surface visibility changes', () => {
+test('host tree sidebar memo tracks surface visibility and theme changes', () => {
   const source = readFileSync(new URL('./TerminalHostTreeSidebar.tsx', import.meta.url), 'utf8');
 
   assert.match(source, /prev\.surfaceVisible === next\.surfaceVisible/);
+  assert.match(source, /themeFingerprint\(prev\.resolvedPreviewTheme\) === themeFingerprint\(next\.resolvedPreviewTheme\)/);
 });
 
 test('host tree sidebar clips the panel instead of fading it out while closing', () => {
@@ -130,6 +131,30 @@ test('host tree sidebar clips the panel instead of fading it out while closing',
   }).opacity, 1);
 });
 
+test('host tree sidebar colors can be overridden by immediate preview styles', () => {
+  const theme = {
+    termBg: 'var(--terminal-host-tree-bg, #000000)',
+    termFg: 'var(--terminal-host-tree-fg, #ffffff)',
+    mutedFg: 'var(--terminal-host-tree-muted, #999999)',
+    separator: 'var(--terminal-host-tree-separator, #333333)',
+    rowHoverBg: 'var(--terminal-host-tree-hover-bg, #111111)',
+    rowActiveBg: 'var(--terminal-host-tree-active-bg, #222222)',
+    rowDropBg: 'var(--terminal-host-tree-drop-bg, #444444)',
+    folderFg: 'var(--terminal-host-tree-folder-fg, #cccccc)',
+  };
+
+  const style = getTerminalHostTreeSidebarPanelStyle({
+    isVisible: true,
+    displayWidth: 240,
+    panelTransition: 'border-color 220ms ease-out',
+    theme,
+  });
+
+  assert.equal(style.backgroundColor, theme.termBg);
+  assert.equal(style.color, theme.termFg);
+  assert.equal(style.borderRight, `1px solid ${theme.separator}`);
+});
+
 test('host tree host inline rename trims and updates the matching host label', () => {
   const result = applyTerminalHostTreeHostRename([host], 'host-1', '  web-01  ');
 
@@ -155,12 +180,11 @@ test('host tree hover card is hidden while the same host is inline editing', () 
 test('host tree hover card renders markdown notes and keeps host details out of the header subtitle', () => {
   const source = readFileSync(new URL('./TerminalHostTreeSidebar.tsx', import.meta.url), 'utf8');
 
-  assert.match(source, /<MessageResponse/);
+  assert.match(source, /<LazyMessageResponse/);
   assert.match(source, /size="sm"/);
   assert.match(source, /items-center gap-2/);
-  assert.match(source, /className="rounded"/);
-  assert.match(source, /flex h-5 min-w-0 items-center/);
-  assert.match(source, /translate-y-px truncate text-\[15px\] font-semibold leading-none/);
+  assert.match(source, /flex min-h-6 min-w-0 items-center/);
+  assert.match(source, /truncate text-\[15px\] font-semibold leading-5/);
   assert.match(source, /details\.host/);
   assert.doesNotMatch(source, /text-muted-foreground">\{host\.hostname\}/);
   assert.match(source, /host-tree-notes-scroll/);
@@ -171,10 +195,10 @@ test('host tree hover card renders markdown notes and keeps host details out of 
 test('host tree row icons, labels, and protocol badges share centered line boxes', () => {
   const source = readFileSync(new URL('./TerminalHostTreeSidebar.tsx', import.meta.url), 'utf8');
 
-  assert.match(source, /flex h-5 shrink-0 items-center">\s*<DistroAvatar/);
-  assert.match(source, /flex h-5 min-w-0 flex-1 translate-y-px items-center truncate leading-none">\{row\.host\.label\}/);
-  assert.match(source, /flex h-5 shrink-0 translate-y-px items-center text-\[10px\] leading-none uppercase/);
-  assert.match(source, /flex h-5 w-4 shrink-0 items-center justify-center/);
+  assert.match(source, /flex h-5 shrink-0 items-center justify-center">\s*<DistroAvatar/);
+  assert.match(source, /flex min-w-0 flex-1 items-center truncate leading-5/);
+  assert.match(source, /flex shrink-0 items-center text-\[10px\] leading-4 uppercase/);
+  assert.match(source, /flex h-5 w-4 shrink-0 items-center/);
   assert.match(source, /flex h-5 shrink-0 items-center">\s*\{isExpanded/);
-  assert.match(source, /flex h-5 min-w-0 flex-1 translate-y-px items-center truncate leading-none">\{node\.name\}/);
+  assert.match(source, /flex min-w-0 flex-1 items-center truncate leading-5">\{node\.name\}/);
 });

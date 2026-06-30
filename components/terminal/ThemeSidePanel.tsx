@@ -10,15 +10,17 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from '
 import { Check, Download, Minus, Palette, Pencil, Plus, Sparkles, Type } from 'lucide-react';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { useAvailableFonts } from '../../application/state/fontStore';
-import { TERMINAL_THEMES, TerminalThemeConfig, USER_VISIBLE_TERMINAL_THEMES, isUiMatchTerminalThemeId } from '../../infrastructure/config/terminalThemes';
+import { TERMINAL_THEMES, TerminalThemeConfig, USER_VISIBLE_TERMINAL_THEMES, getBuiltinTerminalThemeById, isUiMatchTerminalThemeId } from '../../infrastructure/config/terminalThemes';
 import { MIN_FONT_SIZE, MAX_FONT_SIZE, TerminalFont } from '../../infrastructure/config/fonts';
 import { useCustomThemes, useCustomThemeActions } from '../../application/state/customThemeStore';
+import { terminalAppearanceThemePanelVars } from '../../infrastructure/theme/terminalAppearanceTokens';
 import { parseItermcolors } from '../../infrastructure/parsers/itermcolorsParser';
 import { CustomThemeModal } from './CustomThemeModal';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../ui/select';
 import { cn } from '../../lib/utils';
 import { TerminalTheme } from '../../domain/models';
 import { ScrollArea } from '../ui/scroll-area';
+import { isFollowAppTerminalThemeId } from '../../domain/terminalAppearance';
 
 type TabType = 'theme' | 'font' | 'custom';
 
@@ -147,10 +149,6 @@ interface ThemeSidePanelProps {
   onFontWeightChange: (fontWeight: number) => void;
   onFontWeightReset?: () => void;
   isVisible?: boolean;
-  previewColors?: {
-    background: string;
-    foreground: string;
-  };
 }
 
 const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
@@ -174,35 +172,54 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
   onFontWeightChange,
   onFontWeightReset,
   isVisible = true,
-  previewColors,
 }) => {
   const { t } = useI18n();
   const availableFonts = useAvailableFonts();
   const customThemes = useCustomThemes();
   const { addTheme, updateTheme, deleteTheme } = useCustomThemeActions();
 
-  const [activeTab, setActiveTab] = useState<TabType>(followAppTerminalTheme ? 'font' : 'theme');
+  const [activeTab, setActiveTab] = useState<TabType>('theme');
   const [editingTheme, setEditingTheme] = useState<TerminalTheme | null>(null);
   const [isNewTheme, setIsNewTheme] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const allThemes = useMemo(
-    () => [...TERMINAL_THEMES, ...customThemes],
-    [customThemes]
+  useEffect(() => {
+    if (followAppTerminalTheme && activeTab === 'custom') {
+      setActiveTab('theme');
+      setEditingTheme(null);
+    }
+  }, [activeTab, followAppTerminalTheme]);
+
+  const customThemeById = useMemo(
+    () => new Map(customThemes.map((theme) => [theme.id, theme])),
+    [customThemes],
   );
+  const fontById = useMemo(
+    () => new Map(availableFonts.map((font) => [font.id, font])),
+    [availableFonts],
+  );
+  const getThemeById = useCallback((themeId: string): TerminalTheme | undefined =>
+    getBuiltinTerminalThemeById(themeId) ?? customThemeById.get(themeId),
+  [customThemeById]);
   const globalTheme = useMemo(
-    () => allThemes.find((theme) => theme.id === globalThemeId) || TERMINAL_THEMES[0],
-    [allThemes, globalThemeId],
+    () => getThemeById(globalThemeId) || TERMINAL_THEMES[0],
+    [getThemeById, globalThemeId],
   );
   const hiddenSelectedTheme = useMemo(
     () => (isUiMatchTerminalThemeId(currentThemeId)
-      ? TERMINAL_THEMES.find((theme) => theme.id === currentThemeId) || null
+      ? getBuiltinTerminalThemeById(currentThemeId) || null
       : null),
     [currentThemeId],
   );
   const globalFont = useMemo(
-    () => availableFonts.find((font) => font.id === globalFontFamilyId) || availableFonts[0],
-    [availableFonts, globalFontFamilyId],
+    () => fontById.get(globalFontFamilyId) || availableFonts[0],
+    [availableFonts, fontById, globalFontFamilyId],
+  );
+  const builtinThemes = useMemo(
+    () => (followAppTerminalTheme
+      ? TERMINAL_THEMES.filter((theme) => isFollowAppTerminalThemeId(theme.id))
+      : USER_VISIBLE_TERMINAL_THEMES),
+    [followAppTerminalTheme],
   );
 
   const handleThemeSelect = useCallback((themeId: string) => {
@@ -220,7 +237,7 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
   }, [currentFontSize, onFontSizeChange]);
 
   const handleNewTheme = useCallback(() => {
-    const base = allThemes.find(t => t.id === currentThemeId) || TERMINAL_THEMES[0];
+    const base = getThemeById(currentThemeId) || TERMINAL_THEMES[0];
     const newTheme: TerminalTheme = {
       ...base,
       id: `custom-${Date.now()}`,
@@ -230,7 +247,7 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
     };
     setEditingTheme(newTheme);
     setIsNewTheme(true);
-  }, [currentThemeId, allThemes]);
+  }, [currentThemeId, getThemeById]);
 
   const handleImportFile = useCallback(() => {
     fileInputRef.current?.click();
@@ -257,12 +274,12 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
   }, [addTheme, onThemeChange, t]);
 
   const handleEditTheme = useCallback((themeId: string) => {
-    const theme = customThemes.find(t => t.id === themeId);
+    const theme = customThemeById.get(themeId);
     if (theme) {
       setEditingTheme({ ...theme, colors: { ...theme.colors } });
       setIsNewTheme(false);
     }
-  }, [customThemes]);
+  }, [customThemeById]);
 
   const handleEditorDelete = useCallback((themeId: string) => {
     deleteTheme(themeId);
@@ -273,39 +290,12 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
     setIsNewTheme(false);
   }, [deleteTheme, currentThemeId, onThemeChange]);
 
-  const themeEditingLocked = followAppTerminalTheme;
-
-  useEffect(() => {
-    if (themeEditingLocked && activeTab !== 'font') {
-      setActiveTab('font');
-    }
-  }, [activeTab, themeEditingLocked]);
-
-  useEffect(() => {
-    if (!themeEditingLocked || !editingTheme) return;
-    setEditingTheme(null);
-    setIsNewTheme(false);
-  }, [editingTheme, themeEditingLocked]);
-
   if (!isVisible) return null;
 
-  const builtinThemes = USER_VISIBLE_TERMINAL_THEMES;
-
-  const footerLabel = themeEditingLocked
-    ? `${availableFonts.find(f => f.id === currentFontFamilyId)?.name ?? currentFontFamilyId} • ${currentFontSize}px • ${currentFontWeight}`
-    : `${allThemes.find(t => t.id === currentThemeId)?.name ?? currentThemeId} • ${availableFonts.find(f => f.id === currentFontFamilyId)?.name ?? currentFontFamilyId} • ${currentFontSize}px • ${currentFontWeight}`;
-  const panelVars = {
-    ['--terminal-panel-bg' as never]: previewColors?.background ?? 'var(--background)',
-    ['--terminal-panel-fg' as never]: previewColors?.foreground ?? 'var(--foreground)',
-    ['--terminal-panel-muted' as never]: 'color-mix(in srgb, var(--terminal-panel-fg) 58%, var(--terminal-panel-bg) 42%)',
-    ['--terminal-panel-border' as never]: 'color-mix(in srgb, var(--terminal-panel-fg) 12%, var(--terminal-panel-bg) 88%)',
-    ['--terminal-panel-hover' as never]: 'color-mix(in srgb, var(--terminal-panel-fg) 12%, var(--terminal-panel-bg) 88%)',
-    ['--terminal-panel-active' as never]: 'color-mix(in srgb, var(--terminal-panel-fg) 16%, var(--terminal-panel-bg) 84%)',
-  } as React.CSSProperties;
-
-  if (!isVisible) {
-    return null;
-  }
+  const footerThemeName = getThemeById(currentThemeId)?.name ?? currentThemeId;
+  const footerFontName = fontById.get(currentFontFamilyId)?.name ?? currentFontFamilyId;
+  const footerLabel = `${footerThemeName} • ${footerFontName} • ${currentFontSize}px • ${currentFontWeight}`;
+  const panelVars = terminalAppearanceThemePanelVars;
 
   return (
     <>
@@ -320,19 +310,17 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
       >
         {/* Tab Bar */}
         <div className="flex p-1.5 gap-0.5 shrink-0 border-b" style={{ borderColor: 'var(--terminal-panel-border)' }}>
-          {!themeEditingLocked && (
-            <button
-              onClick={() => { setActiveTab('theme'); setEditingTheme(null); }}
-              className="flex-1 flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-md text-[11px] font-medium transition-all"
-              style={{
-                backgroundColor: activeTab === 'theme' ? 'var(--terminal-panel-active)' : 'transparent',
-                color: activeTab === 'theme' ? 'var(--terminal-panel-fg)' : 'var(--terminal-panel-muted)',
-              }}
-            >
-              <Palette size={12} />
-              {t('terminal.themeModal.tab.theme')}
-            </button>
-          )}
+          <button
+            onClick={() => { setActiveTab('theme'); setEditingTheme(null); }}
+            className="flex-1 flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-md text-[11px] font-medium transition-all"
+            style={{
+              backgroundColor: activeTab === 'theme' ? 'var(--terminal-panel-active)' : 'transparent',
+              color: activeTab === 'theme' ? 'var(--terminal-panel-fg)' : 'var(--terminal-panel-muted)',
+            }}
+          >
+            <Palette size={12} />
+            {t('terminal.themeModal.tab.theme')}
+          </button>
           <button
             onClick={() => setActiveTab('font')}
             className="flex-1 flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-md text-[11px] font-medium transition-all"
@@ -344,7 +332,7 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
             <Type size={12} />
             {t('terminal.themeModal.tab.font')}
           </button>
-          {!themeEditingLocked && (
+          {!followAppTerminalTheme && (
             <button
               onClick={() => setActiveTab('custom')}
               className="flex-1 flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-md text-[11px] font-medium transition-all"
@@ -362,18 +350,14 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
         {/* List Content */}
         <ScrollArea className="flex-1 min-h-0">
           <div className="py-1">
-            {!themeEditingLocked && activeTab === 'theme' && (
+            {activeTab === 'theme' && (
               <div>
-                {hiddenSelectedTheme && (
-                  <div className="mx-2 mb-2 rounded-lg border px-3 py-2.5" style={{ borderColor: 'var(--terminal-panel-border)', backgroundColor: 'var(--terminal-panel-hover)' }}>
-                    <div className="text-[10px] uppercase tracking-wider mb-1 font-semibold" style={{ color: 'var(--terminal-panel-muted)' }}>
-                      {t('terminal.hiddenTheme.title')}
-                    </div>
-                    <div className="text-xs font-medium">{hiddenSelectedTheme.name}</div>
-                    <div className="text-[10px] mt-1" style={{ color: 'var(--terminal-panel-muted)' }}>
-                      {t('terminal.hiddenTheme.desc')}
-                    </div>
-                  </div>
+                {!followAppTerminalTheme && hiddenSelectedTheme && (
+                  <ThemeItem
+                    theme={hiddenSelectedTheme}
+                    isSelected={currentThemeId === hiddenSelectedTheme.id && !editingTheme}
+                    onSelect={handleThemeSelect}
+                  />
                 )}
                 {builtinThemes.map(theme => (
                   <ThemeItem
@@ -383,7 +367,7 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
                     onSelect={handleThemeSelect}
                   />
                 ))}
-                {customThemes.length > 0 && (
+                {!followAppTerminalTheme && customThemes.length > 0 && (
                   <>
                     <div className="text-[9px] uppercase tracking-wider mt-2 mb-1 px-1 font-semibold" style={{ color: 'var(--terminal-panel-muted)' }}>
                       {t('terminal.customTheme.section')}
@@ -437,7 +421,7 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
                 )}
               </div>
             )}
-            {!themeEditingLocked && activeTab === 'custom' && !editingTheme && (
+            {activeTab === 'custom' && !editingTheme && (
               <div>
                 <button
                   onClick={handleNewTheme}
@@ -546,23 +530,6 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
                 }}
               >
                 <Plus size={12} />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {themeEditingLocked && canResetTheme && (
-          <div className="p-2.5 border-t shrink-0" style={{ borderColor: 'var(--terminal-panel-border)' }}>
-            <div className="flex items-center justify-between gap-2">
-              <div className="text-[9px] uppercase tracking-wider font-semibold" style={{ color: 'var(--terminal-panel-muted)' }}>
-                {t('terminal.themeModal.globalTheme')}
-              </div>
-              <button
-                onClick={onThemeReset}
-                className="text-[10px] font-medium hover:opacity-80 transition-opacity"
-                style={{ color: 'var(--terminal-panel-fg)' }}
-              >
-                {t('common.useGlobal')}
               </button>
             </div>
           </div>

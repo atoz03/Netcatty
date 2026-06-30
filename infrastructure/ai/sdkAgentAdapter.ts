@@ -6,7 +6,9 @@
  */
 
 import type { AIToolIntegrationMode, ExternalAgentConfig } from './types';
-import { getExternalAgentSdkBackend } from './managedAgents';
+import { getExternalAgentSdkBackend, getManualAgentCommand } from './managedAgents';
+import { encodeSdkSessionIdentity } from './harness/sdkSessionIdentity';
+import { globalTraceStore, mapSdkStreamEventToAgentEvents } from './harness';
 import { decryptField } from '../persistence/secureFieldAdapter';
 
 export interface DefaultTargetSessionHint {
@@ -50,6 +52,7 @@ interface SdkAgentBridge {
     defaultTargetSession?: DefaultTargetSessionHint,
     userSkillsContext?: string,
     agentEnv?: Record<string, string>,
+    agentCommand?: string,
   ): Promise<{ ok: boolean; error?: unknown }>;
   aiSdkAgentCancel(requestId: string, chatSessionId?: string): Promise<{ ok: boolean }>;
   onAiSdkAgentEvent(requestId: string, cb: (event: StreamEvent) => void): () => void;
@@ -62,11 +65,6 @@ interface StreamEvent {
   [key: string]: unknown;
 }
 
-/**
- * Run one managed SDK agent turn.
- * Sends the prompt to the main process and listens for streamed events.
- * Stream events are forwarded back via IPC.
- */
 export interface FileAttachment {
   base64Data: string;
   mediaType: string;
@@ -160,6 +158,10 @@ export async function runSdkAgentTurn(
   toolIntegrationMode?: AIToolIntegrationMode,
   defaultTargetSession?: DefaultTargetSessionHint,
   userSkillsContext?: string,
+  harnessOptions?: {
+    traceSink?: (event: import('./harness/types').AgentEvent) => void;
+    skipHarnessTrace?: boolean;
+  },
 ): Promise<void> {
   const sdkBridge = bridge as unknown as SdkAgentBridge;
   const sdkBackend = getExternalAgentSdkBackend(config);
@@ -184,9 +186,39 @@ export async function runSdkAgentTurn(
   };
 
   const agentEnv = await buildAgentEnvWithStoredApiKey(sdkBackend, config);
+  const agentCommand = getManualAgentCommand(config);
 
   // Set up event listeners before starting stream
+  if (!harnessOptions?.skipHarnessTrace) {
+    globalTraceStore.append({
+      id: `turn-start-${requestId}`,
+      type: 'turn_start',
+      sessionId: chatSessionId,
+      chatSessionId,
+      backend: 'external-sdk',
+      timestamp: Date.now(),
+      backendLabel: sdkBackend,
+    });
+  }
+
+  const appendHarnessEvent = (event: import('./harness/types').AgentEvent) => {
+    if (harnessOptions?.traceSink) {
+      harnessOptions.traceSink(event);
+      return;
+    }
+    if (!harnessOptions?.skipHarnessTrace) {
+      globalTraceStore.append(event);
+    }
+  };
+
   const unsubEvent = sdkBridge.onAiSdkAgentEvent(requestId, (event: StreamEvent) => {
+    for (const agentEvent of mapSdkStreamEventToAgentEvents(event, {
+      sessionId: chatSessionId,
+      chatSessionId,
+      turnId: requestId,
+    })) {
+      appendHarnessEvent(agentEvent);
+    }
     const streamFailed = handleStreamEvent(event, callbacks);
     if (streamFailed) {
       settle();
@@ -240,6 +272,7 @@ export async function runSdkAgentTurn(
     defaultTargetSession,
     userSkillsContext,
     agentEnv,
+    agentCommand,
   ).then((result) => {
     if (result?.ok === false) {
       settle(() => {
@@ -272,8 +305,8 @@ function cleanup(fns: (() => void)[]) {
 }
 
 /**
- * Handle a single stream event from the AI SDK fullStream.
- * Events come from `streamText().fullStream` in the main process.
+ * Handle a single stream event from the AI SDK stream.
+ * Events come from `streamText().stream` in the main process.
  */
 function handleStreamEvent(event: StreamEvent, callbacks: SdkAgentCallbacks): boolean {
   switch (event.type) {
@@ -325,7 +358,13 @@ function handleStreamEvent(event: StreamEvent, callbacks: SdkAgentCallbacks): bo
     }
     case 'session-id': {
       const sessionId = (event.sessionId as string) || '';
-      if (sessionId) callbacks.onSessionId?.(sessionId);
+      if (sessionId) {
+        callbacks.onSessionId?.(encodeSdkSessionIdentity(
+          sessionId,
+          event.sdkBackend as string | undefined,
+          event.binPath as string | undefined,
+        ));
+      }
       return false;
     }
     case 'error': {

@@ -1,4 +1,4 @@
-import React, { createContext, memo, useCallback, useContext, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import React, { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 import { activeTabStore } from '../../application/state/activeTabStore';
 import { useTerminalLayoutSuppressActive } from '../../application/state/terminalLayoutSuppressStore';
@@ -8,21 +8,36 @@ import { getTopTabInsertionTarget, isPointInsideRect, WORKSPACE_SESSION_DRAG_TYP
 import { useAIState } from '../../application/state/useAIState';
 import { useStoredBoolean } from '../../application/state/useStoredBoolean';
 import { collectSessionIds, SplitDirection } from '../../domain/workspace';
+import { resolveSessionTabTitle } from '../../domain/sessionTabTitle';
 import { KeyBinding, TerminalSettings } from '../../domain/models';
 import { STORAGE_KEY_AI_SHOW_TERMINAL_SELECTION_ACTION } from '../../infrastructure/config/storageKeys';
 import { cn } from '../../lib/utils';
+import { LazyLoadBoundary } from '../ui/lazy-load-boundary';
 import type { DropEntry } from '../../lib/sftpFileUtils';
-import type { GroupConfig, Host, Identity, KnownHost, ProxyProfile, SSHKey, Snippet, TerminalSession, TerminalTheme, Workspace } from '../../types';
+import type { GroupConfig, Host, Identity, KnownHost, ProxyProfile, SSHKey, Snippet, TerminalSession, TerminalTheme, VaultNote, Workspace } from '../../types';
 import type { ExecutorContext } from '../../infrastructure/ai/cattyAgent/executor';
-import { AIChatSidePanel } from '../AIChatSidePanel';
 import Terminal from '../Terminal';
 import { removePaneVisible, setPaneVisible } from '../terminal/paneVisibilityStore';
+import type { TerminalBroadcastInputOptions } from '../terminal/terminalHelpers';
+import type { TerminalContextReader } from '../../domain/terminalContextRead';
 import {
   getTerminalPaneRenderSnapshot,
   parseTerminalPaneRenderSnapshot,
 } from '../terminalPaneVisibility';
+import type { ResolvedAppearance, TerminalAppearanceHostScope } from '../../domain/terminalAppearanceRuntime';
+import type { TerminalSidePanelAutoOpenTab } from '../../domain/terminalSidePanelAutoOpen';
 
-export type SidePanelTab = 'sftp' | 'scripts' | 'history' | 'theme' | 'ai' | 'system';
+export type SidePanelTab = 'sftp' | 'scripts' | 'history' | 'theme' | 'ai' | 'system' | 'notes';
+
+const LazyAIChatSidePanel = lazy(() =>
+  import('../AIChatSidePanel').then((module) => ({ default: module.AIChatSidePanel })),
+);
+
+const AIChatSidePanelFallback = memo(function AIChatSidePanelFallback() {
+  return (
+    <div className="netcatty-lazy-fade-in h-full min-h-0 bg-background" aria-hidden="true" />
+  );
+});
 
 export type WorkspaceRect = { x: number; y: number; w: number; h: number };
 
@@ -54,7 +69,7 @@ export type PendingSftpUpload = {
 export type SnippetExecutor = (
   command: string,
   noAutoRun?: boolean,
-  options?: { broadcast?: boolean },
+  options?: { broadcast?: boolean; multiLineRunMode?: Snippet["multiLineRunMode"] },
 ) => void;
 
 export type PendingTerminalSelectionForAI = {
@@ -105,6 +120,13 @@ export function adjustSaturationToken(hsl: string, factor: number): string {
   return `${parts[0]} ${Math.round(newS * 10) / 10}% ${parts[2]}`;
 }
 
+export type { TerminalThemePreviewState } from './terminalThemePreview';
+export {
+  emptyTerminalThemePreview,
+  listThemePreviewSessionIds,
+  resolvePaneThemePreviewId,
+} from './terminalThemePreview';
+
 export const clearTerminalPreviewVars = (sessionId: string | null) => {
   if (!sessionId || typeof document === 'undefined') return;
   const pane = document.querySelector<HTMLElement>(`[data-session-id="${sessionId}"]`);
@@ -117,6 +139,12 @@ export const clearTerminalPreviewVars = (sessionId: string | null) => {
   pane.style.removeProperty('--terminal-preview-toolbar-btn-active');
 };
 
+export const clearTerminalPreviewVarsForSessions = (sessionIds: Iterable<string>) => {
+  for (const sessionId of sessionIds) {
+    clearTerminalPreviewVars(sessionId);
+  }
+};
+
 export const setStylePropertyIfChanged = (element: HTMLElement, property: string, value: string) => {
   if (element.style.getPropertyValue(property) === value) return;
   element.style.setProperty(property, value);
@@ -125,6 +153,56 @@ export const setStylePropertyIfChanged = (element: HTMLElement, property: string
 const removeStylePropertyIfSet = (element: HTMLElement, property: string) => {
   if (!element.style.getPropertyValue(property)) return;
   element.style.removeProperty(property);
+};
+
+const HOST_TREE_PREVIEW_PROPERTIES = [
+  '--terminal-host-tree-bg',
+  '--terminal-host-tree-fg',
+  '--terminal-host-tree-muted',
+  '--terminal-host-tree-separator',
+  '--terminal-host-tree-hover-bg',
+  '--terminal-host-tree-active-bg',
+  '--terminal-host-tree-drop-bg',
+  '--terminal-host-tree-folder-fg',
+] as const;
+
+const getHostTreePreviewRoots = (): HTMLElement[] => {
+  if (typeof document === 'undefined') return [];
+  return Array.from(document.querySelectorAll<HTMLElement>(
+    '[data-section="app-host-tree-layer"], [data-section="terminal-host-tree-sidebar"]',
+  ));
+};
+
+export const applyHostTreePreviewThemeVars = (theme: TerminalTheme) => {
+  const roots = getHostTreePreviewRoots();
+  if (roots.length === 0) return;
+  const bg = theme.colors.background;
+  const fg = theme.colors.foreground;
+  const values = {
+    '--terminal-host-tree-bg': bg,
+    '--terminal-host-tree-fg': fg,
+    '--terminal-host-tree-muted': `color-mix(in srgb, ${fg} 55%, ${bg} 45%)`,
+    '--terminal-host-tree-separator': `color-mix(in srgb, ${fg} 10%, ${bg} 90%)`,
+    '--terminal-host-tree-hover-bg': `color-mix(in srgb, ${fg} 8%, transparent)`,
+    '--terminal-host-tree-active-bg': `color-mix(in srgb, ${fg} 14%, transparent)`,
+    '--terminal-host-tree-drop-bg': `color-mix(in srgb, ${fg} 20%, transparent)`,
+    '--terminal-host-tree-folder-fg': `color-mix(in srgb, ${fg} 75%, ${bg} 25%)`,
+  } satisfies Record<(typeof HOST_TREE_PREVIEW_PROPERTIES)[number], string>;
+
+  for (const root of roots) {
+    for (const property of HOST_TREE_PREVIEW_PROPERTIES) {
+      setStylePropertyIfChanged(root, property, values[property]);
+    }
+  }
+};
+
+export const clearHostTreePreviewVars = () => {
+  const roots = getHostTreePreviewRoots();
+  for (const root of roots) {
+    for (const property of HOST_TREE_PREVIEW_PROPERTIES) {
+      removeStylePropertyIfSet(root, property);
+    }
+  }
 };
 
 export const clearTopTabsPreviewVars = () => {
@@ -139,7 +217,9 @@ export const clearTopTabsPreviewVars = () => {
   removeStylePropertyIfSet(tabsRoot, '--background');
   removeStylePropertyIfSet(tabsRoot, '--foreground');
   removeStylePropertyIfSet(tabsRoot, '--accent');
+  removeStylePropertyIfSet(tabsRoot, '--accent-foreground');
   removeStylePropertyIfSet(tabsRoot, '--primary');
+  removeStylePropertyIfSet(tabsRoot, '--primary-foreground');
   removeStylePropertyIfSet(tabsRoot, '--secondary');
   removeStylePropertyIfSet(tabsRoot, '--border');
   removeStylePropertyIfSet(tabsRoot, '--muted-foreground');
@@ -204,7 +284,30 @@ export type AITerminalSessionInfo = {
   shellType?: string;
   deviceType?: string;
   connected: boolean;
+  hostChain?: Array<{ hostId: string; label?: string; hostname?: string }>;
+  activePortForwards?: Array<{
+    ruleId: string;
+    label?: string;
+    type?: string;
+    localPort?: number;
+    status?: string;
+  }>;
 };
+
+function summarizeHostChain(
+  host: Host | undefined,
+  allHosts: Host[],
+): AITerminalSessionInfo['hostChain'] | undefined {
+  if (!host?.hostChain?.hostIds?.length) return undefined;
+  return host.hostChain.hostIds.map((hostId) => {
+    const jumpHost = allHosts.find((entry) => entry.id === hostId);
+    return {
+      hostId,
+      label: jumpHost?.label,
+      hostname: jumpHost?.hostname,
+    };
+  });
+}
 
 export type AIPanelContext = {
   scopeType: 'terminal' | 'workspace';
@@ -222,9 +325,26 @@ export const buildAITerminalSessionInfo = (
   session: TerminalSession | undefined,
   host: Host | undefined,
   localOs: 'linux' | 'macos' | 'windows',
+  options?: {
+    allHosts?: Host[];
+    portForwardingRules?: import('../../domain/models').PortForwardingRule[];
+  },
 ): AITerminalSessionInfo => {
   const protocol = session?.protocol || host?.protocol;
   const isLocalSession = protocol === 'local' || session?.hostId?.startsWith('local-');
+  const allHosts = options?.allHosts ?? (host ? [host] : []);
+  const hostChain = summarizeHostChain(host, allHosts);
+  const activePortForwards = host?.id && options?.portForwardingRules
+    ? options.portForwardingRules
+      .filter((rule) => rule.hostId === host.id && (rule.status === 'active' || rule.status === 'connecting'))
+      .map((rule) => ({
+        ruleId: rule.id,
+        label: rule.label,
+        type: rule.type,
+        localPort: rule.localPort,
+        status: rule.status,
+      }))
+    : undefined;
   return {
     sessionId: session?.id || '',
     hostId: session?.hostId || '',
@@ -238,6 +358,8 @@ export const buildAITerminalSessionInfo = (
     // PTY and cannot connect to vendor CLIs, so network device mode doesn't apply.
     deviceType: (session?.moshEnabled || host?.moshEnabled || session?.etEnabled || host?.etEnabled) ? undefined : host?.deviceType,
     connected: session?.status === 'connected',
+    ...(hostChain?.length ? { hostChain } : {}),
+    ...(activePortForwards?.length ? { activePortForwards } : {}),
   };
 };
 
@@ -253,6 +375,13 @@ interface AIChatPanelsHostProps {
   }) => ExecutorContext;
   pendingTerminalSelection?: PendingTerminalSelectionForAI | null;
   onPendingTerminalSelectionConsumed?: (requestId: string) => void;
+  notes: VaultNote[];
+  hosts: Host[];
+  snippets: Snippet[];
+  onOpenVaultNoteFromChat?: (noteId: string) => void;
+  onOpenVaultHostFromChat?: (hostId: string) => void;
+  onOpenVaultSectionFromChat?: (section: 'notes' | 'hosts' | 'snippets') => void;
+  onOpenVaultSnippetFromChat?: (snippetId: string) => void;
 }
 
 interface AIStateMaintenanceHostProps {
@@ -320,6 +449,13 @@ function aiChatPanelsHostAreEqual(
   if (prev.pendingTerminalSelection !== next.pendingTerminalSelection) return false;
   if (prev.onPendingTerminalSelectionConsumed !== next.onPendingTerminalSelectionConsumed) return false;
   if (prev.resolveExecutorContext !== next.resolveExecutorContext) return false;
+  if (prev.notes !== next.notes) return false;
+  if (prev.hosts !== next.hosts) return false;
+  if (prev.snippets !== next.snippets) return false;
+  if (prev.onOpenVaultNoteFromChat !== next.onOpenVaultNoteFromChat) return false;
+  if (prev.onOpenVaultHostFromChat !== next.onOpenVaultHostFromChat) return false;
+  if (prev.onOpenVaultSectionFromChat !== next.onOpenVaultSectionFromChat) return false;
+  if (prev.onOpenVaultSnippetFromChat !== next.onOpenVaultSnippetFromChat) return false;
   if (prev.activeTabId === next.activeTabId) return true;
 
   for (let i = 0; i < prev.mountedTabIds.length; i += 1) {
@@ -339,6 +475,13 @@ const AIChatPanelsHostInner: React.FC<AIChatPanelsHostProps> = ({
   resolveExecutorContext,
   pendingTerminalSelection,
   onPendingTerminalSelectionConsumed,
+  notes,
+  hosts,
+  snippets,
+  onOpenVaultNoteFromChat,
+  onOpenVaultHostFromChat,
+  onOpenVaultSectionFromChat,
+  onOpenVaultSnippetFromChat,
 }) => {
   const aiState = useContext(AIStateContext);
 
@@ -401,51 +544,63 @@ const AIChatPanelsHostInner: React.FC<AIChatPanelsHostProps> = ({
             key={tabId}
             className={cn("absolute inset-0 z-10", !isVisible && "hidden")}
           >
-            <AIChatSidePanel
-                  sessions={aiState.sessions}
-                  activeSessionIdMap={aiState.activeSessionIdMap}
-                  draftsByScope={aiState.draftsByScope}
-                  panelViewByScope={aiState.panelViewByScope}
-                  setActiveSessionId={aiState.setActiveSessionId}
-                  ensureDraftForScope={aiState.ensureDraftForScope}
-                  updateDraft={aiState.updateDraft}
-                  showDraftView={aiState.showDraftView}
-                  showSessionView={aiState.showSessionView}
-                  clearDraftForScope={aiState.clearDraftForScope}
-                  addDraftFiles={aiState.addDraftFiles}
-                  removeDraftFile={aiState.removeDraftFile}
-                  createSession={aiState.createSession}
-                  deleteSession={aiState.deleteSession}
-                  updateSessionTitle={aiState.updateSessionTitle}
-                  updateSessionExternalSessionId={aiState.updateSessionExternalSessionId}
-                  addMessageToSession={aiState.addMessageToSession}
-                  updateLastMessage={aiState.updateLastMessage}
-                  updateMessageById={aiState.updateMessageById}
-                  providers={aiState.providers}
-                  activeProviderId={aiState.activeProviderId}
-                  activeModelId={aiState.activeModelId}
-                  defaultAgentId={aiState.defaultAgentId}
-                  toolIntegrationMode={aiState.toolIntegrationMode}
-                  externalAgents={aiState.externalAgents}
-                  setExternalAgents={aiState.setExternalAgents}
-                  agentModelMap={aiState.agentModelMap}
-                  setAgentModel={aiState.setAgentModel}
-                  agentProviderMap={aiState.agentProviderMap}
-                  setAgentProvider={aiState.setAgentProvider}
-                  globalPermissionMode={aiState.globalPermissionMode}
-                  setGlobalPermissionMode={aiState.setGlobalPermissionMode}
-                  commandBlocklist={aiState.commandBlocklist}
-                  maxIterations={aiState.maxIterations}
-                  webSearchConfig={aiState.webSearchConfig}
-                  quickMessages={aiState.quickMessages}
-                  scopeType={context.scopeType}
-                  scopeTargetId={context.scopeTargetId}
-                  scopeHostIds={context.scopeHostIds}
-                  scopeLabel={context.scopeLabel}
-                  terminalSessions={context.terminalSessions}
-                  resolveExecutorContext={resolveExecutorContext}
-                  isVisible={isVisible}
-                />
+            <LazyLoadBoundary name="AI side panel" resetKey={tabId}>
+              <Suspense fallback={<AIChatSidePanelFallback />}>
+                <LazyAIChatSidePanel
+                    sessions={aiState.sessions}
+                    activeSessionIdMap={aiState.activeSessionIdMap}
+                    draftsByScope={aiState.draftsByScope}
+                    panelViewByScope={aiState.panelViewByScope}
+                    setActiveSessionId={aiState.setActiveSessionId}
+                    ensureDraftForScope={aiState.ensureDraftForScope}
+                    updateDraft={aiState.updateDraft}
+                    showDraftView={aiState.showDraftView}
+                    showSessionView={aiState.showSessionView}
+                    clearDraftForScope={aiState.clearDraftForScope}
+                    addDraftFiles={aiState.addDraftFiles}
+                    removeDraftFile={aiState.removeDraftFile}
+                    createSession={aiState.createSession}
+                    deleteSession={aiState.deleteSession}
+                    updateSessionTitle={aiState.updateSessionTitle}
+                    updateSessionExternalSessionId={aiState.updateSessionExternalSessionId}
+                    addMessageToSession={aiState.addMessageToSession}
+                    updateLastMessage={aiState.updateLastMessage}
+                    updateMessageById={aiState.updateMessageById}
+                    providers={aiState.providers}
+                    activeProviderId={aiState.activeProviderId}
+                    activeModelId={aiState.activeModelId}
+                    defaultAgentId={aiState.defaultAgentId}
+                    toolIntegrationMode={aiState.toolIntegrationMode}
+                    externalAgents={aiState.externalAgents}
+                    setExternalAgents={aiState.setExternalAgents}
+                    agentModelMap={aiState.agentModelMap}
+                    setAgentModel={aiState.setAgentModel}
+                    agentProviderMap={aiState.agentProviderMap}
+                    setAgentProvider={aiState.setAgentProvider}
+                    globalPermissionMode={aiState.globalPermissionMode}
+                    setGlobalPermissionMode={aiState.setGlobalPermissionMode}
+                    commandBlocklist={aiState.commandBlocklist}
+                    commandTimeout={aiState.commandTimeout}
+                    maxIterations={aiState.maxIterations}
+                    webSearchConfig={aiState.webSearchConfig}
+                    quickMessages={aiState.quickMessages}
+                    scopeType={context.scopeType}
+                    scopeTargetId={context.scopeTargetId}
+                    scopeHostIds={context.scopeHostIds}
+                    scopeLabel={context.scopeLabel}
+                    terminalSessions={context.terminalSessions}
+                    resolveExecutorContext={resolveExecutorContext}
+                    isVisible={isVisible}
+                    notes={notes}
+                    hosts={hosts}
+                    snippets={snippets}
+                    onOpenVaultNote={onOpenVaultNoteFromChat}
+                    onOpenVaultHost={onOpenVaultHostFromChat}
+                    onOpenVaultSection={onOpenVaultSectionFromChat}
+                    onOpenVaultSnippet={onOpenVaultSnippetFromChat}
+                  />
+              </Suspense>
+            </LazyLoadBoundary>
           </div>
         );
       })}
@@ -458,6 +613,7 @@ AIChatPanelsHost.displayName = 'AIChatPanelsHost';
 
 export interface TerminalLayerProps {
   hosts: Host[];
+  portForwardingRules?: import('../../domain/models').PortForwardingRule[];
   customGroups: string[];
   groupConfigs: GroupConfig[];
   proxyProfiles: ProxyProfile[];
@@ -465,12 +621,24 @@ export interface TerminalLayerProps {
   identities: Identity[];
   snippets: Snippet[];
   snippetPackages: string[];
+  notes: VaultNote[];
+  noteGroups: string[];
+  openNoteRequest?: { tabId: string; noteId: string; requestId: number } | null;
+  onOpenVaultNoteFromChat?: (noteId: string) => void;
+  onOpenVaultHostFromChat?: (hostId: string) => void;
+  onOpenVaultSectionFromChat?: (section: 'notes' | 'hosts' | 'snippets') => void;
+  onOpenVaultSnippetFromChat?: (snippetId: string) => void;
   sessions: TerminalSession[];
   workspaces: Workspace[];
   knownHosts?: KnownHost[];
   draggingSessionId: string | null;
   terminalTheme: TerminalTheme;
+  terminalThemeId?: string;
   followAppTerminalTheme?: boolean;
+  pickTerminalTheme?: (themeId: string) => void;
+  clearThemeIntent?: () => void;
+  settleManualThemeIntent?: () => void;
+  resolveSessionAppearance?: (hostScope: TerminalAppearanceHostScope) => ResolvedAppearance;
   accentMode?: 'theme' | 'custom';
   customAccent?: string;
   terminalSettings?: TerminalSettings;
@@ -478,6 +646,7 @@ export interface TerminalLayerProps {
   fontSize?: number;
   hotkeyScheme?: 'disabled' | 'mac' | 'pc';
   disableTerminalFontZoom?: boolean;
+  restoreTerminalCwd?: boolean;
   keyBindings?: KeyBinding[];
   onHotkeyAction?: (action: string, event: KeyboardEvent) => void;
   onUpdateTerminalThemeId?: (themeId: string) => void;
@@ -485,6 +654,9 @@ export interface TerminalLayerProps {
   onUpdateTerminalFontSize?: (fontSize: number) => void;
   onUpdateTerminalFontWeight?: (fontWeight: number) => void;
   onUpdateSessionFontSize?: (sessionId: string, fontSize: number) => void;
+  onUpdateSessionRestoreCwd?: (sessionId: string, cwd: string | null) => void;
+  onUpdateSessionDynamicTitle?: (sessionId: string, title: string | null) => void;
+  onUpdateSessionCodingCliProvider?: (sessionId: string, providerId: import('../../domain/codingCliProviders').CodingCliProviderId | null) => void;
   onClearSessionFontSizeOverride?: (sessionId: string) => void;
   onCloseSession: (sessionId: string, e?: React.MouseEvent) => void;
   onUpdateSessionStatus: (sessionId: string, status: TerminalSession['status']) => void;
@@ -516,7 +688,7 @@ export interface TerminalLayerProps {
     tabInsertionTarget?: { tabId: string; position: 'before' | 'after'; additionalTabIds?: readonly string[] },
   ) => void;
   onSplitSession?: (sessionId: string, direction: SplitDirection) => void;
-  onConnectToHost: (host: Host) => void;
+  onConnectToHost: (host: Host) => string | void;
   onCreateLocalTerminal?: () => void;
   // Broadcast mode
   isBroadcastEnabled?: (workspaceId: string) => boolean;
@@ -525,12 +697,16 @@ export interface TerminalLayerProps {
   updateHosts: (hosts: Host[]) => void;
   updateSnippets?: (snippets: Snippet[]) => void;
   updateSnippetPackages?: (packages: string[]) => void;
+  updateNotes: (notes: VaultNote[]) => void;
+  updateNoteGroups: (groups: string[]) => void;
   sftpDefaultViewMode: 'list' | 'tree';
   sftpDoubleClickBehavior: 'open' | 'transfer';
   sftpAutoSync: boolean;
   sftpShowHiddenFiles: boolean;
   sftpUseCompressedUpload: boolean;
   sftpAutoOpenSidebar: boolean;
+  terminalSidePanelAutoOpen?: boolean;
+  terminalSidePanelAutoOpenTab?: TerminalSidePanelAutoOpenTab;
   sftpFollowTerminalCwd: boolean;
   setSftpFollowTerminalCwd: (enabled: boolean) => void;
   editorWordWrap: boolean;
@@ -552,6 +728,7 @@ export interface TerminalLayerProps {
 interface TerminalPaneProps {
   session: TerminalSession;
   host: Host;
+  sessionHostResolved: boolean;
   chainHosts?: Host[];
   sudoAutofillPassword?: string;
   workspaceById: Map<string, Workspace>;
@@ -561,7 +738,8 @@ interface TerminalPaneProps {
   workspaceBroadcastHandlersRef: React.MutableRefObject<Map<string, () => void>>;
   splitHorizontalHandlersRef: React.MutableRefObject<Map<string, () => void>>;
   splitVerticalHandlersRef: React.MutableRefObject<Map<string, () => void>>;
-  themePreview: { targetSessionId: string | null; themeId: string | null };
+  resolveSessionAppearance: (hostScope: TerminalAppearanceHostScope) => ResolvedAppearance;
+  hostMap: Map<string, Host>;
   keys: SSHKey[];
   identities: Identity[];
   snippets: Snippet[];
@@ -575,6 +753,7 @@ interface TerminalPaneProps {
   terminalSettings?: TerminalSettings;
   hotkeyScheme?: 'disabled' | 'mac' | 'pc';
   disableTerminalFontZoom?: boolean;
+  restoreTerminalCwd?: boolean;
   keyBindings?: KeyBinding[];
   isResizing: boolean;
   isComposeBarOpen: boolean;
@@ -588,7 +767,11 @@ interface TerminalPaneProps {
     pendingUploadEntries?: DropEntry[],
     sourceSessionId?: string,
   ) => void;
-  onTerminalCwdChange: (sessionId: string, cwd: string | null) => void;
+  onTerminalCwdChange: (sessionId: string, cwd: string | null, meta?: { source?: 'osc7' }) => void;
+  onTerminalTitleChange?: (sessionId: string, title: string | null) => void;
+  onTerminalBell?: (sessionId: string) => void;
+  onTerminalOutput?: (sessionId: string, chunk: string) => void;
+  onTerminalContextReaderChange?: (sessionId: string, reader: TerminalContextReader | null) => void;
   onOpenScripts: () => void;
   onOpenHistory?: () => void;
   onOpenTheme: () => void;
@@ -606,11 +789,23 @@ interface TerminalPaneProps {
   onSetWorkspaceFocusedSession?: (workspaceId: string, sessionId: string) => void;
   onSplitSession?: (sessionId: string, direction: SplitDirection) => void;
   isBroadcastEnabled?: (workspaceId: string) => boolean;
-  onBroadcastInput: (data: string, sourceSessionId: string) => void;
+  onBroadcastInput: (
+    data: string,
+    sourceSessionId: string,
+    options?: TerminalBroadcastInputOptions,
+  ) => void;
   onToggleWorkspaceComposeBar: () => void;
+  onBroadcastInterruptPriorityChange: (
+    sessionId: string,
+    prioritize: (() => void) | null,
+  ) => void;
   onSnippetExecutorChange: (
     sessionId: string,
     executor: SnippetExecutor | null,
+  ) => void;
+  onProgrammaticCommandLogRewriteChange: (
+    sessionId: string,
+    queueRewrite: ((rewrite: ProgrammaticCommandLogRewrite) => void) | null,
   ) => void;
   onAddSelectionToAI?: (sessionId: string, selection: string) => void;
   showSelectionAIAction: boolean;
@@ -624,11 +819,10 @@ interface TerminalPaneProps {
   onEndSessionDrag?: () => void;
 }
 
-const getPaneThemePreviewId = (props: TerminalPaneProps): string | null => (
-  props.session.id === props.themePreview.targetSessionId
-    ? props.themePreview.themeId
-    : null
-);
+const getPaneAppearanceThemeId = (props: TerminalPaneProps): string => {
+  const isEphemeral = !props.hostMap.has(props.host.id);
+  return props.resolveSessionAppearance({ host: props.host, isEphemeral }).themeId;
+};
 
 const getPaneWorkspaceRect = (props: Pick<TerminalPaneProps, 'session' | 'workspaceRectsById'>): WorkspaceRect | null => {
   const workspaceId = props.session.workspaceId;
@@ -657,6 +851,7 @@ const terminalPanePropsAreEqual = (
 ): boolean => (
   prev.session === next.session &&
   prev.host === next.host &&
+  prev.sessionHostResolved === next.sessionHostResolved &&
   prev.chainHosts === next.chainHosts &&
   prev.sudoAutofillPassword === next.sudoAutofillPassword &&
   prev.workspaceById === next.workspaceById &&
@@ -666,7 +861,7 @@ const terminalPanePropsAreEqual = (
   prev.workspaceBroadcastHandlersRef === next.workspaceBroadcastHandlersRef &&
   prev.splitHorizontalHandlersRef === next.splitHorizontalHandlersRef &&
   prev.splitVerticalHandlersRef === next.splitVerticalHandlersRef &&
-  getPaneThemePreviewId(prev) === getPaneThemePreviewId(next) &&
+  getPaneAppearanceThemeId(prev) === getPaneAppearanceThemeId(next) &&
   prev.keys === next.keys &&
   prev.identities === next.identities &&
   prev.snippets === next.snippets &&
@@ -680,6 +875,7 @@ const terminalPanePropsAreEqual = (
   prev.terminalSettings === next.terminalSettings &&
   prev.hotkeyScheme === next.hotkeyScheme &&
   prev.disableTerminalFontZoom === next.disableTerminalFontZoom &&
+  prev.restoreTerminalCwd === next.restoreTerminalCwd &&
   prev.keyBindings === next.keyBindings &&
   prev.isResizing === next.isResizing &&
   prev.isComposeBarOpen === next.isComposeBarOpen &&
@@ -689,6 +885,10 @@ const terminalPanePropsAreEqual = (
   prev.onTerminalFontSizeChange === next.onTerminalFontSizeChange &&
   prev.onOpenSftp === next.onOpenSftp &&
   prev.onTerminalCwdChange === next.onTerminalCwdChange &&
+  prev.onTerminalTitleChange === next.onTerminalTitleChange &&
+  prev.onTerminalBell === next.onTerminalBell &&
+  prev.onTerminalOutput === next.onTerminalOutput &&
+  prev.onTerminalContextReaderChange === next.onTerminalContextReaderChange &&
   prev.onOpenScripts === next.onOpenScripts &&
   prev.onOpenHistory === next.onOpenHistory &&
   prev.onOpenTheme === next.onOpenTheme &&
@@ -706,6 +906,7 @@ const terminalPanePropsAreEqual = (
   prev.onSplitSession === next.onSplitSession &&
   prev.isBroadcastEnabled === next.isBroadcastEnabled &&
   prev.onBroadcastInput === next.onBroadcastInput &&
+  prev.onBroadcastInterruptPriorityChange === next.onBroadcastInterruptPriorityChange &&
   prev.onToggleWorkspaceComposeBar === next.onToggleWorkspaceComposeBar &&
   prev.onSnippetExecutorChange === next.onSnippetExecutorChange &&
   prev.onAddSelectionToAI === next.onAddSelectionToAI &&
@@ -720,6 +921,7 @@ const terminalPanePropsAreEqual = (
 const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   session,
   host,
+  sessionHostResolved,
   chainHosts,
   sudoAutofillPassword,
   workspaceById,
@@ -729,7 +931,8 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   workspaceBroadcastHandlersRef,
   splitHorizontalHandlersRef,
   splitVerticalHandlersRef,
-  themePreview,
+  resolveSessionAppearance,
+  hostMap,
   keys,
   identities,
   snippets,
@@ -743,6 +946,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   terminalSettings,
   hotkeyScheme,
   disableTerminalFontZoom,
+  restoreTerminalCwd,
   keyBindings,
   isResizing,
   isComposeBarOpen,
@@ -752,6 +956,10 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   onTerminalFontSizeChange,
   onOpenSftp,
   onTerminalCwdChange,
+  onTerminalTitleChange,
+  onTerminalBell,
+  onTerminalOutput,
+  onTerminalContextReaderChange,
   onOpenScripts,
   onOpenHistory,
   onOpenTheme,
@@ -769,8 +977,10 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   onSplitSession,
   isBroadcastEnabled,
   onBroadcastInput,
+  onBroadcastInterruptPriorityChange,
   onToggleWorkspaceComposeBar,
   onSnippetExecutorChange,
+  onProgrammaticCommandLogRewriteChange,
   onAddSelectionToAI,
   showSelectionAIAction,
   onStartSessionRename,
@@ -875,9 +1085,12 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   const splitHorizontalHandler = splitHorizontalHandlersRef.current.get(session.id);
   const splitVerticalHandler = splitVerticalHandlersRef.current.get(session.id);
   const broadcastEnabled = activeWorkspaceId ? !!isBroadcastEnabled?.(activeWorkspaceId) : false;
-  const themePreviewId = session.id === themePreview.targetSessionId
-    ? themePreview.themeId ?? undefined
-    : undefined;
+  const isHostEphemeral = !hostMap.has(host.id);
+  const sessionAppearance = useMemo(
+    () => resolveSessionAppearance({ host, isEphemeral: isHostEphemeral }),
+    [resolveSessionAppearance, host, isHostEphemeral],
+  );
+  const sessionAppearanceTheme = sessionAppearance.theme;
 
   const handlePaneClick = useCallback(() => {
     if (activeWorkspaceId && !isFocusMode) {
@@ -913,7 +1126,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
     e.stopPropagation();
 
     const startPoint = { clientX: e.clientX, clientY: e.clientY };
-    const dragLabel = session.customName || session.hostLabel;
+    const dragLabel = resolveSessionTabTitle(session, terminalSettings?.dynamicTabTitleMode);
     let dragStarted = false;
     let ghostEl: HTMLDivElement | null = null;
     let insertEl: HTMLDivElement | null = null;
@@ -1070,10 +1283,8 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
     onRemoveSessionFromWorkspace,
     onReorderTabs,
     onStartSessionDrag,
-    session.customName,
-    session.hostLabel,
-    session.id,
-    session.workspaceId,
+    session,
+    terminalSettings?.dynamicTabTitleMode,
     workspaceById,
   ]);
   const handleTerminalFontSizeChange = useCallback((nextFontSize: number) => {
@@ -1100,7 +1311,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
         identities={identities}
         snippets={snippets}
         chainHosts={chainHosts}
-        themePreviewId={themePreviewId}
+        appearanceTheme={sessionAppearanceTheme}
         knownHosts={knownHosts}
         isVisible={isVisible}
         paneLayoutKey={paneLayoutKey}
@@ -1116,8 +1327,15 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
         customAccent={customAccent}
         terminalSettings={terminalSettings}
         sessionId={session.id}
+        restoreState={session.restoreState}
+        shellType={session.shellType}
+        lastCwd={session.lastCwd}
+        restoreTerminalCwd={restoreTerminalCwd && sessionHostResolved}
         startupCommand={session.startupCommand}
         noAutoRun={session.noAutoRun}
+        multiLineRunMode={session.multiLineRunMode}
+        pendingScriptId={session.pendingScriptId}
+        pendingScript={session.pendingScript}
         reuseConnectionFromSessionId={session.reuseConnectionFromSessionId}
         serialConfig={session.serialConfig}
         hotkeyScheme={hotkeyScheme}
@@ -1127,6 +1345,10 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
         onTerminalFontSizeChange={handleTerminalFontSizeChange}
         onOpenSftp={onOpenSftp}
         onTerminalCwdChange={onTerminalCwdChange}
+        onTerminalTitleChange={onTerminalTitleChange}
+        onTerminalBell={onTerminalBell}
+        onTerminalOutput={onTerminalOutput}
+        onTerminalContextReaderChange={onTerminalContextReaderChange}
         onOpenScripts={onOpenScripts}
         onOpenHistory={onOpenHistory}
         onOpenTheme={onOpenTheme}
@@ -1148,11 +1370,13 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
         onToggleComposeBar={inActiveWorkspace ? onToggleWorkspaceComposeBar : undefined}
         isWorkspaceComposeBarOpen={inActiveWorkspace ? isComposeBarOpen : undefined}
         onBroadcastInput={broadcastEnabled ? onBroadcastInput : undefined}
+        onBroadcastInterruptPriorityChange={onBroadcastInterruptPriorityChange}
         onSnippetExecutorChange={onSnippetExecutorChange}
+        onProgrammaticCommandLogRewriteChange={onProgrammaticCommandLogRewriteChange}
         sessionLog={sessionLog}
         sshDebugLogEnabled={sshDebugLogEnabled}
         sudoAutofillPassword={sudoAutofillPassword}
-        sessionDisplayName={session.customName || session.hostLabel}
+        sessionDisplayName={resolveSessionTabTitle(session, terminalSettings?.dynamicTabTitleMode)}
         showSelectionAIAction={showSelectionAIAction}
         onAddSelectionToAI={onAddSelectionToAI}
         onRename={handleRename}
@@ -1173,6 +1397,7 @@ interface TerminalPanesHostProps {
   sessionHostsMap: Map<string, Host>;
   sessionChainHostsMap: Map<string, Host[]>;
   sessionSudoAutofillPasswordsMap: Map<string, string | undefined>;
+  resolvedSessionHostIds: Set<string>;
   workspaceById: Map<string, Workspace>;
   workspaceRectsById: Map<string, Record<string, WorkspaceRect>>;
   isTerminalLayerVisible: boolean;
@@ -1180,7 +1405,8 @@ interface TerminalPanesHostProps {
   workspaceBroadcastHandlersRef: React.MutableRefObject<Map<string, () => void>>;
   splitHorizontalHandlersRef: React.MutableRefObject<Map<string, () => void>>;
   splitVerticalHandlersRef: React.MutableRefObject<Map<string, () => void>>;
-  themePreview: { targetSessionId: string | null; themeId: string | null };
+  resolveSessionAppearance: (hostScope: TerminalAppearanceHostScope) => ResolvedAppearance;
+  hostMap: Map<string, Host>;
   keys: SSHKey[];
   identities: Identity[];
   snippets: Snippet[];
@@ -1194,6 +1420,7 @@ interface TerminalPanesHostProps {
   terminalSettings?: TerminalSettings;
   hotkeyScheme?: 'disabled' | 'mac' | 'pc';
   disableTerminalFontZoom?: boolean;
+  restoreTerminalCwd?: boolean;
   keyBindings?: KeyBinding[];
   isResizing: boolean;
   isComposeBarOpen: boolean;
@@ -1203,6 +1430,10 @@ interface TerminalPanesHostProps {
   onTerminalFontSizeChange?: TerminalPaneProps['onTerminalFontSizeChange'];
   onOpenSftp: TerminalPaneProps['onOpenSftp'];
   onTerminalCwdChange: TerminalPaneProps['onTerminalCwdChange'];
+  onTerminalTitleChange?: TerminalPaneProps['onTerminalTitleChange'];
+  onTerminalBell?: TerminalPaneProps['onTerminalBell'];
+  onTerminalOutput?: TerminalPaneProps['onTerminalOutput'];
+  onTerminalContextReaderChange?: TerminalPaneProps['onTerminalContextReaderChange'];
   onOpenScripts: () => void;
   onOpenHistory?: () => void;
   onOpenTheme: () => void;
@@ -1220,12 +1451,21 @@ interface TerminalPanesHostProps {
   onSetWorkspaceFocusedSession?: (workspaceId: string, sessionId: string) => void;
   onSplitSession?: (sessionId: string, direction: SplitDirection) => void;
   isBroadcastEnabled?: (workspaceId: string) => boolean;
-  onBroadcastInput: (data: string, sourceSessionId: string) => void;
+  onBroadcastInput: (
+    data: string,
+    sourceSessionId: string,
+    options?: TerminalBroadcastInputOptions,
+  ) => void;
   onToggleWorkspaceComposeBar: () => void;
+  onBroadcastInterruptPriorityChange: (
+    sessionId: string,
+    prioritize: (() => void) | null,
+  ) => void;
   onSnippetExecutorChange: (
     sessionId: string,
     executor: SnippetExecutor | null,
   ) => void;
+  onProgrammaticCommandLogRewriteChange: TerminalPaneProps['onProgrammaticCommandLogRewriteChange'];
   onAddSelectionToAI?: (sessionId: string, selection: string) => void;
   onStartSessionRename?: (sessionId: string) => void;
   onRemoveSessionFromWorkspace?: TerminalPaneProps['onRemoveSessionFromWorkspace'];
@@ -1242,13 +1482,15 @@ const terminalPanesHostPropsAreEqual = (
   if (prev.sessionHostsMap !== next.sessionHostsMap) return false;
   if (prev.sessionChainHostsMap !== next.sessionChainHostsMap) return false;
   if (prev.sessionSudoAutofillPasswordsMap !== next.sessionSudoAutofillPasswordsMap) return false;
+  if (prev.resolvedSessionHostIds !== next.resolvedSessionHostIds) return false;
   if (prev.workspaceById !== next.workspaceById) return false;
   if (prev.isTerminalLayerVisible !== next.isTerminalLayerVisible) return false;
   if (prev.workspaceFocusHandlersRef !== next.workspaceFocusHandlersRef) return false;
   if (prev.workspaceBroadcastHandlersRef !== next.workspaceBroadcastHandlersRef) return false;
   if (prev.splitHorizontalHandlersRef !== next.splitHorizontalHandlersRef) return false;
   if (prev.splitVerticalHandlersRef !== next.splitVerticalHandlersRef) return false;
-  if (prev.themePreview !== next.themePreview) return false;
+  if (prev.resolveSessionAppearance !== next.resolveSessionAppearance) return false;
+  if (prev.hostMap !== next.hostMap) return false;
   if (prev.keys !== next.keys) return false;
   if (prev.identities !== next.identities) return false;
   if (prev.snippets !== next.snippets) return false;
@@ -1262,6 +1504,7 @@ const terminalPanesHostPropsAreEqual = (
   if (prev.terminalSettings !== next.terminalSettings) return false;
   if (prev.hotkeyScheme !== next.hotkeyScheme) return false;
   if (prev.disableTerminalFontZoom !== next.disableTerminalFontZoom) return false;
+  if (prev.restoreTerminalCwd !== next.restoreTerminalCwd) return false;
   if (prev.keyBindings !== next.keyBindings) return false;
   if (prev.isResizing !== next.isResizing) return false;
   if (prev.isComposeBarOpen !== next.isComposeBarOpen) return false;
@@ -1271,6 +1514,10 @@ const terminalPanesHostPropsAreEqual = (
   if (prev.onTerminalFontSizeChange !== next.onTerminalFontSizeChange) return false;
   if (prev.onOpenSftp !== next.onOpenSftp) return false;
   if (prev.onTerminalCwdChange !== next.onTerminalCwdChange) return false;
+  if (prev.onTerminalTitleChange !== next.onTerminalTitleChange) return false;
+  if (prev.onTerminalBell !== next.onTerminalBell) return false;
+  if (prev.onTerminalOutput !== next.onTerminalOutput) return false;
+  if (prev.onTerminalContextReaderChange !== next.onTerminalContextReaderChange) return false;
   if (prev.onOpenScripts !== next.onOpenScripts) return false;
   if (prev.onOpenHistory !== next.onOpenHistory) return false;
   if (prev.onOpenTheme !== next.onOpenTheme) return false;
@@ -1288,8 +1535,10 @@ const terminalPanesHostPropsAreEqual = (
   if (prev.onSplitSession !== next.onSplitSession) return false;
   if (prev.isBroadcastEnabled !== next.isBroadcastEnabled) return false;
   if (prev.onBroadcastInput !== next.onBroadcastInput) return false;
+  if (prev.onBroadcastInterruptPriorityChange !== next.onBroadcastInterruptPriorityChange) return false;
   if (prev.onToggleWorkspaceComposeBar !== next.onToggleWorkspaceComposeBar) return false;
   if (prev.onSnippetExecutorChange !== next.onSnippetExecutorChange) return false;
+  if (prev.onProgrammaticCommandLogRewriteChange !== next.onProgrammaticCommandLogRewriteChange) return false;
   if (prev.onAddSelectionToAI !== next.onAddSelectionToAI) return false;
   if (prev.onStartSessionRename !== next.onStartSessionRename) return false;
   if (prev.onRemoveSessionFromWorkspace !== next.onRemoveSessionFromWorkspace) return false;
@@ -1317,6 +1566,7 @@ export const TerminalPanesHost: React.FC<TerminalPanesHostProps> = memo(({
   sessionHostsMap,
   sessionChainHostsMap,
   sessionSudoAutofillPasswordsMap,
+  resolvedSessionHostIds,
   ...sharedProps
 }) => {
   const [showSelectionAIAction] = useStoredBoolean(
@@ -1334,6 +1584,7 @@ export const TerminalPanesHost: React.FC<TerminalPanesHostProps> = memo(({
             key={session.id}
             session={session}
             host={host}
+            sessionHostResolved={resolvedSessionHostIds.has(session.id)}
             chainHosts={sessionChainHostsMap.get(session.id)}
             sudoAutofillPassword={sessionSudoAutofillPasswordsMap.get(session.id)}
             showSelectionAIAction={showSelectionAIAction}

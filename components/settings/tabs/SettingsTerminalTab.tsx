@@ -6,7 +6,7 @@ import type {
   TerminalSettings,
 } from "../../../domain/models";
 import { useI18n } from "../../../application/i18n/I18nProvider";
-import { MAX_FONT_SIZE, MIN_FONT_SIZE, type TerminalFont } from "../../../infrastructure/config/fonts";
+import { MAX_FONT_SIZE, MIN_FONT_SIZE, resolveTerminalFontFamilyId, type TerminalFont } from "../../../infrastructure/config/fonts";
 import { TERMINAL_THEMES } from "../../../infrastructure/config/terminalThemes";
 import { customThemeStore, useCustomThemes } from "../../../application/state/customThemeStore";
 import { parseItermcolors } from "../../../infrastructure/parsers/itermcolorsParser";
@@ -23,10 +23,14 @@ import { TerminalFontSelect } from "../TerminalFontSelect";
 import { TerminalCjkFontSelect } from "../TerminalCjkFontSelect";
 import { CustomThemeModal } from "../../terminal/CustomThemeModal";
 import type { TerminalTheme } from "../../../domain/models";
-import { resolveFollowedTerminalThemeId, TERMINAL_THEME_AUTO } from "../../../domain/terminalAppearance";
+import { resolveFollowedTerminalThemeId, resolveManualTerminalThemeId } from "../../../domain/terminalAppearance";
 
 import { KeywordHighlightRulesEditor, ThemePreviewButton } from "./SettingsTerminalTabControls";
 import { TerminalBehaviorSettings } from "./TerminalBehaviorSettings";
+import {
+  TERMINAL_SIDE_PANEL_AUTO_OPEN_TABS,
+  type TerminalSidePanelAutoOpenTab,
+} from "../../../domain/terminalSidePanelAutoOpen";
 
 const FONT_WEIGHT_OPTIONS = [
   { value: "100", labelKey: "settings.terminal.font.weight.thin" },
@@ -43,6 +47,7 @@ const FONT_WEIGHT_OPTIONS = [
 function SettingsTerminalTab(props: {
   terminalThemeId: string;
   setTerminalThemeId: (id: string) => void;
+  resolvedTheme: "dark" | "light";
   followAppTerminalTheme: boolean;
   setFollowAppTerminalTheme: (value: boolean) => void;
   terminalThemeDarkId: string;
@@ -60,6 +65,10 @@ function SettingsTerminalTab(props: {
     key: K,
     value: TerminalSettings[K],
   ) => void;
+  terminalSidePanelAutoOpen: boolean;
+  setTerminalSidePanelAutoOpen: (enabled: boolean) => void;
+  terminalSidePanelAutoOpenTab: TerminalSidePanelAutoOpenTab;
+  setTerminalSidePanelAutoOpenTab: (tab: TerminalSidePanelAutoOpenTab) => void;
   availableFonts: TerminalFont[];
   workspaceFocusStyle: 'dim' | 'border';
   setWorkspaceFocusStyle: (style: 'dim' | 'border') => void;
@@ -67,6 +76,7 @@ function SettingsTerminalTab(props: {
   const {
     terminalThemeId,
     setTerminalThemeId,
+    resolvedTheme,
     followAppTerminalTheme,
     setFollowAppTerminalTheme,
     terminalThemeDarkId,
@@ -81,6 +91,10 @@ function SettingsTerminalTab(props: {
     setTerminalFontSize,
     terminalSettings,
     updateTerminalSetting,
+    terminalSidePanelAutoOpen,
+    setTerminalSidePanelAutoOpen,
+    terminalSidePanelAutoOpenTab,
+    setTerminalSidePanelAutoOpenTab,
     availableFonts,
     workspaceFocusStyle,
     setWorkspaceFocusStyle,
@@ -114,50 +128,59 @@ function SettingsTerminalTab(props: {
     setCustomArgsDraft(formatShellArgs(terminalSettings.localShellArgs ?? []));
     setCustomShellModalOpen(true);
   }, [terminalSettings.localShell, terminalSettings.localShellArgs]);
-  const [themeModalOpen, setThemeModalOpen] = useState(false);
   const [themeModalSlot, setThemeModalSlot] = useState<'dark' | 'light' | null>(null);
 
   // Subscribe to custom theme changes so editing in-place triggers re-render
   const customThemes = useCustomThemes();
 
-  // Get current selected theme
-  const currentTheme = useMemo(() => {
-    return TERMINAL_THEMES.find(t => t.id === terminalThemeId)
-      || customThemes.find(t => t.id === terminalThemeId)
-      || TERMINAL_THEMES[0];
-  }, [terminalThemeId, customThemes]);
+  const findTerminalTheme = useCallback((id: string) => (
+    TERMINAL_THEMES.find(t => t.id === id)
+      || customThemes.find(t => t.id === id)
+      || null
+  ), [customThemes]);
 
-  // Preview themes for the follow-app per-mode pickers. resolvedTheme is
-  // forced per slot so each preview reflects exactly that mode's selection.
-  const darkPreviewTheme = useMemo(() => {
+  const followedPreviewTheme = useMemo(() => {
     const id = resolveFollowedTerminalThemeId({
+      resolvedTheme,
+      lightUiThemeId,
+      darkUiThemeId,
+      fallbackThemeId: terminalThemeId,
+    });
+    return findTerminalTheme(id) || findTerminalTheme(terminalThemeId) || TERMINAL_THEMES[0];
+  }, [darkUiThemeId, findTerminalTheme, lightUiThemeId, resolvedTheme, terminalThemeId]);
+
+  const darkPreviewTheme = useMemo(() => {
+    const id = resolveManualTerminalThemeId({
       resolvedTheme: 'dark',
       terminalThemeDarkId, terminalThemeLightId,
       lightUiThemeId, darkUiThemeId, fallbackThemeId: terminalThemeId,
     });
-    return TERMINAL_THEMES.find(t => t.id === id)
-      || customThemes.find(t => t.id === id)
-      // Mirror the runtime fallback in useSettingsState.currentTerminalTheme:
-      // a deleted per-mode override falls back to the manual theme, not [0].
-      || TERMINAL_THEMES.find(t => t.id === terminalThemeId)
-      || customThemes.find(t => t.id === terminalThemeId)
-      || TERMINAL_THEMES[0];
-  }, [terminalThemeDarkId, terminalThemeLightId, lightUiThemeId, darkUiThemeId, terminalThemeId, customThemes]);
+    return findTerminalTheme(id) || findTerminalTheme(terminalThemeId) || TERMINAL_THEMES[0];
+  }, [darkUiThemeId, findTerminalTheme, lightUiThemeId, terminalThemeDarkId, terminalThemeId, terminalThemeLightId]);
 
   const lightPreviewTheme = useMemo(() => {
-    const id = resolveFollowedTerminalThemeId({
+    const id = resolveManualTerminalThemeId({
       resolvedTheme: 'light',
       terminalThemeDarkId, terminalThemeLightId,
       lightUiThemeId, darkUiThemeId, fallbackThemeId: terminalThemeId,
     });
-    return TERMINAL_THEMES.find(t => t.id === id)
-      || customThemes.find(t => t.id === id)
-      // Mirror the runtime fallback in useSettingsState.currentTerminalTheme:
-      // a deleted per-mode override falls back to the manual theme, not [0].
-      || TERMINAL_THEMES.find(t => t.id === terminalThemeId)
-      || customThemes.find(t => t.id === terminalThemeId)
-      || TERMINAL_THEMES[0];
-  }, [terminalThemeDarkId, terminalThemeLightId, lightUiThemeId, darkUiThemeId, terminalThemeId, customThemes]);
+    return findTerminalTheme(id) || findTerminalTheme(terminalThemeId) || TERMINAL_THEMES[0];
+  }, [darkUiThemeId, findTerminalTheme, lightUiThemeId, terminalThemeDarkId, terminalThemeId, terminalThemeLightId]);
+
+  const currentTheme = followAppTerminalTheme
+    ? followedPreviewTheme
+    : resolvedTheme === 'dark'
+      ? darkPreviewTheme
+      : lightPreviewTheme;
+
+  const setManualThemeForResolvedMode = useCallback((themeId: string) => {
+    if (resolvedTheme === 'dark') {
+      setTerminalThemeDarkId(themeId);
+    } else {
+      setTerminalThemeLightId(themeId);
+    }
+    setTerminalThemeId(themeId);
+  }, [resolvedTheme, setTerminalThemeDarkId, setTerminalThemeId, setTerminalThemeLightId]);
 
   const fontWeightOptions = useMemo(() => (
     FONT_WEIGHT_OPTIONS.map((option) => ({
@@ -194,7 +217,7 @@ function SettingsTerminalTab(props: {
       const parsed = parseItermcolors(xml, name);
       if (parsed) {
         customThemeStore.addTheme(parsed);
-        setTerminalThemeId(parsed.id);
+        setManualThemeForResolvedMode(parsed.id);
       } else {
         console.error('[Settings] Failed to parse .itermcolors file:', file.name);
         window.alert(t('terminal.customTheme.importError') || 'Failed to parse the selected file. Please ensure it is a valid .itermcolors XML file.');
@@ -205,7 +228,7 @@ function SettingsTerminalTab(props: {
     };
     reader.readAsText(file);
     e.target.value = '';
-  }, [setTerminalThemeId, t]);
+  }, [setManualThemeForResolvedMode, t]);
 
   // New custom theme modal
   const [customThemeModalOpen, setCustomThemeModalOpen] = useState(false);
@@ -218,9 +241,7 @@ function SettingsTerminalTab(props: {
   }, [currentTheme]);
 
   const handleNewCustomTheme = useCallback(() => {
-    const base = TERMINAL_THEMES.find(t => t.id === terminalThemeId)
-      || customThemeStore.getThemeById(terminalThemeId)
-      || TERMINAL_THEMES[0];
+    const base = currentTheme || TERMINAL_THEMES[0];
     const newTheme: TerminalTheme = {
       ...base,
       id: `custom-${Date.now()}`,
@@ -231,7 +252,7 @@ function SettingsTerminalTab(props: {
     setCustomThemeData(newTheme);
     setIsEditingTheme(false);
     setCustomThemeModalOpen(true);
-  }, [terminalThemeId]);
+  }, [currentTheme]);
 
   const handleEditCustomTheme = useCallback(() => {
     if (!currentTheme?.isCustom) return;
@@ -243,8 +264,8 @@ function SettingsTerminalTab(props: {
   const handleDeleteCustomTheme = useCallback(() => {
     if (!currentTheme?.isCustom) return;
     customThemeStore.deleteTheme(currentTheme.id);
-    setTerminalThemeId(TERMINAL_THEMES[0].id);
-  }, [currentTheme, setTerminalThemeId]);
+    setManualThemeForResolvedMode(followedPreviewTheme.id);
+  }, [currentTheme, followedPreviewTheme.id, setManualThemeForResolvedMode]);
 
   // Fetch default shell on mount
   useEffect(() => {
@@ -347,7 +368,7 @@ function SettingsTerminalTab(props: {
           />
         </SettingRow>
       </div>
-      {followAppTerminalTheme ? (
+      {!followAppTerminalTheme && (
         <div className="space-y-2">
           <div>
             <div className="text-xs text-muted-foreground mb-1.5 px-1">
@@ -356,9 +377,7 @@ function SettingsTerminalTab(props: {
             <ThemePreviewButton
               theme={darkPreviewTheme}
               onClick={() => setThemeModalSlot('dark')}
-              buttonLabel={terminalThemeDarkId === TERMINAL_THEME_AUTO
-                ? t("settings.terminal.theme.auto")
-                : t("settings.terminal.theme.selectButton")}
+              buttonLabel={t("settings.terminal.theme.selectButton")}
             />
           </div>
           <div>
@@ -368,88 +387,80 @@ function SettingsTerminalTab(props: {
             <ThemePreviewButton
               theme={lightPreviewTheme}
               onClick={() => setThemeModalSlot('light')}
-              buttonLabel={terminalThemeLightId === TERMINAL_THEME_AUTO
-                ? t("settings.terminal.theme.auto")
-                : t("settings.terminal.theme.selectButton")}
+              buttonLabel={t("settings.terminal.theme.selectButton")}
             />
           </div>
         </div>
-      ) : (
-        <ThemePreviewButton
-          theme={currentTheme}
-          onClick={() => setThemeModalOpen(true)}
-          buttonLabel={t("settings.terminal.theme.selectButton")}
-        />
       )}
 
       <ThemeSelectModal
-        open={themeModalOpen}
-        onClose={() => setThemeModalOpen(false)}
-        selectedThemeId={terminalThemeId}
-        onSelect={setTerminalThemeId}
-      />
-      <ThemeSelectModal
         open={themeModalSlot !== null}
         onClose={() => setThemeModalSlot(null)}
-        selectedThemeId={themeModalSlot === 'dark' ? terminalThemeDarkId : terminalThemeLightId}
+        selectedThemeId={themeModalSlot === 'dark' ? darkPreviewTheme.id : lightPreviewTheme.id}
         onSelect={(id) => {
-          if (themeModalSlot === 'dark') setTerminalThemeDarkId(id);
-          else if (themeModalSlot === 'light') setTerminalThemeLightId(id);
+          if (themeModalSlot === 'dark') {
+            setTerminalThemeDarkId(id);
+          } else if (themeModalSlot === 'light') {
+            setTerminalThemeLightId(id);
+          }
+          if (themeModalSlot === resolvedTheme) {
+            setTerminalThemeId(id);
+          }
         }}
         filterType={themeModalSlot === 'light' ? 'light' : 'dark'}
-        showAutoOption
       />
 
-      {/* Theme action buttons */}
-      <div className="flex items-center gap-2 -mt-1">
-        <Button
-          variant="outline"
-          size="sm"
-          className="gap-1.5"
-          onClick={handleNewCustomTheme}
-        >
-          <Palette size={14} />
-          {t('terminal.customTheme.new')}
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="gap-1.5"
-          onClick={() => importFileRef.current?.click()}
-        >
-          <Import size={14} />
-          {t('terminal.customTheme.import')}
-        </Button>
-        {isCustomTheme && (
-          <>
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1.5"
-              onClick={handleEditCustomTheme}
-            >
-              <Pencil size={14} />
-              {t('common.edit')}
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="gap-1.5 text-destructive hover:text-destructive"
-              onClick={handleDeleteCustomTheme}
-            >
-              <Trash2 size={14} />
-              {t('common.delete')}
-            </Button>
-          </>
-        )}
-        <input
-          ref={importFileRef}
-          type="file"
-          accept=".itermcolors"
-          className="hidden"
-          onChange={handleImportItermcolors}
-        />
-      </div>
+      {!followAppTerminalTheme && (
+        <div className="flex items-center gap-2 -mt-1">
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={handleNewCustomTheme}
+          >
+            <Palette size={14} />
+            {t('terminal.customTheme.new')}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            className="gap-1.5"
+            onClick={() => importFileRef.current?.click()}
+          >
+            <Import size={14} />
+            {t('terminal.customTheme.import')}
+          </Button>
+          {isCustomTheme && (
+            <>
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5"
+                onClick={handleEditCustomTheme}
+              >
+                <Pencil size={14} />
+                {t('common.edit')}
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="gap-1.5 text-destructive hover:text-destructive"
+                onClick={handleDeleteCustomTheme}
+              >
+                <Trash2 size={14} />
+                {t('common.delete')}
+              </Button>
+            </>
+          )}
+          <input
+            ref={importFileRef}
+            type="file"
+            accept=".itermcolors"
+            className="hidden"
+            onChange={handleImportItermcolors}
+          />
+        </div>
+      )}
 
       {/* Custom Theme Modal */}
       {customThemeData && (
@@ -463,13 +474,13 @@ function SettingsTerminalTab(props: {
             } else {
               customThemeStore.addTheme(theme);
             }
-            setTerminalThemeId(theme.id);
+            setManualThemeForResolvedMode(theme.id);
             setCustomThemeModalOpen(false);
             setCustomThemeData(null);
           }}
           onDelete={isEditingTheme ? (themeId) => {
             customThemeStore.deleteTheme(themeId);
-            setTerminalThemeId(TERMINAL_THEMES[0].id);
+            setManualThemeForResolvedMode(followedPreviewTheme.id);
             setCustomThemeModalOpen(false);
             setCustomThemeData(null);
           } : undefined}
@@ -487,7 +498,10 @@ function SettingsTerminalTab(props: {
           description={t("settings.terminal.font.family.desc")}
         >
           <TerminalFontSelect
-            value={terminalFontFamilyId}
+            value={resolveTerminalFontFamilyId(
+              terminalFontFamilyId,
+              typeof navigator !== "undefined" ? navigator.platform : "",
+            )}
             fonts={availableFonts}
             onChange={(id) => setTerminalFontFamilyId(id)}
             className="w-48"
@@ -551,6 +565,16 @@ function SettingsTerminalTab(props: {
             options={fontWeightOptions}
             onChange={(v) => updateTerminalSetting("fontWeightBold", parseInt(v))}
             className="w-40"
+          />
+        </SettingRow>
+
+        <SettingRow
+          label={t("settings.terminal.font.smoothing")}
+          description={t("settings.terminal.font.smoothing.desc")}
+        >
+          <Toggle
+            checked={terminalSettings.fontSmoothing}
+            onChange={(v) => updateTerminalSetting("fontSmoothing", v)}
           />
         </SettingRow>
 
@@ -657,6 +681,32 @@ function SettingsTerminalTab(props: {
         terminalSettings={terminalSettings}
         updateTerminalSetting={updateTerminalSetting}
       />
+
+      <SectionHeader title={t("settings.terminal.section.sidePanel")} />
+      <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
+        <SettingRow
+          label={t("settings.terminal.sidePanel.autoOpen")}
+          description={t("settings.terminal.sidePanel.autoOpen.desc")}
+        >
+          <Toggle checked={terminalSidePanelAutoOpen} onChange={setTerminalSidePanelAutoOpen} />
+        </SettingRow>
+
+        <SettingRow
+          label={t("settings.terminal.sidePanel.autoOpenPane")}
+          description={t("settings.terminal.sidePanel.autoOpenPane.desc")}
+        >
+          <Select
+            value={terminalSidePanelAutoOpenTab}
+            options={TERMINAL_SIDE_PANEL_AUTO_OPEN_TABS.map((tab) => ({
+              value: tab,
+              label: t(`settings.terminal.sidePanel.pane.${tab}`),
+            }))}
+            onChange={(value) => setTerminalSidePanelAutoOpenTab(value as TerminalSidePanelAutoOpenTab)}
+            disabled={!terminalSidePanelAutoOpen}
+            className="w-36"
+          />
+        </SettingRow>
+      </div>
 
       <SectionHeader title={t("settings.terminal.section.keywordHighlight")} />
       <div className="rounded-lg border bg-card p-4">
@@ -770,6 +820,15 @@ function SettingsTerminalTab(props: {
 
       <SectionHeader title={t("settings.terminal.section.connection")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
+        <SettingRow
+          label={t("settings.terminal.connection.verifyHostKeys")}
+          description={t("settings.terminal.connection.verifyHostKeys.desc")}
+        >
+          <Toggle
+            checked={terminalSettings.verifyHostKeys}
+            onChange={(v) => updateTerminalSetting("verifyHostKeys", v)}
+          />
+        </SettingRow>
         <SettingRow
           label={t("settings.terminal.connection.keepaliveInterval")}
           description={t("settings.terminal.connection.keepaliveInterval.desc")}
@@ -961,6 +1020,95 @@ function SettingsTerminalTab(props: {
             className="w-32"
           />
         </SettingRow>
+        <SettingRow
+          label={t("settings.terminal.rendering.hibernateHiddenTabs")}
+          description={t("settings.terminal.rendering.hibernateHiddenTabs.desc")}
+        >
+          <Toggle
+            checked={terminalSettings.hibernateHiddenTabs}
+            onChange={(v) => updateTerminalSetting("hibernateHiddenTabs", v)}
+          />
+        </SettingRow>
+        {terminalSettings.hibernateHiddenTabs && (
+          <>
+          <SettingRow
+            label={t("settings.terminal.rendering.hibernateHiddenTabsDelay")}
+            description={t("settings.terminal.rendering.hibernateHiddenTabsDelay.desc")}
+          >
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={5}
+                max={600}
+                value={terminalSettings.hibernateHiddenTabsDelaySec}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value, 10);
+                  if (!Number.isNaN(val) && val >= 5 && val <= 600) {
+                    updateTerminalSetting("hibernateHiddenTabsDelaySec", val);
+                  }
+                }}
+                className="w-20"
+              />
+              <span className="text-sm text-muted-foreground">{t("settings.terminal.serverStats.seconds")}</span>
+            </div>
+          </SettingRow>
+          <SettingRow
+            label={t("settings.terminal.rendering.hibernateSkipAltScreen")}
+            description={t("settings.terminal.rendering.hibernateSkipAltScreen.desc")}
+          >
+            <Toggle
+              checked={terminalSettings.hibernateSkipAltScreen}
+              onChange={(v) => updateTerminalSetting("hibernateSkipAltScreen", v)}
+            />
+          </SettingRow>
+          <SettingRow
+            label={t("settings.terminal.rendering.hibernateKeepRendererCount")}
+            description={t("settings.terminal.rendering.hibernateKeepRendererCount.desc")}
+          >
+            <Input
+              type="number"
+              min={0}
+              max={12}
+              value={terminalSettings.hibernateKeepRendererCount}
+              onChange={(e) => {
+                const val = parseInt(e.target.value, 10);
+                if (!Number.isNaN(val) && val >= 0 && val <= 12) {
+                  updateTerminalSetting("hibernateKeepRendererCount", val);
+                }
+              }}
+              className="w-20"
+            />
+          </SettingRow>
+          <SettingRow
+            label={t("settings.terminal.rendering.hibernateReplayChunkBytes")}
+            description={t("settings.terminal.rendering.hibernateReplayChunkBytes.desc")}
+          >
+            <Input
+              type="number"
+              min={4096}
+              max={65536}
+              step={1024}
+              value={terminalSettings.hibernateReplayChunkBytes}
+              onChange={(e) => {
+                const val = parseInt(e.target.value, 10);
+                if (!Number.isNaN(val) && val >= 4096 && val <= 65536) {
+                  updateTerminalSetting("hibernateReplayChunkBytes", val);
+                }
+              }}
+              className="w-28"
+            />
+          </SettingRow>
+          <SettingRow
+            label={t("settings.terminal.rendering.hibernatePreferWasmSerialize")}
+            description={t("settings.terminal.rendering.hibernatePreferWasmSerialize.desc")}
+          >
+            <Toggle
+              checked={terminalSettings.hibernatePreferWasmSerialize}
+              onChange={(v) => updateTerminalSetting("hibernatePreferWasmSerialize", v)}
+            />
+          </SettingRow>
+          </>
+        )}
       </div>
       {/* Autocomplete */}
       <SectionHeader title={t("settings.terminal.section.workspaceFocus")} />

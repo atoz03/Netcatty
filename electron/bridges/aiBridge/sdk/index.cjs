@@ -14,6 +14,7 @@ const codex = require("./codexDriver.cjs");
 const copilot = require("./copilotDriver.cjs");
 const cursor = require("./cursorDriver.cjs");
 const codebuddy = require("./codebuddyDriver.cjs");
+const opencode = require("./opencodeDriver.cjs");
 
 const DRIVER_REGISTRY = {
   claude: {
@@ -64,6 +65,7 @@ const DRIVER_REGISTRY = {
       const sessionOptions = copilot.buildCopilotSessionOptions({
         model: ctx.model,
         injectedMcpServers: ctx.injectedMcpServers,
+        toolIntegrationMode: ctx.toolIntegrationMode,
       });
       return copilot.runCopilotTurn({
         prompt: ctx.prompt,
@@ -71,6 +73,8 @@ const DRIVER_REGISTRY = {
         clientOptions,
         sessionOptions,
         resumeSessionId: ctx.resumeSessionId,
+        toolIntegrationMode: ctx.toolIntegrationMode,
+        runtimeEnv: ctx.env,
         emitter: ctx.emitter,
         signal: ctx.signal,
       });
@@ -123,6 +127,28 @@ const DRIVER_REGISTRY = {
     },
     async listModels(ctx) {
       return codebuddy.listCodebuddyModels({ pathToCodebuddyCode: ctx.binPath, env: ctx.env });
+    },
+  },
+  opencode: {
+    async runTurn(ctx) {
+      return opencode.runOpenCodeTurn({
+        prompt: ctx.prompt,
+        systemPrompt: ctx.systemPrompt,
+        attachments: ctx.attachments,
+        cwd: ctx.cwd,
+        model: ctx.model,
+        env: ctx.env,
+        binPath: ctx.binPath,
+        injectedMcpServers: ctx.injectedMcpServers,
+        toolIntegrationMode: ctx.toolIntegrationMode,
+        skillsPathAllowlist: ctx.skillsPathAllowlist,
+        resumeSessionId: ctx.resumeSessionId,
+        emitter: ctx.emitter,
+        abortController: ctx.abortController,
+      });
+    },
+    async listModels(ctx) {
+      return opencode.listOpenCodeModels({ env: ctx.env, binPath: ctx.binPath });
     },
   },
 };

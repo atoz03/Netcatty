@@ -1,6 +1,9 @@
 import type { DiscoveredAgent, ExternalAgentConfig } from './types';
+import { getCommandBasename, isPathLikeCommand } from './shared/pathLikeCommand';
 
-export type ManagedAgentKey = 'codex' | 'claude' | 'copilot' | 'cursor' | 'codebuddy';
+export { isPathLikeCommand, getCommandBasename };
+
+export type ManagedAgentKey = 'codex' | 'claude' | 'copilot' | 'cursor' | 'codebuddy' | 'opencode';
 
 const MANAGED_AGENT_META: Record<ManagedAgentKey, { commandNames: string[]; sdkBackend: string }> = {
   codex: { commandNames: ['codex'], sdkBackend: 'codex' },
@@ -8,19 +11,8 @@ const MANAGED_AGENT_META: Record<ManagedAgentKey, { commandNames: string[]; sdkB
   copilot: { commandNames: ['copilot'], sdkBackend: 'copilot' },
   cursor: { commandNames: ['cursor'], sdkBackend: 'cursor' },
   codebuddy: { commandNames: ['codebuddy'], sdkBackend: 'codebuddy' },
+  opencode: { commandNames: ['opencode'], sdkBackend: 'opencode' },
 };
-
-function getCommandBasename(command: string | undefined): string {
-  const normalized = String(command || '').trim();
-  if (!normalized) return '';
-  const parts = normalized.split(/[\\/]/);
-  return (parts.pop() || '').toLowerCase();
-}
-
-function isPathLikeCommand(command: string | undefined): boolean {
-  const normalized = String(command || '').trim();
-  return normalized.includes('/') || normalized.includes('\\');
-}
 
 function matchesPrimaryCliBasename(command: string | undefined, agentKey: ManagedAgentKey): boolean {
   const basename = getCommandBasename(command);
@@ -34,7 +26,8 @@ export function isSettingsManagedDiscoveredAgent(
     || agent.command === 'claude'
     || agent.command === 'copilot'
     || agent.command === 'cursor'
-    || agent.command === 'codebuddy';
+    || agent.command === 'codebuddy'
+    || agent.command === 'opencode';
 }
 
 export function matchesManagedAgentConfig(
@@ -85,4 +78,11 @@ export function getManagedAgentStoredPath(
       matchesPrimaryCliBasename(agent.command, agentKey),
   );
   return fallbackAgent?.command ?? null;
+}
+
+export function getManualAgentCommand(
+  config: Pick<ExternalAgentConfig, 'command' | 'commandSource'> | null | undefined,
+): string | undefined {
+  const command = String(config?.command || '').trim();
+  return config?.commandSource === 'manual' && command ? command : undefined;
 }

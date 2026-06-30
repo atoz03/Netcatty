@@ -3,6 +3,7 @@
 let bridgesRegistered = false;
 let cloudSyncSessionPassword = null;
 const { readClipboardFiles, readClipboardImage } = require("../bridges/clipboardFiles.cjs");
+const { TRANSFER_CHUNK_SIZE, TRANSFER_CONCURRENCY } = require("../bridges/transferLimits.cjs");
 
 const excludedFigSpecPrefixes = ["aws", "gcloud", "az"];
 
@@ -27,7 +28,7 @@ function createBridgeRegistrar(context) {
     preload,
     effectiveDevServerUrl,
     isDev,
-    appIcon,
+    getAppIconPath,
     isMac,
     electronDir,
     sessions,
@@ -137,11 +138,29 @@ function createBridgeRegistrar(context) {
   
     // Initialize bridges with shared dependencies
     const cliDiscoveryFilePath = getCliDiscoveryFilePath({ userDataDir: app.getPath("userData") });
+    const { createTerminalOutputChannel } = require("../bridges/terminalOutputChannel.cjs");
+    const {
+      createTerminalWorkerManager,
+      isTerminalWorkerEnabled,
+    } = require("../bridges/terminalWorkerManager.cjs");
+    const terminalOutputChannel = createTerminalOutputChannel({
+      MessageChannelMain: electronModule.MessageChannelMain,
+    });
+    const terminalWorkerManager = isTerminalWorkerEnabled({ env: process.env }) && electronModule.utilityProcess
+      ? createTerminalWorkerManager({
+          utilityProcess: electronModule.utilityProcess,
+          electronModule,
+          terminalOutputChannel,
+          MessageChannelMain: electronModule.MessageChannelMain,
+        })
+      : null;
     const deps = {
       sessions,
       sftpClients,
       electronModule,
       cliDiscoveryFilePath,
+      terminalOutputChannel,
+      terminalWorkerManager,
     };
   
     sshBridge.init(deps);
@@ -163,12 +182,22 @@ function createBridgeRegistrar(context) {
     tempDirBridge.ensureTempDir();
   
     // Register all IPC handlers
-    sshBridge.registerHandlers(ipcMain);
-    sftpBridge.registerHandlers(ipcMain);
+    sshBridge.registerHandlers(ipcMain, { terminalWorkerManager });
+    sftpBridge.registerHandlers(ipcMain, { terminalWorkerManager });
     localFsBridge.registerHandlers(ipcMain);
-    transferBridge.registerHandlers(ipcMain);
+    transferBridge.registerHandlers(ipcMain, { terminalWorkerManager });
     portForwardingBridge.registerHandlers(ipcMain);
-    terminalBridge.registerHandlers(ipcMain);
+    terminalBridge.registerHandlers(ipcMain, { terminalWorkerManager });
+
+    const scriptBridge = require("../bridges/scriptBridge.cjs");
+    scriptBridge.init({
+      sessions,
+      electronModule,
+      terminalBridge,
+      terminalWorkerManager,
+      getMainWindow: () => win,
+    });
+    scriptBridge.registerHandlers(ipcMain);
 
     const { createSystemManagerBridge } = require("../bridges/systemManagerBridge.cjs");
     const systemManagerBridge = createSystemManagerBridge({
@@ -177,16 +206,16 @@ function createBridgeRegistrar(context) {
       ensureMoshStatsConnection: (...args) => sshBridge.ensureMoshStatsConnection(...args),
       process,
     });
-    systemManagerBridge.registerHandlers(ipcMain);
+    systemManagerBridge.registerHandlers(ipcMain, { terminalWorkerManager });
     oauthBridge.setupOAuthBridge(ipcMain);
     githubAuthBridge.registerHandlers(ipcMain);
     googleAuthBridge.registerHandlers(ipcMain, electronModule);
     onedriveAuthBridge.registerHandlers(ipcMain, electronModule);
     cloudSyncBridge.registerHandlers(ipcMain);
-    fileWatcherBridge.registerHandlers(ipcMain);
+    fileWatcherBridge.registerHandlers(ipcMain, { terminalWorkerManager });
     tempDirBridge.registerHandlers(ipcMain, shell);
     sessionLogsBridge.registerHandlers(ipcMain);
-    compressUploadBridge.registerHandlers(ipcMain);
+    compressUploadBridge.registerHandlers(ipcMain, { terminalWorkerManager });
     globalShortcutBridge.registerHandlers(ipcMain);
     credentialBridge.registerHandlers(ipcMain, electronModule);
     autoUpdateBridge.init(deps);
@@ -196,14 +225,25 @@ function createBridgeRegistrar(context) {
     vaultBackupBridge.registerHandlers(ipcMain, electronModule);
   
     // ZMODEM cancel handler
-    ipcMain.on("netcatty:zmodem:cancel", (_event, payload) => {
+    ipcMain.on("netcatty:zmodem:cancel", (event, payload) => {
+      if (terminalWorkerManager) {
+        terminalWorkerManager.send("netcatty:zmodem:cancel", payload, {
+          webContentsId: event?.sender?.id,
+        });
+        return;
+      }
       const session = sessions.get(payload.sessionId);
       if (session?.zmodemSentry) {
         session.zmodemSentry.cancel(payload.options);
       }
     });
 
-    ipcMain.handle("netcatty:zmodem:drag-drop-upload", async (_event, payload) => {
+    ipcMain.handle("netcatty:zmodem:drag-drop-upload", async (event, payload) => {
+      if (terminalWorkerManager) {
+        return terminalWorkerManager.request("netcatty:zmodem:drag-drop-upload", payload, {
+          webContentsId: event?.sender?.id,
+        });
+      }
       const { sessionId, files, uploadCommand } = payload || {};
       const session = sessions.get(sessionId);
       if (!session?.zmodemSentry?.queueDragDropUpload) {
@@ -363,7 +403,7 @@ function createBridgeRegistrar(context) {
           preload,
           devServerUrl: effectiveDevServerUrl,
           isDev,
-          appIcon,
+          appIcon: getAppIconPath(),
           isMac,
           electronDir,
           sourceWindow: BrowserWindow.fromWebContents(event.sender),
@@ -387,9 +427,11 @@ function createBridgeRegistrar(context) {
           preload,
           devServerUrl: effectiveDevServerUrl,
           isDev,
-          appIcon,
+          appIcon: getAppIconPath(),
           isMac,
           electronDir,
+          route: "session-window",
+          registerAsMainWindow: false,
           onRegisterBridge: registerBridges,
         });
         try {
@@ -439,7 +481,7 @@ function createBridgeRegistrar(context) {
           preload,
           devServerUrl: effectiveDevServerUrl,
           isDev,
-          appIcon,
+          appIcon: getAppIconPath(),
           isMac,
           electronDir,
           sourceWindow,
@@ -758,17 +800,36 @@ function createBridgeRegistrar(context) {
     });
   
     // Download SFTP file to temp and return local path
-    ipcMain.handle("netcatty:sftp:downloadToTemp", async (_event, { sftpId, remotePath, fileName, encoding }) => {
+    ipcMain.handle("netcatty:sftp:downloadToTemp", async (event, { sftpId, remotePath, fileName, encoding }) => {
       console.log(`[Main] Downloading SFTP file to temp:`);
       console.log(`[Main]   SFTP ID: ${sftpId}`);
       console.log(`[Main]   Remote path: ${remotePath}`);
       console.log(`[Main]   File name: ${fileName}`);
       
-      const client = require("./bridges/sftpBridge.cjs");
+      const client = require("../bridges/sftpBridge.cjs");
       // Use tempDirBridge for dedicated Netcatty temp directory
       const localPath = await getTempDirBridge().getTempFilePath(fileName);
       
       console.log(`[Main]   Local temp path: ${localPath}`);
+
+      if (terminalWorkerManager) {
+        try {
+          const result = await terminalWorkerManager.request("netcatty:sftp:downloadToLocal", {
+            sftpId,
+            remotePath,
+            localPath,
+            encoding,
+          }, {
+            webContentsId: event?.sender?.id,
+          });
+          if (result?.error) throw new Error(result.error);
+          console.log(`[Main]   File downloaded successfully via terminal worker`);
+          return localPath;
+        } catch (err) {
+          try { await fs.promises.rm(localPath, { force: true }); } catch { /* ignore */ }
+          throw err;
+        }
+      }
       
       // Get the sftp client and download file
       const sftpClients = client.getSftpClients ? client.getSftpClients() : null;
@@ -794,7 +855,10 @@ function createBridgeRegistrar(context) {
       const encodedPath = client.encodePathForSession
         ? client.encodePathForSession(sftpId, remotePath, encoding)
         : remotePath;
-      await sftpClient.fastGet(encodedPath, localPath);
+      await sftpClient.fastGet(encodedPath, localPath, {
+        chunkSize: TRANSFER_CHUNK_SIZE,
+        concurrency: TRANSFER_CONCURRENCY,
+      });
       console.log(`[Main]   File downloaded successfully`);
       return localPath;
     });
@@ -826,7 +890,11 @@ function createBridgeRegistrar(context) {
           totalBytes: 0,
         };
   
-        const result = await transferBridge.startTransfer(event, payload);
+        const result = terminalWorkerManager
+          ? await terminalWorkerManager.request("netcatty:transfer:start", payload, {
+              webContentsId: event?.sender?.id,
+            })
+          : await transferBridge.startTransfer(event, payload);
   
         if (result.error) {
           await cleanupPartialDownload();

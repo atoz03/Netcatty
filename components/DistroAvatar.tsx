@@ -1,8 +1,10 @@
 import { Server, Usb } from "lucide-react";
 import React, { memo } from "react";
 import { getEffectiveHostDistro } from "../domain/host";
+import { resolveHostIconAppearance, resolveHostIconColorAppearance } from "../domain/hostIcon";
 import { cn } from "../lib/utils";
 import { Host } from "../types";
+import { renderHostIconGlyph } from "./hostIconRenderer";
 
 export const DISTRO_LOGOS: Record<string, string> = {
   ubuntu: "/distro/ubuntu.svg",
@@ -29,6 +31,7 @@ export const DISTRO_LOGOS: Record<string, string> = {
   cisco: "/distro/cisco.svg",
   juniper: "/distro/juniper.svg",
   huawei: "/distro/huawei.svg",
+  h3c: "/distro/h3c.svg",
   hpe: "/distro/hpe.svg",
   mikrotik: "/distro/mikrotik.svg",
   fortinet: "/distro/fortinet.svg",
@@ -60,6 +63,7 @@ export const DISTRO_COLORS: Record<string, string> = {
   cisco: "bg-[#1BA0D7]",
   juniper: "bg-[#0A6EB4]",
   huawei: "bg-[#CF0A2C]",
+  h3c: "bg-white",
   hpe: "bg-[#01A982]",
   mikrotik: "bg-[#293239]",
   fortinet: "bg-[#EE3124]",
@@ -71,7 +75,7 @@ export const DISTRO_COLORS: Record<string, string> = {
 
 type DistroAvatarProps = {
   host: Pick<Host, "distro" | "manualDistro" | "distroMode" | "os"> &
-    Partial<Pick<Host, "protocol">>;
+    Partial<Pick<Host, "protocol" | "iconMode" | "iconId" | "iconColorMode" | "iconColor" | "iconColorCustom">>;
   fallback: string;
   className?: string;
   /** xs matches top tab bar icons (h-4 rounded rect) */
@@ -89,25 +93,35 @@ const DistroAvatarInner: React.FC<DistroAvatarProps> = ({
   const [errored, setErrored] = React.useState(false);
   const bg = DISTRO_COLORS[distro] || DISTRO_COLORS.default;
 
-  // Size variants — rounded rects (same corner style as SessionTabIcon in TopTabItems)
+  // Corner radii ~27% of edge (matches lg rounded-xl on 44px) — avoids circles on small sizes
+  const radiusClasses = {
+    xs: "rounded-[4px]",
+    sm: "rounded-[5px]",
+    md: "rounded-lg",
+    tree: "rounded-[6px]",
+    log: "rounded-[10px]",
+    lg: "rounded-xl",
+  } as const;
+
+  // Size variants — rounded rects aligned with vault host list (lg = rounded-xl)
   const sizeClasses = {
-    xs: "h-4 w-4 rounded",
-    sm: "h-5 w-5 rounded",
-    md: "h-8 w-8 rounded",
-    tree: "h-8 w-8 rounded-lg",
-    log: "h-9 w-9 rounded-xl",
-    lg: "h-11 w-11 rounded-xl",
+    xs: "h-4 w-4",
+    sm: "h-5 w-5",
+    md: "h-8 w-8",
+    tree: "h-6 w-6",
+    log: "h-9 w-9",
+    lg: "h-11 w-11",
   };
   const iconSizes = {
     xs: "h-2.5 w-2.5",
     sm: "h-3 w-3",
     md: "h-4 w-4",
-    tree: "h-4 w-4",
+    tree: "h-3.5 w-3.5",
     log: "h-5 w-5",
     lg: "h-5 w-5",
   };
 
-  const containerClass = sizeClasses[size];
+  const containerClass = cn(sizeClasses[size], radiusClasses[size]);
   const iconSize = iconSizes[size];
 
   // Show USB icon for serial hosts
@@ -115,7 +129,7 @@ const DistroAvatarInner: React.FC<DistroAvatarProps> = ({
     return (
       <div
         className={cn(
-          "shrink-0 rounded flex items-center justify-center bg-amber-600 text-white dark:bg-amber-400 dark:text-slate-950",
+          "shrink-0 flex items-center justify-center bg-amber-600 text-white dark:bg-amber-400 dark:text-slate-950",
           containerClass,
           className,
         )}
@@ -125,20 +139,38 @@ const DistroAvatarInner: React.FC<DistroAvatarProps> = ({
     );
   }
 
+  const customAppearance = resolveHostIconAppearance(host);
+  const customColor = resolveHostIconColorAppearance(host);
+  if (customAppearance) {
+    return (
+      <div
+        className={cn(
+          "shrink-0 flex items-center justify-center text-white",
+          containerClass,
+          className,
+        )}
+        style={{ backgroundColor: customAppearance.colorHex }}
+      >
+        {renderHostIconGlyph(customAppearance.iconId, iconSize)}
+      </div>
+    );
+  }
+
   if (logo && !errored) {
     return (
       <div
         className={cn(
-          "shrink-0 rounded flex items-center justify-center overflow-hidden",
+          "shrink-0 flex items-center justify-center overflow-hidden",
           containerClass,
-          bg,
+          !customColor && bg,
           className,
         )}
+        style={customColor ? { backgroundColor: customColor.colorHex } : undefined}
       >
         <img
           src={logo}
           alt={distro || host.os}
-          className={cn("object-contain invert brightness-0", iconSize)}
+          className={distro === "h3c" ? "object-contain w-[80%]" : cn("object-contain invert brightness-0", iconSize)}
           onError={() => setErrored(true)}
         />
       </div>
@@ -148,7 +180,7 @@ const DistroAvatarInner: React.FC<DistroAvatarProps> = ({
   return (
     <div
       className={cn(
-        "shrink-0 rounded flex items-center justify-center bg-primary text-primary-foreground",
+        "shrink-0 flex items-center justify-center bg-primary text-primary-foreground",
         containerClass,
         className,
       )}

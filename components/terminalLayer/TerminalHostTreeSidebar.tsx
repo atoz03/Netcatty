@@ -36,11 +36,14 @@ import {
   STORAGE_KEY_TERMINAL_HOST_TREE_WIDTH,
   STORAGE_KEY_VAULT_HOSTS_TREE_EXPANDED,
 } from '../../infrastructure/config/storageKeys';
+import { themeFingerprint } from '../../application/state/useActiveChromeTheme';
+import { buildHostTreeThemeFromTerminalTheme } from '../../infrastructure/theme/terminalAppearanceTokens';
 import { cn } from '../../lib/utils';
+import { matchesHostSearchQuery, matchesSearchQuery } from '../../lib/searchMatcher';
 import type { GroupConfig, GroupNode, Host, TerminalTheme } from '../../types';
 import { HostTreeGroupContextMenuContent, HostTreeHostContextMenuContent } from '../host/HostTreeContextMenus';
 import { HostTreeGroupInlineRenameInput } from '../host/HostTreeGroupInlineRenameInput';
-import { MessageResponse } from '../ai-elements/message';
+import { LazyMessageResponse } from '../ai-elements/LazyMessageResponse';
 import { DistroAvatar } from '../DistroAvatar';
 import { ContextMenu, ContextMenuTrigger } from '../ui/context-menu';
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '../ui/hover-card';
@@ -199,13 +202,8 @@ export function getTerminalHostTreeMeasuredLayoutWidth(
 }
 
 function hostMatchesSearch(host: Host, search: string): boolean {
-  const s = search.toLowerCase();
-  return (
-    host.label.toLowerCase().includes(s)
-    || host.hostname.toLowerCase().includes(s)
-    || host.tags.some((tag) => tag.toLowerCase().includes(s))
-    || (host.notes?.toLowerCase().includes(s) ?? false)
-  );
+  return matchesHostSearchQuery(search, host)
+    || matchesSearchQuery(search, host.username, host.notes);
 }
 
 function filterGroupNode(
@@ -274,10 +272,9 @@ const TerminalHostTreeHostHoverCard: React.FC<{ host: Host }> = ({ host }) => {
           host={host}
           size="sm"
           fallback={host.label.slice(0, 1).toUpperCase()}
-          className="rounded"
         />
-        <div className="flex h-5 min-w-0 items-center">
-          <div className="translate-y-px truncate text-[15px] font-semibold leading-none">{host.label}</div>
+        <div className="flex min-h-6 min-w-0 items-center">
+          <div className="truncate text-[15px] font-semibold leading-5">{host.label}</div>
         </div>
       </div>
       <div className="mt-3 space-y-1.5">
@@ -291,9 +288,9 @@ const TerminalHostTreeHostHoverCard: React.FC<{ host: Host }> = ({ host }) => {
       {notes && (
         <div className="mt-3 border-t border-border/60 pt-3">
           <div className="mb-1 text-muted-foreground">{t('hostDetails.notes.label')}</div>
-          <MessageResponse className="host-tree-notes-scroll max-h-[min(44vh,420px)] overflow-y-auto pr-2 text-xs leading-relaxed text-popover-foreground/90 [&_h1]:text-sm [&_h1]:mt-2 [&_h1]:mb-1 [&_h2]:text-sm [&_h2]:mt-2 [&_h2]:mb-1 [&_h3]:text-xs [&_h3]:mt-1.5 [&_h3]:mb-1 [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1">
+          <LazyMessageResponse className="host-tree-notes-scroll max-h-[min(44vh,420px)] overflow-y-auto pr-2 text-xs leading-relaxed text-popover-foreground/90 [&_h1]:text-sm [&_h1]:mt-2 [&_h1]:mb-1 [&_h2]:text-sm [&_h2]:mt-2 [&_h2]:mb-1 [&_h3]:text-xs [&_h3]:mt-1.5 [&_h3]:mb-1 [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1">
             {notes}
-          </MessageResponse>
+          </LazyMessageResponse>
         </div>
       )}
     </HoverCardContent>
@@ -409,7 +406,7 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
         }}
       >
         <span className="flex h-5 w-4 shrink-0 items-center" />
-        <span className="flex h-5 shrink-0 items-center">
+        <span className="flex h-5 shrink-0 items-center justify-center">
           <DistroAvatar host={row.host} size="xs" fallback={row.host.label.slice(0, 1).toUpperCase()} />
         </span>
         {isInlineEditing && menuActions && inlineEditInitialName ? (
@@ -421,10 +418,15 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
             style={{ color: theme.termFg }}
           />
         ) : (
-          <span className="flex h-5 min-w-0 flex-1 translate-y-px items-center truncate leading-none">{row.host.label}</span>
+          <span
+            className="flex min-w-0 flex-1 items-center truncate leading-5"
+            style={{ color: theme.termFg }}
+          >
+            {row.host.label}
+          </span>
         )}
         {row.host.protocol && row.host.protocol !== 'ssh' && (
-          <span className="flex h-5 shrink-0 translate-y-px items-center text-[10px] leading-none uppercase opacity-70" style={{ color: theme.mutedFg }}>
+          <span className="flex shrink-0 items-center text-[10px] leading-4 uppercase opacity-70" style={{ color: theme.mutedFg }}>
             {row.host.protocol}
           </span>
         )}
@@ -552,7 +554,7 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
           style={{ color: theme.termFg }}
         />
       ) : (
-        <span className="flex h-5 min-w-0 flex-1 translate-y-px items-center truncate leading-none">{node.name}</span>
+        <span className="flex min-w-0 flex-1 items-center truncate leading-5">{node.name}</span>
       )}
     </div>
   );
@@ -636,20 +638,10 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
   const inlineHostEdit = useHostTreeInlineHostEdit();
   const listRef = useRef<FixedSizeVirtualListHandle>(null);
 
-  const theme = useMemo<HostTreeTheme>(() => {
-    const termBg = resolvedPreviewTheme.colors.background;
-    const termFg = resolvedPreviewTheme.colors.foreground;
-    return {
-      termBg,
-      termFg,
-      mutedFg: `color-mix(in srgb, ${termFg} 55%, ${termBg} 45%)`,
-      separator: `color-mix(in srgb, ${termFg} 10%, ${termBg} 90%)`,
-      rowHoverBg: `color-mix(in srgb, ${termFg} 8%, transparent)`,
-      rowActiveBg: `color-mix(in srgb, ${termFg} 14%, transparent)`,
-      rowDropBg: `color-mix(in srgb, ${termFg} 20%, transparent)`,
-      folderFg: `color-mix(in srgb, ${termFg} 75%, ${termBg} 25%)`,
-    };
-  }, [resolvedPreviewTheme]);
+  const theme = useMemo(
+    () => buildHostTreeThemeFromTerminalTheme(resolvedPreviewTheme),
+    [resolvedPreviewTheme],
+  );
 
   const allTags = useMemo(() => {
     const tags = new Set<string>();
@@ -738,8 +730,6 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
   const handleCollapseAll = useCallback(() => {
     collapseAll();
   }, [collapseAll]);
-
-  const canExpandCollapse = allGroupPaths.length > 0 && !searchActive && !tagsActive;
 
   const handleCollapse = useCallback(() => {
     terminalHostTreeStore.setIsOpen(false);
@@ -955,6 +945,7 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
   }, [isVisible, persistSidebarWidth, setSidebarWidth, sidebarWidth]);
 
   const displayWidth = resizePreviewWidth ?? sidebarWidth;
+  const canExpandCollapse = allGroupPaths.length > 0 && !searchActive && !tagsActive;
   const targetLayoutWidth = getTerminalHostTreeLayoutTargetWidth(isVisible, displayWidth);
   const hiddenSurfaceShellWidth = getTerminalHostTreeHiddenSurfaceShellWidth(isOpen, enabled, displayWidth);
   const [shellWidth, setShellWidth] = useState(getTerminalHostTreeInitialLayoutWidth);
@@ -1135,8 +1126,8 @@ export const TerminalHostTreeSidebar = memo(
     && prev.enabled === next.enabled
     && prev.surfaceVisible === next.surfaceVisible
     && prev.customGroups === next.customGroups
-    && prev.resolvedPreviewTheme === next.resolvedPreviewTheme
     && prev.activeHostId === next.activeHostId
+    && themeFingerprint(prev.resolvedPreviewTheme) === themeFingerprint(next.resolvedPreviewTheme)
     && prev.onConnect === next.onConnect
     && prev.onCreateLocalTerminal === next.onCreateLocalTerminal
   ),

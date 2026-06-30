@@ -3,7 +3,22 @@ function createMainWindowApi(ctx) {
   with (ctx) {
     async function createWindow(electronModule, options) {
       const { BrowserWindow, nativeTheme, app, screen, shell } = electronModule;
-      const { preload, devServerUrl, isDev, appIcon, isMac, onRegisterBridge, electronDir } = options;
+      const {
+        preload,
+        devServerUrl,
+        isDev,
+        appIcon,
+        isMac,
+        onRegisterBridge,
+        electronDir,
+        route,
+        registerAsMainWindow = true,
+        persistWindowState = registerAsMainWindow,
+        registerAsAppContentWindow = true,
+      } = options;
+      const rendererHash = typeof route === "string" && route.trim()
+        ? `#/${route.trim().replace(/^#?\/*/, "")}`
+        : "";
     
       // Store app reference for window state persistence
       electronApp = app;
@@ -15,7 +30,7 @@ function createMainWindowApi(ctx) {
       const themeConfig = THEME_COLORS[effectiveTheme] || THEME_COLORS.light;
     
       // Load saved window state
-      const savedState = loadWindowState();
+      const savedState = persistWindowState ? loadWindowState() : null;
       let windowBounds = {
         width: DEFAULT_WINDOW_WIDTH,
         height: DEFAULT_WINDOW_HEIGHT,
@@ -72,10 +87,14 @@ function createMainWindowApi(ctx) {
         },
       });
     
-      if (typeof registerMainWindow === "function") {
-        registerMainWindow(win);
-      } else {
-        mainWindow = win;
+      if (registerAsMainWindow) {
+        if (typeof registerMainWindow === "function") {
+          registerMainWindow(win);
+        } else {
+          mainWindow = win;
+        }
+      } else if (registerAsAppContentWindow && typeof registerAppContentWindow === "function") {
+        registerAppContentWindow(win);
       }
     
       // Clear reference when the main window is destroyed
@@ -88,10 +107,14 @@ function createMainWindowApi(ctx) {
         } catch {
           // ignore
         }
-        if (typeof unregisterMainWindow === "function") {
-          unregisterMainWindow(win);
-        } else if (mainWindow === win) {
-          mainWindow = null;
+        if (registerAsMainWindow) {
+          if (typeof unregisterMainWindow === "function") {
+            unregisterMainWindow(win);
+          } else if (mainWindow === win) {
+            mainWindow = null;
+          }
+        } else if (registerAsAppContentWindow && typeof unregisterAppContentWindow === "function") {
+          unregisterAppContentWindow(win);
         }
       });
     
@@ -178,6 +201,7 @@ function createMainWindowApi(ctx) {
       let lastNormalBounds = null;
       let saveStateTimer = null;
       let thisWindowCloseRequested = false;
+      let dirtyEditorCloseConfirmed = false;
     
       const updateNormalBounds = () => {
         if (!win.isDestroyed() && !win.isMaximized() && !win.isFullScreen()) {
@@ -186,6 +210,7 @@ function createMainWindowApi(ctx) {
       };
     
       const scheduleSaveState = () => {
+        if (!persistWindowState) return;
         if (saveStateTimer) clearTimeout(saveStateTimer);
         saveStateTimer = setTimeout(() => {
           const state = getWindowBoundsState(win, lastNormalBounds);
@@ -210,16 +235,57 @@ function createMainWindowApi(ctx) {
         scheduleSaveState();
       });
     
+      const queryDirtyEditorsBeforeClose = (event, { markCloseRequested = false } = {}) => {
+        event.preventDefault();
+        if (markCloseRequested) {
+          thisWindowCloseRequested = true;
+        }
+        const dirtyEditorQuery = typeof queryDirtyEditors === "function"
+          ? queryDirtyEditors(win.webContents, 5000, { ipcMain: electronModule.ipcMain })
+          : false;
+        Promise.resolve(dirtyEditorQuery)
+          .then((hasDirty) => {
+            if (hasDirty) {
+              thisWindowCloseRequested = false;
+              return;
+            }
+            dirtyEditorCloseConfirmed = true;
+            try {
+              win.close();
+            } catch {
+              // ignore
+            }
+          })
+          .catch(() => {
+            dirtyEditorCloseConfirmed = true;
+            try {
+              win.close();
+            } catch {
+              // ignore
+            }
+          });
+      };
+
       // Save state when window is about to close
       win.on("close", (event) => {
+        if (!registerAsMainWindow && registerAsAppContentWindow && !isQuitting && !dirtyEditorCloseConfirmed) {
+          queryDirtyEditorsBeforeClose(event, { markCloseRequested: true });
+          return;
+        }
+
         // Check if close-to-tray is enabled
         const trackedMainWindowCount = typeof getMainWindowCount === "function" ? getMainWindowCount() : 1;
-        if (trackedMainWindowCount <= 1 && !isQuitting && getGlobalShortcutBridge().handleWindowClose(event, win)) {
+        if (registerAsMainWindow && trackedMainWindowCount <= 1 && !isQuitting && getGlobalShortcutBridge().handleWindowClose(event, win)) {
           // Window was hidden to tray - save state before returning
           if (saveStateTimer) clearTimeout(saveStateTimer);
-          const state = getWindowBoundsState(win, lastNormalBounds);
+          const state = persistWindowState ? getWindowBoundsState(win, lastNormalBounds) : null;
           if (state) saveWindowStateSync(state);
           hideSettingsWindow();
+          return;
+        }
+
+        if (registerAsMainWindow && registerAsAppContentWindow && !isQuitting && !dirtyEditorCloseConfirmed) {
+          queryDirtyEditorsBeforeClose(event);
           return;
         }
     
@@ -228,7 +294,7 @@ function createMainWindowApi(ctx) {
         }
         thisWindowCloseRequested = true;
         if (saveStateTimer) clearTimeout(saveStateTimer);
-        const state = getWindowBoundsState(win, lastNormalBounds);
+        const state = persistWindowState ? getWindowBoundsState(win, lastNormalBounds) : null;
         if (pendingWindowStateWrite) {
           event.preventDefault();
           if (state) queuedWindowState = state;
@@ -237,9 +303,9 @@ function createMainWindowApi(ctx) {
               // ignore async write errors before closing
             })
             .finally(() => {
-              const finalState = getWindowBoundsState(win, lastNormalBounds);
+              const finalState = persistWindowState ? getWindowBoundsState(win, lastNormalBounds) : null;
               if (finalState) saveWindowStateSync(finalState);
-              closeSettingsWindow();
+              if (registerAsMainWindow) closeSettingsWindow();
               try {
                 win.close();
               } catch {
@@ -249,7 +315,7 @@ function createMainWindowApi(ctx) {
           return;
         }
         if (state) saveWindowStateSync(state);
-        closeSettingsWindow();
+        if (registerAsMainWindow) closeSettingsWindow();
       });
     
       const safeSend = (channel, ...args) => {
@@ -271,6 +337,10 @@ function createMainWindowApi(ctx) {
         safeSend("netcatty:window:fullscreen-changed", false);
         updateNormalBounds();
         scheduleSaveState();
+      });
+
+      win.on("show", () => {
+        safeSend("netcatty:window:shown");
       });
     
       // Ensure native background matches frontend background, even before first paint.
@@ -295,7 +365,8 @@ function createMainWindowApi(ctx) {
           // ignore
         }
         try {
-          if (appIcon && childWindow.setIcon) childWindow.setIcon(appIcon);
+          const iconPath = resolveLiveAppIcon(appIcon);
+          if (iconPath && childWindow.setIcon) childWindow.setIcon(iconPath);
         } catch {
           // ignore
         }
@@ -309,7 +380,11 @@ function createMainWindowApi(ctx) {
       });
     
       win.webContents.setWindowOpenHandler(
-        createAppWindowOpenHandler(shell, { backgroundColor, appIcon })
+        createAppWindowOpenHandler(shell, {
+          backgroundColor,
+          appIcon,
+          getAppIcon: () => resolveLiveAppIcon(appIcon),
+        })
       );
     
       // Register window control handlers
@@ -321,7 +396,7 @@ function createMainWindowApi(ctx) {
     
       if (isDev) {
         try {
-          await win.loadURL(getDevRendererBaseUrl(devServerUrl));
+          await win.loadURL(`${getDevRendererBaseUrl(devServerUrl)}${rendererHash}`);
           win.webContents.openDevTools({ mode: "detach" });
           return win;
         } catch (e) {
@@ -330,7 +405,7 @@ function createMainWindowApi(ctx) {
       }
     
       // Production mode - load via custom protocol.
-      await win.loadURL("app://netcatty/index.html");
+      await win.loadURL(`app://netcatty/index.html${rendererHash}`);
       return win;
     }
 

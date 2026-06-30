@@ -2,7 +2,7 @@
  * Terminal Toolbar
  * Displays high-frequency terminal actions and close button in the terminal status bar.
  */
-import { Check, ChevronRight, Download, FolderInput, History, Languages, MoreVertical, X, Zap, Palette, Search, TextCursorInput, Upload } from 'lucide-react';
+import { Check, ChevronRight, Download, FileText, FolderInput, FolderSync, History, Languages, MoreVertical, X, Zap, Palette, Search, TextCursorInput, Upload, Circle } from 'lucide-react';
 import React, { useState } from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { Host, Snippet } from '../../types';
@@ -27,18 +27,26 @@ export interface TerminalToolbarProps {
     onOpenScripts: () => void;
     onOpenHistory?: () => void;
     onOpenTheme: () => void;
+    onConfigureOsc7?: () => void;
     onUpdateHost?: (host: Host) => void;
     showClose?: boolean;
     onClose?: () => void;
     // Search functionality
     isSearchOpen?: boolean;
     onToggleSearch?: () => void;
+    // Manual session log
+    showLogButton?: boolean;
+    onToggleSessionLog?: () => void;
+    isSessionLogging?: boolean;
+    isSessionLogDisabled?: boolean;
     // Compose bar
     isComposeBarOpen?: boolean;
     onToggleComposeBar?: () => void;
     // Terminal encoding
     terminalEncoding?: 'utf-8' | 'gb18030';
     onSetTerminalEncoding?: (encoding: 'utf-8' | 'gb18030') => void;
+    recordingIndicator?: React.ReactNode;
+    onStartRecording?: () => void;
 }
 
 export const TerminalToolbar: React.FC<TerminalToolbarProps> = ({
@@ -54,15 +62,22 @@ export const TerminalToolbar: React.FC<TerminalToolbarProps> = ({
     onOpenScripts,
     onOpenHistory,
     onOpenTheme,
+    onConfigureOsc7,
     onUpdateHost,
     showClose,
     onClose,
     isSearchOpen,
     onToggleSearch,
+    showLogButton = false,
+    onToggleSessionLog,
+    isSessionLogging = false,
+    isSessionLogDisabled = false,
     isComposeBarOpen,
     onToggleComposeBar,
     terminalEncoding,
     onSetTerminalEncoding,
+    recordingIndicator,
+    onStartRecording,
 }) => {
     const { t } = useI18n();
     const [highlightPopoverOpen, setHighlightPopoverOpen] = useState(false);
@@ -240,6 +255,7 @@ export const TerminalToolbar: React.FC<TerminalToolbarProps> = ({
             <Tooltip>
                 <TooltipTrigger asChild>
                     <Button
+                        type="button"
                         variant="secondary"
                         size="icon"
                         className={buttonBase}
@@ -257,6 +273,7 @@ export const TerminalToolbar: React.FC<TerminalToolbarProps> = ({
             <Tooltip>
                 <TooltipTrigger asChild>
                     <Button
+                        type="button"
                         variant="secondary"
                         size="icon"
                         className={buttonBase}
@@ -271,10 +288,49 @@ export const TerminalToolbar: React.FC<TerminalToolbarProps> = ({
                 <TooltipContent>{t("terminal.toolbar.searchTerminal")}</TooltipContent>
             </Tooltip>
 
+            {showLogButton && (
+                <Tooltip>
+                    <TooltipTrigger asChild>
+                        <Button
+                            type="button"
+                            variant="secondary"
+                            size="icon"
+                            className={cn(buttonBase, isSessionLogDisabled && "opacity-50")}
+                            aria-label={isSessionLogging ? t("terminal.toolbar.stopSessionLog") : t("terminal.toolbar.startSessionLog")}
+                            aria-pressed={isSessionLogging}
+                            onClick={onToggleSessionLog}
+                            disabled={isSessionLogDisabled || !onToggleSessionLog}
+                            style={isSessionLogging ? activeButtonStyle : undefined}
+                        >
+                            <FileText size={12} />
+                        </Button>
+                    </TooltipTrigger>
+                    <TooltipContent>
+                        {isSessionLogging ? t("terminal.toolbar.stopSessionLog") : t("terminal.toolbar.startSessionLog")}
+                    </TooltipContent>
+                </Tooltip>
+            )}
+
+            <Tooltip>
+                <TooltipTrigger asChild>
+                    <Button
+                        type="button"
+                        variant="secondary"
+                        size="icon"
+                        className={buttonBase}
+                        aria-label={t("terminal.toolbar.scripts")}
+                        onClick={onOpenScripts}
+                    >
+                        <Zap size={12} />
+                    </Button>
+                </TooltipTrigger>
+                <TooltipContent>{t("terminal.toolbar.scripts")}</TooltipContent>
+            </Tooltip>
+
             {/* Overflow menu — keeps lower-frequency opener-style actions
-                (Encoding / Scripts / Terminal Settings) behind a single
+                (Encoding / Terminal Settings) behind a single
                 trigger so the toolbar doesn't feel crowded.
-                Highlight / Compose / Search stay visible because they
+                Highlight / Compose / Search / Scripts stay visible because they
                 are toggled mid-session, not just once. */}
             <Popover
                 open={overflowOpen}
@@ -311,12 +367,6 @@ export const TerminalToolbar: React.FC<TerminalToolbarProps> = ({
                         }
                     }}
                 >
-                    <PopoverClose asChild>
-                        <button type="button" className={menuItemClass} onClick={onOpenScripts}>
-                            <Zap size={12} className="shrink-0" />
-                            <span className="flex-1 text-left truncate">{t("terminal.toolbar.scripts")}</span>
-                        </button>
-                    </PopoverClose>
                     {historySupported && (
                         <PopoverClose asChild>
                             <button
@@ -332,12 +382,35 @@ export const TerminalToolbar: React.FC<TerminalToolbarProps> = ({
                             </button>
                         </PopoverClose>
                     )}
+                    {onConfigureOsc7 && !hidesSftp && (
+                        <PopoverClose asChild>
+                            <button
+                                type="button"
+                                className={menuItemClass}
+                                disabled={status !== 'connected'}
+                                onClick={onConfigureOsc7}
+                            >
+                                <FolderSync size={12} className="shrink-0" />
+                                <span className="flex-1 text-left truncate">
+                                    {status === 'connected' ? t("terminal.toolbar.configureOsc7") : t("terminal.toolbar.availableAfterConnect")}
+                                </span>
+                            </button>
+                        </PopoverClose>
+                    )}
                     <PopoverClose asChild>
                         <button type="button" className={menuItemClass} onClick={onOpenTheme}>
                             <Palette size={12} className="shrink-0" />
                             <span className="flex-1 text-left truncate">{t("terminal.toolbar.terminalSettings")}</span>
                         </button>
                     </PopoverClose>
+                    {onStartRecording && status === 'connected' && !recordingIndicator ? (
+                        <PopoverClose asChild>
+                            <button type="button" className={menuItemClass} onClick={onStartRecording}>
+                                <Circle size={12} className="shrink-0 text-red-500" />
+                                <span className="flex-1 text-left truncate">{t('scripts.recording.start')}</span>
+                            </button>
+                        </PopoverClose>
+                    ) : null}
                     {encodingSwitchSupported && onSetTerminalEncoding && (
                         <Popover open={encodingSubmenuOpen} onOpenChange={setEncodingSubmenuOpen}>
                             <PopoverTrigger asChild>
@@ -391,6 +464,8 @@ export const TerminalToolbar: React.FC<TerminalToolbarProps> = ({
                     )}
                 </PopoverContent>
             </Popover>
+
+            {recordingIndicator}
 
             {showClose && onClose && (
                 <Tooltip>

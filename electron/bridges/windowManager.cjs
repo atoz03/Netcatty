@@ -6,6 +6,8 @@
 const path = require("node:path");
 const fs = require("node:fs");
 
+const { safeSend } = require("./ipcUtils.cjs");
+
 const V8_CACHE_OPTIONS = "bypassHeatCheck";
 
 function getGlobalShortcutBridge() {
@@ -29,6 +31,7 @@ const THEME_COLORS = {
 // State
 let mainWindow = null;
 const mainWindows = new Set();
+const appContentWindows = new Set();
 let lastFocusedMainWindow = null;
 let settingsWindow = null;
 let currentTheme = "light";
@@ -124,8 +127,8 @@ function setQuittingForUpdate(nextValue) {
 
 /**
  * True when quitAndInstall() initiated the current quit. The before-quit guard
- * checks this to skip the dirty-editor round-trip and let the app exit so the
- * updater's installer can run.
+ * still performs the dirty-editor round-trip; if the user cancels to save, it
+ * uses this state to roll back the update quit flags.
  */
 function isQuittingForUpdate() {
   return quittingForUpdate;
@@ -247,6 +250,7 @@ function getWindowBoundsState(win, overrideBounds) {
 const MENU_LABELS = {
   en: { edit: "Edit", view: "View", window: "Window", reload: "Reload", closeWindow: "Close Window" },
   "zh-CN": { edit: "编辑", view: "视图", window: "窗口", reload: "重新加载", closeWindow: "关闭窗口" },
+  "zh-TW": { edit: "編輯", view: "檢視", window: "視窗", reload: "重新載入", closeWindow: "關閉視窗" },
 };
 
 function tMenu(language, key) {
@@ -286,9 +290,22 @@ function pruneMainWindows() {
   }
 }
 
+function pruneAppContentWindows() {
+  for (const win of Array.from(appContentWindows)) {
+    if (!win || win.isDestroyed?.()) {
+      appContentWindows.delete(win);
+    }
+  }
+}
+
 function getMainWindowList() {
   pruneMainWindows();
   return Array.from(mainWindows).filter((win) => isWindowUsable(win));
+}
+
+function getAppContentWindowList() {
+  pruneAppContentWindows();
+  return Array.from(appContentWindows).filter((win) => isWindowUsable(win));
 }
 
 function rememberMainWindow(win) {
@@ -297,8 +314,19 @@ function rememberMainWindow(win) {
   mainWindow = win;
 }
 
+function registerAppContentWindow(win) {
+  if (!win || win.isDestroyed?.()) return;
+  appContentWindows.add(win);
+}
+
+function unregisterAppContentWindow(win) {
+  if (!win) return;
+  appContentWindows.delete(win);
+}
+
 function registerMainWindow(win) {
   if (!win || win.isDestroyed?.()) return;
+  registerAppContentWindow(win);
   mainWindows.add(win);
   rememberMainWindow(win);
   try {
@@ -311,6 +339,7 @@ function registerMainWindow(win) {
 function unregisterMainWindow(win) {
   if (!win) return;
   mainWindows.delete(win);
+  unregisterAppContentWindow(win);
   if (lastFocusedMainWindow === win) lastFocusedMainWindow = null;
   if (mainWindow === win) mainWindow = null;
   const fallback = getMainWindowList().at(-1) || null;
@@ -770,10 +799,18 @@ function waitForRendererReady(win, { timeoutMs = 15000 } = {}) {
  * existing error path instead.
  */
 async function sendWhenRendererReady(win, channel, payload, options = {}) {
-  const { timeoutMs = 8000, waitForReady = waitForRendererReady } = options;
+  const {
+    timeoutMs = 8000,
+    waitForReady = waitForRendererReady,
+    shouldSend,
+    cancelReason = "cancelled",
+  } = options;
   try {
     await waitForReady(win, { timeoutMs });
   } catch (err) {
+    if (typeof shouldSend === "function" && shouldSend() === false) {
+      return { success: false, reason: cancelReason };
+    }
     return {
       success: false,
       error: "New window did not become ready in time",
@@ -783,8 +820,25 @@ async function sendWhenRendererReady(win, channel, payload, options = {}) {
   if (win?.isDestroyed?.() || win?.webContents?.isDestroyed?.()) {
     return { success: false, error: "Window closed before message could be delivered" };
   }
+  if (typeof shouldSend === "function" && shouldSend() === false) {
+    return { success: false, reason: cancelReason };
+  }
   win.webContents.send(channel, payload);
   return { success: true };
+}
+
+function resolveLiveAppIcon(fallback = null) {
+  try {
+    const appIconManager = require("./appIconManager.cjs");
+    const appPath = electronApp?.getAppPath?.();
+    if (appPath) {
+      const iconPath = appIconManager.getAppIconPath(appPath);
+      if (iconPath) return iconPath;
+    }
+  } catch {
+    // ignore
+  }
+  return fallback;
 }
 
 /**
@@ -830,13 +884,17 @@ const mainWindowApi = createMainWindowApi({
   createExternalOnlyWindowOpenHandler,
   createAppWindowOpenHandler,
   attachOAuthLoadingOverlay,
+  queryDirtyEditors: (...args) => require("./dirtyEditorGuard.cjs").queryDirtyEditors(...args),
   registerWindowHandlers,
   requestWindowCommandClose,
   shouldCloseWindowFromInput,
   registerMainWindow,
   unregisterMainWindow,
+  registerAppContentWindow,
+  unregisterAppContentWindow,
   getMainWindowCount,
   applyWindowOpacityToWindow,
+  resolveLiveAppIcon,
   closeSettingsWindow: (...args) => closeSettingsWindow(...args),
   hideSettingsWindow: (...args) => hideSettingsWindow(...args),
 });
@@ -879,6 +937,7 @@ const settingsWindowApi = createSettingsWindowApi({
   resolveFrontendBackgroundColor,
   createAppWindowOpenHandler,
   createExternalOnlyWindowOpenHandler,
+  resolveLiveAppIcon,
   getDevRendererBaseUrl,
   applyWindowOpacityToWindow,
 });
@@ -1017,6 +1076,18 @@ function registerWindowHandlers(ipcMain, nativeTheme) {
   ipcMain.handle("netcatty:setWindowOpacity", (_event, opacity) => {
     applyWindowOpacity(opacity);
     return true;
+  });
+
+  ipcMain.handle("netcatty:setAppIconVariant", (_event, variant) => {
+    const { app, BrowserWindow, nativeImage } = require("electron");
+    const appIconManager = require("./appIconManager.cjs");
+    return appIconManager.applyAppIconVariant(variant, {
+      app,
+      BrowserWindow,
+      nativeImage,
+      appPath: app.getAppPath(),
+      isMac: process.platform === "darwin",
+    });
   });
 
   ipcMain.handle("netcatty:setLanguage", (_event, language) => {
@@ -1185,6 +1256,32 @@ function getSettingsWindow() {
   return settingsWindow;
 }
 
+/**
+ * Show the main window and restore reliable keyboard/caret routing (#760, #1722).
+ * Global hotkeys and tray entry points invoke this from non-foreground contexts
+ * where bare BrowserWindow.focus() is silently rejected on Windows.
+ */
+function showAndFocusMainWindow(win) {
+  if (!win || win.isDestroyed?.()) return false;
+  if (win.isMinimized?.()) {
+    try {
+      win.restore();
+    } catch {
+      // ignore
+    }
+  }
+  return restoreWindowInputFocus(win, { show: true });
+}
+
+/**
+ * Tell the renderer to dismiss transient overlays before the native hide (#1722).
+ * Must run before BrowserWindow.hide(), not from Electron's post-hide event.
+ */
+function notifyWindowWillHide(win) {
+  if (!win || win.isDestroyed?.()) return;
+  safeSend(win.webContents, "netcatty:window:will-hide");
+}
+
 module.exports = {
   createWindow,
   openSettingsWindow,
@@ -1195,14 +1292,19 @@ module.exports = {
   buildAppMenu,
   getMainWindow,
   getMainWindows: getMainWindowList,
+  getAppContentWindows: getAppContentWindowList,
   getMainWindowCount,
   isMainWindow,
   registerMainWindow,
   unregisterMainWindow,
+  registerAppContentWindow,
+  unregisterAppContentWindow,
   getSettingsWindow,
   isWindowUsable,
   registerWindowHandlers,
   restoreWindowInputFocus,
+  showAndFocusMainWindow,
+  notifyWindowWillHide,
   requestWindowCommandClose,
   shouldCloseWindowFromInput,
   WINDOW_COMMAND_CLOSE_CHANNEL,

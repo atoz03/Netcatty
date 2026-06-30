@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/exhaustive-deps */
-import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 
 import { terminalLayoutSuppressStore } from '../../application/state/terminalLayoutSuppressStore';
 import { AI_PANEL_FORCE_HIDE_SHELL } from '../ai/aiPanelDiagnostics';
@@ -8,7 +8,7 @@ import { getTerminalSidePanelShellWidth } from './TerminalLayerSidePanelSection'
 type TerminalLayerEffectsContext = Record<string, any>;
 
 export function useTerminalLayerEffects(ctx: TerminalLayerEffectsContext) {
-  const { activeSidePanelTab, activeTabId, activeTabIdRef, activeTopTabsThemeId, activeWorkspace, activityTrackedSessions, appliedPreviewSessionRef, applyTerminalPreviewVars, applyTopTabsPreviewVars, cancelAnimationFrame, ChunkedEscapeFilter, clearTerminalPreviewVars, clearTimeout, clearTopTabsPreviewVars, document, dropHint, filterTabsMap, focusedSessionId, followAppTerminalTheme, getSessionActivityIdsToClear, handleToggleAiFromTopBar, handleToggleScriptsSidePanel, handleToggleSidePanel, hasNotifiableTerminalOutput, isComposeBarOpen, isFocusMode, isTerminalLayerVisible, lastSidePanelTabRef, Map, onSessionData, onSplitSessionRef, onToggleBroadcastRef, onToggleWorkspaceViewModeRef, prevFocusedSessionIdRef, previewTargetSessionId, refocusActiveTerminalSession, requestAnimationFrame, ResizeObserver, sessionActivityStore, sessions, Set, setAiMountedTabIds, setDropHint, setScriptsMountedTabIds, setSystemMountedTabIds, setSftpHostForTab, setSftpInitialLocationForTab, setSftpPendingUploadsForTab, setSidePanelOpenTabs, setThemeMountedTabIds, setThemePreview, setTimeout, setupMcpApprovalBridge, setWorkspaceArea, sidePanelPosition, sidePanelWidth, sftpActiveHost, sftpHostForTab, shouldMarkSessionActivity, sidePanelOpenTabs, splitHorizontalHandlersRef, splitVerticalHandlersRef, terminalRendererCwdBySessionRef, themeCommitTimerRef, themePreview, toggleScriptsSidePanelRef, toggleSidePanelRef, validAIScopeTargetIds, validSessionActivityIds, visibleFocusedThemeId, window, workspaceBroadcastHandlersRef, workspaceFocusHandlersRef, workspaceInnerRef, workspaces } = ctx;
+  const { activeSidePanelTab, activeTabId, activeTabIdRef, activeWorkspace, activityTrackedSessions, cancelAnimationFrame, ChunkedEscapeFilter, clearTimeout, clearTopTabsPreviewVars, document, dropHint, filterTabsMap, focusedSessionId, getSessionActivityIdsToClear, handleToggleAiFromTopBar, handleToggleScriptsSidePanel, handleToggleSidePanel, hasNotifiableTerminalOutput, isComposeBarOpen, isFocusMode, isTerminalLayerVisible, lastSidePanelTabRef, Map, onSessionData, onSplitSessionRef, onToggleBroadcastRef, onToggleWorkspaceViewModeRef, prevFocusedSessionIdRef, refocusActiveTerminalSession, requestAnimationFrame, ResizeObserver, sessionActivityStore, sessions, Set, setAiMountedTabIds, setDropHint, setNotesMountedTabIds, setScriptsMountedTabIds, setSystemMountedTabIds, setSftpHostForTab, setSftpInitialLocationForTab, setSftpPendingUploadsForTab, setSidePanelOpenTabs, setThemeMountedTabIds, setTimeout, setupMcpApprovalBridge, setWorkspaceArea, sidePanelPosition, sidePanelWidth, sftpActiveHost, sftpHostForTab, shouldMarkSessionActivity, sidePanelOpenTabs, splitHorizontalHandlersRef, splitVerticalHandlersRef, terminalRendererCwdBySessionRef, toggleScriptsSidePanelRef, toggleSidePanelRef, validAIScopeTargetIds, validSessionActivityIds, window, workspaceBroadcastHandlersRef, workspaceFocusHandlersRef, workspaceInnerRef, workspaces } = ctx;
 
   const activeWorkspaceId = activeWorkspace?.id;
   const activeWorkspaceViewMode = activeWorkspace?.viewMode;
@@ -24,6 +24,16 @@ export function useTerminalLayerEffects(ctx: TerminalLayerEffectsContext) {
 
   const activityEscapeFiltersRef = useRef<any>(new Map());
 
+  const remeasureScheduledRef = useRef(false);
+  const layoutEffectSnapshotRef = useRef({
+    workspaceId: undefined as string | undefined,
+    viewMode: undefined as string | undefined,
+    composeBarOpen: false,
+    shellWidth: 0,
+    width: 0,
+    height: 0,
+  });
+
   const remeasureWorkspaceArea = useCallback(() => {
     const el = workspaceInnerRef.current;
     if (!el) return;
@@ -38,12 +48,25 @@ export function useTerminalLayerEffects(ctx: TerminalLayerEffectsContext) {
   }, [setWorkspaceArea, workspaceInnerRef]);
 
   const scheduleWorkspaceAreaRemeasure = useCallback(() => {
+    if (remeasureScheduledRef.current) return;
+    remeasureScheduledRef.current = true;
     remeasureWorkspaceArea();
     requestAnimationFrame(() => {
       remeasureWorkspaceArea();
-      requestAnimationFrame(remeasureWorkspaceArea);
+      requestAnimationFrame(() => {
+        remeasureWorkspaceArea();
+        remeasureScheduledRef.current = false;
+      });
     });
   }, [remeasureWorkspaceArea, requestAnimationFrame]);
+
+  useEffect(() => {
+    if (!isTerminalLayerVisible) {
+      if (typeof clearTopTabsPreviewVars === 'function') {
+        clearTopTabsPreviewVars();
+      }
+    }
+  }, [clearTopTabsPreviewVars, isTerminalLayerVisible]);
 
   useEffect(() => {
       const liveSessionIds = new Set(sessions.map((session) => session.id));
@@ -122,6 +145,7 @@ export function useTerminalLayerEffects(ctx: TerminalLayerEffectsContext) {
       setSftpInitialLocationForTab(prev => filterTabsMap(prev, validAIScopeTargetIds));
       setSftpPendingUploadsForTab(prev => filterTabsMap(prev, validAIScopeTargetIds));
       setAiMountedTabIds((prev) => prev.filter((tabId) => validAIScopeTargetIds.has(tabId)));
+      setNotesMountedTabIds((prev) => prev.filter((tabId) => validAIScopeTargetIds.has(tabId)));
       setScriptsMountedTabIds((prev) => prev.filter((tabId) => validAIScopeTargetIds.has(tabId)));
       setSystemMountedTabIds((prev) => prev.filter((tabId) => validAIScopeTargetIds.has(tabId)));
       setThemeMountedTabIds((prev) => prev.filter((tabId) => validAIScopeTargetIds.has(tabId)));
@@ -157,6 +181,31 @@ export function useTerminalLayerEffects(ctx: TerminalLayerEffectsContext) {
   // because it updates continuously during drag.
   useEffect(() => {
       if (!isTerminalLayerVisible) return;
+      const el = workspaceInnerRef.current;
+      const width = el?.clientWidth ?? 0;
+      const height = el?.clientHeight ?? 0;
+      const prev = layoutEffectSnapshotRef.current;
+      const dimensionsUnchanged = width > 0
+        && height > 0
+        && prev.width === width
+        && prev.height === height
+        && prev.shellWidth === sidePanelShellWidth;
+      if (
+        dimensionsUnchanged
+        && prev.workspaceId === activeWorkspaceId
+        && prev.viewMode === activeWorkspaceViewMode
+        && prev.composeBarOpen === isComposeBarOpen
+      ) {
+        return;
+      }
+      layoutEffectSnapshotRef.current = {
+        workspaceId: activeWorkspaceId,
+        viewMode: activeWorkspaceViewMode,
+        composeBarOpen: isComposeBarOpen,
+        shellWidth: sidePanelShellWidth,
+        width,
+        height,
+      };
       scheduleWorkspaceAreaRemeasure();
     }, [
       activeWorkspaceId,
@@ -235,11 +284,14 @@ export function useTerminalLayerEffects(ctx: TerminalLayerEffectsContext) {
           activityEscapeFiltersRef.current.set(session.id, filter);
         }
         return onSessionData(session.id, (chunk) => {
-          if (!hasNotifiableTerminalOutput(filter, chunk)) return;
-
+          const hasNotifiableOutput = hasNotifiableTerminalOutput(filter, chunk);
           if (!shouldMarkSessionActivity(activeTabIdRef.current, session)) {
             return;
           }
+          if (sessionActivityStore.getSnapshot()[session.id]) {
+            return;
+          }
+          if (!hasNotifiableOutput) return;
   
           sessionActivityStore.setTabActive(session.id, true);
         });
@@ -251,93 +303,7 @@ export function useTerminalLayerEffects(ctx: TerminalLayerEffectsContext) {
         }
       };
     }, [activityTrackedSessions, onSessionData]);
-  
-  useEffect(() => {
-      return () => {
-        if (themeCommitTimerRef.current) {
-          clearTimeout(themeCommitTimerRef.current);
-        }
-        clearTerminalPreviewVars(appliedPreviewSessionRef.current);
-        clearTopTabsPreviewVars();
-      };
-    }, []);
-  
-  useEffect(() => {
-      const appliedSessionId = appliedPreviewSessionRef.current;
-      if (
-        appliedSessionId &&
-        (appliedSessionId !== themePreview.targetSessionId || !themePreview.themeId)
-      ) {
-        clearTerminalPreviewVars(appliedSessionId);
-        appliedPreviewSessionRef.current = null;
-      }
-  
-      if (themePreview.targetSessionId && themePreview.themeId) {
-        applyTerminalPreviewVars(themePreview.targetSessionId, themePreview.themeId);
-        appliedPreviewSessionRef.current = themePreview.targetSessionId;
-      }
-    }, [applyTerminalPreviewVars, themePreview]);
-  
-  useLayoutEffect(() => {
-      if (!isTerminalLayerVisible) {
-        clearTopTabsPreviewVars();
-        return;
-      }
-      if (activeTopTabsThemeId) {
-        applyTopTabsPreviewVars(activeTopTabsThemeId);
-        return;
-      }
-      if (typeof document !== 'undefined' && document.documentElement.dataset.activeChromeTheme) return;
-      clearTopTabsPreviewVars();
-    }, [activeTopTabsThemeId, applyTopTabsPreviewVars, isTerminalLayerVisible]);
-  
-  useEffect(() => {
-      if (!followAppTerminalTheme) return;
-      if (themeCommitTimerRef.current) {
-        clearTimeout(themeCommitTimerRef.current);
-        themeCommitTimerRef.current = null;
-      }
-      const appliedSessionId = appliedPreviewSessionRef.current;
-      if (appliedSessionId) {
-        clearTerminalPreviewVars(appliedSessionId);
-        appliedPreviewSessionRef.current = null;
-      }
-      clearTopTabsPreviewVars();
-      if (themePreview.targetSessionId || themePreview.themeId) {
-        setThemePreview({ targetSessionId: null, themeId: null });
-      }
-    }, [followAppTerminalTheme, themePreview.targetSessionId, themePreview.themeId]);
-  
-  useEffect(() => {
-      const panelOpen = activeSidePanelTab === 'theme' && !!previewTargetSessionId;
-      const shouldKeepPreview =
-        panelOpen &&
-        themePreview.targetSessionId === previewTargetSessionId &&
-        !!themePreview.targetSessionId &&
-        !!themePreview.themeId;
-  
-      if (shouldKeepPreview) return;
-  
-      const appliedSessionId = appliedPreviewSessionRef.current;
-      if (appliedSessionId) {
-        clearTerminalPreviewVars(appliedSessionId);
-        appliedPreviewSessionRef.current = null;
-      }
-      if (themePreview.targetSessionId || themePreview.themeId) {
-        setThemePreview({ targetSessionId: null, themeId: null });
-      }
-    }, [activeSidePanelTab, previewTargetSessionId, themePreview.targetSessionId, themePreview.themeId]);
-  
-  useEffect(() => {
-      if (
-        themePreview.targetSessionId === previewTargetSessionId &&
-        themePreview.themeId &&
-        themePreview.themeId === visibleFocusedThemeId
-      ) {
-        setThemePreview({ targetSessionId: null, themeId: null });
-      }
-    }, [previewTargetSessionId, themePreview, visibleFocusedThemeId]);
-  
+
   // Keep MCP/SDK-agent approval IPC listener alive for the entire terminal lifecycle.
     // Must live here (TerminalLayer), not inside the AI panel subtree, so closing
     // or hiding the panel never tears down approval handling mid-execution.

@@ -43,6 +43,7 @@ interface SystemManagerSidePanelProps {
     startupCommand: string,
     options?: { mode?: 'tab' | 'verticalSplit' },
   ) => boolean | void;
+  onRequestTerminalFocus?: () => void;
 }
 
 export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
@@ -53,6 +54,7 @@ export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
   terminalSettings,
   snippets,
   onOpenManagedTerminal,
+  onRequestTerminalFocus,
 }: SystemManagerSidePanelProps) {
   const { t } = useI18n();
   const backend = useSystemManagerBackend();
@@ -236,7 +238,7 @@ export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
               backend={backend}
               refreshIntervalSec={terminalSettings.systemManagerTmuxRefreshInterval}
               snippets={snippets}
-              onOpenManagedTerminal={onOpenManagedTerminal}
+              onRequestTerminalFocus={onRequestTerminalFocus}
             />
           </div>
         ) : null}
@@ -258,6 +260,7 @@ export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
               backend={backend}
               refreshIntervalSec={terminalSettings.systemManagerTmuxRefreshInterval}
               snippets={snippets}
+              onOpenManagedTerminal={onOpenManagedTerminal}
             />
           </div>
         ) : null}

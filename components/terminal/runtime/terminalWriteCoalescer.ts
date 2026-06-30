@@ -4,6 +4,7 @@ import {
   MAX_PENDING_WRITE_COALESCE_BYTES,
   MAX_PENDING_WRITE_COALESCE_BYTES_FLOOD,
   MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES,
+  MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES,
 } from "./terminalFlowConstants";
 import { createWriteCoalescer, type WriteCoalescer } from "./writeCoalescer.ts";
 
@@ -62,12 +63,19 @@ const splitIngressBytes = (
 const isPlainTerminalOutput = (data: string): boolean =>
   !data.includes("\x1b") && !data.includes("\x9b");
 
+const hasLineBreak = (data: string): boolean =>
+  data.includes("\n") || data.includes("\r");
+
 const resolveTerminalWriteBatchBytes = (
   data: string,
   maxPendingBytes: number,
 ): number => (
-  data.length > MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES && isPlainTerminalOutput(data)
-    ? MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES
+  data.length > MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES
+    && isPlainTerminalOutput(data)
+    && !hasLineBreak(data)
+    ? MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES
+    : data.length > MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES && isPlainTerminalOutput(data)
+      ? MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES
     : maxPendingBytes
 );
 

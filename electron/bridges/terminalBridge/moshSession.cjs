@@ -442,6 +442,7 @@ function createMoshSessionApi(ctx) {
       const {
         bufferData,
         flush,
+        flushPaced,
         discard,
       } = createPtyOutputBuffer((data) => {
         const contents = electronModule.webContents.fromId(session.webContentsId);
@@ -452,7 +453,7 @@ function createMoshSessionApi(ctx) {
       }, {
         shouldAcceptOutput: () => shouldAcceptSessionOutput(session),
       });
-      session.flushPendingData = flush;
+      session.flushPendingData = flushPaced;
       session.discardPendingData = discard;
     
       const sniffer = moshHandshake.createMoshConnectSniffer();

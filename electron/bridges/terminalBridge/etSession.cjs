@@ -826,6 +826,7 @@ main();
         const {
           bufferData: bufferEtData,
           flush: flushEt,
+          flushPaced: flushEtPaced,
           discard: discardEt,
         } = createPtyOutputBuffer((data) => {
           const contents = electronModule.webContents.fromId(session.webContentsId);
@@ -836,7 +837,7 @@ main();
         }, {
           shouldAcceptOutput: () => shouldAcceptSessionOutput(session),
         });
-        session.flushPendingData = flushEt;
+        session.flushPendingData = flushEtPaced;
         session.discardPendingData = discardEt;
 
         if (process.platform !== "win32") {

@@ -3,6 +3,14 @@ import assert from "node:assert/strict";
 
 import { KeywordHighlighter } from "./keywordHighlight.ts";
 import type { KeywordHighlightRule } from "../../types.ts";
+import {
+  noteTerminalOutputPressureData,
+  resetTerminalOutputPressure,
+} from "./runtime/terminalOutputPressure.ts";
+import {
+  TERMINAL_AUX_LONG_LINE_SCAN_LIMIT_CHARS,
+  TERMINAL_LONG_LINE_PRESSURE_BYTES,
+} from "./runtime/terminalFlowConstants.ts";
 
 type RafCallback = (time: number) => void;
 
@@ -46,6 +54,57 @@ function createFakeLine(text: string, onTranslate?: () => void) {
       };
     },
   };
+}
+
+function createFakeWrappedLine(text: string, isWrapped: boolean) {
+  return {
+    ...createFakeLine(text),
+    isWrapped,
+  };
+}
+
+function createFakeTerminalFromLines(lines: Array<{ text: string; isWrapped: boolean }>) {
+  const fakeLines = lines.map((line) => createFakeWrappedLine(line.text, line.isWrapped));
+  const decorations: Array<{ x: number; width: number; foregroundColor: string }> = [];
+  const noopDisposable = { dispose() {} };
+  const term = {
+    rows: fakeLines.length,
+    cols: 80,
+    buffer: {
+      active: {
+        type: "normal",
+        viewportY: 0,
+        baseY: 0,
+        cursorY: 0,
+        length: fakeLines.length,
+        getLine: (lineY: number) => fakeLines[lineY],
+      },
+    },
+    onScroll: () => noopDisposable,
+    onWriteParsed: () => noopDisposable,
+    onResize: () => noopDisposable,
+    onRender: () => noopDisposable,
+    registerMarker(offset: number) {
+      return {
+        line: offset,
+        isDisposed: false,
+        dispose() {
+          this.isDisposed = true;
+        },
+      };
+    },
+    registerDecoration(options: { x: number; width: number; foregroundColor: string }) {
+      decorations.push(options);
+      return {
+        isDisposed: false,
+        dispose() {
+          this.isDisposed = true;
+        },
+      };
+    },
+    refresh() {},
+  };
+  return { term, decorations };
 }
 
 function createFakeTerminal(lineText: string, options: { lineCount?: number } = {}) {
@@ -185,6 +244,68 @@ test("output-driven viewport changes defer keyword highlight scans", async () =>
     await new Promise((resolve) => { setTimeout(resolve, 220); });
     assert.ok(getTranslateCount() > 0);
     highlighter.dispose();
+  } finally {
+    raf.restore();
+  }
+});
+
+test("long-line pressure avoids scanning across a whole soft-wrapped logical line", () => {
+  const raf = installAnimationFrameQueue();
+  try {
+    const { term, decorations } = createFakeTerminalFromLines([
+      { text: "abc", isWrapped: false },
+      { text: "XYZ", isWrapped: true },
+    ]);
+    noteTerminalOutputPressureData(
+      term as never,
+      "x".repeat(TERMINAL_LONG_LINE_PRESSURE_BYTES),
+    );
+    const highlighter = new KeywordHighlighter(term as never);
+    const rules: KeywordHighlightRule[] = [
+      {
+        id: "wrapped",
+        label: "Wrapped",
+        patterns: ["abcXYZ"],
+        color: "#F87171",
+        enabled: true,
+      },
+    ];
+
+    highlighter.setRules(rules, true);
+    raf.flush();
+    highlighter.dispose();
+    resetTerminalOutputPressure(term as never);
+
+    assert.deepEqual(decorations, []);
+  } finally {
+    raf.restore();
+  }
+});
+
+test("wrapped highlight scanning falls back when the logical line exceeds the scan cap", () => {
+  const raf = installAnimationFrameQueue();
+  try {
+    const { term, decorations } = createFakeTerminalFromLines([
+      { text: `${"a".repeat(TERMINAL_AUX_LONG_LINE_SCAN_LIMIT_CHARS)}ZZ`, isWrapped: false },
+      { text: "tail", isWrapped: true },
+    ]);
+    const highlighter = new KeywordHighlighter(term as never);
+    const rules: KeywordHighlightRule[] = [
+      {
+        id: "capped-wrapped",
+        label: "Capped wrapped",
+        patterns: ["ZZtail"],
+        color: "#F87171",
+        enabled: true,
+      },
+    ];
+
+    highlighter.setRules(rules, true);
+    raf.flush();
+    highlighter.dispose();
+    resetTerminalOutputPressure(term as never);
+
+    assert.deepEqual(decorations, []);
   } finally {
     raf.restore();
   }

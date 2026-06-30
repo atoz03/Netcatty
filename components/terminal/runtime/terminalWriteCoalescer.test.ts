@@ -10,7 +10,10 @@ import {
   setTerminalWriteCoalescerByteCapResolver,
   type CoalescedTerminalWriteOptions,
 } from "./terminalWriteCoalescer.ts";
-import { MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES } from "./terminalFlowConstants.ts";
+import {
+  MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES,
+  MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES,
+} from "./terminalFlowConstants.ts";
 
 const createFakeTerm = () => ({}) as XTerm;
 
@@ -47,7 +50,7 @@ test("splits large plain terminal output into cooperative chunks", () => {
     ingressBytes: number;
     options?: CoalescedTerminalWriteOptions;
   }> = [];
-  const payload = "x".repeat(MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES * 2 + 7);
+  const payload = `${"x".repeat(MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES)}\n${"x".repeat(MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES)}\n12345`;
 
   setTerminalWriteCoalescerByteCapResolver(term, () => payload.length + 100);
   enqueueCoalescedTerminalWrite(
@@ -77,6 +80,40 @@ test("splits large plain terminal output into cooperative chunks", () => {
       { deferStart: true, yieldAfter: true },
     ],
   );
+
+  resetTerminalWriteCoalescer(term);
+});
+
+test("splits long unbroken plain terminal output more conservatively", () => {
+  const term = createFakeTerm();
+  const writes: Array<{
+    data: string;
+    ingressBytes: number;
+    options?: CoalescedTerminalWriteOptions;
+  }> = [];
+  const payload = "x".repeat(MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES * 2 + 11);
+
+  setTerminalWriteCoalescerByteCapResolver(term, () => payload.length + 100);
+  enqueueCoalescedTerminalWrite(
+    term,
+    payload,
+    (data, ingressBytes, options) => {
+      writes.push({ data, ingressBytes, options });
+    },
+    payload.length,
+  );
+  flushTerminalWriteCoalescer(term);
+
+  assert.deepEqual(
+    writes.map((write) => write.data.length),
+    [
+      MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES,
+      MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES,
+      11,
+    ],
+  );
+  assert.deepEqual(writes.map((write) => write.ingressBytes), writes.map((write) => write.data.length));
+  assert.equal(writes.every((write) => write.options?.yieldAfter === true), true);
 
   resetTerminalWriteCoalescer(term);
 });

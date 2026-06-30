@@ -17,6 +17,11 @@ import {
   resetTerminalLineTimestamps,
   writeTerminalDataWithLineTimestamps,
 } from "./terminalLineTimestamps";
+import {
+  noteTerminalOutputPressureData,
+  resetTerminalOutputPressure,
+  setTerminalOutputPressureVisibility,
+} from "./terminalOutputPressure";
 import { createSudoPasswordAutofill } from "./terminalSudoAutofill";
 import {
   filterTerminalSessionData,
@@ -176,6 +181,8 @@ export const writeSessionData = (
 ) => {
   const flow = getFlowController(ctx, term);
   flow.received(ingressBytes);
+  setTerminalOutputPressureVisibility(term, ctx.isVisibleRef?.current !== false);
+  noteTerminalOutputPressureData(term, data);
   enqueueCoalescedTerminalWrite(term, data, (batch, batchIngress, writeOptions) => {
     writeSessionDataImmediate(ctx, term, batch, batchIngress, writeOptions);
   }, ingressBytes);
@@ -372,6 +379,7 @@ export const attachSessionToTerminal = (
   flushTerminalWriteCoalescer(term);
   resetTerminalSyncBlockFilter(term);
   resetTerminalLineTimestamps(term);
+  resetTerminalOutputPressure(term);
   ctx.onSessionAttached?.(id);
   const sudoAutofill = createSudoPasswordAutofill({
     password: opts?.sudoAutofillPassword,

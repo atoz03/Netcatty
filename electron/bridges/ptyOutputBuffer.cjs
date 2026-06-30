@@ -25,7 +25,7 @@
  *   floodFlushDelayMs?: number,
  *   maxFloodBufferSize?: number,
  * }} [options]
- * @returns {{ bufferData: (data: string) => void, flush: () => void, takePending: () => string, discard: () => number }}
+ * @returns {{ bufferData: (data: string) => void, flush: () => void, flushPaced: () => void, takePending: () => string, discard: () => number }}
  */
 function createPtyOutputBuffer(sendFn, options = {}) {
   const maxBufferSize = options.maxBufferSize ?? 16384; // 16KB
@@ -124,6 +124,40 @@ function createPtyOutputBuffer(sendFn, options = {}) {
     flushNow();
   };
 
+  const hasPendingData = () => queuedBuffers.length > 0 || dataBuffer.length > 0;
+
+  const sendNextPendingChunk = () => {
+    if (!shouldAcceptOutput()) {
+      scheduled = null;
+      scheduledType = null;
+      return;
+    }
+    if (queuedBuffers.length > 0) {
+      sendFn(queuedBuffers.shift());
+    } else if (dataBuffer.length > maxFloodBufferSize) {
+      const chunk = dataBuffer.slice(0, maxFloodBufferSize);
+      dataBuffer = dataBuffer.slice(maxFloodBufferSize);
+      sendFn(chunk);
+    } else if (dataBuffer.length > 0) {
+      const pending = dataBuffer;
+      dataBuffer = "";
+      sendFn(pending);
+    }
+
+    if (!hasPendingData()) {
+      scheduled = null;
+      scheduledType = null;
+      return;
+    }
+    scheduledType = "timeout";
+    scheduled = setTimeout(sendNextPendingChunk, floodFlushDelayMs);
+  };
+
+  const flushPaced = () => {
+    cancelScheduled();
+    sendNextPendingChunk();
+  };
+
   const takePending = () => {
     cancelScheduled();
     const pending = `${queuedBuffers.join("")}${dataBuffer}`;
@@ -137,7 +171,7 @@ function createPtyOutputBuffer(sendFn, options = {}) {
     return pending.length;
   };
 
-  return { bufferData, flush, takePending, discard };
+  return { bufferData, flush, flushPaced, takePending, discard };
 }
 
 module.exports = { createPtyOutputBuffer };

@@ -113,6 +113,7 @@ function createStartSessionApi(ctx) {
       const {
         bufferData,
         flush: flushBuffer,
+        flushPaced: flushBufferPaced,
         takePending: takePendingBuffer,
         discard: discardBuffer,
       } = createPtyOutputBuffer((data) => {
@@ -125,7 +126,7 @@ function createStartSessionApi(ctx) {
       }, {
         shouldAcceptOutput: () => shouldAcceptSessionOutput(sessions.get(sessionId)),
       });
-      session.flushPendingData = flushBuffer;
+      session.flushPendingData = flushBufferPaced;
       session.takePendingData = takePendingBuffer;
       session.discardPendingData = discardBuffer;
 

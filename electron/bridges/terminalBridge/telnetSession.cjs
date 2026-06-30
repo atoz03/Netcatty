@@ -220,7 +220,7 @@ function createTelnetSessionApi(ctx) {
               return telnetProtocolActive;
             },
           };
-          session.flushPendingData = flushTelnet;
+          session.flushPendingData = flushTelnetPaced;
           sessions.set(sessionId, session);
           openTerminalOutputSession?.(sessionId, event.sender);
     
@@ -243,6 +243,7 @@ function createTelnetSessionApi(ctx) {
         const {
           bufferData: bufferTelnetData,
           flush: flushTelnet,
+          flushPaced: flushTelnetPaced,
           discard: discardTelnet,
         } = createPtyOutputBuffer((data) => {
           const contents = electronModule.webContents.fromId(telnetWebContentsId);

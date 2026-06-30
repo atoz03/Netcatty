@@ -209,6 +209,34 @@ test("merged flood backlog still yields between synchronous write steps", async 
   assert.deepEqual(order, [0, 1]);
 });
 
+test("write queue yields when a drain reaches its byte budget", async () => {
+  const term = createFakeTerm();
+  const order: number[] = [];
+  let releaseFirst: (() => void) | null = null;
+
+  enqueueTerminalWrite(term, 0, (done) => {
+    releaseFirst = done;
+  });
+
+  for (let index = 0; index < 4; index += 1) {
+    enqueueTerminalWrite(
+      term,
+      10,
+      (done) => {
+        order.push(index);
+        done();
+      },
+      { maxDrainBytes: 20 },
+    );
+  }
+
+  assert.deepEqual(order, []);
+  releaseFirst?.();
+  assert.deepEqual(order, [0, 1]);
+  await waitForQueuedWriteYield();
+  assert.deepEqual(order, [0, 1, 2, 3]);
+});
+
 test("abortTerminalWriteQueue drops pending bytes and reports dropped count", () => {
   const term = createFakeTerm();
   const dropped: number[] = [];

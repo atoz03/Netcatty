@@ -455,6 +455,7 @@ function startLocalSession(event, payload) {
   const {
     bufferData: bufferLocalData,
     flush: flushLocal,
+    flushPaced: flushLocalPaced,
     takePending: takePendingLocal,
     discard: discardLocal,
   } = createPtyOutputBuffer((data) => {
@@ -466,7 +467,7 @@ function startLocalSession(event, payload) {
   }, {
     shouldAcceptOutput: () => shouldAcceptSessionOutput(session),
   });
-  session.flushPendingData = flushLocal;
+  session.flushPendingData = flushLocalPaced;
   session.takePendingData = takePendingLocal;
   session.discardPendingData = discardLocal;
 

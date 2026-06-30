@@ -1,5 +1,14 @@
 const { moshExtraResources } = require('./scripts/mosh-extra-resources.cjs');
 const { etExtraResources } = require('./scripts/et-extra-resources.cjs');
+const process = require('node:process');
+
+const hasMacSigningSecrets = Boolean(
+    process.env.CSC_LINK
+    && process.env.CSC_KEY_PASSWORD
+    && process.env.APPLE_ID
+    && process.env.APPLE_APP_SPECIFIC_PASSWORD
+    && process.env.APPLE_TEAM_ID
+);
 
 /**
  * @type {import('electron-builder').Configuration}
@@ -166,7 +175,9 @@ module.exports = {
         ],
         category: 'public.app-category.developer-tools',
         hardenedRuntime: true,
-        notarize: true,
+        // Fork/PR CI 通常没有签名与公证 secret；允许生成未签名包。
+        identity: hasMacSigningSecrets ? undefined : null,
+        notarize: hasMacSigningSecrets,
         entitlements: 'electron/entitlements.mac.plist',
         entitlementsInherit: 'electron/entitlements.mac.plist',
         extendInfo: {

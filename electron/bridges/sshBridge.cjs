@@ -49,6 +49,7 @@ const { enableSshNoDelay, enableTcpNoDelay } = require("./tcpNoDelay.cjs");
 const {
   configureTerminalSessionDataEmitter,
 } = require("./emitTerminalSessionData.cjs");
+const { trackAck } = require("./terminalFlowAck.cjs");
 
 // Default SSH key names in priority order (preferred keys tried first)
 const PREFERRED_KEY_NAMES = ["id_ed25519", "id_ecdsa", "id_rsa"];

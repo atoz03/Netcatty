@@ -17,6 +17,11 @@ import {
   resetTerminalLineTimestamps,
   writeTerminalDataWithLineTimestamps,
 } from "./terminalLineTimestamps";
+import {
+  noteTerminalOutputPressureData,
+  resetTerminalOutputPressure,
+  setTerminalOutputPressureVisibility,
+} from "./terminalOutputPressure";
 import { createSudoPasswordAutofill } from "./terminalSudoAutofill";
 import {
   filterTerminalSessionData,
@@ -24,6 +29,7 @@ import {
 } from "./terminalSyncBlockFilter";
 import { appendEraseScrollbackAfterFullErases } from "../clearTerminalViewport";
 import {
+  type CoalescedTerminalWriteOptions,
   enqueueCoalescedTerminalWrite,
   flushTerminalWriteCoalescer,
   resolveFloodCoalescerByteCap,
@@ -175,8 +181,10 @@ export const writeSessionData = (
 ) => {
   const flow = getFlowController(ctx, term);
   flow.received(ingressBytes);
-  enqueueCoalescedTerminalWrite(term, data, (batch, batchIngress) => {
-    writeSessionDataImmediate(ctx, term, batch, batchIngress);
+  setTerminalOutputPressureVisibility(term, ctx.isVisibleRef?.current !== false);
+  noteTerminalOutputPressureData(term, data);
+  enqueueCoalescedTerminalWrite(term, data, (batch, batchIngress, writeOptions) => {
+    writeSessionDataImmediate(ctx, term, batch, batchIngress, writeOptions);
   }, ingressBytes);
   maybeFlushTerminalWriteCoalescerWhenUnfocused(
     term,
@@ -189,6 +197,7 @@ const writeSessionDataImmediate = (
   term: XTerm,
   data: string,
   ingressBytes: number = data.length,
+  writeOptions: CoalescedTerminalWriteOptions = {},
 ) => {
   const flow = getFlowController(ctx, term);
   enqueueTerminalWrite(term, ingressBytes, (done) => {
@@ -279,6 +288,9 @@ const writeSessionDataImmediate = (
         commitIpcAck(ackOnCallback);
       }
     });
+  }, {
+    deferStart: writeOptions.deferStart,
+    yieldAfter: writeOptions.yieldAfter,
   });
 };
 
@@ -367,6 +379,7 @@ export const attachSessionToTerminal = (
   flushTerminalWriteCoalescer(term);
   resetTerminalSyncBlockFilter(term);
   resetTerminalLineTimestamps(term);
+  resetTerminalOutputPressure(term);
   ctx.onSessionAttached?.(id);
   const sudoAutofill = createSudoPasswordAutofill({
     password: opts?.sudoAutofillPassword,
@@ -379,7 +392,7 @@ export const attachSessionToTerminal = (
 
   ctx.disposeDataRef.current = ctx.terminalBackend.onSessionData(
     id,
-    (chunk) => {
+    (chunk, meta) => {
       const filtered = filterTerminalInterruptDisplayOutput(term, chunk);
       acknowledgeDroppedTerminalDisplayBytes(ctx, filtered.droppedBytes);
       if (!filtered.accepted) return;
@@ -391,7 +404,7 @@ export const attachSessionToTerminal = (
       }
       data = sudoAutofill?.handleOutput(data) ?? data;
       writeSessionData(ctx, term, data, ingressBytes);
-      ctx.onTerminalOutput?.(data);
+      ctx.onTerminalOutput?.(data, meta);
       if (!ctx.hasConnectedRef.current) {
         ctx.updateStatus("connected");
         opts?.onConnected?.();

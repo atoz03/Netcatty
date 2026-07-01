@@ -33,6 +33,7 @@ const {
 } = require("./terminalInterruptDiagnostics.cjs");
 const {
   clearSessionFlowState,
+  setBufferedOutputBytes,
   setRendererFlowPaused,
   shouldAcceptSessionOutput,
   shouldProcessSessionOutput,
@@ -43,6 +44,8 @@ const {
   disarmTerminalInterruptOutputGate,
   filterTerminalInterruptOutput,
   shouldArmTerminalInterruptOutputGate,
+  stashPendingInterruptOutputMeta,
+  takePendingInterruptOutputMeta,
 } = require("./terminalInterruptOutputGate.cjs");
 const iconv = require("iconv-lite");
 const ptyProcessTree = require("./ptyProcessTree.cjs");
@@ -454,20 +457,21 @@ function startLocalSession(event, payload) {
 
   const {
     bufferData: bufferLocalData,
-    flush: flushLocal,
-    takePending: takePendingLocal,
+    flushPaced: flushLocalPaced,
+    takePendingEntry: takePendingLocal,
     discard: discardLocal,
-  } = createPtyOutputBuffer((data) => {
+  } = createPtyOutputBuffer((data, meta) => {
     const contents = electronModule.webContents.fromId(session.webContentsId);
     emitTerminalSessionData(contents, sessionId, data, {
       cols: session.cols,
       rows: session.rows,
+      meta,
     });
   }, {
+    onPendingBytesChange: (bytes) => setBufferedOutputBytes(session, bytes),
     shouldAcceptOutput: () => shouldAcceptSessionOutput(session),
-    onDropPausedData: (bytes) => trackAck(session, bytes),
   });
-  session.flushPendingData = flushLocal;
+  session.flushPendingData = flushLocalPaced;
   session.takePendingData = takePendingLocal;
   session.discardPendingData = discardLocal;
 
@@ -514,17 +518,22 @@ function startLocalSession(event, payload) {
     });
   }
 
+  let localExitFinalized = false;
   proc.onExit((evt) => {
-    flushLocal();
-    sessionLogStreamManager.stopStream(sessionId, logStreamToken);
-    ptyProcessTree.unregisterPid(sessionId);
-    sessions.delete(sessionId);
-    const contents = electronModule.webContents.fromId(session.webContentsId);
-    // Signal present = killed externally (show disconnected UI).
-    // No signal = process exited normally, even with non-zero code
-    // (e.g. user typed `exit` after a failed command), so auto-close.
-    const reason = evt.signal ? "error" : "exited";
-    contents?.send("netcatty:exit", { sessionId, ...evt, reason });
+    const finalizeExit = () => {
+      if (localExitFinalized) return;
+      localExitFinalized = true;
+      sessionLogStreamManager.stopStream(sessionId, logStreamToken);
+      ptyProcessTree.unregisterPid(sessionId);
+      sessions.delete(sessionId);
+      const contents = electronModule.webContents.fromId(session.webContentsId);
+      // Signal present = killed externally (show disconnected UI).
+      // No signal = process exited normally, even with non-zero code
+      // (e.g. user typed `exit` after a failed command), so auto-close.
+      const reason = evt.signal ? "error" : "exited";
+      contents?.send("netcatty:exit", { sessionId, ...evt, reason });
+    };
+    flushLocalPaced(finalizeExit);
   });
 
   return { sessionId };
@@ -1013,7 +1022,9 @@ function writeToSession(event, payload) {
 
 function drainPendingOutputForInterrupt(sessionId, session, trace) {
   if (typeof session?.takePendingData !== "function") return;
-  const pending = session.takePendingData();
+  const pendingEntry = session.takePendingData();
+  const pending = typeof pendingEntry === "string" ? pendingEntry : pendingEntry?.data;
+  const pendingMeta = typeof pendingEntry === "string" ? undefined : pendingEntry?.meta;
   if (!pending) return;
   const output = filterTerminalInterruptOutput(session, pending);
   if (!output.accepted || output.droppedBytes > 0) {
@@ -1024,11 +1035,16 @@ function drainPendingOutputForInterrupt(sessionId, session, trace) {
       accepted: output.accepted,
     }, trace);
   }
-  if (!output.accepted || !output.data) return;
+  if (!output.accepted || !output.data) {
+    stashPendingInterruptOutputMeta(session, pendingMeta);
+    return;
+  }
+  const outputMeta = takePendingInterruptOutputMeta(session, pendingMeta);
   const contents = electronModule.webContents.fromId(session.webContentsId);
   emitTerminalSessionData(contents, sessionId, output.data, {
     cols: session.cols,
     rows: session.rows,
+    meta: outputMeta,
   });
 }
 
@@ -1513,6 +1529,7 @@ function cleanupAllSessions() {
       cancelActiveYmodemSession(session);
       clearPendingAutomatedWrites(session);
       clearSessionFlowState(session, { resume: false });
+      session.discardPendingData?.();
       closeTerminalOutputSession(sessionId);
       cleanupSessionExternalAuthArtifacts(session);
       session.releaseTelnetGeneration?.();
@@ -1579,6 +1596,7 @@ module.exports = {
   setSessionEncoding,
   resizeSession,
   setSessionFlowPaused,
+  ackSessionFlow,
   closeSession,
   interruptSession,
   cleanupAllSessions,

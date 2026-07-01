@@ -278,7 +278,8 @@ test("ordinary input priority preserves a pending coalesced backlog above the pr
     events.push("input-forwarded");
     flushTerminalWriteCoalescer(term);
 
-    assert.deepEqual(written, [payload]);
+    assert.equal(written.join(""), payload);
+    assert.ok(written.length > 1);
     assert.equal(flow.pendingBytes(), 0);
   } finally {
     resetTerminalWriteCoalescer(term);

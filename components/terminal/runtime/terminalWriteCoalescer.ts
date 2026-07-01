@@ -3,10 +3,16 @@ import type { Terminal as XTerm } from "@xterm/xterm";
 import {
   MAX_PENDING_WRITE_COALESCE_BYTES,
   MAX_PENDING_WRITE_COALESCE_BYTES_FLOOD,
+  MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES,
+  MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES,
 } from "./terminalFlowConstants";
 import { createWriteCoalescer, type WriteCoalescer } from "./writeCoalescer.ts";
 
 type CoalescerByteCapResolver = () => number;
+export type CoalescedTerminalWriteOptions = {
+  deferStart?: boolean;
+  yieldAfter?: boolean;
+};
 
 const terminalWriteCoalescers = new WeakMap<XTerm, WriteCoalescer>();
 const terminalWriteCoalescerIngress = new WeakMap<XTerm, number>();
@@ -54,13 +60,49 @@ const splitIngressBytes = (
   return Math.max(0, Math.min(remainingIngressBytes, proportionalBytes));
 };
 
+const isPlainTerminalOutput = (data: string): boolean =>
+  !data.includes("\x1b") && !data.includes("\x9b");
+
+const hasLongUnbrokenRun = (data: string, maxRunBytes: number): boolean => {
+  let runBytes = 0;
+  for (let index = 0; index < data.length; index += 1) {
+    const char = data[index];
+    if (char === "\n" || char === "\r") {
+      runBytes = 0;
+      continue;
+    }
+    runBytes += 1;
+    if (runBytes > maxRunBytes) {
+      return true;
+    }
+  }
+  return false;
+};
+
+const resolveTerminalWriteBatchBytes = (
+  data: string,
+  maxPendingBytes: number,
+): number => (
+  isPlainTerminalOutput(data)
+    && hasLongUnbrokenRun(data, MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES)
+    ? MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES
+    : data.length > MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES && isPlainTerminalOutput(data)
+      ? MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES
+    : maxPendingBytes
+);
+
 const writeLargeTerminalBatch = (
   data: string,
   ingressBytes: number,
   maxBatchBytes: number,
-  writeNow: (data: string, ingressBytes: number) => void,
+  writeNow: (
+    data: string,
+    ingressBytes: number,
+    options?: CoalescedTerminalWriteOptions,
+  ) => void,
 ): void => {
   const batchSize = Math.max(1, maxBatchBytes);
+  const isSliced = data.length > batchSize;
   let offset = 0;
   let remainingIngressBytes = Math.max(0, ingressBytes);
 
@@ -76,7 +118,10 @@ const writeLargeTerminalBatch = (
         remainingIngressBytes,
       );
     remainingIngressBytes -= sliceIngress;
-    writeNow(slice, sliceIngress);
+    writeNow(slice, sliceIngress, isSliced ? {
+      deferStart: true,
+      yieldAfter: true,
+    } : undefined);
     offset = end;
   }
 };
@@ -84,7 +129,11 @@ const writeLargeTerminalBatch = (
 export const enqueueCoalescedTerminalWrite = (
   term: XTerm,
   data: string,
-  writeNow: (data: string, ingressBytes: number) => void,
+  writeNow: (
+    data: string,
+    ingressBytes: number,
+    options?: CoalescedTerminalWriteOptions,
+  ) => void,
   ingressBytes: number = data.length,
 ): void => {
   const maxPendingBytes = resolveCoalescerByteCap(term);
@@ -92,7 +141,12 @@ export const enqueueCoalescedTerminalWrite = (
     flushTerminalWriteCoalescer(term);
   }
   if (data.length > maxPendingBytes) {
-    writeLargeTerminalBatch(data, ingressBytes, maxPendingBytes, writeNow);
+    writeLargeTerminalBatch(
+      data,
+      ingressBytes,
+      resolveTerminalWriteBatchBytes(data, maxPendingBytes),
+      writeNow,
+    );
     return;
   }
 
@@ -105,7 +159,12 @@ export const enqueueCoalescedTerminalWrite = (
   if (!coalescer) {
     coalescer = createWriteCoalescer((batch) => {
       const batchIngress = takePendingIngressBytes(term, batch.length);
-      writeNow(batch, batchIngress);
+      writeLargeTerminalBatch(
+        batch,
+        batchIngress,
+        resolveTerminalWriteBatchBytes(batch, resolveCoalescerByteCap(term)),
+        writeNow,
+      );
     }, {
       getMaxPendingBytes: () => resolveCoalescerByteCap(term),
     });

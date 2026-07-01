@@ -4,6 +4,8 @@ import { KeywordHighlightRule } from "../../types";
 
 import { XTERM_PERFORMANCE_CONFIG } from "../../infrastructure/config/xtermPerformance";
 import { checkRegexSafetyPattern } from "../../lib/regexSafety";
+import { TERMINAL_AUX_LONG_LINE_SCAN_LIMIT_CHARS } from "./runtime/terminalFlowConstants";
+import { getTerminalOutputPressure } from "./runtime/terminalOutputPressure";
 import { forEachNonEmptyRegexMatch } from "./keywordHighlightRegex";
 
 /** Pre-compiled rule with regex ready for matching */
@@ -105,13 +107,17 @@ export class KeywordHighlighter implements IDisposable {
     this.disposables.push(
       // When user scrolls, refresh visible area
       this.term.onScroll(() => {
-        this.triggerRefresh("immediate", "scroll");
+        this.triggerViewportChangeRefresh();
       }),
       // When new data is written, refresh on the next frame so highlights land
       // with the freshly rendered content instead of trailing behind it.
       this.term.onWriteParsed(() => {
         this.markDirtyFromWrite();
-        this.triggerRefresh("immediate", "write");
+        const pressure = getTerminalOutputPressure(this.term);
+        this.triggerRefresh(
+          pressure.longLine || pressure.background ? "debounced" : "immediate",
+          "write",
+        );
       }),
       // Also refresh on resize as viewport content changes
       this.term.onResize(() => this.triggerRefresh("debounced", "full")),
@@ -121,7 +127,7 @@ export class KeywordHighlighter implements IDisposable {
         const currentViewportY = this.term.buffer.active?.viewportY ?? 0;
         if (currentViewportY !== this.lastViewportY) {
           this.lastViewportY = currentViewportY;
-          this.triggerRefresh("immediate", "scroll");
+          this.triggerViewportChangeRefresh();
         }
       })
     );
@@ -468,6 +474,20 @@ export class KeywordHighlighter implements IDisposable {
       this.debounceTimer = null;
       this.executeRefresh();
     }, delay);
+  }
+
+  private triggerViewportChangeRefresh() {
+    const now = performance.now();
+    const isOutputDrivenViewportChange =
+      this.lastWriteAt > 0 &&
+      now - this.lastWriteAt <= KeywordHighlighter.WRITE_BURST_HIGHLIGHT_PAUSE_MS;
+    if (isOutputDrivenViewportChange || this.isWriteBurstActive(now)) {
+      this.markVisibleRangeDirty();
+      this.triggerRefresh("debounced", "write");
+      return;
+    }
+
+    this.triggerRefresh("immediate", "scroll");
   }
 
   private refreshViewport(reason: RefreshReason) {
@@ -1004,6 +1024,7 @@ export class KeywordHighlighter implements IDisposable {
     if (end < start) return;
     const buffer = this.term.buffer.active;
     const wrappedBlockCache = new Map<number, WrappedBlockContext>();
+    const pressure = getTerminalOutputPressure(this.term);
     for (let lineY = start; lineY <= end; lineY++) {
       const line = buffer.getLine(lineY);
       if (!line) {
@@ -1018,7 +1039,7 @@ export class KeywordHighlighter implements IDisposable {
       }
 
       const hasWrappedContext = this.hasWrappedNeighbor(buffer, lineY, line);
-      const cachedRanges = hasWrappedContext
+      const cachedRanges = hasWrappedContext && !pressure.longLine
         ? this.scanWrappedLine(buffer, lineY, line, lineText, wrappedBlockCache)
         : this.getCachedRanges(line, lineText);
       if (cachedRanges.length === 0) {
@@ -1103,6 +1124,9 @@ export class KeywordHighlighter implements IDisposable {
       const segmentText = segment.translateToString(true);
       const lineStart = logicalLineText.length;
       const lineEnd = lineStart + segmentText.length;
+      if (lineEnd > TERMINAL_AUX_LONG_LINE_SCAN_LIMIT_CHARS) {
+        return null;
+      }
       segmentBounds.set(cursorY, { lineStart, lineEnd });
       logicalLineText += segmentText;
 

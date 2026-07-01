@@ -234,7 +234,7 @@ test("writeSessionData batches IPC acks using the VS Code ack size", () => {
     },
   };
 
-  writeSessionData(ctx as never, term, "x".repeat(FLOW_CHAR_COUNT_ACK_SIZE + 1));
+  writeSessionData(ctx as never, term, `${"x".repeat(FLOW_CHAR_COUNT_ACK_SIZE)}\n`);
   flushTerminalWriteCoalescer(term);
   flushTerminalSessionFlowAck("session-1");
 

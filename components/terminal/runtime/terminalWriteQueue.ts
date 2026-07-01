@@ -1,18 +1,30 @@
 import type { Terminal as XTerm } from "@xterm/xterm";
 
+import { MAX_TERMINAL_WRITE_QUEUE_DRAIN_BYTES } from "./terminalFlowConstants";
+
 export const MAX_WRITE_QUEUE_ITEMS = 32;
 export const MAX_WRITE_QUEUE_BYTES = 512 * 1024;
+
+export type TerminalWriteQueueOptions = {
+  onDropped?: (bytes: number) => void;
+  deferStart?: boolean;
+  yieldAfter?: boolean;
+  maxDrainBytes?: number;
+};
 
 type QueuedWrite = {
   bytes: number;
   steps: QueuedWriteStep[];
   nextIndex: number;
   cancelled: boolean;
+  yieldAfter: boolean;
+  maxDrainBytes: number;
 };
 
 type QueuedWriteStep = {
   bytes: number;
   write: (done: () => void) => void;
+  yieldAfter: boolean;
 };
 
 type TerminalWriteQueue = {
@@ -20,8 +32,10 @@ type TerminalWriteQueue = {
   active?: QueuedWrite;
   pending: QueuedWrite[];
   pendingBytes: number;
+  drainBytes: number;
   floodMode: boolean;
   onDropped?: (bytes: number) => void;
+  drainTimer?: ReturnType<typeof setTimeout>;
 };
 
 const terminalWriteQueues = new WeakMap<XTerm, TerminalWriteQueue>();
@@ -34,6 +48,7 @@ const getOrCreateQueue = (term: XTerm): TerminalWriteQueue => {
       writing: false,
       pending: [],
       pendingBytes: 0,
+      drainBytes: 0,
       floodMode: false,
       onDropped: terminalWriteQueueDropHandlers.get(term),
     };
@@ -42,12 +57,40 @@ const getOrCreateQueue = (term: XTerm): TerminalWriteQueue => {
   return queue;
 };
 
+const scheduleQueueDrain = (
+  term: XTerm,
+  queue: TerminalWriteQueue,
+  deferred: boolean,
+): void => {
+  if (queue.drainTimer) return;
+  if (!deferred) {
+    scheduleNextTerminalWrite(term, queue);
+    return;
+  }
+  queue.drainTimer = setTimeout(() => {
+    queue.drainTimer = undefined;
+    scheduleNextTerminalWrite(term, queue);
+  }, 0);
+};
+
 const scheduleNextTerminalWrite = (term: XTerm, queue: TerminalWriteQueue) => {
   const next = queue.pending.shift();
   if (!next) {
     queue.writing = false;
+    queue.drainBytes = 0;
     queue.floodMode = false;
-    terminalWriteQueues.delete(term);
+    if (terminalWriteQueues.get(term) === queue) {
+      terminalWriteQueues.delete(term);
+    }
+    return;
+  }
+  if (
+    queue.drainBytes > 0
+    && queue.drainBytes + next.bytes > next.maxDrainBytes
+  ) {
+    queue.drainBytes = 0;
+    queue.pending.unshift(next);
+    scheduleQueueDrain(term, queue, true);
     return;
   }
 
@@ -56,41 +99,79 @@ const scheduleNextTerminalWrite = (term: XTerm, queue: TerminalWriteQueue) => {
   queue.writing = true;
   queue.active = next;
   runQueuedWrite(next, () => {
+    if (queue.active !== next) {
+      return;
+    }
+    queue.drainBytes += next.bytes;
     if (queue.active === next) {
       queue.active = undefined;
     }
-    scheduleNextTerminalWrite(term, queue);
+    if (next.yieldAfter) {
+      queue.drainBytes = 0;
+    }
+    scheduleQueueDrain(term, queue, next.yieldAfter);
   });
 };
 
+const resolveMaxDrainBytes = (value?: number): number => (
+  Number.isFinite(value) && Number(value) > 0
+    ? Number(value)
+    : MAX_TERMINAL_WRITE_QUEUE_DRAIN_BYTES
+);
+
 const runQueuedWrite = (item: QueuedWrite, done: () => void): void => {
   let index = 0;
-  let inCallback = false;
-  let continueRequested = false;
+  let completed = false;
+  let currentDrainBytes = 0;
 
   const runNext = (): void => {
-    if (inCallback) {
-      continueRequested = true;
+    if (completed) {
       return;
     }
+    if (item.cancelled) {
+      completed = true;
+      done();
+      return;
+    }
+    const step = item.steps[index];
+    if (!step) {
+      completed = true;
+      done();
+      return;
+    }
+    if (
+      currentDrainBytes > 0
+      && currentDrainBytes + step.bytes > item.maxDrainBytes
+    ) {
+      currentDrainBytes = 0;
+      setTimeout(runNext, 0);
+      return;
+    }
+    index += 1;
+    item.nextIndex = index;
 
-    do {
-      continueRequested = false;
-      if (item.cancelled) {
-        done();
+    let callbackCalledSynchronously = false;
+    let insideWrite = true;
+    const continueAfterStep = (): void => {
+      currentDrainBytes += step.bytes;
+      if ((step.yieldAfter || item.yieldAfter) && index < item.steps.length) {
+        currentDrainBytes = 0;
+        setTimeout(runNext, 0);
         return;
       }
-      const step = item.steps[index];
-      index += 1;
-      item.nextIndex = index;
-      if (!step) {
-        done();
+      runNext();
+    };
+    step.write(() => {
+      if (insideWrite) {
+        callbackCalledSynchronously = true;
         return;
       }
-      inCallback = true;
-      step.write(runNext);
-      inCallback = false;
-    } while (continueRequested);
+      continueAfterStep();
+    });
+    insideWrite = false;
+    if (callbackCalledSynchronously) {
+      continueAfterStep();
+    }
   };
 
   runNext();
@@ -110,6 +191,8 @@ const mergePendingWrites = (queue: TerminalWriteQueue): void => {
     steps,
     nextIndex: 0,
     cancelled: false,
+    yieldAfter: true,
+    maxDrainBytes: Math.min(...queue.pending.map((item) => item.maxDrainBytes)),
   }];
   queue.pendingBytes = bytes;
   queue.floodMode = true;
@@ -153,7 +236,7 @@ export const enqueueTerminalWrite = (
   term: XTerm,
   bytes: number,
   write: (done: () => void) => void,
-  options: { onDropped?: (bytes: number) => void } = {},
+  options: TerminalWriteQueueOptions = {},
 ): void => {
   const queue = getOrCreateQueue(term);
   if (options.onDropped) {
@@ -166,9 +249,11 @@ export const enqueueTerminalWrite = (
 
   queue.pending.push({
     bytes,
-    steps: [{ bytes, write }],
+    steps: [{ bytes, write, yieldAfter: Boolean(options.yieldAfter) }],
     nextIndex: 0,
     cancelled: false,
+    yieldAfter: Boolean(options.yieldAfter),
+    maxDrainBytes: resolveMaxDrainBytes(options.maxDrainBytes),
   });
   queue.pendingBytes += bytes;
   if (
@@ -180,7 +265,7 @@ export const enqueueTerminalWrite = (
   }
 
   if (!queue.writing) {
-    scheduleNextTerminalWrite(term, queue);
+    scheduleQueueDrain(term, queue, Boolean(options.deferStart));
   }
 };
 
@@ -205,6 +290,10 @@ export const abortTerminalWriteQueue = (
   queue.writing = false;
   queue.floodMode = false;
   queue.active = undefined;
+  if (queue.drainTimer) {
+    clearTimeout(queue.drainTimer);
+    queue.drainTimer = undefined;
+  }
   terminalWriteQueues.delete(term);
 
   if (droppedBytes > 0) {

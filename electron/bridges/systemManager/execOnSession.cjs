@@ -4,6 +4,19 @@ const { isSshConnAlive, isTransportExecError } = require("./execConnHealth.cjs")
 
 function createExecOnSessionApi(ctx) {
   with (ctx) {
+    const DEFAULT_LOCAL_EXEC_MAX_BUFFER = 10 * 1024 * 1024;
+
+    function normalizeExecMaxBuffer(value, fallback = DEFAULT_LOCAL_EXEC_MAX_BUFFER) {
+      const numeric = Number(value);
+      return Number.isFinite(numeric) && numeric > 0 ? Math.floor(numeric) : fallback;
+    }
+
+    function isExecMaxBufferError(err) {
+      const code = String(err?.code || "");
+      const message = String(err?.message || "");
+      return code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" || /maxBuffer/i.test(message);
+    }
+
     /** Serialize remote exec per session to avoid SSH channel storms. */
     const execQueues = new Map();
 
@@ -82,6 +95,7 @@ function createExecOnSessionApi(ctx) {
       return new Promise((resolve) => {
         let settled = false;
         let activeStream = null;
+        const maxBuffer = normalizeExecMaxBuffer(execOptions.maxBuffer);
         const settle = (result) => {
           if (settled) return;
           settled = true;
@@ -102,9 +116,24 @@ function createExecOnSessionApi(ctx) {
             activeStream = stream;
             let stdout = "";
             let stderr = "";
-            stream.on("data", (chunk) => { stdout += chunk.toString(); });
+            const appendOutput = (streamName, current, chunk) => {
+              const next = current + chunk.toString();
+              if (next.length > maxBuffer) {
+                settle({
+                  success: false,
+                  error: `${streamName} maxBuffer exceeded`,
+                  stdout: "",
+                  stderr: "",
+                  code: 1,
+                });
+                try { stream.close(); } catch { /* ignore */ }
+                return current;
+              }
+              return next;
+            };
+            stream.on("data", (chunk) => { stdout = appendOutput("stdout", stdout, chunk); });
             if (stream.stderr) {
-              stream.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+              stream.stderr.on("data", (chunk) => { stderr = appendOutput("stderr", stderr, chunk); });
             }
             if (typeof execOptions.stdin === "string") {
               stream.write(execOptions.stdin);
@@ -129,6 +158,7 @@ function createExecOnSessionApi(ctx) {
           requireTrustedHost: true,
           knownHosts: session.etStatsAuth?.knownHosts,
           stdin: execOptions.stdin,
+          maxBuffer: execOptions.maxBuffer,
         });
       }
 
@@ -162,9 +192,9 @@ function createExecOnSessionApi(ctx) {
           const child = execFile(
             "powershell.exe",
             ["-NoProfile", "-NonInteractive", "-Command", command],
-            { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
+            { timeout: timeoutMs, maxBuffer: normalizeExecMaxBuffer(execOptions.maxBuffer) },
             (err, stdout, stderr) => {
-              if (err && !stdout) {
+              if (err && (isExecMaxBufferError(err) || !stdout)) {
                 resolve({ success: false, error: err.message || String(err), stdout: "", stderr: String(stderr || "") });
                 return;
               }
@@ -181,9 +211,9 @@ function createExecOnSessionApi(ctx) {
         const child = execFile(
           "sh",
           ["-c", command],
-          { timeout: timeoutMs, maxBuffer: 10 * 1024 * 1024 },
+          { timeout: timeoutMs, maxBuffer: normalizeExecMaxBuffer(execOptions.maxBuffer) },
           (err, stdout, stderr) => {
-            if (err && !stdout) {
+            if (err && (isExecMaxBufferError(err) || !stdout)) {
               resolve({ success: false, error: err.message || String(err), stdout: "", stderr: String(stderr || "") });
               return;
             }

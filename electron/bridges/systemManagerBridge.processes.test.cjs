@@ -3,6 +3,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { EventEmitter } = require("node:events");
+const fs = require("node:fs");
+const path = require("node:path");
 const { createSystemManagerBridge } = require("./systemManagerBridge.cjs");
 
 function createFakeExecStream(stdout, options = {}) {
@@ -26,8 +28,10 @@ test("listProcesses uses a ps format that works on CentOS 7 procps", async () =>
     "     1      0 root     Ss    0.0  0.0  4060 191024  2-19:23:42 /usr/lib/systemd/systemd --switched-root --system --deserialize 21",
   ].join("\n");
 
+  let seenCommand = "";
   const conn = {
     exec(command, callback) {
+      seenCommand = command;
       const stdout = command.includes(compatiblePsFormat)
         ? compatibleOutput
         : badCentos7Output;
@@ -46,6 +50,44 @@ test("listProcesses uses a ps format that works on CentOS 7 procps", async () =>
   assert.equal(result.processes.length, 1);
   assert.equal(result.processes[0].pid, 1);
   assert.equal(result.processes[0].command, "/usr/lib/systemd/systemd --switched-root --system --deserialize 21");
+  assert.doesNotMatch(seenCommand, /head\s+-n\s+2000/);
+});
+
+test("process listing commands do not hard-cap the visible list at 2000 entries", () => {
+  const source = fs.readFileSync(path.join(__dirname, "systemManagerBridge.cjs"), "utf8");
+
+  assert.doesNotMatch(source, /head\s+-n\s+2000/);
+  assert.doesNotMatch(source, /Select-Object\s+-First\s+2000/);
+});
+
+test("listProcesses gives ET process listing enough output buffer for dense hosts", async () => {
+  let seenOptions = null;
+  const sessions = new Map([["s1", {
+    type: "et",
+    etStatsAuth: { knownHosts: [] },
+  }]]);
+  const bridge = createSystemManagerBridge({
+    getSessions: () => sessions,
+    process,
+    execOnEtSession: async (_session, _command, _timeoutMs, options) => {
+      seenOptions = options;
+      return { success: true, stdout: "" };
+    },
+  });
+
+  const result = await bridge.listProcesses(null, { sessionId: "s1" });
+
+  assert.equal(result.success, true);
+  assert.ok(seenOptions.maxBuffer > 10 * 1024 * 1024);
+});
+
+test("listProcesses gives Windows process listing enough output buffer for dense local hosts", () => {
+  const source = fs.readFileSync(path.join(__dirname, "systemManagerBridge.cjs"), "utf8");
+
+  assert.match(
+    source,
+    /execOnLocalMachine\(\s*"Get-CimInstance Win32_Process[\s\S]+10000,\s*\{\s*maxBuffer:\s*PROCESS_LIST_MAX_BUFFER\s*\}/,
+  );
 });
 
 test("probeCapabilities reports Docker when docker is installed even if plain docker access is denied", async () => {

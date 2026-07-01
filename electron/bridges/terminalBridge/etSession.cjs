@@ -660,12 +660,17 @@ main();
       args.push(session.sshUserHost, command);
 
       return new Promise((resolve) => {
-        const child = execFile(sshCmd, args, {
+        const execFileOptions = {
           env: { ...process.env, ...session.sshEnv },
           timeout: timeoutMs,
           encoding: "utf8",
           windowsHide: true,
-        }, (err, stdout, stderr) => {
+        };
+        const maxBuffer = Number(execOpts.maxBuffer);
+        if (Number.isFinite(maxBuffer) && maxBuffer > 0) {
+          execFileOptions.maxBuffer = Math.floor(maxBuffer);
+        }
+        const child = execFile(sshCmd, args, execFileOptions, (err, stdout, stderr) => {
           if (err) {
             resolve({
               success: false,

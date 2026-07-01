@@ -11,6 +11,39 @@ export type TerminalPaneSnapshot =
 
 export type TerminalPaneFocusSnapshot = "na" | "focused" | "unfocused";
 
+export type TerminalPaneHiddenSize = {
+  width: number;
+  height: number;
+};
+
+export type TerminalPaneStyle = {
+  left?: string | number;
+  top?: string | number;
+  width?: string | number;
+  height?: string | number;
+  visibility?: string;
+  pointerEvents?: string;
+};
+
+export function resolveHiddenTerminalPaneStyle<T extends TerminalPaneStyle>(
+  layoutStyle: T,
+  lastVisibleSize: TerminalPaneHiddenSize | null,
+): T {
+  return {
+    ...layoutStyle,
+    visibility: "hidden",
+    pointerEvents: "none",
+    left: "-9999px",
+    top: "-9999px",
+    ...(lastVisibleSize
+      ? {
+        width: `${lastVisibleSize.width}px`,
+        height: `${lastVisibleSize.height}px`,
+      }
+      : {}),
+  };
+}
+
 interface GetTerminalPaneSnapshotOptions {
   activeTabId: string | null;
   sessionId: string;

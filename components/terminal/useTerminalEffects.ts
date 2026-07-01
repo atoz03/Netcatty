@@ -143,7 +143,7 @@ export function resolveSelectionOverlayPosition(term: any, container: HTMLElemen
 }
 
 export function useTerminalEffects(ctx: TerminalEffectsContext) {
-  const { CONNECTION_TIMEOUT, Error, XTERM_PERFORMANCE_CONFIG, applyUserCursorPreference, auth, autocompleteCloseRef, autocompleteInputRef, autocompleteKeyEventRef, captureTerminalLogData, clearTerminalCwd, commandBufferRef, connectionLogBufferRef, containerRef, createPromptLineBreakState, createReplaySafeTerminalLogSanitizer, createXTermRuntime, deferTerminalResizeRef, disableTerminalFontZoomRef, effectiveFontSize, effectiveFontWeight, effectiveTheme, error, executeSnippetCommand, finalizeTerminalLogData, fitAddonRef, fontFamilyId, fontSize, fontWeightFixupDoneRef, forceCloseHibernatedSession, forceSyncRenderAfterResize, handleOsc52ReadRequest, handleTerminalDataCaptureOnce, hasConnectedRef, hasRuntimeRef, host, hotkeySchemeRef, hibernatedRef, identities, inWorkspace, isBootActiveRef, isBroadcastEnabledRef, isComposeBarOpen, isConnectionAwaitingUserInput, isConnectionPastTcpDial, isFocusMode, isFocused, isLocalConnection, isNetworkDevice, isResizing, isRestoringSelectionRef, isSearchOpen, isSerialConnection, isVisible, isVisibleRef, keyBindingsRef, keys, knownCwdRef, lastFittedSizeRef, lastToastedErrorRef, logger, mouseTrackingRef, needsHostKeyVerification, onBroadcastInputRef, onBroadcastInterruptPriorityChange, onCommandExecuted, onCommandSubmitted, onHotkeyActionRef, onOutputTriggerUserInputRef, onSnippetExecutorChange, onTerminalCwdChange, onTerminalTitleChange, onTerminalBell, onTerminalFontSizeChange, paneLayoutKey, passwordPromptActiveRef, pendingAuthRef, pendingOutputScrollRef, prepareRestoredReconnect, prevIsResizingRef, promptLineBreakStateRef, resizeSession, resolveHostAuth, resolvedFontFamily, safeFit, scriptRecorderRef, searchAddonRef, serialConfig, serialLineBufferRef, serializeAddonRef, sessionId, sessionRef, sessionStarters, setError, setHasMouseTracking, setHasSelection, setIsCancelling, setIsDisconnectedDialogDismissed, requestSearchFocus, setNeedsHostKeyVerification, setPendingHostKeyInfo, setPendingHostKeyRequestId, setProgressLogs, setProgressValue, setSelectionOverlayPosition, setShowLogs, setStatus, setTimeLeft, shouldEnableNativeUserInputAutoScroll, shouldProbeSessionCwd, shouldStartTerminalBackend, onSnippetShortkeyRef, snippetsRef, status, statusRef, sudoAutofillRef, t, teardown, telnetLocalEchoRef, termRef, terminalAltKeyOptions, terminalBackend, terminalContextActionsRef, terminalCwdTracker, terminalDataCapturedRef, terminalLogSanitizerRef, terminalSettings, terminalSettingsRef, toHostKeyInfo, toast, updateStatus, useEffect, useLayoutEffect, xtermRuntimeRef, zmodem, zmodemToastedRef, restoreState } = ctx;
+  const { CONNECTION_TIMEOUT, Error, XTERM_PERFORMANCE_CONFIG, applyUserCursorPreference, auth, autocompleteCloseRef, autocompleteInputRef, autocompleteKeyEventRef, captureTerminalLogData, clearTerminalCwd, commandBufferRef, connectionLogBufferRef, containerRef, createPromptLineBreakState, createReplaySafeTerminalLogSanitizer, createXTermRuntime, deferTerminalResizeRef, disableTerminalFontZoomRef, effectiveFontSize, effectiveFontWeight, effectiveTheme, error, executeSnippetCommand, finalizeTerminalLogData, fitAddonRef, fontFamilyId, fontSize, fontWeightFixupDoneRef, forceCloseHibernatedSession, forceSyncRenderAfterResize, handleOsc52ReadRequest, handleTerminalDataCaptureOnce, hasConnectedRef, hasRuntimeRef, host, hotkeySchemeRef, hibernatedRef, identities, inWorkspace, isBootActiveRef, isBroadcastEnabledRef, isComposeBarOpen, isConnectionAwaitingUserInput, isConnectionPastTcpDial, isFocusMode, isFocused, isLocalConnection, isNetworkDevice, isResizing, isRestoringSelectionRef, isSearchOpen, isSerialConnection, isVisible, isVisibleRef, keyBindingsRef, keys, knownCwdRef, lastFittedSizeRef, lastToastedErrorRef, logger, mouseTrackingRef, needsHostKeyVerification, onBroadcastInputRef, onBroadcastInterruptPriorityChange, onCommandExecuted, onCommandSubmitted, onHotkeyActionRef, onOutputTriggerUserInputRef, onSnippetExecutorChange, onTerminalCwdChange, onTerminalTitleChange, onTerminalBell, onTerminalFontSizeChange, paneLayoutKey, passwordPromptActiveRef, pendingAuthRef, pendingOutputScrollRef, prepareRestoredReconnect, prevIsResizingRef, promptLineBreakStateRef, resizeSession, resolveHostAuth, resolvedFontFamily, safeFit, scriptRecorderRef, searchAddonRef, serialConfig, serialLineBufferRef, serializeAddonRef, sessionId, sessionRef, sessionStarters, setError, setHasMouseTracking, setHasSelection, setIsCancelling, setIsDisconnectedDialogDismissed, requestSearchFocus, setNeedsHostKeyVerification, setPendingHostKeyInfo, setPendingHostKeyRequestId, setProgressLogs, setProgressValue, setSelectionOverlayPosition, setShowLogs, setStatus, setTimeLeft, shouldEnableNativeUserInputAutoScroll, shouldProbeSessionCwd, shouldStartTerminalBackend, onSnippetShortkeyRef, snippetsRef, splitResizeActive, status, statusRef, sudoAutofillRef, t, teardown, telnetLocalEchoRef, termRef, terminalAltKeyOptions, terminalBackend, terminalContextActionsRef, terminalCwdTracker, terminalDataCapturedRef, terminalLogSanitizerRef, terminalSettings, terminalSettingsRef, toHostKeyInfo, toast, updateStatus, useEffect, useLayoutEffect, xtermRuntimeRef, zmodem, zmodemToastedRef, restoreState } = ctx;
 
   // Remember the last layout we successfully refit while visible so revisiting
   // the same workspace tab does not replay expensive force-fit/WebGL recovery.
@@ -712,10 +712,10 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
     if (force) {
       lastFittedSizeRef.current = null;
     }
-    safeFit({ force, requireVisible: true });
+    safeFit({ force, requireVisible: true, immediate: true });
     if (force && repeatOnNextFrame && typeof requestAnimationFrame === 'function') {
       requestAnimationFrame(() => {
-        safeFit({ force: true, requireVisible: true });
+        safeFit({ force: true, requireVisible: true, immediate: true });
       });
     }
   };
@@ -811,11 +811,27 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
     lastCommittedVisibleLayoutKeyRef.current = paneLayoutKey;
   };
 
+  const currentContainerSizeAlreadyFit = () => {
+    const container = containerRef.current;
+    const lastSize = lastFittedSizeRef.current;
+    if (!container || !lastSize) return false;
+    const width = container.clientWidth;
+    const height = container.clientHeight;
+    return width > 0 && height > 0 && lastSize.width === width && lastSize.height === height;
+  };
+
   const recoverTerminalAfterBecomeVisible = () => {
     lastCommittedVisibleLayoutKeyRef.current = null;
-    lastFittedSizeRef.current = null;
     xtermRuntimeRef.current?.ensureWebglRenderer();
     xtermRuntimeRef.current?.clearTextureAtlas();
+
+    if (currentContainerSizeAlreadyFit()) {
+      finishLayoutRecovery();
+      commitVisibleLayout();
+      return;
+    }
+
+    lastFittedSizeRef.current = null;
     runImmediateRefit({ force: true, repeatOnNextFrame: false });
     finishLayoutRecoveryAfterFit();
     commitVisibleLayout();
@@ -825,14 +841,20 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
   // Refit synchronously when a split pane becomes visible or its bounds change.
   // Tab switches move hidden panes off-screen without resizing xterm; becoming
   // visible again does not always fire ResizeObserver, leaving a gap below content.
-  // Skip during split-divider drag — refit runs once when isResizing becomes false.
+  // Skip during split-divider drag — refit runs once when split resizing ends.
   // In multi-split workspaces only the focused pane refits on tab switch; other
   // visible panes defer so N terminals don't block the main thread together.
   useLayoutEffect(() => {
     const becameVisible = isVisible && !wasVisibleRef.current;
-    wasVisibleRef.current = isVisible;
 
-    if (!isVisible || isResizing) return;
+    if (!isVisible) {
+      wasVisibleRef.current = false;
+      return;
+    }
+
+    if (splitResizeActive) return;
+
+    wasVisibleRef.current = true;
 
     if (becameVisible) {
       if (shouldRefitImmediatelyOnShow()) {
@@ -854,7 +876,7 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
     commitVisibleLayout();
     runImmediateRefit({ force: true, repeatOnNextFrame: false });
     finishLayoutRecoveryAfterFit();
-  }, [isVisible, paneLayoutKey, isResizing, inWorkspace, isFocusMode, isFocused]);
+  }, [isVisible, paneLayoutKey, splitResizeActive, inWorkspace, isFocusMode, isFocused]);
 
   // Defer refit for non-focused split panes that became visible on a tab switch.
   useEffect(() => {
@@ -955,6 +977,10 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
         renderer?: { remeasureFont?: () => void };
       } | null;
       if (cancelled || !term) return;
+      if (!isVisibleRef.current) {
+        lastFittedSizeRef.current = null;
+        return;
+      }
       const fitAddon = fitAddonRef.current;
       try {
         term.renderer?.remeasureFont?.();
@@ -1093,15 +1119,15 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
   }, [isVisible, isResizing]);
 
   useLayoutEffect(() => {
-    if (isResizing) {
+    if (splitResizeActive) {
       prevIsResizingRef.current = true;
       return;
     }
     if (!prevIsResizingRef.current || !isVisible) {
-      prevIsResizingRef.current = isResizing;
+      prevIsResizingRef.current = splitResizeActive;
       return;
     }
-    prevIsResizingRef.current = isResizing;
+    prevIsResizingRef.current = splitResizeActive;
     lastFittedSizeRef.current = null;
     safeFit({ force: true, requireVisible: true });
     finishLayoutRecoveryAfterFit();
@@ -1115,7 +1141,7 @@ export function useTerminalEffects(ctx: TerminalEffectsContext) {
         }
       });
     }
-  }, [isResizing, isVisible]);
+  }, [splitResizeActive, isVisible]);
 
 
   useEffect(() => {

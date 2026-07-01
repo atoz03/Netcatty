@@ -11,6 +11,7 @@ import {
 import {
   attachSessionToTerminal,
   getFlowController,
+  notePendingOutputScrollIfEnabled,
   tryAttachSessionToTerminal,
   writeSessionData,
 } from "./terminalSessionAttachment.ts";
@@ -79,6 +80,28 @@ const createContext = (showLineTimestamps: boolean, host: Record<string, unknown
   terminalBackend: {},
   sessionRef: { current: "session-1" },
   promptLineBreakStateRef: { current: undefined },
+});
+
+test("notePendingOutputScrollIfEnabled leaves hidden output unmarked when scroll-on-output is disabled", () => {
+  const pendingOutputScrollRef = { current: false };
+
+  notePendingOutputScrollIfEnabled({
+    terminalSettingsRef: { current: { scrollOnOutput: false } },
+    pendingOutputScrollRef,
+  } as never);
+
+  assert.equal(pendingOutputScrollRef.current, false);
+});
+
+test("notePendingOutputScrollIfEnabled marks hidden output when scroll-on-output is enabled", () => {
+  const pendingOutputScrollRef = { current: false };
+
+  notePendingOutputScrollIfEnabled({
+    terminalSettingsRef: { current: { scrollOnOutput: true } },
+    pendingOutputScrollRef,
+  } as never);
+
+  assert.equal(pendingOutputScrollRef.current, true);
 });
 
 test("writeSessionData clears renderer backlog while deferring IPC ack", () => {

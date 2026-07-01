@@ -1,4 +1,4 @@
-import React, { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import React, { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 import { activeTabStore } from '../../application/state/activeTabStore';
 import { useTerminalLayoutSuppressActive } from '../../application/state/terminalLayoutSuppressStore';
@@ -23,6 +23,8 @@ import type { TerminalContextReader } from '../../domain/terminalContextRead';
 import {
   getTerminalPaneRenderSnapshot,
   parseTerminalPaneRenderSnapshot,
+  resolveHiddenTerminalPaneStyle,
+  type TerminalPaneHiddenSize,
 } from '../terminalPaneVisibility';
 import type { ResolvedAppearance, TerminalAppearanceHostScope } from '../../domain/terminalAppearanceRuntime';
 import type { TerminalSidePanelAutoOpenTab } from '../../domain/terminalSidePanelAutoOpen';
@@ -1000,6 +1002,8 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   const { paneState, isFocusedPane } = parseTerminalPaneRenderSnapshot(renderSnapshot);
   const activeWorkspaceId = paneState.workspaceId;
   const isVisible = paneState.isVisible;
+  const paneElementRef = useRef<HTMLDivElement | null>(null);
+  const lastVisiblePaneSizeRef = useRef<TerminalPaneHiddenSize | null>(null);
 
   // Publish visibility to the per-session store so TerminalServerStats /
   // TerminalAutocomplete can self-subscribe — keeping isVisible out of the
@@ -1062,12 +1066,24 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   const paneLayoutKey = paneLayoutKeyRef.current;
   const style: React.CSSProperties = { ...layoutStyle };
 
+  useLayoutEffect(() => {
+    if (!isVisible) return;
+    const element = paneElementRef.current;
+    if (!element) return;
+    const width = element.clientWidth;
+    const height = element.clientHeight;
+    if (width > 0 && height > 0) {
+      lastVisiblePaneSizeRef.current = { width, height };
+    }
+  }, [
+    isVisible,
+    layoutStyle.height,
+    layoutStyle.width,
+    activeWorkspaceId,
+  ]);
+
   if (!isVisible) {
-    style.visibility = 'hidden';
-    style.pointerEvents = 'none';
-    // Preserve xterm state while keeping hidden terminals out of layout.
-    style.left = '-9999px';
-    style.top = '-9999px';
+    Object.assign(style, resolveHiddenTerminalPaneStyle(style, lastVisiblePaneSizeRef.current));
   }
 
   const workspaceFocusHandler = activeWorkspaceId
@@ -1287,6 +1303,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
 
   return (
     <div
+      ref={paneElementRef}
       data-session-id={session.id}
       data-section="terminal-split-pane"
       data-focused={isFocusedPane ? 'true' : undefined}

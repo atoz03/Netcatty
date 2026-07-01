@@ -6,6 +6,7 @@ import {
   getTerminalPaneSnapshot,
   HIDDEN_TERMINAL_PANE_SNAPSHOT,
   parseTerminalPaneRenderSnapshot,
+  resolveHiddenTerminalPaneStyle,
 } from "./terminalPaneVisibility";
 import type { Workspace } from "../types";
 
@@ -136,4 +137,18 @@ test("terminal pane render snapshot combines visibility and focus in one token",
   assert.equal(parsed.paneState.isVisible, true);
   assert.equal(parsed.paneState.mode, "split");
   assert.equal(parsed.isFocusedPane, true);
+});
+
+test("hidden terminal pane keeps its last visible size instead of inheriting the active tab width", () => {
+  const hiddenStyle = resolveHiddenTerminalPaneStyle(
+    { left: 0, top: 0, width: "100%", height: "100%" },
+    { width: 1180, height: 720 },
+  );
+
+  assert.equal(hiddenStyle.left, "-9999px");
+  assert.equal(hiddenStyle.top, "-9999px");
+  assert.equal(hiddenStyle.visibility, "hidden");
+  assert.equal(hiddenStyle.pointerEvents, "none");
+  assert.equal(hiddenStyle.width, "1180px");
+  assert.equal(hiddenStyle.height, "720px");
 });

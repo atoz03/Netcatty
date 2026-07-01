@@ -261,21 +261,58 @@ export const createTerminalLineTimestampSegmenter = (
           }
         }
 
-        if (!suspendedForAlternateScreen && isPrintableOutput(char)) {
-          pushTimestampIfNeeded(segments);
-        }
-        pushDataSegment(segments, char);
-
-        if (suspendedForAlternateScreen) {
+        // \n and \r are single-char runs: they never carry a timestamp and
+        // they re-arm atLineStart / resetLineState for the NEXT line, so a
+        // following printable char gets stamped. Folding them into a longer
+        // run would skip that re-arm and miss the next line's timestamp.
+        if (char === "\n" || char === "\r") {
+          pushDataSegment(segments, char);
+          if (!suspendedForAlternateScreen) {
+            if (char === "\n") {
+              resetLineState();
+            } else {
+              atLineStart = true;
+            }
+          }
           continue;
         }
-        if (char === "\n") {
-          resetLineState();
-        } else if (char === "\r") {
-          atLineStart = true;
-        } else if (isPrintableOutput(char)) {
-          atLineStart = false;
+
+        // Batch consecutive plain characters into a single slice instead of
+        // pushing them one at a time. The original loop called pushDataSegment
+        // per character, and since pushDataSegment mutates the trailing data
+        // segment via `previous.data += data`, that was an O(n) string concat
+        // per character — O(n²) over a large write. Claude Code's high-rate
+        // streaming writes made this the dominant per-frame cost. Slicing up
+        // to the next special byte (\x1b, \n, \r) collapses it to one concat
+        // per run of plain text. Behavior is unchanged: timestamps are still
+        // stamped at the first printable char of a line.
+        //
+        // A run may start with a non-printable byte (e.g. a stray ST 
+        // left over from a split OSC), so we stamp the timestamp iff the run
+        // contains at least one printable char — matching the original
+        // per-char loop, which stamped on the first printable it saw.
+        const runStart = index;
+        let next = index + 1;
+        while (next < input.length) {
+          const c = input[next];
+          if (c === "\x1b" || c === "\n" || c === "\r") break;
+          next += 1;
         }
+        const run = input.slice(runStart, next);
+        if (!suspendedForAlternateScreen) {
+          let runHasPrintable = isPrintableOutput(char);
+          if (!runHasPrintable) {
+            for (let i = 1; i < run.length; i += 1) {
+              if (isPrintableOutput(run[i])) { runHasPrintable = true; break; }
+            }
+          }
+          if (runHasPrintable) {
+            pushTimestampIfNeeded(segments);
+            atLineStart = false;
+          }
+        }
+        pushDataSegment(segments, run);
+        index = next - 1;
       }
 
       return segments;

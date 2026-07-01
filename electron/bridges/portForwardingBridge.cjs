@@ -42,6 +42,16 @@ function cancelTunnel(tunnelId, tunnel, sendStatus, { deleteEntry = false } = {}
   if (tunnel.server) {
     try { tunnel.server.close(); } catch { /* ignore */ }
   }
+  // Force-destroy every accepted socket so the listening port is released
+  // immediately. Without this, server.close() leaves existing connections
+  // open and the port stays bound until they time out — which on a hard quit
+  // never happens, so the next launch fails with EADDRINUSE.
+  if (tunnel.acceptedSockets) {
+    for (const socket of tunnel.acceptedSockets) {
+      try { socket.destroy(); } catch { /* ignore */ }
+    }
+    tunnel.acceptedSockets.clear();
+  }
   if (tunnel.passphraseAbortController && !tunnel.passphraseAbortController.signal.aborted) {
     try { tunnel.passphraseAbortController.abort(); } catch { /* ignore */ }
   }
@@ -104,6 +114,11 @@ async function startPortForward(event, payload) {
     conn,
     pendingConn: null,
     server: null,
+    // Track every socket accepted by the local listener so cancelTunnel can
+    // force-destroy them. net.Server.close() only stops new connections —
+    // existing ones stay open and hold the listening port, so on Cmd+Q the
+    // port was not released and the next launch hit EADDRINUSE.
+    acceptedSockets: new Set(),
     chainConnections,
     passphraseAbortController,
     ruleId,
@@ -334,6 +349,8 @@ async function startPortForward(event, payload) {
       if (type === 'local') {
         // LOCAL FORWARDING: Listen on local port, forward to remote
         const server = net.createServer((socket) => {
+          tunnelState.acceptedSockets.add(socket);
+          socket.on('close', () => tunnelState.acceptedSockets.delete(socket));
           conn.forwardOut(
             bindAddress,
             localPort,
@@ -422,6 +439,8 @@ async function startPortForward(event, payload) {
       } else if (type === 'dynamic') {
         // DYNAMIC FORWARDING (SOCKS5 Proxy)
         const server = net.createServer((socket) => {
+          tunnelState.acceptedSockets.add(socket);
+          socket.on('close', () => tunnelState.acceptedSockets.delete(socket));
           // Simple SOCKS5 handshake
           socket.once('data', (data) => {
             if (data[0] !== 0x05) {

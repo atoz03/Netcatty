@@ -1010,6 +1010,17 @@ if (!gotLock) {
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {
     console.log(`[Main] Received ${sig}, quitting…`);
+    // Force-destroy port-forward listeners synchronously before app.quit()
+    // runs the will-quit chain. If the process is killed mid-shutdown (e.g.
+    // a second SIGINT, or the OS reaping it), will-quit may never fire and
+    // the listening ports would stay bound — EADDRINUSE on next launch.
+    // socket.destroy() in cancelTunnel is synchronous, so this releases the
+    // ports immediately regardless of how far the async shutdown gets.
+    try {
+      portForwardingBridge.stopAllPortForwards();
+    } catch (err) {
+      console.warn("[Main] Port forward cleanup on signal failed:", err);
+    }
     app.quit();
   });
 }

@@ -192,6 +192,9 @@ test("terminal worker mode proxies system management requests", async () => {
     "netcatty:system:listProcesses",
     "netcatty:system:setupOsc7Tracking",
     "netcatty:system:listTmuxSessions",
+    "netcatty:system:listZellijSessions",
+    "netcatty:system:createZellijSession",
+    "netcatty:system:zellijAction",
     "netcatty:system:listDockerContainers",
   ]) {
     assert.equal(ipcMain.handlers.has(channel), true, `${channel} should be proxied`);
@@ -205,6 +208,9 @@ test("terminal worker mode proxies system management requests", async () => {
       "netcatty:system:listProcesses",
       "netcatty:system:setupOsc7Tracking",
       "netcatty:system:listTmuxSessions",
+      "netcatty:system:listZellijSessions",
+      "netcatty:system:createZellijSession",
+      "netcatty:system:zellijAction",
       "netcatty:system:listDockerContainers",
     ],
   );

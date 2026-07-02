@@ -55,6 +55,7 @@ import {
 } from "./terminalFlowAckBuffer";
 import {
   enqueueTerminalWrite,
+  flushTerminalWriteQueueBypassingTimers,
   isTerminalWriteQueueInFloodMode,
   setTerminalWriteQueueDropHandler,
 } from "./terminalWriteQueue";
@@ -64,8 +65,10 @@ import {
   teardownTerminalOutputPipeline,
 } from "./terminalOutputPipeline";
 import {
+  flushTerminalWriteBufferBypassingTimers,
   maybeFlushTerminalWriteCoalescerWhenUnfocused,
   scheduleTerminalRepaintWhenUnfocused,
+  shouldFlushTerminalWritesForHiddenPage,
 } from "./terminalUnfocusedRepaint";
 
 export { FLOW_HIGH_WATER_MARK, FLOW_LOW_WATER_MARK };
@@ -112,6 +115,22 @@ export const notePendingOutputScrollIfEnabled = (
 };
 
 const terminalFlowControllers = new WeakMap<XTerm, OutputFlowController>();
+
+type TerminalSessionWriteOptions = CoalescedTerminalWriteOptions & {
+  flushXtermWriteBuffer?: boolean;
+};
+
+const HIDDEN_PAGE_FLUSH_MAX_PASSES = 64;
+
+const flushTerminalWritesForHiddenPage = (term: XTerm): void => {
+  flushTerminalWriteBufferBypassingTimers(term);
+  for (let pass = 0; pass < HIDDEN_PAGE_FLUSH_MAX_PASSES; pass += 1) {
+    if (!flushTerminalWriteQueueBypassingTimers(term)) {
+      return;
+    }
+    flushTerminalWriteBufferBypassingTimers(term);
+  }
+};
 
 export const getFlowControllerForTerm = (term: XTerm): OutputFlowController | undefined =>
   terminalFlowControllers.get(term);
@@ -188,15 +207,33 @@ export const writeSessionData = (
   ingressBytes: number = data.length,
 ) => {
   const flow = getFlowController(ctx, term);
+  const isPaneVisible = ctx.isVisibleRef?.current !== false;
   flow.received(ingressBytes);
-  setTerminalOutputPressureVisibility(term, ctx.isVisibleRef?.current !== false);
+  setTerminalOutputPressureVisibility(term, isPaneVisible);
   noteTerminalOutputPressureData(term, data);
+  if (shouldFlushTerminalWritesForHiddenPage(isPaneVisible)) {
+    const writeHiddenPageData = (
+      batch: string,
+      batchIngress: number,
+    ): void => {
+      writeSessionDataImmediate(ctx, term, batch, batchIngress, {
+        flushXtermWriteBuffer: true,
+      });
+      flushTerminalWritesForHiddenPage(term);
+    };
+    flushTerminalWriteCoalescer(term, writeHiddenPageData);
+    flushTerminalWritesForHiddenPage(term);
+    enqueueCoalescedTerminalWrite(term, data, writeHiddenPageData, ingressBytes);
+    flushTerminalWriteCoalescer(term, writeHiddenPageData);
+    flushTerminalWritesForHiddenPage(term);
+    return;
+  }
   enqueueCoalescedTerminalWrite(term, data, (batch, batchIngress, writeOptions) => {
     writeSessionDataImmediate(ctx, term, batch, batchIngress, writeOptions);
   }, ingressBytes);
   maybeFlushTerminalWriteCoalescerWhenUnfocused(
     term,
-    ctx.isVisibleRef?.current !== false,
+    isPaneVisible,
   );
 };
 
@@ -205,7 +242,7 @@ const writeSessionDataImmediate = (
   term: XTerm,
   data: string,
   ingressBytes: number = data.length,
-  writeOptions: CoalescedTerminalWriteOptions = {},
+  writeOptions: TerminalSessionWriteOptions = {},
 ) => {
   const flow = getFlowController(ctx, term);
   enqueueTerminalWrite(term, ingressBytes, (done) => {
@@ -262,7 +299,8 @@ const writeSessionDataImmediate = (
       flushIpcAck(clearDeferredTerminalWriteAck(term));
     };
     const deferredBeforeWrite = getDeferredTerminalWriteAckBytes(term);
-    const deferFlowAck = !forcePromptNewLine
+    const deferFlowAck = !writeOptions.flushXtermWriteBuffer
+      && !forcePromptNewLine
       && shouldDeferTerminalWriteCallback(
         preparedDisplayData.length,
         deferredBeforeWrite,
@@ -271,8 +309,15 @@ const writeSessionDataImmediate = (
         XTERM_WRITE_CALLBACK_BATCH_BYTES,
       );
 
+    const writePreparedDisplayData = (callback: () => void): void => {
+      writeTerminalDataWithLineTimestamps(term, preparedDisplayData, callback);
+      if (writeOptions.flushXtermWriteBuffer) {
+        flushTerminalWriteBufferBypassingTimers(term);
+      }
+    };
+
     if (deferFlowAck) {
-      writeTerminalDataWithLineTimestamps(term, preparedDisplayData, () => {
+      writePreparedDisplayData(() => {
         finishQueueItem();
         flow.written(ingressBytes);
         const deferredTotal = accumulateDeferredTerminalWriteAck(term, ingressBytes);
@@ -287,7 +332,7 @@ const writeSessionDataImmediate = (
 
     const deferredBeforeCallback = clearDeferredTerminalWriteAck(term);
     const ackOnCallback = deferredBeforeCallback + ingressBytes;
-    writeTerminalDataWithLineTimestamps(term, preparedDisplayData, () => {
+    writePreparedDisplayData(() => {
       finishQueueItem();
       flow.written(ingressBytes);
       if (deferredBeforeCallback > 0) {

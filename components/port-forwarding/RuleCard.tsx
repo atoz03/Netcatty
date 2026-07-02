@@ -2,7 +2,7 @@
  * Port Forwarding Rule Card
  * Displays a single port forwarding rule in grid or list view
  */
-import { Copy,Loader2,Pencil,Play,Square,Trash2 } from 'lucide-react';
+import { Copy,Loader2,Pencil,Play,Square,Trash2,Unplug } from 'lucide-react';
 import React from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { Host, PortForwardingRule } from '../../domain/models';
@@ -28,6 +28,7 @@ export interface RuleCardProps {
     onDelete: () => void;
     onStart: () => void;
     onStop: () => void;
+    onReleaseRemotePort?: () => void;
 }
 
 export const RuleCard: React.FC<RuleCardProps> = ({
@@ -43,6 +44,7 @@ export const RuleCard: React.FC<RuleCardProps> = ({
     onDelete,
     onStart,
     onStop,
+    onReleaseRemotePort,
 }) => {
     const { t } = useI18n();
     const isActive = rule.status === 'active';
@@ -184,6 +186,11 @@ export const RuleCard: React.FC<RuleCardProps> = ({
                 {(rule.status === 'active' || rule.status === 'connecting') && (
                     <ContextMenuItem onClick={onStop}>
                         <Square className="mr-2 h-4 w-4" /> {t('action.stop')}
+                    </ContextMenuItem>
+                )}
+                {onReleaseRemotePort && rule.type === 'remote' && (
+                    <ContextMenuItem onClick={onReleaseRemotePort}>
+                        <Unplug className="mr-2 h-4 w-4" /> {t('pf.action.releaseRemotePort')}
                     </ContextMenuItem>
                 )}
                 <ContextMenuSeparator />

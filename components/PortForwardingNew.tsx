@@ -129,6 +129,8 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
   const [pendingOperations, setPendingOperations] = useState<Set<string>>(
     new Set(),
   );
+  const [remoteReleaseConfirmRule, setRemoteReleaseConfirmRule] = useState<PortForwardingRule | null>(null);
+  const [isRemoteReleasePending, setIsRemoteReleasePending] = useState(false);
   const proxyProfileIdSet = useMemo(
     () => new Set(proxyProfiles.map((profile) => profile.id)),
     [proxyProfiles],
@@ -160,7 +162,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
 
   // Start a port forwarding tunnel
   const handleStartTunnel = useCallback(
-    async (rule: PortForwardingRule) => {
+    async (rule: PortForwardingRule, options: { releaseStaleRemoteSshd?: boolean } = {}) => {
       const _rawHost = hostById.get(rule.hostId);
       if (!_rawHost) {
         setRuleStatus(rule.id, "error", t("pf.error.hostNotFound"));
@@ -197,6 +199,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
           rule.autoStart, // Enable reconnect for auto-start rules
           terminalSettings,
           knownHosts,
+          options,
         );
         // Show error from result only if not already shown
         if (!result.success && result.error && !errorShown) {
@@ -233,6 +236,14 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
       }
     },
     [stopTunnel],
+  );
+
+  const handleReleaseRemotePortAndStart = useCallback(
+    async (rule: PortForwardingRule) => {
+      if (rule.type !== "remote") return;
+      await handleStartTunnel(rule, { releaseStaleRemoteSshd: true });
+    },
+    [handleStartTunnel],
   );
 
   // Wizard state
@@ -766,6 +777,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
                     onDelete={() => handleDeleteRule(rule)}
                     onStart={() => handleStartTunnel(rule)}
                     onStop={() => handleStopTunnel(rule)}
+                    onReleaseRemotePort={() => setRemoteReleaseConfirmRule(rule)}
                   />
                 ))}
               </div>
@@ -773,6 +785,51 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
           )}
         </div>
       </div>
+
+      <Dialog
+        open={!!remoteReleaseConfirmRule}
+        onOpenChange={(open) => {
+          if (!open && !isRemoteReleasePending) setRemoteReleaseConfirmRule(null);
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>{t("pf.release.remoteConfirmTitle")}</DialogTitle>
+            <DialogDescription>
+              {t("pf.release.remoteConfirmDesc", {
+                port: remoteReleaseConfirmRule?.localPort ?? "",
+                label: remoteReleaseConfirmRule?.label ?? "",
+              })}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="outline"
+              onClick={() => setRemoteReleaseConfirmRule(null)}
+              disabled={isRemoteReleasePending}
+            >
+              {t("pf.wizard.cancel")}
+            </Button>
+            <Button
+              variant="destructive"
+              disabled={!remoteReleaseConfirmRule || isRemoteReleasePending}
+              onClick={async () => {
+                const rule = remoteReleaseConfirmRule;
+                if (!rule) return;
+                setIsRemoteReleasePending(true);
+                try {
+                  await handleReleaseRemotePortAndStart(rule);
+                  setRemoteReleaseConfirmRule(null);
+                } finally {
+                  setIsRemoteReleasePending(false);
+                }
+              }}
+            >
+              {t("pf.release.remoteConfirmAction")}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Edit Panel - shown when a rule is selected */}
       {showEditPanel && editingRule && (

@@ -382,6 +382,7 @@ export const startPortForward = async (
   enableReconnect = false,
   terminalSettings?: Pick<TerminalSettings, 'verifyHostKeys' | 'keepaliveInterval' | 'keepaliveCountMax'>,
   knownHosts?: KnownHost[],
+  options: { releaseStaleRemoteSshd?: boolean } = {},
 ): Promise<{ success: boolean; error?: string }> => {
   const globalTerminalSettings = { ...FALLBACK_TERMINAL_SETTINGS, ...(terminalSettings ?? {}) };
   const bridge = netcattyBridge.get();
@@ -574,6 +575,7 @@ export const startPortForward = async (
       algorithmOverrides: host.algorithms,
       keepaliveInterval: resolveHostKeepalive(host, globalTerminalSettings).interval,
       keepaliveCountMax: resolveHostKeepalive(host, globalTerminalSettings).countMax,
+      releaseStaleRemoteSshd: options.releaseStaleRemoteSshd,
     });
     
     if (!result.success) {

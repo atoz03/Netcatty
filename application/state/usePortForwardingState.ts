@@ -72,12 +72,12 @@ export interface UsePortForwardingStateResult {
     enableReconnect?: boolean,
     terminalSettings?: { keepaliveInterval: number; keepaliveCountMax: number },
     knownHosts?: KnownHost[],
+    options?: { releaseStaleRemoteSshd?: boolean },
   ) => Promise<{ success: boolean; error?: string }>;
   stopTunnel: (
     ruleId: string,
     onStatusChange?: (status: PortForwardingRule["status"]) => void,
   ) => Promise<{ success: boolean; error?: string }>;
-
   filteredRules: PortForwardingRule[];
   selectedRule: PortForwardingRule | undefined;
 }
@@ -403,11 +403,12 @@ export const usePortForwardingState = (): UsePortForwardingStateResult => {
       enableReconnect = false,
       terminalSettings?: { keepaliveInterval: number; keepaliveCountMax: number },
       knownHosts?: KnownHost[],
+      options: { releaseStaleRemoteSshd?: boolean } = {},
     ) => {
       return startPortForward(rule, host, hosts, keys, identities, (status, error) => {
         setRuleStatus(rule.id, status, error);
         onStatusChange?.(status, error ?? undefined);
-      }, enableReconnect, terminalSettings, knownHosts);
+      }, enableReconnect, terminalSettings, knownHosts, options);
     },
     [setRuleStatus],
   );

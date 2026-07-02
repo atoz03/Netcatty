@@ -184,6 +184,9 @@ declare global {
     // applied host override / global fallback). interval in seconds.
     keepaliveInterval?: number;
     keepaliveCountMax?: number;
+    // Explicitly confirmed retry path for remote (-R) forwards when the
+    // remote sshd child from a previous tunnel is still holding the port.
+    releaseStaleRemoteSshd?: boolean;
   }
 
   interface PortForwardResult {
@@ -207,7 +210,15 @@ declare global {
 
   type PortForwardStatusCallback = (status: 'inactive' | 'connecting' | 'active' | 'error', error?: string) => void;
 
-  interface NetcattyBridge {}
+  interface NetcattyBridge {
+    startPortForward?: (options: PortForwardOptions) => Promise<PortForwardResult>;
+    stopPortForward?: (tunnelId: string) => Promise<{ tunnelId: string; success: boolean; error?: string }>;
+    getPortForwardStatus?: (tunnelId: string) => Promise<PortForwardStatusResult>;
+    listPortForwards?: () => Promise<Array<{ tunnelId: string; type?: 'local' | 'remote' | 'dynamic'; status: string }>>;
+    stopAllPortForwards?: () => Promise<void>;
+    stopPortForwardByRuleId?: (ruleId: string) => Promise<{ stopped: number }>;
+    onPortForwardStatus?: (tunnelId: string, cb: PortForwardStatusCallback) => () => void;
+  }
 
   interface Window {
     netcatty?: NetcattyBridge;

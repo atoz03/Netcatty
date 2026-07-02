@@ -26,7 +26,7 @@ const rule = (overrides: Partial<PortForwardingRule> = {}): PortForwardingRule =
   ...overrides,
 });
 
-const installBridgeStub = () => {
+const installBridgeStub = (overrides: Record<string, unknown> = {}) => {
   let started = false;
   let capturedOptions: Record<string, unknown> | null = null;
   Object.defineProperty(globalThis, "window", {
@@ -39,6 +39,7 @@ const installBridgeStub = () => {
           return { success: true };
         },
         onPortForwardStatus: () => undefined,
+        ...overrides,
       },
     },
   });
@@ -47,6 +48,29 @@ const installBridgeStub = () => {
     getOptions: () => capturedOptions,
   };
 };
+
+test("startPortForward passes confirmed remote sshd release option to backend", async () => {
+  const bridge = installBridgeStub();
+  const statuses: string[] = [];
+
+  const result = await startPortForward(
+    rule({ type: "remote" }),
+    host(),
+    [],
+    [],
+    [],
+    (status, error) => statuses.push(error ? `${status}:${error}` : status),
+    false,
+    undefined,
+    undefined,
+    { releaseStaleRemoteSshd: true },
+  );
+
+  assert.equal(result.success, true);
+  assert.equal(bridge.wasStarted(), true);
+  assert.equal(bridge.getOptions()?.releaseStaleRemoteSshd, true);
+  assert.deepEqual(statuses, ["connecting"]);
+});
 
 test("startPortForward rejects missing proxy identities before starting", async () => {
   const bridge = installBridgeStub();

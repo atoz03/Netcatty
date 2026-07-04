@@ -36,12 +36,26 @@ export function shouldShowDockerTab(
   return isDefiniteLinuxTarget(host, capabilities, session);
 }
 
+export function shouldCollectServerStats(
+  host: Host | null | undefined,
+  capabilities: SessionCapabilities | undefined,
+  session: TerminalSession | null | undefined,
+): boolean {
+  const detectedDeviceClass = classifyDistroId(host?.distro);
+  if (host?.deviceType === 'network' || detectedDeviceClass === 'network-device') return false;
+  if (capabilities?.targetOs === 'linux' || capabilities?.targetOs === 'darwin') return true;
+  if (host?.os === 'linux' || host?.os === 'macos') return true;
+  if (detectedDeviceClass === 'linux-like') return true;
+  if (session?.protocol === 'local' && host?.os === 'linux') return true;
+  return false;
+}
+
 export function buildSystemManagerTabs(
   host: Host | null | undefined,
   capabilities: SessionCapabilities | undefined,
   session: TerminalSession | null | undefined,
 ): SystemManagerSubTab[] {
-  const tabs: SystemManagerSubTab[] = ['processes'];
+  const tabs: SystemManagerSubTab[] = ['overview', 'processes'];
   if (shouldShowTmuxTab(host, capabilities, session)) tabs.push('tmux');
   if (shouldShowDockerTab(host, capabilities, session)) tabs.push('docker');
   return tabs;

@@ -119,7 +119,7 @@ export type DockerImageManageAction =
   | { action: 'prune'; all?: boolean }
   | { action: 'tag'; imageId: string; repository: string; tag?: string };
 
-export type SystemManagerSubTab = 'processes' | 'tmux' | 'docker';
+export type SystemManagerSubTab = 'overview' | 'processes' | 'tmux' | 'docker';
 
 export interface TerminalPopupIcon {
   kind: 'image';

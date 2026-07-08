@@ -104,7 +104,7 @@ export type SessionLogConfig = {
 };
 
 export type TerminalSessionStartersContext = {
-  host: Host;
+  host: Host & Pick<Partial<TerminalSession>, "localStartDir">;
   keys: SSHKey[];
   identities?: Identity[];
   knownHosts?: KnownHost[];
@@ -184,4 +184,5 @@ export type TerminalSessionStartersContext = {
 export type TerminalSessionDataMeta = {
   droppedOutputMayAffectTerminalState?: boolean;
   droppedOutputAlternateScreenAction?: 'enter' | 'leave';
+  terminalPerf?: NetcattyTerminalOutputPerfMeta;
 };

@@ -81,6 +81,7 @@ function createFakeTerminalFromLines(lines: Array<{ text: string; isWrapped: boo
       },
     },
     onScroll: () => noopDisposable,
+    onData: () => noopDisposable,
     onWriteParsed: () => noopDisposable,
     onResize: () => noopDisposable,
     onRender: () => noopDisposable,
@@ -107,18 +108,110 @@ function createFakeTerminalFromLines(lines: Array<{ text: string; isWrapped: boo
   return { term, decorations };
 }
 
+function createFakeTerminalFromLargeWrappedBlock({
+  lineCount,
+  lineText,
+  viewportY,
+  rows,
+}: {
+  lineCount: number;
+  lineText: string;
+  viewportY: number;
+  rows: number;
+}) {
+  let getLineCount = 0;
+  const decorations: Array<{ x: number; width: number; foregroundColor: string }> = [];
+  const noopDisposable = { dispose() {} };
+  const handlers: {
+    scroll?: () => void;
+    data?: (data: string) => void;
+    writeParsed?: () => void;
+    resize?: () => void;
+    render?: () => void;
+  } = {};
+  const term = {
+    rows,
+    cols: lineText.length,
+    buffer: {
+      active: {
+        type: "normal",
+        viewportY,
+        baseY: 0,
+        cursorY: viewportY,
+        length: lineCount,
+        getLine: (lineY: number) => {
+          getLineCount += 1;
+          if (lineY < 0 || lineY >= lineCount) return undefined;
+          return createFakeWrappedLine(lineText, lineY > 0);
+        },
+      },
+    },
+    onScroll(handler: () => void) {
+      handlers.scroll = handler;
+      return noopDisposable;
+    },
+    onData(handler: (data: string) => void) {
+      handlers.data = handler;
+      return noopDisposable;
+    },
+    onWriteParsed(handler: () => void) {
+      handlers.writeParsed = handler;
+      return noopDisposable;
+    },
+    onResize(handler: () => void) {
+      handlers.resize = handler;
+      return noopDisposable;
+    },
+    onRender(handler: () => void) {
+      handlers.render = handler;
+      return noopDisposable;
+    },
+    registerMarker(offset: number) {
+      return {
+        line: offset,
+        isDisposed: false,
+        dispose() {
+          this.isDisposed = true;
+        },
+      };
+    },
+    registerDecoration(options: { x: number; width: number; foregroundColor: string }) {
+      decorations.push(options);
+      return {
+        isDisposed: false,
+        dispose() {
+          this.isDisposed = true;
+        },
+      };
+    },
+    refresh() {},
+  };
+  return {
+    term,
+    decorations,
+    handlers,
+    getLineCount: () => getLineCount,
+    resetGetLineCount: () => {
+      getLineCount = 0;
+    },
+  };
+}
+
 function createFakeTerminal(lineText: string, options: { lineCount?: number } = {}) {
   const lineCount = options.lineCount ?? 1;
   let translateCount = 0;
+  const translatedLineIndexes: number[] = [];
   const lines = Array.from({ length: lineCount }, (_, index) =>
     createFakeLine(`${lineText} ${index}`, () => {
       translateCount += 1;
+      translatedLineIndexes.push(index);
     })
   );
   const decorations: Array<{ x: number; width: number; foregroundColor: string }> = [];
   const noopDisposable = { dispose() {} };
   const handlers: {
     scroll?: () => void;
+    data?: (data: string) => void;
     writeParsed?: () => void;
     resize?: () => void;
     render?: () => void;
@@ -138,6 +231,10 @@ function createFakeTerminal(lineText: string, options: { lineCount?: number } = 
     },
     onScroll: (handler: () => void) => {
       handlers.scroll = handler;
+      return noopDisposable;
+    },
+    onData: (handler: (data: string) => void) => {
+      handlers.data = handler;
       return noopDisposable;
     },
     onWriteParsed: (handler: () => void) => {
@@ -178,8 +275,10 @@ function createFakeTerminal(lineText: string, options: { lineCount?: number } = 
     decorations,
     handlers,
     getTranslateCount: () => translateCount,
+    getTranslatedLineIndexes: () => [...translatedLineIndexes],
     resetTranslateCount: () => {
       translateCount = 0;
+      translatedLineIndexes.length = 0;
     },
   };
 }
@@ -249,6 +348,168 @@ test("output-driven viewport changes defer keyword highlight scans", async () =>
   }
 });
 
+test("user scroll defers keyword highlight scans and scans only visible rows", async () => {
+  const raf = installAnimationFrameQueue();
+  try {
+    const { term, handlers, getTranslateCount, resetTranslateCount } = createFakeTerminal("hello DEPLOY world", {
+      lineCount: 80,
+    });
+    term.rows = 30;
+    const highlighter = new KeywordHighlighter(term as never);
+    const rules: KeywordHighlightRule[] = [
+      {
+        id: "deploy",
+        label: "Deploy",
+        patterns: ["DEPLOY"],
+        color: "#F87171",
+        enabled: true,
+      },
+    ];
+
+    highlighter.setRules(rules, true);
+    raf.flush();
+    resetTranslateCount();
+
+    term.buffer.active.viewportY = 10;
+    handlers.scroll?.();
+    handlers.render?.();
+
+    assert.equal(getTranslateCount(), 0);
+
+    await new Promise((resolve) => { setTimeout(resolve, 130); });
+    assert.equal(getTranslateCount(), term.rows);
+    highlighter.dispose();
+  } finally {
+    raf.restore();
+  }
+});
+
+test("continuous user scroll cancels stale keyword highlight continuation work", async () => {
+  const raf = installAnimationFrameQueue();
+  try {
+    const {
+      term,
+      handlers,
+      getTranslatedLineIndexes,
+      resetTranslateCount,
+    } = createFakeTerminal("hello DEPLOY world", { lineCount: 120 });
+    term.rows = 30;
+    const highlighter = new KeywordHighlighter(term as never);
+    const rules: KeywordHighlightRule[] = [
+      {
+        id: "deploy",
+        label: "Deploy",
+        patterns: ["DEPLOY"],
+        color: "#F87171",
+        enabled: true,
+      },
+    ];
+
+    highlighter.setRules(rules, true);
+    raf.flush();
+    resetTranslateCount();
+
+    term.buffer.active.viewportY = 10;
+    handlers.scroll?.();
+    await new Promise((resolve) => { setTimeout(resolve, 60); });
+
+    term.buffer.active.viewportY = 60;
+    handlers.scroll?.();
+    await new Promise((resolve) => { setTimeout(resolve, 130); });
+    raf.flush();
+
+    assert.deepEqual(
+      getTranslatedLineIndexes().filter((lineY) => lineY > 17 && lineY < 60),
+      [],
+      "stale continuation from the first scroll should not keep scanning old viewport rows",
+    );
+    assert.ok(
+      getTranslatedLineIndexes().some((lineY) => lineY >= 60 && lineY < 90),
+      "latest viewport should be highlighted after scroll settles",
+    );
+    highlighter.dispose();
+  } finally {
+    raf.restore();
+  }
+});
+
+test("large output delays keyword highlight scans until output quiets", async () => {
+  const raf = installAnimationFrameQueue();
+  try {
+    const { term, handlers, getTranslateCount, resetTranslateCount } = createFakeTerminal("hello DEPLOY world", {
+      lineCount: 40,
+    });
+    const highlighter = new KeywordHighlighter(term as never);
+    const rules: KeywordHighlightRule[] = [
+      {
+        id: "deploy",
+        label: "Deploy",
+        patterns: ["DEPLOY"],
+        color: "#F87171",
+        enabled: true,
+      },
+    ];
+
+    highlighter.setRules(rules, true);
+    raf.flush();
+    resetTranslateCount();
+
+    noteTerminalOutputPressureData(
+      term as never,
+      "x\n".repeat(Math.ceil(TERMINAL_LONG_LINE_PRESSURE_BYTES / 2)),
+    );
+    handlers.writeParsed?.();
+    raf.flush();
+
+    assert.equal(getTranslateCount(), 0);
+
+    await new Promise((resolve) => { setTimeout(resolve, 220); });
+    assert.ok(getTranslateCount() > 0);
+    highlighter.dispose();
+    resetTerminalOutputPressure(term as never);
+  } finally {
+    raf.restore();
+  }
+});
+
+test("recent user input delays keyword highlight scans until typing is quiet", async () => {
+  const raf = installAnimationFrameQueue();
+  try {
+    const { term, handlers, getTranslateCount, resetTranslateCount } = createFakeTerminal("hello DEPLOY world", {
+      lineCount: 40,
+    });
+    const highlighter = new KeywordHighlighter(term as never);
+    const rules: KeywordHighlightRule[] = [
+      {
+        id: "deploy",
+        label: "Deploy",
+        patterns: ["DEPLOY"],
+        color: "#F87171",
+        enabled: true,
+      },
+    ];
+
+    highlighter.setRules(rules, true);
+    raf.flush();
+    resetTranslateCount();
+
+    handlers.data?.("a");
+    handlers.writeParsed?.();
+    raf.flush();
+
+    assert.equal(getTranslateCount(), 0);
+
+    await new Promise((resolve) => { setTimeout(resolve, 120); });
+    assert.equal(getTranslateCount(), 0);
+
+    await new Promise((resolve) => { setTimeout(resolve, 100); });
+    assert.ok(getTranslateCount() > 0);
+    highlighter.dispose();
+  } finally {
+    raf.restore();
+  }
+});
+
 test("long-line pressure avoids scanning across a whole soft-wrapped logical line", () => {
   const raf = installAnimationFrameQueue();
   try {
@@ -306,6 +567,87 @@ test("wrapped highlight scanning falls back when the logical line exceeds the sc
     resetTerminalOutputPressure(term as never);
 
     assert.deepEqual(decorations, []);
+  } finally {
+    raf.restore();
+  }
+});
+
+test("wrapped highlight scanning stops before walking an oversized soft-wrapped line", () => {
+  const raf = installAnimationFrameQueue();
+  try {
+    const lineText = "a".repeat(80);
+    const { term, decorations, getLineCount } = createFakeTerminalFromLargeWrappedBlock({
+      lineCount: 30_000,
+      lineText,
+      viewportY: 29_990,
+      rows: 3,
+    });
+    const highlighter = new KeywordHighlighter(term as never);
+    const rules: KeywordHighlightRule[] = [
+      {
+        id: "wrapped",
+        label: "Wrapped",
+        patterns: [`${lineText}${lineText}`],
+        color: "#F87171",
+        enabled: true,
+      },
+    ];
+
+    highlighter.setRules(rules, true);
+    raf.flush();
+    highlighter.dispose();
+    resetTerminalOutputPressure(term as never);
+
+    assert.deepEqual(decorations, []);
+    assert.ok(
+      getLineCount() < 3_000,
+      `expected capped wrapped scan, got ${getLineCount()} getLine calls`,
+    );
+  } finally {
+    raf.restore();
+  }
+});
+
+test("scroll refresh reuses wrapped scan misses across visible rows", async () => {
+  const raf = installAnimationFrameQueue();
+  try {
+    const lineText = "a".repeat(80);
+    const {
+      term,
+      handlers,
+      getLineCount,
+      resetGetLineCount,
+    } = createFakeTerminalFromLargeWrappedBlock({
+      lineCount: 30_000,
+      lineText,
+      viewportY: 29_000,
+      rows: 30,
+    });
+    const highlighter = new KeywordHighlighter(term as never);
+    const rules: KeywordHighlightRule[] = [
+      {
+        id: "wrapped",
+        label: "Wrapped",
+        patterns: [`${lineText}${lineText}`],
+        color: "#F87171",
+        enabled: true,
+      },
+    ];
+
+    highlighter.setRules(rules, true);
+    raf.flush();
+    resetGetLineCount();
+
+    term.buffer.active.viewportY = 29_500;
+    handlers.scroll?.();
+    await new Promise((resolve) => { setTimeout(resolve, 130); });
+
+    assert.ok(
+      getLineCount() < 1_000,
+      `expected scroll chunk to share wrapped scan cache, got ${getLineCount()} getLine calls`,
+    );
+    highlighter.dispose();
+    resetTerminalOutputPressure(term as never);
   } finally {
     raf.restore();
   }

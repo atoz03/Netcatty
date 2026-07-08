@@ -43,6 +43,7 @@ function createBridgeRegistrar(context) {
     terminalBridge,
     crashLogBridge,
     ptyProcessTree,
+    ensureMainWindow,
     getOauthBridge,
     getGithubAuthBridge,
     getGoogleAuthBridge,
@@ -158,6 +159,9 @@ function createBridgeRegistrar(context) {
       sessions,
       sftpClients,
       electronModule,
+      ensureMainWindow,
+      getMainWindow: () => getWindowManager().getMainWindow?.(),
+      sendWhenRendererReady: (...args) => getWindowManager().sendWhenRendererReady?.(...args),
       cliDiscoveryFilePath,
       terminalOutputChannel,
       terminalWorkerManager,
@@ -214,7 +218,7 @@ function createBridgeRegistrar(context) {
     cloudSyncBridge.registerHandlers(ipcMain);
     fileWatcherBridge.registerHandlers(ipcMain, { terminalWorkerManager });
     tempDirBridge.registerHandlers(ipcMain, shell);
-    sessionLogsBridge.registerHandlers(ipcMain);
+    sessionLogsBridge.registerHandlers(ipcMain, { terminalWorkerManager });
     compressUploadBridge.registerHandlers(ipcMain, { terminalWorkerManager });
     globalShortcutBridge.registerHandlers(ipcMain);
     credentialBridge.registerHandlers(ipcMain, electronModule);

@@ -397,9 +397,18 @@ export const enCoreMessages: Messages = {
   'settings.terminal.behavior.middleClick.menu': 'Show menu',
   'settings.terminal.behavior.middleClick.paste': 'Paste',
   'settings.terminal.behavior.middleClick.disabled': 'Do nothing',
+  'settings.terminal.behavior.wordSeparators': 'Word separators',
+  'settings.terminal.behavior.wordSeparators.desc':
+    'Characters treated as word boundaries for double-click selection. Spaces count too; add =, comma, or : for strings like uid=name.',
   'settings.terminal.behavior.bracketedPaste': 'Bracketed paste mode',
   'settings.terminal.behavior.bracketedPaste.desc':
     'Wrap pasted text with escape sequences so the shell can distinguish paste from typed input. Disable if you see ^[[200~ artifacts.',
+  'settings.terminal.behavior.shiftEnterNewline': 'Shift+Enter text',
+  'settings.terminal.behavior.shiftEnterNewline.desc':
+    'Send configured text instead of normal Enter when pressing Shift+Enter in the terminal.',
+  'settings.terminal.behavior.shiftEnterNewlineText': 'Text to send',
+  'settings.terminal.behavior.shiftEnterNewlineText.desc':
+    'Use \\n for newline, \\t for tab, and \\\\ for backslash.',
   'settings.terminal.behavior.clearWipesScrollback': '`clear` wipes scrollback',
   'settings.terminal.behavior.clearWipesScrollback.desc':
     'Make `clear` also wipe the scrollback buffer (POSIX default). Disable to keep history visible after `clear`.',
@@ -488,6 +497,8 @@ export const enCoreMessages: Messages = {
   'settings.terminal.section.connection': 'Connection',
   'settings.terminal.connection.verifyHostKeys': 'Verify SSH host keys',
   'settings.terminal.connection.verifyHostKeys.desc': 'Ask before connecting to a new or changed SSH host key. Turn this off only for trusted private networks.',
+  'settings.terminal.connection.sshAutoReconnectEnabled': 'Automatically reconnect SSH sessions',
+  'settings.terminal.connection.sshAutoReconnectEnabled.desc': 'When turned on, established SSH sessions that drop unexpectedly try to reconnect every 5 seconds until the tab is closed or the connection succeeds.',
   'settings.terminal.connection.keepaliveInterval': 'Keepalive Interval',
   'settings.terminal.connection.keepaliveInterval.desc': 'How often (in seconds) to send SSH-level keepalive packets. Set to 0 to disable globally — note that individual hosts can override this in their own settings.',
   'settings.terminal.connection.keepaliveCountMax': 'Max unanswered keepalives',
@@ -721,6 +732,12 @@ export const enCoreMessages: Messages = {
   'vault.groups.errors.invalidChars': "Group name cannot include '/' or '\\\\'.",
   'vault.groups.errors.duplicatePath': 'A group with this name already exists at this location.',
 
+  'vault.deleteConfirm.title': 'Delete "{name}"?',
+  'vault.deleteConfirm.desc': 'This action cannot be undone.',
+  'vault.deleteConfirm.packageDesc': 'This will remove the script package. Scripts inside it will stay saved and move out of the package.',
+  'vault.deleteConfirm.noteGroupDesc': 'This will remove the folder. Notes inside it will stay saved and move out of the folder.',
+  'vault.deleteConfirm.portForwardingDesc': 'This will delete the port forwarding rule.',
+
   'vault.managedSource.unmanage': 'Unmanage',
   'vault.managedSource.unmanageSuccess': 'Successfully unmanaged group',
 
@@ -763,5 +780,8 @@ export const enCoreMessages: Messages = {
   'vault.hosts.empty.title': 'Set up your hosts',
   'vault.hosts.empty.desc': 'Save hosts to quickly connect to your servers, VMs, and containers.',
   'deepLink.ssh.invalid': 'Invalid ssh:// link',
+  'deepLink.telnet.invalid': 'Invalid telnet:// link',
+  'deepLink.jms.invalid': 'Invalid JumpServer link',
+  'deepLink.jms.unsupported': 'Unsupported JumpServer protocol: {{protocol}}',
 
 };

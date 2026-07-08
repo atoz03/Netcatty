@@ -46,6 +46,79 @@ import { resolveRestorePreviousSessionSetting } from './sessionRestoreSettings';
 import type { CodingCliProviderId } from '../../domain/codingCliProviders';
 import { normalizeCodingCliDynamicTitleForStorage } from '../../domain/codingCliTitleParse';
 
+export function addWorkspaceIfMissing(
+  workspaces: Workspace[],
+  workspace: Workspace,
+): Workspace[] {
+  return workspaces.some(ws => ws.id === workspace.id) ? workspaces : [...workspaces, workspace];
+}
+
+export function addTerminalSessionIfMissing(
+  sessions: TerminalSession[],
+  session: TerminalSession,
+): TerminalSession[] {
+  return sessions.some(candidate => candidate.id === session.id) ? sessions : [...sessions, session];
+}
+
+export function insertWorkspacePaneIfMissing(
+  workspaces: Workspace[],
+  workspaceId: string,
+  sessionId: string,
+  hint: SplitHint,
+): Workspace[] {
+  return workspaces.map(ws => {
+    if (ws.id !== workspaceId) return ws;
+    if (collectSessionIds(ws.root).includes(sessionId)) return ws;
+    return { ...ws, root: insertPaneIntoWorkspace(ws.root, sessionId, hint) };
+  });
+}
+
+export function appendWorkspaceRootPaneIfMissing(
+  workspaces: Workspace[],
+  workspaceId: string,
+  sessionId: string,
+  direction: SplitDirection = 'vertical',
+): Workspace[] {
+  return workspaces.map(ws => {
+    if (ws.id !== workspaceId) return ws;
+    if (collectSessionIds(ws.root).includes(sessionId)) {
+      return ws.focusedSessionId === sessionId ? ws : { ...ws, focusedSessionId: sessionId };
+    }
+    return {
+      ...ws,
+      root: appendPaneToWorkspaceRoot(ws.root, sessionId, direction),
+      focusedSessionId: sessionId,
+    };
+  });
+}
+
+export function insertCopiedTabOrderIdOnce(
+  prevTabOrder: string[],
+  sourceTabId: string,
+  copiedTabId: string,
+  allTabIds: string[],
+): string[] {
+  if (prevTabOrder.includes(copiedTabId)) return prevTabOrder;
+
+  const directIdx = prevTabOrder.indexOf(sourceTabId);
+  if (directIdx !== -1) {
+    const next = [...prevTabOrder];
+    next.splice(directIdx + 1, 0, copiedTabId);
+    return next;
+  }
+
+  const allTabIdSet = new Set(allTabIds);
+  const orderedIds = prevTabOrder.filter(id => allTabIdSet.has(id));
+  const orderedIdSet = new Set(orderedIds);
+  const newIds = allTabIds.filter(id => !orderedIdSet.has(id));
+  const currentOrder = [...orderedIds, ...newIds];
+  const sourceIdx = currentOrder.indexOf(sourceTabId);
+  if (sourceIdx === -1) return [...prevTabOrder, copiedTabId];
+  const next = [...currentOrder];
+  next.splice(sourceIdx + 1, 0, copiedTabId);
+  return next;
+}
+
 
 export const useSessionState = ({
   persistSessionRestore = true,
@@ -634,14 +707,14 @@ export const useSessionState = ({
     hint: SplitHint
   ) => {
     if (!hint || baseSessionId === joiningSessionId) return;
+    const newWorkspace = createWorkspaceEntity(baseSessionId, joiningSessionId, hint);
     
 	    setSessions(prevSessions => {
       const base = prevSessions.find(s => s.id === baseSessionId);
       const joining = prevSessions.find(s => s.id === joiningSessionId);
       if (!base || !joining || base.workspaceId || joining.workspaceId) return prevSessions;
 
-      const newWorkspace = createWorkspaceEntity(baseSessionId, joiningSessionId, hint);
-      setWorkspaces(prev => [...prev, newWorkspace]);
+      setWorkspaces(prev => addWorkspaceIfMissing(prev, newWorkspace));
       setActiveTabId(newWorkspace.id);
       
       return prevSessions.map(s => {
@@ -668,10 +741,7 @@ export const useSessionState = ({
         const targetWorkspace = prevWorkspaces.find(w => w.id === workspaceId);
         if (!targetWorkspace) return prevWorkspaces;
         
-        return prevWorkspaces.map(ws => {
-          if (ws.id !== workspaceId) return ws;
-          return { ...ws, root: insertPaneIntoWorkspace(ws.root, sessionId, hint) };
-        });
+        return insertWorkspacePaneIfMissing(prevWorkspaces, workspaceId, sessionId, hint);
       });
       
       setActiveTabId(workspaceId);
@@ -726,16 +796,9 @@ export const useSessionState = ({
     setWorkspaces(prev => {
       const target = prev.find(w => w.id === workspaceId);
       if (!target) return prev;
-      setSessions(s => s.some(x => x.id === newSessionId) ? s : [...s, newSession]);
+      setSessions(s => addTerminalSessionIfMissing(s, newSession));
       setActiveTabId(workspaceId);
-      return prev.map(ws => {
-        if (ws.id !== workspaceId) return ws;
-        return {
-          ...ws,
-          root: appendPaneToWorkspaceRoot(ws.root, newSessionId, direction),
-          focusedSessionId: newSessionId,
-        };
-      });
+      return appendWorkspaceRootPaneIfMissing(prev, workspaceId, newSessionId, direction);
     });
     return newSessionId;
   }, [setActiveTabId]);
@@ -778,16 +841,9 @@ export const useSessionState = ({
     setWorkspaces(prev => {
       const target = prev.find(w => w.id === workspaceId);
       if (!target) return prev;
-      setSessions(s => s.some(x => x.id === newSessionId) ? s : [...s, newSession]);
+      setSessions(s => addTerminalSessionIfMissing(s, newSession));
       setActiveTabId(workspaceId);
-      return prev.map(ws => {
-        if (ws.id !== workspaceId) return ws;
-        return {
-          ...ws,
-          root: appendPaneToWorkspaceRoot(ws.root, newSessionId, direction),
-          focusedSessionId: newSessionId,
-        };
-      });
+      return appendWorkspaceRootPaneIfMissing(prev, workspaceId, newSessionId, direction);
     });
     return newSessionId;
   }, [setActiveTabId]);
@@ -810,6 +866,13 @@ export const useSessionState = ({
       customName?: string;
     },
   ) => {
+    const newSessionId = crypto.randomUUID();
+    const standaloneHint: SplitHint = {
+      direction,
+      position: direction === 'horizontal' ? 'bottom' : 'right',
+    };
+    const standaloneWorkspace = createWorkspaceEntity(sessionId, newSessionId, standaloneHint);
+
 	    setSessions(prevSessions => {
       const session = prevSessions.find(s => s.id === sessionId);
       if (!session) return prevSessions;
@@ -818,7 +881,7 @@ export const useSessionState = ({
       if (session.workspaceId) {
         // Create a new session with the same host
         const newSession = createSplitTerminalSessionClone(session, {
-          id: crypto.randomUUID(),
+          id: newSessionId,
           localShellType: options?.localShellType,
           workspaceId: session.workspaceId,
           startupCommand: options?.startupCommand,
@@ -833,38 +896,29 @@ export const useSessionState = ({
         };
         
         setWorkspaces(prevWorkspaces => {
-          return prevWorkspaces.map(ws => {
-            if (ws.id !== session.workspaceId) return ws;
-            return { ...ws, root: insertPaneIntoWorkspace(ws.root, newSession.id, hint) };
-          });
+          return insertWorkspacePaneIfMissing(prevWorkspaces, session.workspaceId, newSession.id, hint);
         });
         
-        return [...prevSessions, newSession];
+        return addTerminalSessionIfMissing(prevSessions, newSession);
       }
       
       // Session is standalone - create a new workspace
       const newSession = createSplitTerminalSessionClone(session, {
-        id: crypto.randomUUID(),
+        id: newSessionId,
         localShellType: options?.localShellType,
         startupCommand: options?.startupCommand,
         customName: options?.customName,
       });
 
-      const hint: SplitHint = {
-        direction,
-        position: direction === 'horizontal' ? 'bottom' : 'right',
-      };
-
-      const newWorkspace = createWorkspaceEntity(sessionId, newSession.id, hint);
-      setWorkspaces(prev => [...prev, newWorkspace]);
-      setActiveTabId(newWorkspace.id);
+      setWorkspaces(prev => addWorkspaceIfMissing(prev, standaloneWorkspace));
+      setActiveTabId(standaloneWorkspace.id);
       
       return prevSessions.map(s => {
         if (s.id === sessionId) {
-          return { ...s, workspaceId: newWorkspace.id };
+          return { ...s, workspaceId: standaloneWorkspace.id };
         }
         return s;
-      }).concat({ ...newSession, workspaceId: newWorkspace.id });
+      }).concat({ ...newSession, workspaceId: standaloneWorkspace.id });
 	    });
 	  }, [setActiveTabId]);
 
@@ -1034,30 +1088,12 @@ export const useSessionState = ({
       // StrictMode's double-invocation is harmless.
       setActiveTabId(newSessionId);
       setTabOrder(prevTabOrder => {
-        // Fast path: source is already tracked in tabOrder — splice directly.
-        const directIdx = prevTabOrder.indexOf(sessionId);
-        if (directIdx !== -1) {
-          const next = [...prevTabOrder];
-          next.splice(directIdx + 1, 0, newSessionId);
-          return next;
-        }
-        // Fallback: source is only in the derived tab collections. Rebuild the
-        // effective order (same pattern as reorderTabs) to locate its position.
         const allTabIds = [
           ...orphanSessions.map(s => s.id),
           ...workspaces.map(w => w.id),
           ...logViews.map(lv => lv.id),
         ];
-        const allTabIdSet = new Set(allTabIds);
-        const orderedIds = prevTabOrder.filter(id => allTabIdSet.has(id));
-        const orderedIdSet = new Set(orderedIds);
-        const newIds = allTabIds.filter(id => !orderedIdSet.has(id));
-        const currentOrder = [...orderedIds, ...newIds];
-        const sourceIdx = currentOrder.indexOf(sessionId);
-        if (sourceIdx === -1) return [...prevTabOrder, newSessionId];
-        const next = [...currentOrder];
-        next.splice(sourceIdx + 1, 0, newSessionId);
-        return next;
+        return insertCopiedTabOrderIdOnce(prevTabOrder, sessionId, newSessionId, allTabIds);
       });
 
       return [...prevSessions, newSession];

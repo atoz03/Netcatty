@@ -131,6 +131,7 @@ export const STORAGE_KEY_SESSION_LOGS_FORMAT = 'netcatty_session_logs_format_v1'
 export const STORAGE_KEY_SESSION_LOGS_TIMESTAMPS_ENABLED = 'netcatty_session_logs_timestamps_enabled_v1';
 export const STORAGE_KEY_SSH_DEBUG_LOGS_ENABLED = 'netcatty_ssh_debug_logs_enabled_v1';
 export const STORAGE_KEY_SSH_DEEP_LINK_ENABLED = 'netcatty_ssh_deep_link_enabled_v1';
+export const STORAGE_KEY_JMS_DEEP_LINK_ENABLED = 'netcatty_jms_deep_link_enabled_v1';
 
 // Archived legacy key records that are no longer supported by the app (e.g. biometric/WebAuthn/FIDO2 experiments).
 export const STORAGE_KEY_LEGACY_KEYS = 'netcatty_legacy_keys_v1';
@@ -203,6 +204,7 @@ export const STORAGE_KEY_TERMINAL_HOST_TREE_COLLAPSED = 'netcatty_terminal_host_
 export const STORAGE_KEY_TERMINAL_COMPOSE_BAR_OPEN = 'netcatty_terminal_compose_bar_open_v1';
 export const STORAGE_KEY_TERMINAL_SEARCH_OPEN = 'netcatty_terminal_search_open_v1';
 export const STORAGE_KEY_TERMINAL_ENCODING_BY_HOST_PREFIX = 'netcatty_terminal_encoding_by_host_v1:';
+export const STORAGE_KEY_TERMINAL_YMODEM_SEND_DIR = 'netcatty_terminal_ymodem_send_dir_v1';
 
 // Port Forwarding (transient cross-window broadcast key)
 export const STORAGE_KEY_PF_RECONNECT_CANCEL = '__netcatty_pf_cancel_reconnect';

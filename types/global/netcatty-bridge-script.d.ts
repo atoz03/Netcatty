@@ -40,13 +40,79 @@ export interface ScriptScreenSnapshot {
   lines: string[];
 }
 
+export interface ScriptDialogOption {
+  label: string;
+  value: string;
+  description?: string;
+  disabled?: boolean;
+}
+
+export type ScriptDialogConditionValue = string | number | boolean;
+
+export type ScriptDialogCondition =
+  | { field: string; equals: ScriptDialogConditionValue }
+  | { field: string; notEquals: ScriptDialogConditionValue }
+  | { field: string; truthy: true }
+  | { field: string; falsy: true };
+
+export interface ScriptDialogFieldBase {
+  name: string;
+  label: string;
+  description?: string;
+  required?: boolean;
+  visibleWhen?: ScriptDialogCondition;
+}
+
+export interface ScriptDialogChoiceField extends ScriptDialogFieldBase {
+  type: 'select' | 'radio';
+  options: ScriptDialogOption[];
+  defaultValue: string;
+}
+
+export interface ScriptDialogCheckboxField extends ScriptDialogFieldBase {
+  type: 'checkbox';
+  defaultValue: boolean;
+}
+
+export interface ScriptDialogTextareaField extends ScriptDialogFieldBase {
+  type: 'textarea';
+  defaultValue: string;
+  placeholder?: string;
+}
+
+export interface ScriptDialogNumberField extends ScriptDialogFieldBase {
+  type: 'number';
+  defaultValue?: number;
+  placeholder?: string;
+  min?: number;
+  max?: number;
+  step?: number;
+}
+
+export type ScriptDialogField =
+  | ScriptDialogChoiceField
+  | ScriptDialogCheckboxField
+  | ScriptDialogTextareaField
+  | ScriptDialogNumberField;
+
+export interface ScriptDialogForm {
+  title?: string;
+  message: string;
+  submitLabel?: string;
+  cancelLabel?: string;
+  fields: ScriptDialogField[];
+}
+
+export type ScriptDialogFormValue = string | boolean | number | undefined;
+
 export interface ScriptDialogRequest {
   requestId: string;
-  type: 'alert' | 'confirm' | 'prompt' | 'waitForTimeout';
+  type: 'alert' | 'confirm' | 'prompt' | 'waitForTimeout' | 'form';
   message: string;
   defaultValue?: string;
   pattern?: string;
   timeoutMs?: number;
+  form?: ScriptDialogForm;
 }
 
 export interface ScriptRunParams {

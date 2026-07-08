@@ -25,3 +25,16 @@ test("terminal activity filter stays in sync before notification guards", () => 
   assert.ok(filterIndex < visibleGuardIndex);
   assert.ok(filterIndex < alreadyActiveGuardIndex);
 });
+
+test("side panel layout changes remeasure workspace before paint", () => {
+  assert.match(source, /import \{ useCallback, useEffect, useLayoutEffect, useRef \} from 'react';/);
+
+  const commentIndex = source.indexOf("Discrete layout changes (side panel toggle");
+  const layoutEffectIndex = source.indexOf("useLayoutEffect(() => {", commentIndex);
+  const shellWidthDependencyIndex = source.indexOf("sidePanelShellWidth,", layoutEffectIndex);
+
+  assert.notEqual(commentIndex, -1);
+  assert.notEqual(layoutEffectIndex, -1);
+  assert.notEqual(shellWidthDependencyIndex, -1);
+  assert.ok(commentIndex < layoutEffectIndex);
+});

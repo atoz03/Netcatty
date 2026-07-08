@@ -27,13 +27,18 @@ Global \`nct.version\` exposes the runtime version.
 
 ### nct.screen
 - \`await nct.screen.waitForPrompt(ms?)\` — wait for shell prompt (# root / $ user)
-- \`await nct.screen.waitFor(pattern, ms?)\` — wait for output (string or RegExp, default 30s)
+- \`await nct.screen.waitForText(text, ms?)\` — wait for exact text; regex characters are treated literally
+- \`await nct.screen.waitForRegex(pattern, ms?)\` — wait for regex output; string patterns match multiline output
+- \`await nct.screen.waitFor(pattern, ms?)\` — compatibility helper; plain strings are literal, and legacy \`/regex/flags\` strings still work
 - \`await nct.screen.waitForAny(patterns, ms?)\` — wait until any pattern matches
 - \`await nct.screen.sendLine(cmd)\` — type command + Enter
 - \`await nct.screen.send(text)\` — raw keys without Enter
 - \`await nct.screen.getText(start?, end?)\` — read terminal buffer
 - \`await nct.screen.clear()\` — clear screen
 - Properties: \`rows\`, \`cols\`, \`currentRow\`
+
+Use \`waitForText("请选择SSH资源")\` for literal prompts.
+Use \`waitForRegex(".*请选择SSH资源.*登录方式.*")\` for regex or output split across terminal lines.
 
 ### nct.session
 - \`nct.session.connected\`, \`hostname\`, \`username\`
@@ -45,6 +50,15 @@ Global \`nct.version\` exposes the runtime version.
 - \`await nct.dialog.confirm(msg)\` → boolean
 - \`await nct.dialog.prompt(msg, default?)\` → string
 - \`await nct.dialog.alert(msg)\`
+- \`await nct.dialog.form({ title?, message?, fields })\` → object; fields support \`select\`, \`checkbox\`, \`radio\`, \`textarea\`, and \`number\`
+- \`await nct.dialog.select(msg, options, default?)\` → string
+- \`await nct.dialog.radio(msg, options, default?)\` → string
+- \`await nct.dialog.checkbox(msg, defaultChecked?)\` → boolean
+
+\`select\` and \`radio\` options may be strings or \`{ label, value, description?, disabled? }\`; option values must be non-empty and unique within the field.
+\`textarea\` returns string values; \`number\` returns number values or \`undefined\` when optional and empty. \`number\` fields support submit-time \`min\`, \`max\`, and \`step\` validation.
+Fields may use \`visibleWhen: { field, equals|notEquals|truthy|falsy }\` for conditional display; \`visibleWhen.field\` must reference an earlier field. Hidden fields are not validated and are omitted from the submitted object.
+\`form\` returns an object keyed by visible field \`name\`. Field names must not be \`__proto__\`, \`prototype\`, or \`constructor\`. Text, number, select, and radio fields are required/defaulted by default; checkbox fields are optional boolean fields unless \`required: true\` is set.
 
 ### nct.progress
 - \`nct.progress.start(label, total)\` — opt-in determinate bar

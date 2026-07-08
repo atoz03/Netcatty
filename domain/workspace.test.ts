@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 
 import type { WorkspaceNode } from "./models.ts";
 import {
+  appendPaneToWorkspaceRoot,
+  insertPaneIntoWorkspace,
   reorderWorkspaceFocusSessionOrder,
   resolveWorkspaceFocusSessionOrder,
 } from "./workspace.ts";
@@ -40,5 +42,20 @@ test("reorderWorkspaceFocusSessionOrder moves a session after a target", () => {
   assert.deepEqual(
     reorderWorkspaceFocusSessionOrder(root, ["s1", "s2", "s3"], "s1", "s3", "after"),
     ["s2", "s3", "s1"],
+  );
+});
+
+test("appendPaneToWorkspaceRoot ignores an existing session pane", () => {
+  assert.equal(appendPaneToWorkspaceRoot(root, "s2"), root);
+});
+
+test("insertPaneIntoWorkspace ignores an existing session pane", () => {
+  assert.equal(
+    insertPaneIntoWorkspace(root, "s2", {
+      direction: "vertical",
+      position: "right",
+      targetSessionId: "s1",
+    }),
+    root,
   );
 });

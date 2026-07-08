@@ -38,3 +38,12 @@ test('terminal layer bridge passes vault open callbacks into the side panel cont
   assert.match(source, /onOpenVaultHostFromChat: s\.onOpenVaultHostFromChat/);
   assert.match(source, /onOpenVaultSectionFromChat: s\.onOpenVaultSectionFromChat/);
 });
+
+test('terminal layer bridge updates side panel live state after render', () => {
+  assert.match(source, /const sidePanelLiveSnapshot = useMemo<SidePanelLiveSnapshot>/);
+  assert.match(
+    source,
+    /useLayoutEffect\(\(\) => \{\s*sidePanelLiveStore\.update\(sidePanelLiveSnapshot\);\s*\}, \[sidePanelLiveSnapshot\]\);/,
+  );
+  assert.doesNotMatch(source, /sidePanelLiveStore\.update\(\{\s*sftpActiveHost/);
+});

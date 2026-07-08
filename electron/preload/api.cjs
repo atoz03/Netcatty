@@ -272,7 +272,12 @@ function createPreloadApi(ctx) {
   onZmodemEvent: (sessionId, cb) => {
     if (!zmodemListeners.has(sessionId)) zmodemListeners.set(sessionId, new Set());
     zmodemListeners.get(sessionId).add(cb);
-    return () => zmodemListeners.get(sessionId)?.delete(cb);
+    return () => {
+      const set = zmodemListeners.get(sessionId);
+      if (!set) return;
+      set.delete(cb);
+      if (set.size === 0) zmodemListeners.delete(sessionId);
+    };
   },
   cancelZmodem: (sessionId, options) => {
     ipcRenderer.send("netcatty:zmodem:cancel", { sessionId, options });
@@ -287,7 +292,12 @@ function createPreloadApi(ctx) {
   onZmodemOverwriteRequest: (sessionId, cb) => {
     if (!zmodemOverwriteListeners.has(sessionId)) zmodemOverwriteListeners.set(sessionId, new Set());
     zmodemOverwriteListeners.get(sessionId).add(cb);
-    return () => zmodemOverwriteListeners.get(sessionId)?.delete(cb);
+    return () => {
+      const set = zmodemOverwriteListeners.get(sessionId);
+      if (!set) return;
+      set.delete(cb);
+      if (set.size === 0) zmodemOverwriteListeners.delete(sessionId);
+    };
   },
   respondZmodemOverwrite: (payload) => {
     ipcRenderer.send("netcatty:zmodem:overwrite-response", payload);
@@ -597,6 +607,10 @@ function createPreloadApi(ctx) {
     windowShownListeners.add(cb);
     return () => windowShownListeners.delete(cb);
   },
+  onWindowFocusRequested: (cb) => {
+    windowFocusRequestedListeners.add(cb);
+    return () => windowFocusRequestedListeners.delete(cb);
+  },
   onWindowWillHide: (cb) => {
     windowWillHideListeners.add(cb);
     return () => windowWillHideListeners.delete(cb);
@@ -691,10 +705,30 @@ function createPreloadApi(ctx) {
     ipcRenderer.on("netcatty:deepLink:ssh", handler);
     return () => ipcRenderer.removeListener("netcatty:deepLink:ssh", handler);
   },
+  onTelnetDeepLink: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on("netcatty:deepLink:telnet", handler);
+    return () => ipcRenderer.removeListener("netcatty:deepLink:telnet", handler);
+  },
+  onOpenTerminalPath: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on("netcatty:openTerminalPath", handler);
+    return () => ipcRenderer.removeListener("netcatty:openTerminalPath", handler);
+  },
   setSshDeepLinkEnabled: (enabled) =>
     ipcRenderer.invoke("netcatty:deepLink:ssh:setEnabled", { enabled }),
   getSshDeepLinkEnabled: () =>
     ipcRenderer.invoke("netcatty:deepLink:ssh:getEnabled"),
+
+  onJmsDeepLink: (callback) => {
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on("netcatty:deepLink:jms", handler);
+    return () => ipcRenderer.removeListener("netcatty:deepLink:jms", handler);
+  },
+  setJmsDeepLinkEnabled: (enabled) =>
+    ipcRenderer.invoke("netcatty:deepLink:jms:setEnabled", { enabled }),
+  getJmsDeepLinkEnabled: () =>
+    ipcRenderer.invoke("netcatty:deepLink:jms:getEnabled"),
 
   // Quit guard: main process asks whether any editor tabs have unsaved changes.
   // Returns an unsubscribe function so React effects can clean up on unmount.

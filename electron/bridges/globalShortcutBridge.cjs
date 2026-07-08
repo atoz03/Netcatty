@@ -7,6 +7,9 @@ const path = require("node:path");
 const fs = require("node:fs");
 
 let electronModule = null;
+let ensureMainWindow = null;
+let sendWhenRendererReady = null;
+let getSystemMenuMainWindow = null;
 let tray = null;
 let closeToTray = false;
 let currentHotkey = null;
@@ -29,6 +32,7 @@ const STATUS_TEXT = {
 let trayMenuData = {
   sessions: [],        // { id, label, hostLabel, status }
   portForwardRules: [], // { id, label, type, localPort, remoteHost, remotePort, status, hostId }
+  hosts: [],           // { id, label, hostname, group, pinned, lastConnectedAt }
 };
 
 let trayPanelWindow = null;
@@ -178,6 +182,64 @@ function bringMainWindowToForeground(win) {
 
 function openMainWindow() {
   bringMainWindowToForeground(getMainWindow());
+}
+
+function getTrackedMainWindow() {
+  if (typeof getSystemMenuMainWindow === "function") {
+    const win = getSystemMenuMainWindow();
+    if (win && !win.isDestroyed?.()) return win;
+  }
+  try {
+    const windowManager = require("./windowManager.cjs");
+    const tracked = windowManager.getMainWindow?.();
+    if (tracked && !tracked.isDestroyed?.()) return tracked;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+async function getOrCreateMainWindow() {
+  const tracked = getTrackedMainWindow();
+  if (tracked) {
+    return { win: tracked, created: false };
+  }
+  if (typeof ensureMainWindow === "function") {
+    const win = await ensureMainWindow();
+    return { win, created: true };
+  }
+  return { win: null, created: false };
+}
+
+async function openMainWindowReady() {
+  const { win } = await getOrCreateMainWindow();
+  bringMainWindowToForeground(win);
+  return win;
+}
+
+async function sendToMainWindow(channel, ...args) {
+  const { win } = await getOrCreateMainWindow();
+  bringMainWindowToForeground(win);
+  try {
+    if (typeof sendWhenRendererReady === "function") {
+      const result = await sendWhenRendererReady(win, channel, args[0], { timeoutMs: 8000 });
+      if (!result?.success) {
+        console.warn(
+          `[GlobalShortcut] Failed to deliver ${channel} to main window:`,
+          result?.error || result?.reason || "unknown",
+        );
+      }
+      return;
+    }
+    win?.webContents?.send(channel, ...args);
+  } catch {
+    // ignore
+  }
+}
+
+async function connectToHostFromSystemMenu(hostId) {
+  if (!hostId) return;
+  await sendToMainWindow("netcatty:trayPanel:connectToHost", hostId);
 }
 
 function getTrayPanelUrl() {
@@ -337,6 +399,10 @@ function resolveTrayIconPath() {
  */
 function init(deps) {
   electronModule = deps.electronModule;
+  ensureMainWindow = deps.ensureMainWindow || null;
+  sendWhenRendererReady = deps.sendWhenRendererReady || null;
+  getSystemMenuMainWindow = deps.getMainWindow || null;
+  updateDockMenu();
 }
 
 /**
@@ -727,6 +793,68 @@ function buildTrayMenuTemplate() {
   return menuTemplate;
 }
 
+function getDockHostLabel(host) {
+  const label = typeof host?.label === "string" ? host.label.trim() : "";
+  if (label) return label;
+  const hostname = typeof host?.hostname === "string" ? host.hostname.trim() : "";
+  return hostname || "Untitled Host";
+}
+
+function getDockHostLastConnectedAt(host) {
+  const value = Number(host?.lastConnectedAt);
+  return Number.isFinite(value) ? value : 0;
+}
+
+function getDockMenuHosts() {
+  return (Array.isArray(trayMenuData.hosts) ? trayMenuData.hosts : [])
+    .filter((host) => host && typeof host.id === "string" && host.id.length > 0)
+    .slice()
+    .sort((a, b) => {
+      if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
+      const recentDiff = getDockHostLastConnectedAt(b) - getDockHostLastConnectedAt(a);
+      if (recentDiff !== 0) return recentDiff;
+      return getDockHostLabel(a).localeCompare(getDockHostLabel(b), undefined, { sensitivity: "base" });
+    });
+}
+
+function buildDockMenuTemplate() {
+  const hostItems = getDockMenuHosts().map((host) => ({
+    label: getDockHostLabel(host),
+    click: async () => {
+      await connectToHostFromSystemMenu(host.id);
+    },
+  }));
+
+  return [
+    {
+      label: "Open Main Window",
+      click: async () => {
+        await openMainWindowReady();
+      },
+    },
+    { type: "separator" },
+    {
+      label: "New Connection",
+      enabled: hostItems.length > 0,
+      submenu: hostItems.length > 0
+        ? hostItems
+        : [{ label: "No Saved Hosts", enabled: false }],
+    },
+  ];
+}
+
+function updateDockMenu() {
+  if (!electronModule || process.platform !== "darwin") return;
+  const { Menu, app } = electronModule;
+  if (!Menu || !app?.dock?.setMenu) return;
+
+  try {
+    app.dock.setMenu(Menu.buildFromTemplate(buildDockMenuTemplate()));
+  } catch {
+    // ignore
+  }
+}
+
 /**
  * Update the tray context menu
  */
@@ -757,8 +885,12 @@ function setTrayMenuData(data) {
   if (data.portForwardRules !== undefined) {
     trayMenuData.portForwardRules = data.portForwardRules;
   }
+  if (data.hosts !== undefined) {
+    trayMenuData.hosts = data.hosts;
+  }
   // Rebuild menu with new data
   updateTrayMenu();
+  updateDockMenu();
 }
 
 /**
@@ -867,29 +999,17 @@ function registerHandlers(ipcMain) {
   });
 
   ipcMain.handle("netcatty:trayPanel:openMainWindow", async () => {
-    openMainWindow();
+    await openMainWindowReady();
     return { success: true };
   });
 
   ipcMain.handle("netcatty:trayPanel:jumpToSession", async (_event, sessionId) => {
-    openMainWindow();
-    try {
-      const win = getMainWindow();
-      win?.webContents?.send("netcatty:trayPanel:jumpToSession", sessionId);
-    } catch {
-      // ignore
-    }
+    await sendToMainWindow("netcatty:trayPanel:jumpToSession", sessionId);
     return { success: true };
   });
 
   ipcMain.handle("netcatty:trayPanel:connectToHost", async (_event, hostId) => {
-    openMainWindow();
-    try {
-      const win = getMainWindow();
-      win?.webContents?.send("netcatty:trayPanel:connectToHost", hostId);
-    } catch {
-      // ignore
-    }
+    await connectToHostFromSystemMenu(hostId);
     return { success: true };
   });
 
@@ -909,6 +1029,13 @@ function registerHandlers(ipcMain) {
 function cleanup() {
   unregisterGlobalHotkey();
   destroyTray();
+  if (electronModule?.app?.dock?.setMenu) {
+    try {
+      electronModule.app.dock.setMenu(null);
+    } catch {
+      // ignore
+    }
+  }
 
   if (trayPanelRefreshTimer) {
     clearInterval(trayPanelRefreshTimer);

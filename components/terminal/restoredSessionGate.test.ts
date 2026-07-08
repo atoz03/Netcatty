@@ -56,10 +56,11 @@ test("manual reconnect captures restore cwd intent before clearing restored stat
   const prepareDefinitionIndex = source.indexOf("const prepareRestoredReconnect = useCallback");
   const captureAssignIndex = source.indexOf("restoreCwdIntentRef.current =", prepareDefinitionIndex);
   const captureCallIndex = source.indexOf("resolveRestoreCwdIntent", captureAssignIndex);
-  const manualRetryIndex = source.indexOf("const handleRetry = () =>");
-  const manualPrepareIndex = source.indexOf("prepareRestoredReconnect();", manualRetryIndex);
+  const reconnectIndex = source.indexOf("const startReconnect = ");
+  const manualBranchIndex = source.indexOf('if (mode === "manual")', reconnectIndex);
+  const manualPrepareIndex = source.indexOf("prepareRestoredReconnect();", manualBranchIndex);
   const bootActiveIndex = source.indexOf("isBootActiveRef.current = true", manualPrepareIndex);
-  const connectingIndex = source.indexOf('updateStatus("connecting")');
+  const connectingIndex = source.indexOf('updateStatus("connecting")', manualPrepareIndex);
   const startNewSessionIndex = source.indexOf("const startNewSession = () =>", connectingIndex);
 
   assert.notEqual(importIndex, -1);
@@ -68,7 +69,8 @@ test("manual reconnect captures restore cwd intent before clearing restored stat
   assert.notEqual(prepareDefinitionIndex, -1);
   assert.notEqual(captureCallIndex, -1);
   assert.notEqual(captureAssignIndex, -1);
-  assert.notEqual(manualRetryIndex, -1);
+  assert.notEqual(reconnectIndex, -1);
+  assert.notEqual(manualBranchIndex, -1);
   assert.notEqual(manualPrepareIndex, -1);
   assert.notEqual(bootActiveIndex, -1);
   assert.notEqual(connectingIndex, -1);
@@ -80,6 +82,68 @@ test("manual reconnect captures restore cwd intent before clearing restored stat
   assert.ok(
     bootActiveIndex < startNewSessionIndex,
     "manual retry must reactivate the boot guard before opening a backend session",
+  );
+});
+
+test("auto reconnect connected history ref is initialized after status state exists", () => {
+  const source = readFileSync(new URL("../Terminal.tsx", import.meta.url), "utf8");
+  const statusStateIndex = source.indexOf('const [status, setStatus] = useState<TerminalSession["status"]>');
+  const hasEverConnectedIndex = source.indexOf("const hasEverConnectedRef = useRef");
+
+  assert.notEqual(statusStateIndex, -1);
+  assert.notEqual(hasEverConnectedIndex, -1);
+  assert.ok(
+    statusStateIndex < hasEverConnectedIndex,
+    "auto reconnect refs must not read status before the status state is initialized",
+  );
+});
+
+test("auto reconnect wakes a hibernated terminal before requiring a terminal instance", () => {
+  const source = readFileSync(new URL("../Terminal.tsx", import.meta.url), "utf8");
+  const reconnectIndex = source.indexOf("const startReconnect = ");
+  const hibernatedAutoBranchIndex = source.indexOf('mode === "auto" && hibernatedRef.current', reconnectIndex);
+  const wakeCallIndex = source.indexOf("wakeHibernatedRuntimeForReconnectRef.current", hibernatedAutoBranchIndex);
+  const missingTermReturnIndex = source.indexOf("if (!termRef.current) return;", reconnectIndex);
+
+  assert.notEqual(reconnectIndex, -1);
+  assert.notEqual(hibernatedAutoBranchIndex, -1);
+  assert.notEqual(wakeCallIndex, -1);
+  assert.notEqual(missingTermReturnIndex, -1);
+  assert.ok(
+    hibernatedAutoBranchIndex < missingTermReturnIndex && wakeCallIndex < missingTermReturnIndex,
+    "auto reconnect must wake fully hibernated SSH sessions before the terminal guard can stop the retry",
+  );
+});
+
+test("dismissing the disconnected dialog returns focus to the terminal for enter reconnect", () => {
+  const source = readFileSync(new URL("../Terminal.tsx", import.meta.url), "utf8");
+  const dismissIndex = source.indexOf("const handleDismissDisconnectedDialog = () =>");
+  const dismissedIndex = source.indexOf("setIsDisconnectedDialogDismissed(true)", dismissIndex);
+  const focusIndex = source.indexOf("queueMicrotask(() => termRef.current?.focus())", dismissIndex);
+  const closeSessionIndex = source.indexOf("const handleCloseDisconnectedSession = () =>", dismissIndex);
+
+  assert.notEqual(dismissIndex, -1);
+  assert.notEqual(dismissedIndex, -1);
+  assert.notEqual(focusIndex, -1);
+  assert.notEqual(closeSessionIndex, -1);
+  assert.ok(
+    dismissedIndex < focusIndex && focusIndex < closeSessionIndex,
+    "dismissing the disconnected dialog should leave Enter routed back through the terminal",
+  );
+});
+
+test("terminal view receives the effective compose bar state for enter reconnect gating", () => {
+  const source = readFileSync(new URL("../Terminal.tsx", import.meta.url), "utf8");
+  const effectiveDefinitionIndex = source.indexOf("const effectiveComposeBarOpen =");
+  const viewIndex = source.indexOf("<TerminalView ctx={{");
+  const passEffectiveIndex = source.indexOf("isComposeBarOpen: effectiveComposeBarOpen", viewIndex);
+
+  assert.notEqual(effectiveDefinitionIndex, -1);
+  assert.notEqual(viewIndex, -1);
+  assert.notEqual(passEffectiveIndex, -1);
+  assert.ok(
+    effectiveDefinitionIndex < passEffectiveIndex,
+    "TerminalView must use the visible workspace compose state before deciding whether Enter can reconnect",
   );
 });
 

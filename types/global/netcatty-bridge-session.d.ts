@@ -20,6 +20,14 @@ declare global {
     };
   }
 
+  interface NetcattyTerminalOutputPerfMeta {
+    id: string;
+    emittedAt: number;
+    sessionId?: string;
+    chars: number;
+    lineFeeds: number;
+  }
+
   interface NetcattyBridge {
     getWindowsPtyInfo?(): NetcattyWindowsPtyInfo | null;
     startSSHSession(options: NetcattySSHOptions): Promise<string>;
@@ -246,6 +254,11 @@ declare global {
           rxSpeed: number;            // Receive speed (bytes/sec)
           txSpeed: number;            // Transmit speed (bytes/sec)
         }>;
+        hostname?: string;             // Hostname reported by the server
+        osName?: string;               // Friendly OS name when available
+        kernelRelease?: string;        // Kernel release from uname
+        uptimeSeconds?: number | null; // Server uptime in seconds
+        loadAverage?: number[];        // 1/5/15-minute load average
       };
     }>;
     setSessionEncoding?(sessionId: string, encoding: string): Promise<{ ok: boolean; encoding: string }>;
@@ -306,6 +319,7 @@ declare global {
         meta?: {
           droppedOutputMayAffectTerminalState?: boolean;
           droppedOutputAlternateScreenAction?: "enter" | "leave";
+          terminalPerf?: NetcattyTerminalOutputPerfMeta;
         },
       ) => void,
       options?: { replayBacklog?: boolean },

@@ -25,7 +25,10 @@ import { matchesKeyBinding } from './domain/models';
 import { resolveGroupDefaults, applyGroupDefaults } from './domain/groupConfig';
 import { upsertKnownHost } from './domain/knownHosts';
 import { materializeHostProxyProfile } from './domain/proxyProfiles';
-import { buildSshDeepLinkConnectionHost, buildSshDeepLinkHostDraft, findSshDeepLinkHost, parseSshDeepLink } from './domain/sshDeepLink';
+import { buildSshDeepLinkConnectionHost, buildSshDeepLinkEphemeralHost, buildSshDeepLinkEphemeralHostFromSaved, buildSshDeepLinkHostDraft, findSshDeepLinkHost, parseSshDeepLink } from './domain/sshDeepLink';
+import { buildTelnetDeepLinkConnectionHost, buildTelnetDeepLinkEphemeralHostFromSaved, buildTelnetDeepLinkOpenHost, findTelnetDeepLinkHost, materializeTelnetDeepLinkMatchHost, parseTelnetDeepLink } from './domain/telnetDeepLink';
+import { buildJmsDeepLinkEphemeralHost, isSupportedJmsProtocol, parseJmsDeepLink } from './domain/jmsDeepLink';
+import { applyEphemeralHostsUpdate, splitHostsUpdateByEphemeral } from './domain/ephemeralHosts';
 import { resolveHostAuth } from './domain/sshAuth';
 import { isEncryptedCredentialPlaceholder } from './domain/credentials';
 import {
@@ -57,6 +60,7 @@ import {
 import { getEffectiveKnownHosts } from './infrastructure/syncHelpers';
 import { ToastProvider, toast } from './components/ui/toast';
 import { TooltipProvider } from './components/ui/tooltip';
+import { ConfirmDialog } from './components/ui/confirm-dialog';
 import { PortForwardHostKeyDialog } from './components/port-forwarding';
 import { VaultSection } from './components/VaultView';
 import { KeyboardInteractiveRequest } from './components/KeyboardInteractiveModal';
@@ -72,7 +76,7 @@ import { AppActiveTabChrome } from './application/app/AppActiveTabChrome';
 import { AppView } from './application/app/AppView';
 import { useAppStartupEffects } from './application/app/useAppStartupEffects';
 import { LogViewWrapper, SftpViewMount, TerminalLayerMount, VaultViewContainer } from './application/app/AppMounts';
-import { handleTrayJumpToSessionImpl, handleTrayTogglePortForwardImpl, handleTrayPanelConnectImpl, handleGlobalHotkeyKeyDownImpl, handleEscapeKeyDownImpl, handleKeyboardInteractiveSubmitImpl, handleKeyboardInteractiveCancelImpl, handlePassphraseSubmitImpl, handlePassphraseCancelImpl, handlePassphraseSkipImpl, createLocalTerminalWithCurrentShellImpl, splitSessionWithCurrentShellImpl, copySessionWithCurrentShellImpl, copySessionToNewWindowWithCurrentShellImpl, confirmIfBusyLocalTerminalImpl, closeTabsBatchImpl, executeHotkeyActionImpl, handleCreateLocalTerminalImpl, handleConnectToHostImpl, handleTerminalDataCaptureImpl, hasMultipleProtocolsImpl, handleHostConnectWithProtocolCheckImpl, handleProtocolSelectImpl, handleToggleThemeImpl, handleRootContextMenuImpl } from './application/app/AppHandlers';
+import { handleTrayJumpToSessionImpl, handleTrayTogglePortForwardImpl, handleTrayPanelConnectImpl, handleTrayPanelConnectRequestImpl, flushQueuedTrayPanelConnectHostsImpl, handleGlobalHotkeyKeyDownImpl, handleEscapeKeyDownImpl, handleKeyboardInteractiveSubmitImpl, handleKeyboardInteractiveCancelImpl, handlePassphraseSubmitImpl, handlePassphraseCancelImpl, handlePassphraseSkipImpl, createLocalTerminalWithCurrentShellImpl, splitSessionWithCurrentShellImpl, copySessionWithCurrentShellImpl, copySessionToNewWindowWithCurrentShellImpl, confirmIfBusyLocalTerminalImpl, closeTabsBatchImpl, executeHotkeyActionImpl, handleCreateLocalTerminalImpl, handleConnectToHostImpl, handleTerminalDataCaptureImpl, hasMultipleProtocolsImpl, handleHostConnectWithProtocolCheckImpl, handleProtocolSelectImpl, handleToggleThemeImpl, handleRootContextMenuImpl } from './application/app/AppHandlers';
 
 // Initialize fonts eagerly at app startup
 initializeFonts();
@@ -109,11 +113,14 @@ function App({ settings }: { settings: SettingsState }) {
   // Navigation state for VaultView sections
   const [navigateToSection, setNavigateToSection] = useState<VaultSection | null>(null);
   const [deepLinkHostDraft, setDeepLinkHostDraft] = useState<Host | null>(null);
+  const [ephemeralHosts, setEphemeralHosts] = useState<Host[]>([]);
   // Keyboard-interactive authentication queue (2FA/MFA) - queue-based to handle multiple concurrent sessions
   const [keyboardInteractiveQueue, setKeyboardInteractiveQueue] = useState<KeyboardInteractiveRequest[]>([]);
   // Passphrase request queue for encrypted SSH keys
   const [passphraseQueue, setPassphraseQueue] = useState<PassphraseRequest[]>([]);
+  const [deleteHostConfirm, setDeleteHostConfirm] = useState<{ hostId: string; name: string } | null>(null);
   const [pendingNewWindowSession, setPendingNewWindowSession] = useState<OpenSessionInNewWindowPayload | null>(null);
+  const [pendingTrayPanelConnectHostIds, setPendingTrayPanelConnectHostIds] = useState<string[]>([]);
   const isPeerSessionWindow = typeof window !== 'undefined' && window.location.hash.startsWith('#/session-window');
 
   const {
@@ -337,6 +344,14 @@ function App({ settings }: { settings: SettingsState }) {
     () => new Map(hosts.map((host) => [host.id, host])),
     [hosts],
   );
+  const terminalHosts = useMemo(
+    () => (ephemeralHosts.length > 0 ? [...hosts, ...ephemeralHosts] : hosts),
+    [hosts, ephemeralHosts],
+  );
+  const ephemeralHostIds = useMemo(
+    () => new Set(ephemeralHosts.map((host) => host.id)),
+    [ephemeralHosts],
+  );
   const sessionById = useMemo(
     () => new Map(sessions.map((session) => [session.id, session])),
     [sessions],
@@ -557,6 +572,7 @@ function App({ settings }: { settings: SettingsState }) {
   const _handleTrayJumpToSession = useEffectEvent((sessionId: string) => { return handleTrayJumpToSessionImpl(() => ({ sessionId, sessions, setActiveTabId, setWorkspaceFocusedSession }), sessionId); });
   const _handleTrayTogglePortForward = useEffectEvent((ruleId: string, start: boolean) => { return handleTrayTogglePortForwardImpl(() => ({ hosts, identities, keys, knownHosts: effectiveKnownHosts, portForwardingRules, resolveEffectiveHost, ruleId, start, startTunnel, stopTunnel, t, terminalSettings, toast, undefined }), ruleId, start); });
   const _handleTrayPanelConnect = useEffectEvent((hostId: string) => { return handleTrayPanelConnectImpl(() => ({ addConnectionLog, connectToHost, hostId, hosts, identities, keys, resolveEffectiveHost, resolveHostAuth, systemInfoRef, t, toast }), hostId); });
+  const _handleTrayPanelConnectRequest = useEffectEvent((hostId: string) => { return handleTrayPanelConnectRequestImpl(() => ({ connectNow: _handleTrayPanelConnect, hostId, isVaultInitialized, queueConnect: (queuedHostId: string) => setPendingTrayPanelConnectHostIds((prev) => [...prev, queuedHostId]) }), hostId); });
   const _handleGlobalHotkeyKeyDown = useEffectEvent((e: KeyboardEvent) => { return handleGlobalHotkeyKeyDownImpl(() => ({ HOTKEY_DEBUG, closeTabKeyStr, e, executeHotkeyAction, hotkeyScheme, keyBindings, matchesKeyBinding }), e); });
   const _handleEscapeKeyDown = useEffectEvent((e: KeyboardEvent) => { return handleEscapeKeyDownImpl(() => ({ e, isQuickSwitcherOpen, setIsQuickSwitcherOpen }), e); });
 
@@ -589,13 +605,22 @@ function App({ settings }: { settings: SettingsState }) {
       _handleTrayJumpToSession(sessionId);
     });
     const unsubscribeConnect = bridge.onTrayPanelConnectToHost((hostId) => {
-      _handleTrayPanelConnect(hostId);
+      _handleTrayPanelConnectRequest(hostId);
     });
     return () => {
       unsubscribeJump?.();
       unsubscribeConnect?.();
     };
   }, [isPeerSessionWindow]);
+
+  useEffect(() => {
+    if (!isVaultInitialized || pendingTrayPanelConnectHostIds.length === 0) return;
+    flushQueuedTrayPanelConnectHostsImpl(() => ({
+      connectNow: _handleTrayPanelConnect,
+      pendingHostIds: pendingTrayPanelConnectHostIds,
+      setPendingHostIds: setPendingTrayPanelConnectHostIds,
+    }));
+  }, [isVaultInitialized, pendingTrayPanelConnectHostIds]);
 
   // Handle keyboard-interactive submit
   const handleKeyboardInteractiveSubmit = useCallback((requestId: string, responses: string[], savePassword?: string) => { return handleKeyboardInteractiveSubmitImpl(() => ({ hosts, keyboardInteractiveQueue, netcattyBridge, requestId, responses, savePassword, sessions, setKeyboardInteractiveQueue, updateHosts }), requestId, responses, savePassword); }, [keyboardInteractiveQueue, sessions, hosts, updateHosts]);
@@ -893,10 +918,14 @@ function App({ settings }: { settings: SettingsState }) {
 
   const handleDeleteHost = useCallback((hostId: string) => {
     const target = hosts.find(h => h.id === hostId);
-    const confirmed = window.confirm(t('confirm.deleteHost', { name: target?.label || hostId }));
-    if (!confirmed) return;
-    updateHosts(hosts.filter(h => h.id !== hostId));
-  }, [hosts, updateHosts, t]);
+    setDeleteHostConfirm({ hostId, name: target?.label || hostId });
+  }, [hosts]);
+
+  const handleConfirmDeleteHost = useCallback(() => {
+    if (!deleteHostConfirm) return;
+    updateHosts(hosts.filter(h => h.id !== deleteHostConfirm.hostId));
+    setDeleteHostConfirm(null);
+  }, [deleteHostConfirm, hosts, updateHosts]);
 
   const handleAddKnownHost = useCallback((kh: KnownHost) => {
     const nextKnownHosts = upsertKnownHost(knownHostsRef.current, kh);
@@ -929,7 +958,16 @@ function App({ settings }: { settings: SettingsState }) {
   }, []);
 
   // Wrapper to create local terminal with logging
-  const handleCreateLocalTerminal = useCallback((shell?: { command: string; args?: string[]; name?: string; icon?: string }) => { return handleCreateLocalTerminalImpl(() => ({ addConnectionLog, classifyLocalShellType, createLocalTerminal, discoveredShells, resolveShellSetting, shell, systemInfoRef, terminalSettings, undefined }), shell); }, [addConnectionLog, createLocalTerminal, terminalSettings, discoveredShells]);
+  const handleCreateLocalTerminal = useCallback((
+    shell?: { command: string; args?: string[]; name?: string; icon?: string },
+    options?: { localStartDir?: string },
+  ) => {
+    return handleCreateLocalTerminalImpl(
+      () => ({ addConnectionLog, classifyLocalShellType, createLocalTerminal, discoveredShells, resolveShellSetting, shell, systemInfoRef, terminalSettings, undefined }),
+      shell,
+      options,
+    );
+  }, [addConnectionLog, createLocalTerminal, terminalSettings, discoveredShells]);
 
   const proxyProfileIdSet = useMemo(
     () => new Set(proxyProfiles.map((profile) => profile.id)),
@@ -985,6 +1023,23 @@ function App({ settings }: { settings: SettingsState }) {
       };
     });
     const matchedEffectiveHost = findSshDeepLinkHost(effectiveHosts, target);
+
+    if (target.password) {
+      // One-time-password link: connect ephemerally with exactly the URL
+      // credentials. A uniquely matched saved host still contributes its
+      // non-credential settings (proxy, jump chain, charset, ...). Build
+      // from the group-resolved effective host so the builder can clear
+      // `group` and block group credential inheritance from later
+      // effective-host resolution.
+      const draftOptions = { id: crypto.randomUUID(), now: Date.now() };
+      const ephemeralHost = matchedEffectiveHost
+        ? buildSshDeepLinkEphemeralHostFromSaved(matchedEffectiveHost, target, draftOptions)
+        : buildSshDeepLinkEphemeralHost(target, draftOptions);
+      setEphemeralHosts((prev) => [...prev, ephemeralHost]);
+      handleConnectToHost(ephemeralHost);
+      return;
+    }
+
     if (matchedEffectiveHost) {
       const originalHost = hosts.find((host) => host.id === matchedEffectiveHost.id) ?? matchedEffectiveHost;
       handleConnectToHost(buildSshDeepLinkConnectionHost(originalHost));
@@ -1005,6 +1060,106 @@ function App({ settings }: { settings: SettingsState }) {
     if (!bridge?.onSshDeepLink) return;
     return bridge.onSshDeepLink((payload) => {
       _handleSshDeepLink(payload);
+    });
+  }, [isPeerSessionWindow]);
+
+  const _handleTelnetDeepLink = useEffectEvent((payload: { url?: string }) => {
+    const rawUrl = payload?.url || '';
+    const target = parseTelnetDeepLink(rawUrl);
+    if (!target) {
+      toast.warning(t('deepLink.telnet.invalid'));
+      return;
+    }
+
+    const effectiveHosts = hosts.map((host) =>
+      materializeTelnetDeepLinkMatchHost(resolveEffectiveHost(host), identities),
+    );
+    const matchedEffectiveHost = findTelnetDeepLinkHost(effectiveHosts, target, {
+      ignoreTargetUsername: Boolean(target.password),
+    });
+
+    if (matchedEffectiveHost) {
+      if (target.password) {
+        const ephemeralHost = buildTelnetDeepLinkEphemeralHostFromSaved(matchedEffectiveHost, target, {
+          id: crypto.randomUUID(),
+          now: Date.now(),
+        });
+        setEphemeralHosts((prev) => [...prev, ephemeralHost]);
+        handleConnectToHost(ephemeralHost);
+        return;
+      }
+      handleConnectToHost(buildTelnetDeepLinkConnectionHost(matchedEffectiveHost));
+      return;
+    }
+
+    const ephemeralHost = buildTelnetDeepLinkOpenHost(effectiveHosts, target, {
+      id: crypto.randomUUID(),
+      now: Date.now(),
+    });
+    setEphemeralHosts((prev) => [...prev, ephemeralHost]);
+    handleConnectToHost(ephemeralHost);
+  });
+
+  useEffect(() => {
+    if (isPeerSessionWindow) return;
+    const bridge = netcattyBridge.get();
+    if (!bridge?.onTelnetDeepLink) return;
+    return bridge.onTelnetDeepLink((payload) => {
+      _handleTelnetDeepLink(payload);
+    });
+  }, [isPeerSessionWindow]);
+
+  const _handleJmsDeepLink = useEffectEvent((payload: { url?: string }) => {
+    const rawUrl = payload?.url || '';
+    const target = parseJmsDeepLink(rawUrl);
+    if (!target) {
+      toast.warning(t('deepLink.jms.invalid'));
+      return;
+    }
+    if (!isSupportedJmsProtocol(target.protocol)) {
+      toast.warning(t('deepLink.jms.unsupported', { protocol: target.protocol }));
+      return;
+    }
+    const ephemeralHost = buildJmsDeepLinkEphemeralHost(target, {
+      id: crypto.randomUUID(),
+      now: Date.now(),
+    });
+    setEphemeralHosts((prev) => [...prev, ephemeralHost]);
+    handleConnectToHost(ephemeralHost);
+  });
+
+  useEffect(() => {
+    if (isPeerSessionWindow) return;
+    const bridge = netcattyBridge.get();
+    if (!bridge?.onJmsDeepLink) return;
+    return bridge.onJmsDeepLink((payload) => {
+      _handleJmsDeepLink(payload);
+    });
+  }, [isPeerSessionWindow]);
+
+  useEffect(() => {
+    setEphemeralHosts((prev) => {
+      if (prev.length === 0) return prev;
+      const referencedHostIds = new Set(
+        sessions.map((session) => session.hostId).filter((id): id is string => Boolean(id)),
+      );
+      const next = prev.filter((host) => referencedHostIds.has(host.id));
+      return next.length === prev.length ? prev : next;
+    });
+  }, [sessions]);
+
+  const _handleOpenTerminalPath = useEffectEvent((payload: { path?: string }) => {
+    const localStartDir = typeof payload?.path === 'string' ? payload.path : '';
+    if (!localStartDir.trim()) return;
+    handleCreateLocalTerminal(undefined, { localStartDir });
+  });
+
+  useEffect(() => {
+    if (isPeerSessionWindow) return;
+    const bridge = netcattyBridge.get();
+    if (!bridge?.onOpenTerminalPath) return;
+    return bridge.onOpenTerminalPath((payload) => {
+      _handleOpenTerminalPath(payload);
     });
   }, [isPeerSessionWindow]);
 
@@ -1072,6 +1227,17 @@ function App({ settings }: { settings: SettingsState }) {
       h.id === host.id ? mergeTerminalHostUpdate(h, host) : h
     )));
   }, [hosts, updateHosts]);
+
+  // Terminal-layer host updates may include ephemeral deep-link hosts; keep
+  // those in memory only and never let them reach the persisted vault.
+  const updateTerminalHosts = useCallback((nextHosts: Host[]) => {
+    const { vaultHosts, ephemeralHosts: updatedEphemeralHosts } =
+      splitHostsUpdateByEphemeral(nextHosts, ephemeralHostIds);
+    if (updatedEphemeralHosts.length > 0) {
+      setEphemeralHosts((prev) => applyEphemeralHostsUpdate(prev, updatedEphemeralHosts));
+    }
+    updateHosts(vaultHosts);
+  }, [ephemeralHostIds, updateHosts]);
 
   // Wrapper to create serial session with logging
   const handleConnectSerial = useCallback((config: SerialConfig, options?: { charset?: string }) => {
@@ -1178,6 +1344,16 @@ function App({ settings }: { settings: SettingsState }) {
   return (
     <>
       <PortForwardHostKeyDialog onAddKnownHost={handleAddKnownHost} />
+      <ConfirmDialog
+        open={deleteHostConfirm !== null}
+        title={deleteHostConfirm ? t('confirm.deleteHost', { name: deleteHostConfirm.name }) : ''}
+        confirmLabel={t('action.delete')}
+        destructive
+        onOpenChange={(open) => {
+          if (!open) setDeleteHostConfirm(null);
+        }}
+        onConfirm={handleConfirmDeleteHost}
+      />
       <AppActiveTabChrome
         showSftpTab={settings.showSftpTab}
         setActiveTabId={setActiveTabId}
@@ -1195,7 +1371,7 @@ function App({ settings }: { settings: SettingsState }) {
         resolveSessionAppearance={themeRuntime.resolveFocusedAppearance}
         t={t}
       />
-      <AppView ctx={{ accentMode, addShellHistoryEntry, addSessionToWorkspace, addToWorkspaceDialog, appendHostToWorkspace, appendLocalTerminalToWorkspace, clearAndRemoveSource, clearAndRemoveSources, clearUnsavedConnectionLogs, clearSessionFontSizeOverride, closeLogView, closeSession, closeTabsBatch, copySessionWithCurrentShell, copySessionToNewWindowWithCurrentShell, closeWorkspace, connectionLogs, convertKnownHostToHost, createWorkspaceFromSessions, createWorkspaceFromTargets, createWorkspaceWithHosts, customAccent, customGroups, currentTerminalTheme, deepLinkHostDraft, deleteConnectionLog, draggingSessionId, effectiveKnownHosts, editorTabs, editorWordWrap, emptyVaultConflict, followAppTerminalTheme, clearThemeIntent: themeRuntime.clearIntent, settleManualThemeIntent: themeRuntime.settleManualIntent, pickTerminalTheme: themeRuntime.pickTheme, resolveSessionAppearance: themeRuntime.resolveFocusedAppearance, groupConfigs, handleAddKnownHost, handleConnectSerial, handleConnectToHost, handleCreateLocalTerminal, handleDefaultTerminalThemeChange, handleDeleteHost, handleEndSessionDrag, handleFollowAppTerminalThemeChange, handleHostConnectWithProtocolCheck, handleHotkeyAction, handleOpenHostFromVaultNote, handleOpenVaultHostFromChat, handleOpenVaultNoteFromChat, handleOpenVaultSectionFromChat, handleOpenVaultSnippetFromChat, handleKeyboardInteractiveCancel, handleKeyboardInteractiveSubmit, handleOpenQuickSwitcher, handleOpenSettings, handleRootContextMenu, handlePassphraseCancel, handlePassphraseSkip, handlePassphraseSubmit, handleProtocolSelect, handleRequestCloseEditorTabRef, handleSessionStatusChange, handleSyncNowManual, handleTerminalDataCapture, handleToggleTheme, handleUpdateHostFromTerminal, hostById, hosts, hotkeyScheme, identities, importOrReuseKey, isBroadcastEnabled, isCreateWorkspaceOpen, isMacClient, isQuickSwitcherOpen, keyBindings, keyboardInteractiveQueue, keys, logViews, managedSources, navigateToSection, noteGroups, notes, openLogView, openNoteRequest, orderedTabsWithEditors, orphanSessions, passphraseQueue, protocolSelectHost, proxyProfiles, portForwardingRules, quickResults, quickSearch, removeSessionFromWorkspace, reorderWorkTabs, reorderWorkspaceSessions, resetSessionRename, resetWorkspaceRename, resolveEmptyVaultConflict, resolvedTheme, runSnippet: handleRunSnippet, sessionLogsDir, sessionLogsEnabled, sessionLogsFormat, sessionLogsTimestampsEnabled, sessionRenameTarget, sessionRenameValue, sessions, setActiveTabId, setAddToWorkspaceDialog, setDeepLinkHostDraft, setDraggingSessionId, setEditorWordWrap, setIsCreateWorkspaceOpen, setIsQuickSwitcherOpen, setNavigateToSection, setProtocolSelectHost, setQuickSearch, setSessionRenameValue, setTerminalFontFamilyId, setTerminalFontSize, setVaultFocusRequest, setWorkspaceFocusedSession, setWorkspaceRenameValue, settings, sftpAutoOpenSidebar, sftpFollowTerminalCwd, setSftpFollowTerminalCwd, sftpAutoSync, sftpDefaultViewMode, sftpDoubleClickBehavior, sftpShowHiddenFiles, sftpUseCompressedUpload, shellHistory, snippetPackages, snippets, splitSessionWithCurrentShell, sshDebugLogsEnabled: settings.sshDebugLogsEnabled, startSessionRename, renameSessionInline, startWorkspaceRename, submitSessionRename, submitWorkspaceRename, t, terminalFontFamilyId, terminalFontSize, terminalSettings, terminalThemeId, themeById, toggleBroadcast, toggleConnectionLogSaved, toggleScriptsSidePanelRef, toggleSidePanelRef, toggleWorkspaceViewMode, unmanageSource, updateConnectionLog, updateCustomGroups, updateGroupConfigs, updateHostDistro, updateHosts, updateIdentities, updateKeys, updateKnownHosts, updateManagedSources, updateNoteGroups, updateNotes, updateProxyProfiles, updateSnippetPackages, updateSnippets, updateSplitSizes, updateSessionFontSize, updateSessionRestoreCwd, updateSessionDynamicTitle, updateSessionCodingCliProvider, updateTerminalSetting, vaultFocusRequest, workspaceRenameTarget, workspaceRenameValue, workspaces, VaultViewContainer, SftpViewMount, TerminalLayerMount, LogViewWrapper }} />
+      <AppView ctx={{ accentMode, addShellHistoryEntry, addSessionToWorkspace, addToWorkspaceDialog, appendHostToWorkspace, appendLocalTerminalToWorkspace, clearAndRemoveSource, clearAndRemoveSources, clearUnsavedConnectionLogs, clearSessionFontSizeOverride, closeLogView, closeSession, closeTabsBatch, copySessionWithCurrentShell, copySessionToNewWindowWithCurrentShell, closeWorkspace, connectionLogs, convertKnownHostToHost, createWorkspaceFromSessions, createWorkspaceFromTargets, createWorkspaceWithHosts, customAccent, customGroups, currentTerminalTheme, deepLinkHostDraft, deleteConnectionLog, draggingSessionId, effectiveKnownHosts, editorTabs, editorWordWrap, emptyVaultConflict, followAppTerminalTheme, clearThemeIntent: themeRuntime.clearIntent, settleManualThemeIntent: themeRuntime.settleManualIntent, pickTerminalTheme: themeRuntime.pickTheme, resolveSessionAppearance: themeRuntime.resolveFocusedAppearance, groupConfigs, handleAddKnownHost, handleConnectSerial, handleConnectToHost, handleCreateLocalTerminal, handleDefaultTerminalThemeChange, handleDeleteHost, handleEndSessionDrag, handleFollowAppTerminalThemeChange, handleHostConnectWithProtocolCheck, handleHotkeyAction, handleOpenHostFromVaultNote, handleOpenVaultHostFromChat, handleOpenVaultNoteFromChat, handleOpenVaultSectionFromChat, handleOpenVaultSnippetFromChat, handleKeyboardInteractiveCancel, handleKeyboardInteractiveSubmit, handleOpenQuickSwitcher, handleOpenSettings, handleRootContextMenu, handlePassphraseCancel, handlePassphraseSkip, handlePassphraseSubmit, handleProtocolSelect, handleRequestCloseEditorTabRef, handleSessionStatusChange, handleSyncNowManual, handleTerminalDataCapture, handleToggleTheme, handleUpdateHostFromTerminal, hostById, hosts, terminalHosts, updateTerminalHosts, hotkeyScheme, identities, importOrReuseKey, isBroadcastEnabled, isCreateWorkspaceOpen, isMacClient, isQuickSwitcherOpen, keyBindings, keyboardInteractiveQueue, keys, logViews, managedSources, navigateToSection, noteGroups, notes, openLogView, openNoteRequest, orderedTabsWithEditors, orphanSessions, passphraseQueue, protocolSelectHost, proxyProfiles, portForwardingRules, quickResults, quickSearch, removeSessionFromWorkspace, reorderWorkTabs, reorderWorkspaceSessions, resetSessionRename, resetWorkspaceRename, resolveEmptyVaultConflict, resolvedTheme, runSnippet: handleRunSnippet, sessionLogsDir, sessionLogsEnabled, sessionLogsFormat, sessionLogsTimestampsEnabled, sessionRenameTarget, sessionRenameValue, sessions, setActiveTabId, setAddToWorkspaceDialog, setDeepLinkHostDraft, setDraggingSessionId, setEditorWordWrap, setIsCreateWorkspaceOpen, setIsQuickSwitcherOpen, setNavigateToSection, setProtocolSelectHost, setQuickSearch, setSessionRenameValue, setTerminalFontFamilyId, setTerminalFontSize, setVaultFocusRequest, setWorkspaceFocusedSession, setWorkspaceRenameValue, settings, sftpAutoOpenSidebar, sftpFollowTerminalCwd, setSftpFollowTerminalCwd, sftpAutoSync, sftpDefaultViewMode, sftpDoubleClickBehavior, sftpShowHiddenFiles, sftpUseCompressedUpload, shellHistory, snippetPackages, snippets, splitSessionWithCurrentShell, sshDebugLogsEnabled: settings.sshDebugLogsEnabled, startSessionRename, renameSessionInline, startWorkspaceRename, submitSessionRename, submitWorkspaceRename, t, terminalFontFamilyId, terminalFontSize, terminalSettings, terminalThemeId, themeById, toggleBroadcast, toggleConnectionLogSaved, toggleScriptsSidePanelRef, toggleSidePanelRef, toggleWorkspaceViewMode, unmanageSource, updateConnectionLog, updateCustomGroups, updateGroupConfigs, updateHostDistro, updateHosts, updateIdentities, updateKeys, updateKnownHosts, updateManagedSources, updateNoteGroups, updateNotes, updateProxyProfiles, updateSnippetPackages, updateSnippets, updateSplitSizes, updateSessionFontSize, updateSessionRestoreCwd, updateSessionDynamicTitle, updateSessionCodingCliProvider, updateTerminalSetting, vaultFocusRequest, workspaceRenameTarget, workspaceRenameValue, workspaces, VaultViewContainer, SftpViewMount, TerminalLayerMount, LogViewWrapper }} />
     </>
   );
 }

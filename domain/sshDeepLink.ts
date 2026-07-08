@@ -3,6 +3,7 @@ import type { Host } from "./models";
 export interface SshDeepLinkTarget {
   rawUrl: string;
   username?: string;
+  password?: string;
   hostname: string;
   port?: number;
 }
@@ -57,10 +58,14 @@ export const parseSshDeepLink = (rawUrl: string): SshDeepLinkTarget | null => {
   const username = parsed.username
     ? decodeUrlComponent(parsed.username).trim()
     : undefined;
+  const password = parsed.password
+    ? decodeUrlComponent(parsed.password)
+    : undefined;
 
   return {
     rawUrl: trimmed,
     ...(username ? { username } : {}),
+    ...(password ? { password } : {}),
     hostname,
     ...(port ? { port } : {}),
   };
@@ -100,6 +105,51 @@ export const buildSshDeepLinkOpenHost = (
 ): Host => buildSshDeepLinkConnectionHost(
   findSshDeepLinkHost(hosts, target) ?? buildSshDeepLinkHostDraft(target, options),
 );
+
+export const buildSshDeepLinkEphemeralHost = (
+  target: SshDeepLinkTarget,
+  options: SshDeepLinkDraftOptions,
+): Host => ({
+  ...buildSshDeepLinkHostDraft(target, options),
+  ...(target.password ? { password: target.password, authMethod: "password" as const } : {}),
+  savePassword: false,
+  ephemeral: true,
+  moshEnabled: false,
+  etEnabled: false,
+});
+
+/**
+ * Ephemeral host for a password deep link that uniquely matches a saved
+ * vault host: keep the saved host's non-credential settings (proxy, jump
+ * chain, charset, ...) but authenticate with exactly the URL credentials,
+ * so vault identities and key references never override the one-time
+ * password.
+ *
+ * Pass the group-resolved effective host (not the raw vault host): group
+ * defaults must already be materialized here, because this builder clears
+ * `group` so that later effective-host resolution cannot re-inherit group
+ * credentials (identity, key, password) over the URL password.
+ */
+export const buildSshDeepLinkEphemeralHostFromSaved = (
+  effectiveSavedHost: Host,
+  target: SshDeepLinkTarget,
+  options: SshDeepLinkDraftOptions,
+): Host => ({
+  ...effectiveSavedHost,
+  id: options.id,
+  createdAt: options.now,
+  ...(target.username ? { username: target.username } : {}),
+  ...(target.password ? { password: target.password, authMethod: "password" as const } : {}),
+  identityId: undefined,
+  identityFileId: undefined,
+  identityFilePaths: undefined,
+  savePassword: false,
+  group: "",
+  ephemeral: true,
+  protocol: "ssh",
+  moshEnabled: false,
+  etEnabled: false,
+});
 
 export const buildSshDeepLinkHostDraft = (
   target: SshDeepLinkTarget,

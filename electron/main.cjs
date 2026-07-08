@@ -65,15 +65,35 @@ const fs = require("node:fs");
 const { getCliDiscoveryFilePath } = require("./cli/discoveryPath.cjs");
 const {
   SSH_DEEP_LINK_CHANNEL,
+  TELNET_DEEP_LINK_CHANNEL,
+  JMS_DEEP_LINK_CHANNEL,
+  applyInitialJmsDeepLinkPreference,
   applyInitialSshDeepLinkPreference,
+  applyJmsProtocolClientPreference,
   applySshProtocolClientPreference,
+  collectJmsDeepLinkUrls,
   collectSshDeepLinkUrls,
+  collectTelnetDeepLinkUrls,
+  isJmsDeepLinkUrl,
   isSshDeepLinkUrl,
+  isTelnetDeepLinkUrl,
+  readJmsDeepLinkEnabledPreference,
   readSshDeepLinkEnabledPreference,
+  shouldDeliverJmsDeepLink,
   shouldDeliverSshDeepLink,
+  shouldDeliverTelnetDeepLink,
+  updateJmsDeepLinkEnabledPreference,
   updateSshDeepLinkEnabledPreference,
+  writeJmsDeepLinkEnabledPreference,
   writeSshDeepLinkEnabledPreference,
 } = require("./deepLink.cjs");
+const { getReusableMainWindow } = require("./mainWindowReuse.cjs");
+const {
+  OPEN_TERMINAL_PATH_CHANNEL,
+  collectOpenTerminalPathArgs,
+  resolveOpenTerminalPath,
+  resolveOpenTerminalPathsFromArgs,
+} = require("./openTerminalPath.cjs");
 
 try {
   protocol?.registerSchemesAsPrivileged?.([
@@ -330,18 +350,8 @@ function registerAppProtocol() {
 
 function focusMainWindow() {
   try {
-    const mainWin = getWindowManager().getMainWindow?.();
-    const win = mainWin && !mainWin.isDestroyed?.() ? mainWin : null;
+    const win = getReusableMainWindow({ getWindowManager });
     if (!win) return false;
-
-    // Check if the webContents has crashed or been destroyed
-    try {
-      if (win.webContents?.isCrashed?.()) {
-        console.warn('[Main] Main window webContents has crashed, destroying window');
-        win.destroy();
-        return false;
-      }
-    } catch {}
 
     // Cancel any in-flight close-to-tray hide so second-instance / dock-click
     // re-entry beats a pending leave-full-screen → hide sequence.
@@ -423,6 +433,7 @@ const registerBridges = createBridgeRegistrar({
   terminalBridge,
   crashLogBridge,
   ptyProcessTree,
+  ensureMainWindow: createAndShowMainWindow,
   getOauthBridge,
   getGithubAuthBridge,
   getGoogleAuthBridge,
@@ -498,6 +509,12 @@ let mainWindowStartupPromise = null;
 async function createAndShowMainWindow() {
   if (mainWindowStartupPromise) return mainWindowStartupPromise;
 
+  const existingWin = getReusableMainWindow({ getWindowManager });
+  if (existingWin) {
+    focusMainWindow();
+    return existingWin;
+  }
+
   mainWindowStartupPromise = (async () => {
     processErrorController.beginMainWindowStartup();
     try {
@@ -523,8 +540,17 @@ async function createAndShowMainWindow() {
 
 let sshDeepLinkEnabled = readSshDeepLinkEnabledPreference({ app });
 const pendingSshDeepLinkUrls = sshDeepLinkEnabled ? collectSshDeepLinkUrls(process.argv) : [];
+const pendingTelnetDeepLinkUrls = sshDeepLinkEnabled ? collectTelnetDeepLinkUrls(process.argv) : [];
+const pendingOpenTerminalPaths = resolveOpenTerminalPathsFromArgs(process.argv);
 let flushingSshDeepLinks = false;
+let flushingTelnetDeepLinks = false;
+let flushingOpenTerminalPaths = false;
 let sshDeepLinkDeliveryGeneration = 0;
+
+let jmsDeepLinkEnabled = readJmsDeepLinkEnabledPreference({ app });
+const pendingJmsDeepLinkUrls = jmsDeepLinkEnabled ? collectJmsDeepLinkUrls(process.argv) : [];
+let flushingJmsDeepLinks = false;
+let jmsDeepLinkDeliveryGeneration = 0;
 
 function queueSshDeepLink(rawUrl) {
   if (!sshDeepLinkEnabled) return;
@@ -532,6 +558,32 @@ function queueSshDeepLink(rawUrl) {
   pendingSshDeepLinkUrls.push(rawUrl);
   if (app.isReady?.()) {
     void flushPendingSshDeepLinks();
+  }
+}
+
+function queueTelnetDeepLink(rawUrl) {
+  if (!sshDeepLinkEnabled) return;
+  if (!isTelnetDeepLinkUrl(rawUrl)) return;
+  pendingTelnetDeepLinkUrls.push(rawUrl);
+  if (app.isReady?.()) {
+    void flushPendingTelnetDeepLinks();
+  }
+}
+
+function queueOpenTerminalPath(rawPath, options = {}) {
+  const resolvedPath = resolveOpenTerminalPath(rawPath, options);
+  if (!resolvedPath) return;
+  pendingOpenTerminalPaths.push(resolvedPath);
+  if (app.isReady?.()) {
+    void flushPendingOpenTerminalPaths();
+  }
+}
+
+function queueResolvedOpenTerminalPaths(paths) {
+  if (!Array.isArray(paths) || paths.length === 0) return;
+  pendingOpenTerminalPaths.push(...paths);
+  if (app.isReady?.()) {
+    void flushPendingOpenTerminalPaths();
   }
 }
 
@@ -544,6 +596,7 @@ ipcMain?.handle?.("netcatty:deepLink:ssh:setEnabled", async (_event, payload) =>
     writePreference: (nextEnabled) => writeSshDeepLinkEnabledPreference({ app, enabled: nextEnabled }),
     clearPending: () => {
       pendingSshDeepLinkUrls.length = 0;
+      pendingTelnetDeepLinkUrls.length = 0;
       sshDeepLinkDeliveryGeneration += 1;
     },
   });
@@ -552,6 +605,85 @@ ipcMain?.handle?.("netcatty:deepLink:ssh:setEnabled", async (_event, payload) =>
 });
 
 ipcMain?.handle?.("netcatty:deepLink:ssh:getEnabled", async () => sshDeepLinkEnabled);
+
+function queueJmsDeepLink(rawUrl) {
+  if (!jmsDeepLinkEnabled) return;
+  if (!isJmsDeepLinkUrl(rawUrl)) return;
+  pendingJmsDeepLinkUrls.push(rawUrl);
+  if (app.isReady?.()) {
+    void flushPendingJmsDeepLinks();
+  }
+}
+
+ipcMain?.handle?.("netcatty:deepLink:jms:setEnabled", async (_event, payload) => {
+  const enabled = payload?.enabled !== false;
+  const result = updateJmsDeepLinkEnabledPreference({
+    currentEnabled: jmsDeepLinkEnabled,
+    enabled,
+    applyPreference: (nextEnabled) => applyJmsProtocolClientPreference({ app, enabled: nextEnabled, isDev }),
+    writePreference: (nextEnabled) => writeJmsDeepLinkEnabledPreference({ app, enabled: nextEnabled }),
+    clearPending: () => {
+      pendingJmsDeepLinkUrls.length = 0;
+      jmsDeepLinkDeliveryGeneration += 1;
+    },
+  });
+  jmsDeepLinkEnabled = result.enabled;
+  return result;
+});
+
+ipcMain?.handle?.("netcatty:deepLink:jms:getEnabled", async () => jmsDeepLinkEnabled);
+
+async function deliverJmsDeepLink(rawUrl, expectedGeneration = jmsDeepLinkDeliveryGeneration) {
+  if (!shouldDeliverJmsDeepLink({
+    enabled: jmsDeepLinkEnabled,
+    deliveryGeneration: jmsDeepLinkDeliveryGeneration,
+    expectedGeneration,
+  })) return;
+  const win = await createAndShowMainWindow();
+  if (!shouldDeliverJmsDeepLink({
+    enabled: jmsDeepLinkEnabled,
+    deliveryGeneration: jmsDeepLinkDeliveryGeneration,
+    expectedGeneration,
+  })) return;
+  focusMainWindow();
+  const windowManager = getWindowManager();
+  const result = await windowManager.sendWhenRendererReady?.(
+    win,
+    JMS_DEEP_LINK_CHANNEL,
+    { url: rawUrl },
+    {
+      timeoutMs: isDev ? 30000 : 15000,
+      shouldSend: () => shouldDeliverJmsDeepLink({
+        enabled: jmsDeepLinkEnabled,
+        deliveryGeneration: jmsDeepLinkDeliveryGeneration,
+        expectedGeneration,
+      }),
+      cancelReason: "jms-deep-link-disabled",
+    },
+  );
+  if (result && result.success === false && result.reason !== "jms-deep-link-disabled") {
+    console.warn("[Main] Failed to deliver jms:// deep link:", result.error || result.reason);
+  }
+}
+
+async function flushPendingJmsDeepLinks() {
+  if (flushingJmsDeepLinks) return;
+  flushingJmsDeepLinks = true;
+  try {
+    while (jmsDeepLinkEnabled && pendingJmsDeepLinkUrls.length > 0) {
+      const rawUrl = pendingJmsDeepLinkUrls.shift();
+      if (!rawUrl) continue;
+      await deliverJmsDeepLink(rawUrl, jmsDeepLinkDeliveryGeneration);
+    }
+  } catch (err) {
+    console.warn("[Main] Failed to process jms:// deep link:", err);
+  } finally {
+    flushingJmsDeepLinks = false;
+    if (jmsDeepLinkEnabled && pendingJmsDeepLinkUrls.length > 0) {
+      void flushPendingJmsDeepLinks();
+    }
+  }
+}
 
 async function deliverSshDeepLink(rawUrl, expectedGeneration = sshDeepLinkDeliveryGeneration) {
   if (!shouldDeliverSshDeepLink({
@@ -586,6 +718,39 @@ async function deliverSshDeepLink(rawUrl, expectedGeneration = sshDeepLinkDelive
   }
 }
 
+async function deliverTelnetDeepLink(rawUrl, expectedGeneration = sshDeepLinkDeliveryGeneration) {
+  if (!shouldDeliverTelnetDeepLink({
+    enabled: sshDeepLinkEnabled,
+    deliveryGeneration: sshDeepLinkDeliveryGeneration,
+    expectedGeneration,
+  })) return;
+  const win = await createAndShowMainWindow();
+  if (!shouldDeliverTelnetDeepLink({
+    enabled: sshDeepLinkEnabled,
+    deliveryGeneration: sshDeepLinkDeliveryGeneration,
+    expectedGeneration,
+  })) return;
+  focusMainWindow();
+  const windowManager = getWindowManager();
+  const result = await windowManager.sendWhenRendererReady?.(
+    win,
+    TELNET_DEEP_LINK_CHANNEL,
+    { url: rawUrl },
+    {
+      timeoutMs: isDev ? 30000 : 15000,
+      shouldSend: () => shouldDeliverTelnetDeepLink({
+        enabled: sshDeepLinkEnabled,
+        deliveryGeneration: sshDeepLinkDeliveryGeneration,
+        expectedGeneration,
+      }),
+      cancelReason: "telnet-deep-link-disabled",
+    },
+  );
+  if (result && result.success === false && result.reason !== "telnet-deep-link-disabled") {
+    console.warn("[Main] Failed to deliver telnet:// deep link:", result.error || result.reason);
+  }
+}
+
 async function flushPendingSshDeepLinks() {
   if (flushingSshDeepLinks) return;
   flushingSshDeepLinks = true;
@@ -601,6 +766,59 @@ async function flushPendingSshDeepLinks() {
     flushingSshDeepLinks = false;
     if (sshDeepLinkEnabled && pendingSshDeepLinkUrls.length > 0) {
       void flushPendingSshDeepLinks();
+    }
+  }
+}
+
+async function flushPendingTelnetDeepLinks() {
+  if (flushingTelnetDeepLinks) return;
+  flushingTelnetDeepLinks = true;
+  try {
+    while (sshDeepLinkEnabled && pendingTelnetDeepLinkUrls.length > 0) {
+      const rawUrl = pendingTelnetDeepLinkUrls.shift();
+      if (!rawUrl) continue;
+      await deliverTelnetDeepLink(rawUrl, sshDeepLinkDeliveryGeneration);
+    }
+  } catch (err) {
+    console.warn("[Main] Failed to process telnet:// deep link:", err);
+  } finally {
+    flushingTelnetDeepLinks = false;
+    if (sshDeepLinkEnabled && pendingTelnetDeepLinkUrls.length > 0) {
+      void flushPendingTelnetDeepLinks();
+    }
+  }
+}
+
+async function deliverOpenTerminalPath(targetPath) {
+  const win = await createAndShowMainWindow();
+  focusMainWindow();
+  const windowManager = getWindowManager();
+  const result = await windowManager.sendWhenRendererReady?.(
+    win,
+    OPEN_TERMINAL_PATH_CHANNEL,
+    { path: targetPath },
+    { timeoutMs: isDev ? 30000 : 15000 },
+  );
+  if (result && result.success === false) {
+    console.warn("[Main] Failed to deliver open terminal path:", result.error || result.reason);
+  }
+}
+
+async function flushPendingOpenTerminalPaths() {
+  if (flushingOpenTerminalPaths) return;
+  flushingOpenTerminalPaths = true;
+  try {
+    while (pendingOpenTerminalPaths.length > 0) {
+      const targetPath = pendingOpenTerminalPaths.shift();
+      if (!targetPath) continue;
+      await deliverOpenTerminalPath(targetPath);
+    }
+  } catch (err) {
+    console.warn("[Main] Failed to process open terminal path:", err);
+  } finally {
+    flushingOpenTerminalPaths = false;
+    if (pendingOpenTerminalPaths.length > 0) {
+      void flushPendingOpenTerminalPaths();
     }
   }
 }
@@ -639,15 +857,48 @@ if (!gotLock) {
 } else {
   app.on("open-url", (event, rawUrl) => {
     event.preventDefault();
+    if (isJmsDeepLinkUrl(rawUrl)) {
+      queueJmsDeepLink(rawUrl);
+      return;
+    }
+    if (isTelnetDeepLinkUrl(rawUrl)) {
+      queueTelnetDeepLink(rawUrl);
+      return;
+    }
     queueSshDeepLink(rawUrl);
   });
 
-  app.on("second-instance", (_event, argv) => {
-    const deepLinkUrls = collectSshDeepLinkUrls(argv);
-    if (deepLinkUrls.length > 0) {
-      if (sshDeepLinkEnabled) {
-        deepLinkUrls.forEach(queueSshDeepLink);
+  app.on("open-file", (event, filePath) => {
+    event.preventDefault();
+    queueOpenTerminalPath(filePath);
+  });
+
+  app.on("second-instance", (_event, argv, workingDirectory) => {
+    const jmsDeepLinkUrls = collectJmsDeepLinkUrls(argv);
+    const telnetDeepLinkUrls = collectTelnetDeepLinkUrls(argv);
+    const sshDeepLinkUrls = collectSshDeepLinkUrls(argv);
+    if (jmsDeepLinkUrls.length > 0) {
+      if (jmsDeepLinkEnabled) {
+        jmsDeepLinkUrls.forEach(queueJmsDeepLink);
       }
+      return;
+    }
+    if (telnetDeepLinkUrls.length > 0) {
+      if (sshDeepLinkEnabled) {
+        telnetDeepLinkUrls.forEach(queueTelnetDeepLink);
+      }
+      return;
+    }
+    if (sshDeepLinkUrls.length > 0) {
+      if (sshDeepLinkEnabled) {
+        sshDeepLinkUrls.forEach(queueSshDeepLink);
+      }
+      return;
+    }
+    if (collectOpenTerminalPathArgs(argv).length > 0) {
+      const baseDirectory = typeof workingDirectory === "string" ? workingDirectory : undefined;
+      const openTerminalPaths = resolveOpenTerminalPathsFromArgs(argv, { baseDirectory });
+      queueResolvedOpenTerminalPaths(openTerminalPaths);
       return;
     }
     if (!focusMainWindow()) {
@@ -670,10 +921,21 @@ if (!gotLock) {
       applyPreference: (enabled) => applySshProtocolClientPreference({ app, enabled, isDev }),
       clearPending: () => {
         pendingSshDeepLinkUrls.length = 0;
+        pendingTelnetDeepLinkUrls.length = 0;
         sshDeepLinkDeliveryGeneration += 1;
       },
     });
     sshDeepLinkEnabled = initialSshDeepLinkPreference.enabled;
+
+    const initialJmsDeepLinkPreference = applyInitialJmsDeepLinkPreference({
+      enabled: jmsDeepLinkEnabled,
+      applyPreference: (enabled) => applyJmsProtocolClientPreference({ app, enabled, isDev }),
+      clearPending: () => {
+        pendingJmsDeepLinkUrls.length = 0;
+        jmsDeepLinkDeliveryGeneration += 1;
+      },
+    });
+    jmsDeepLinkEnabled = initialJmsDeepLinkPreference.enabled;
 
     // Grant only the Chromium permissions the app actually uses, and only
     // to the app's own origin. The default session is shared with in-app
@@ -779,6 +1041,9 @@ if (!gotLock) {
     // Create the main window
     void createAndShowMainWindow().then(() => {
       void flushPendingSshDeepLinks();
+      void flushPendingTelnetDeepLinks();
+      void flushPendingJmsDeepLinks();
+      void flushPendingOpenTerminalPaths();
 
       // Trigger auto-update check 5 s after window creation.
       // startAutoCheck() is a no-op on unsupported platforms (Linux deb/rpm/snap).
@@ -944,10 +1209,10 @@ if (!gotLock) {
           commitQuit();
           return;
         }
+        const wm = getWindowManager();
         for (const win of dirtyWindows) {
           try {
-            if (typeof win.show === "function" && !win.isVisible?.()) win.show();
-            if (typeof win.focus === "function") win.focus();
+            wm.showAndFocusMainWindow?.(win);
           } catch {
             // ignore
           }
@@ -963,7 +1228,6 @@ if (!gotLock) {
         // autoUpdateBridge's watchdog; otherwise close-to-tray and other
         // !isQuitting-gated behavior stay bypassed while the app keeps running
         // (#1215 review).
-        const wm = getWindowManager();
         if (wm.isQuittingForUpdate?.()) wm.setQuittingForUpdate(false);
       })
       .catch((err) => {

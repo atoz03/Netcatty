@@ -1,7 +1,5 @@
 import { useCallback, useSyncExternalStore } from 'react';
 
-import { terminalLayoutSuppressStore } from './terminalLayoutSuppressStore';
-
 // Simple store for active tab that allows fine-grained subscriptions
 type Listener = () => void;
 type SyncListener = (activeTabId: string) => void;
@@ -39,20 +37,11 @@ class ActiveTabStore {
 
   setActiveTabId = (id: string) => {
     if (this.activeTabId !== id) {
-      terminalLayoutSuppressStore.begin();
       this.activeTabId = id;
       this.syncListeners.forEach((listener) => listener(id));
       // Coalesce rapid tab switches into one notification per frame and avoid
       // "setState during render" if called from a render phase.
       this.scheduleNotify();
-      const schedule = typeof requestAnimationFrame === 'function'
-        ? requestAnimationFrame
-        : (cb: () => void) => window.setTimeout(cb, 0) as unknown as number;
-      schedule(() => {
-        schedule(() => {
-          terminalLayoutSuppressStore.end();
-        });
-      });
     }
   };
 
@@ -76,11 +65,6 @@ export const useActiveTabId = () => {
     activeTabStore.getActiveTabId,
     activeTabStore.getActiveTabId,
   );
-};
-
-// Hook to get setter - never causes re-render
-export const useSetActiveTabId = () => {
-  return activeTabStore.setActiveTabId;
 };
 
 // Check if a specific tab is active - only re-renders when this specific tab's active state changes

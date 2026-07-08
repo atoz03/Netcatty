@@ -360,6 +360,50 @@ test("execOnEtSession requireTrustedHost uses strict host-key checking", async (
   assert.match(strictContent, /host\.example ssh-ed25519 vaultblob/);
 });
 
+test("execOnEtSession forwards maxBuffer to the ssh execFile call", async (t) => {
+  let capturedOptions = null;
+  const { api } = makeApi(t, {
+    execFile: (_cmd, _args, opts, cb) => {
+      capturedOptions = opts;
+      process.nextTick(() => cb(null, "", ""));
+    },
+  });
+  const env = api.prepareEtSshEnvironment("sess1", { hostname: "host.example", username: "alice" });
+  const session = {
+    sshUserHost: env.userHost,
+    sshOptions: env.sshOptions,
+    sshEnv: env.env,
+    externalAuthArtifacts: env.artifacts,
+    externalAuthArtifactsCleaned: false,
+  };
+
+  await api.execOnEtSession(session, "echo ok", 1000, { maxBuffer: 64 * 1024 * 1024 });
+
+  assert.equal(capturedOptions.maxBuffer, 64 * 1024 * 1024);
+});
+
+test("execOnEtSession keeps the default execFile maxBuffer when no override is provided", async (t) => {
+  let capturedOptions = null;
+  const { api } = makeApi(t, {
+    execFile: (_cmd, _args, opts, cb) => {
+      capturedOptions = opts;
+      process.nextTick(() => cb(null, "", ""));
+    },
+  });
+  const env = api.prepareEtSshEnvironment("sess1", { hostname: "host.example", username: "alice" });
+  const session = {
+    sshUserHost: env.userHost,
+    sshOptions: env.sshOptions,
+    sshEnv: env.env,
+    externalAuthArtifacts: env.artifacts,
+    externalAuthArtifactsCleaned: false,
+  };
+
+  await api.execOnEtSession(session, "echo ok", 1000);
+
+  assert.equal(Object.hasOwn(capturedOptions, "maxBuffer"), false);
+});
+
 test("cleanupStaleEtTempDirs only removes Netcatty ET temp directories by prefix", (t) => {
   const { api, base } = makeApi(t);
   const staleEtDir = path.join(base, "et-ssh-home-old-session");

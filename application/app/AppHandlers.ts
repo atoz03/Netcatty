@@ -61,7 +61,7 @@ export function handleTrayTogglePortForwardImpl(getCtx: AppContextGetter, ruleId
 
 export function handleTrayPanelConnectImpl(getCtx: AppContextGetter, hostId: string) {
   const { addConnectionLog, connectToHost, hosts, identities, keys, resolveEffectiveHost, resolveHostAuth, systemInfoRef, t, toast } = getCtx();
-{
+  {
     const host = hosts.find((item) => item.id === hostId);
     if (!host) {
       toast.error(t("pf.error.hostNotFound"));
@@ -108,6 +108,24 @@ export function handleTrayPanelConnectImpl(getCtx: AppContextGetter, hostId: str
     });
     return sessionId;
   }
+}
+
+export function handleTrayPanelConnectRequestImpl(getCtx: AppContextGetter, hostId: string) {
+  const { connectNow, isVaultInitialized, queueConnect } = getCtx();
+  if (!hostId) return;
+  if (!isVaultInitialized) {
+    queueConnect(hostId);
+    return;
+  }
+  connectNow(hostId);
+}
+
+export function flushQueuedTrayPanelConnectHostsImpl(getCtx: AppContextGetter) {
+  const { connectNow, pendingHostIds, setPendingHostIds } = getCtx();
+  if (!Array.isArray(pendingHostIds) || pendingHostIds.length === 0) return;
+  const hostIds = [...pendingHostIds];
+  setPendingHostIds([]);
+  hostIds.forEach((hostId: string) => connectNow(hostId));
 }
 
 export function handleGlobalHotkeyKeyDownImpl(getCtx: AppContextGetter, e: KeyboardEvent) {
@@ -751,7 +769,11 @@ export function executeHotkeyActionImpl(getCtx: AppContextGetter, action: string
   }
 }
 
-export function handleCreateLocalTerminalImpl(getCtx: AppContextGetter, shell?: { command: string; args?: string[]; name?: string; icon?: string }) {
+export function handleCreateLocalTerminalImpl(
+  getCtx: AppContextGetter,
+  shell?: { command: string; args?: string[]; name?: string; icon?: string },
+  options?: { localStartDir?: string },
+) {
   const { addConnectionLog, classifyLocalShellType, createLocalTerminal, discoveredShells, resolveShellSetting, systemInfoRef, terminalSettings } = getCtx();
 {
     const { username, hostname } = systemInfoRef.current;
@@ -766,6 +788,7 @@ export function handleCreateLocalTerminalImpl(getCtx: AppContextGetter, shell?: 
       shellArgs: resolved?.args,
       shellName,
       shellIcon,
+      localStartDir: options?.localStartDir,
     });
     addConnectionLog({
       sessionId,

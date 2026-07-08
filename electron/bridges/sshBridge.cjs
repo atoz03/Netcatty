@@ -948,22 +948,82 @@ async function generateKeyPair(event, options) {
  * Wrapper for SSH session handler to suppress noisy auth error stack traces
  * Auth failures are expected when fallback to password is available
  */
+function isStartAuthError(err) {
+  return err?.message?.toLowerCase().includes('authentication') ||
+    err?.message?.toLowerCase().includes('auth') ||
+    err?.message?.toLowerCase().includes('password') ||
+    err?.level === 'client-authentication';
+}
+
+function canRetryWithEncryptedDefaultKeys(options) {
+  const hasJumpHosts = options.jumpHosts && options.jumpHosts.length > 0;
+  const isPasswordOnly = !hasJumpHosts &&
+    !options.agentForwarding &&
+    !!options.password &&
+    !options.privateKey &&
+    !options.certificate;
+  return !isPasswordOnly &&
+    (!options._unlockedEncryptedKeys || options._unlockedEncryptedKeys.length === 0);
+}
+
+function canReuseExistingSession(options) {
+  if (!options.sourceSessionId || options.x11Forwarding) return false;
+  return Boolean(findReusableSession(sessions, options.sourceSessionId, {
+    hostname: options.hostname,
+    port: options.port || 22,
+    username: options.username || "root",
+  }));
+}
+
+function sendFinalStartFailureExit(event, options, err) {
+  const sessionId = options.sessionId;
+  if (!sessionId || event.sender?.isDestroyed?.()) return;
+  safeSend(event.sender, "netcatty:exit", {
+    sessionId,
+    exitCode: 1,
+    error: err?.message || String(err),
+    reason: "error",
+  });
+}
+
 async function startSSHSessionWrapper(event, options) {
+  let retryableEncryptedKeys = [];
+  let loadedRetryableEncryptedKeys = false;
+  let shouldSuppressInitialAuthExit = false;
+  const canRetryEncryptedDefaults = canRetryWithEncryptedDefaultKeys(options);
+  const mayReuseExistingSession = canRetryEncryptedDefaults && canReuseExistingSession(options);
+  const loadRetryableEncryptedKeys = async () => {
+    const allKeysWithEncrypted = await findAllDefaultPrivateKeysFromHelper({ includeEncrypted: true });
+    retryableEncryptedKeys = allKeysWithEncrypted.filter(k => k.isEncrypted);
+    loadedRetryableEncryptedKeys = true;
+    return retryableEncryptedKeys;
+  };
+
+  if (canRetryEncryptedDefaults && !mayReuseExistingSession) {
+    await loadRetryableEncryptedKeys();
+    shouldSuppressInitialAuthExit = retryableEncryptedKeys.length > 0;
+  } else if (mayReuseExistingSession) {
+    // Let Copy Tab reuse an authenticated transport without waiting on key
+    // discovery. If reuse falls back to a fresh connection and auth fails, the
+    // catch path below lazily loads encrypted keys before deciding final failure.
+    shouldSuppressInitialAuthExit = true;
+  }
+
   try {
-    return await startSSHSession(event, options);
+    return await startSSHSession(event, {
+      ...options,
+      _suppressPreShellAuthExit: shouldSuppressInitialAuthExit,
+    });
   } catch (err) {
-    const isAuthError = err.message?.toLowerCase().includes('authentication') ||
-      err.message?.toLowerCase().includes('auth') ||
-      err.level === 'client-authentication';
+    const isAuthError = isStartAuthError(err);
 
     if (isAuthError) {
       // Check if there are encrypted default keys we haven't tried yet
       // Only offer retry if no unlocked keys were provided in this attempt
-      const hasJumpHosts = options.jumpHosts && options.jumpHosts.length > 0;
-      const isPasswordOnly = !hasJumpHosts && !options.agentForwarding && !!options.password && !options.privateKey && !options.certificate;
-      if (!isPasswordOnly && (!options._unlockedEncryptedKeys || options._unlockedEncryptedKeys.length === 0)) {
-        const allKeysWithEncrypted = await findAllDefaultPrivateKeysFromHelper({ includeEncrypted: true });
-        const encryptedKeys = allKeysWithEncrypted.filter(k => k.isEncrypted);
+      if (canRetryEncryptedDefaults) {
+        const encryptedKeys = loadedRetryableEncryptedKeys
+          ? retryableEncryptedKeys
+          : await loadRetryableEncryptedKeys();
 
         if (encryptedKeys.length > 0) {
           console.log('[SSH] Auth failed, found encrypted default keys. Requesting passphrases for retry...');
@@ -1005,9 +1065,7 @@ async function startSSHSessionWrapper(event, options) {
               }
 
               // Re-wrap retry errors the same way as initial errors
-              const isRetryAuthError = retryErr.message?.toLowerCase().includes('authentication') ||
-                retryErr.message?.toLowerCase().includes('auth') ||
-                retryErr.level === 'client-authentication';
+              const isRetryAuthError = isStartAuthError(retryErr);
 
               if (isRetryAuthError) {
                 const authError = new Error(retryErr.message);
@@ -1025,6 +1083,10 @@ async function startSSHSessionWrapper(event, options) {
             console.log('[SSH] User did not unlock any keys, not retrying');
           }
         }
+      }
+
+      if (shouldSuppressInitialAuthExit) {
+        sendFinalStartFailureExit(event, options, err);
       }
 
       // Re-throw with a clean error to avoid Electron printing full stack trace

@@ -45,10 +45,12 @@ function createTerminalSessionClone(
     localShellArgs: session.localShellArgs,
     localShellName: session.localShellName,
     localShellIcon: session.localShellIcon,
+    localStartDir: session.localStartDir,
     fontSize: session.fontSize,
     fontSizeOverride: session.fontSizeOverride,
     startupCommand: options.startupCommand,
     customName: options.customName,
+    ...(session.ephemeralHost ? { ephemeralHost: true } : {}),
     reuseConnectionFromSessionId: canReuseTerminalConnection(session) ? session.id : undefined,
   };
 

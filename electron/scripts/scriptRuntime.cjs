@@ -30,6 +30,229 @@ function truncateActivityLabel(value, max = 80) {
   return text.length > max ? `${text.slice(0, max - 1)}…` : text;
 }
 
+function normalizeDialogOption(option) {
+  if (typeof option === "string") {
+    if (!option) {
+      throw new Error("Dialog option value is required");
+    }
+    return {
+      label: option,
+      value: option,
+      description: undefined,
+      disabled: false,
+    };
+  }
+  if (!option || typeof option !== "object") {
+    throw new Error("Dialog option must be a string or object");
+  }
+  const value = String(option.value ?? "");
+  if (!value) {
+    throw new Error("Dialog option value is required");
+  }
+  return {
+    label: String(option.label ?? value),
+    value,
+    description: option.description == null ? undefined : String(option.description),
+    disabled: Boolean(option.disabled),
+  };
+}
+
+function normalizeChoiceOptions(fieldType, options, defaultValue) {
+  if (!Array.isArray(options) || options.length === 0) {
+    throw new Error(`Dialog ${fieldType} field requires at least one option`);
+  }
+  const normalizedOptions = options.map(normalizeDialogOption);
+  const seenValues = new Set();
+  for (const option of normalizedOptions) {
+    if (seenValues.has(option.value)) {
+      throw new Error(`Dialog ${fieldType} field option values must be unique: ${option.value}`);
+    }
+    seenValues.add(option.value);
+  }
+  const firstEnabled = normalizedOptions.find((option) => !option.disabled);
+  if (!firstEnabled) {
+    throw new Error(`Dialog ${fieldType} field requires at least one enabled option`);
+  }
+  const defaultText = defaultValue == null ? undefined : String(defaultValue);
+  const selected = normalizedOptions.find((option) => option.value === defaultText && !option.disabled);
+  return {
+    options: normalizedOptions,
+    defaultValue: selected ? selected.value : firstEnabled.value,
+  };
+}
+
+function hasOwn(value, key) {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function normalizeConditionValue(value, context) {
+  const valueType = typeof value;
+  if (valueType === "string" || valueType === "boolean") {
+    return value;
+  }
+  if (valueType === "number" && Number.isFinite(value)) {
+    return value;
+  }
+  throw new Error(`${context} must be a string, number, or boolean`);
+}
+
+function normalizeDialogCondition(condition, context = "Dialog visibleWhen") {
+  if (!condition || typeof condition !== "object" || Array.isArray(condition)) {
+    throw new Error(`${context} must be an object`);
+  }
+  const field = String(condition.field ?? "").trim();
+  if (!field) {
+    throw new Error(`${context} field is required`);
+  }
+  const operators = ["equals", "notEquals", "truthy", "falsy"].filter((operator) => hasOwn(condition, operator));
+  if (operators.length !== 1) {
+    throw new Error(`${context} requires exactly one condition operator`);
+  }
+  const operator = operators[0];
+  if (operator === "truthy" || operator === "falsy") {
+    if (condition[operator] !== true) {
+      throw new Error(`${context} ${operator} must be true`);
+    }
+    return { field, [operator]: true };
+  }
+  return {
+    field,
+    [operator]: normalizeConditionValue(condition[operator], `${context} ${operator}`),
+  };
+}
+
+function matchesNumberStep(value, step, base = 0) {
+  const quotient = (value - base) / step;
+  return Math.abs(quotient - Math.round(quotient)) < 1e-9;
+}
+
+function normalizeDialogField(field, seenNames) {
+  if (!field || typeof field !== "object") {
+    throw new Error("Dialog form field must be an object");
+  }
+  const type = String(field.type ?? "");
+  if (!["select", "checkbox", "radio", "textarea", "number"].includes(type)) {
+    throw new Error(`Unsupported dialog field type: ${type || "unknown"}`);
+  }
+  const name = String(field.name ?? "").trim();
+  if (!name) {
+    throw new Error("Dialog form field name is required");
+  }
+  if (["__proto__", "prototype", "constructor"].includes(name)) {
+    throw new Error(`Dialog form field name is reserved: ${name}`);
+  }
+  if (seenNames.has(name)) {
+    throw new Error(`Duplicate dialog form field name: ${name}`);
+  }
+  seenNames.add(name);
+
+  const base = {
+    type,
+    name,
+    label: String(field.label ?? name),
+    description: field.description == null ? undefined : String(field.description),
+    required: field.required !== false,
+    visibleWhen: field.visibleWhen == null ? undefined : normalizeDialogCondition(field.visibleWhen),
+  };
+
+  if (type === "checkbox") {
+    return {
+      ...base,
+      required: field.required === true,
+      defaultValue: Boolean(field.defaultValue),
+    };
+  }
+
+  if (type === "textarea") {
+    return {
+      ...base,
+      placeholder: field.placeholder == null ? undefined : String(field.placeholder),
+      defaultValue: field.defaultValue == null ? "" : String(field.defaultValue),
+    };
+  }
+
+  if (type === "number") {
+    const defaultNumber = field.defaultValue === undefined || field.defaultValue === null || field.defaultValue === ""
+      ? undefined
+      : Number(field.defaultValue);
+    if (defaultNumber !== undefined && !Number.isFinite(defaultNumber)) {
+      throw new Error(`Dialog number field defaultValue must be a finite number: ${name}`);
+    }
+    const min = field.min === undefined || field.min === null || field.min === "" ? undefined : Number(field.min);
+    const max = field.max === undefined || field.max === null || field.max === "" ? undefined : Number(field.max);
+    const step = field.step === undefined || field.step === null || field.step === "" ? undefined : Number(field.step);
+    if (min !== undefined && !Number.isFinite(min)) {
+      throw new Error(`Dialog number field min must be a finite number: ${name}`);
+    }
+    if (max !== undefined && !Number.isFinite(max)) {
+      throw new Error(`Dialog number field max must be a finite number: ${name}`);
+    }
+    if (step !== undefined && (!Number.isFinite(step) || step <= 0)) {
+      throw new Error(`Dialog number field step must be a positive finite number: ${name}`);
+    }
+    if (min !== undefined && max !== undefined && min > max) {
+      throw new Error(`Dialog number field min cannot be greater than max: ${name}`);
+    }
+    if (defaultNumber !== undefined && min !== undefined && defaultNumber < min) {
+      throw new Error(`Dialog number field defaultValue cannot be less than min: ${name}`);
+    }
+    if (defaultNumber !== undefined && max !== undefined && defaultNumber > max) {
+      throw new Error(`Dialog number field defaultValue cannot be greater than max: ${name}`);
+    }
+    if (
+      defaultNumber !== undefined
+      && step !== undefined
+      && min !== undefined
+      && !matchesNumberStep(defaultNumber, step, min)
+    ) {
+      throw new Error(`Dialog number field defaultValue must match step from min: ${name}`);
+    }
+    return {
+      ...base,
+      placeholder: field.placeholder == null ? undefined : String(field.placeholder),
+      defaultValue: defaultNumber,
+      min,
+      max,
+      step,
+    };
+  }
+
+  const choice = normalizeChoiceOptions(type, field.options, field.defaultValue);
+  return {
+    ...base,
+    options: choice.options,
+    defaultValue: choice.defaultValue,
+  };
+}
+
+function normalizeDialogFormSpec(spec) {
+  if (!spec || typeof spec !== "object") {
+    throw new Error("Dialog form spec must be an object");
+  }
+  if (!Array.isArray(spec.fields) || spec.fields.length === 0) {
+    throw new Error("Dialog form requires at least one field");
+  }
+  const seenNames = new Set();
+  const fields = spec.fields.map((field) => normalizeDialogField(field, seenNames));
+  const fieldIndexByName = new Map(fields.map((field, index) => [field.name, index]));
+  for (const [index, field] of fields.entries()) {
+    if (field.visibleWhen && !seenNames.has(field.visibleWhen.field)) {
+      throw new Error(`Dialog visibleWhen references unknown field: ${field.visibleWhen.field}`);
+    }
+    const dependencyIndex = field.visibleWhen ? fieldIndexByName.get(field.visibleWhen.field) : undefined;
+    if (dependencyIndex !== undefined && dependencyIndex >= index) {
+      throw new Error(`Dialog visibleWhen must reference an earlier field: ${field.name}`);
+    }
+  }
+  return {
+    title: spec.title == null ? undefined : String(spec.title),
+    message: spec.message == null ? "" : String(spec.message),
+    submitLabel: spec.submitLabel == null ? undefined : String(spec.submitLabel),
+    cancelLabel: spec.cancelLabel == null ? undefined : String(spec.cancelLabel),
+    fields,
+  };
+}
+
 function createScriptRuntime(deps) {
   const {
     sessionId,
@@ -179,7 +402,9 @@ function createScriptRuntime(deps) {
     }
   }
 
-  async function waitForWithRecovery(pattern, timeoutMs = 30000) {
+  async function waitForWithRecovery(pattern, timeoutMs = 30000, options = {}) {
+    const waitMethod = options.waitMethod || "waitFor";
+    const operationLabel = options.operationLabel || waitMethod;
     const patternLabel = pattern instanceof RegExp ? pattern.source : String(pattern);
     let stepTracked = false;
     while (true) {
@@ -187,12 +412,12 @@ function createScriptRuntime(deps) {
         throw new Error("Script stopped");
       }
       if (!stepTracked) {
-        await trackStep(`waitFor ${truncateActivityLabel(patternLabel, 60)}`);
+        await trackStep(`${operationLabel} ${truncateActivityLabel(patternLabel, 60)}`);
         stepTracked = true;
       }
       onStatusChange?.(runId, { waitingFor: patternLabel, status: "running", elapsedMs: Math.max(0, Date.now() - startedAt) });
       try {
-        return await getOutputBuffer(sessionId).waitFor(
+        return await getOutputBuffer(sessionId)[waitMethod](
           pattern,
           timeoutMs,
           () => Boolean(deps.isAborted?.()),
@@ -329,6 +554,18 @@ function createScriptRuntime(deps) {
     waitFor(pattern, timeoutMs = 30000) {
       return waitForWithRecovery(pattern, timeoutMs);
     },
+    waitForText(text, timeoutMs = 30000) {
+      return waitForWithRecovery(text, timeoutMs, {
+        waitMethod: "waitForText",
+        operationLabel: "waitForText",
+      });
+    },
+    waitForRegex(pattern, timeoutMs = 30000) {
+      return waitForWithRecovery(pattern, timeoutMs, {
+        waitMethod: "waitForRegex",
+        operationLabel: "waitForRegex",
+      });
+    },
     waitForPrompt(timeoutMs = 60000) {
       return waitForPromptWithRecovery(timeoutMs);
     },
@@ -370,6 +607,48 @@ function createScriptRuntime(deps) {
     },
     prompt(message, defaultValue = "") {
       return showDialog("prompt", String(message ?? ""), String(defaultValue ?? ""));
+    },
+    form(spec) {
+      const form = normalizeDialogFormSpec(spec);
+      return showDialog("form", form.message, undefined, { form });
+    },
+    async select(message, options, defaultValue) {
+      const values = await dialogApi.form({
+        message,
+        fields: [{
+          type: "select",
+          name: "value",
+          label: message,
+          options,
+          defaultValue,
+        }],
+      });
+      return String(values?.value ?? "");
+    },
+    async radio(message, options, defaultValue) {
+      const values = await dialogApi.form({
+        message,
+        fields: [{
+          type: "radio",
+          name: "value",
+          label: message,
+          options,
+          defaultValue,
+        }],
+      });
+      return String(values?.value ?? "");
+    },
+    async checkbox(message, defaultChecked = false) {
+      const values = await dialogApi.form({
+        message,
+        fields: [{
+          type: "checkbox",
+          name: "value",
+          label: message,
+          defaultValue: defaultChecked,
+        }],
+      });
+      return Boolean(values?.value);
     },
   };
 
@@ -459,4 +738,5 @@ module.exports = {
   wrapScriptSource,
   interruptibleSleep,
   formatScriptInputForLog,
+  normalizeDialogFormSpec,
 };

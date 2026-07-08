@@ -1,8 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import type { Host } from "./models";
+import { resolveHostAutofillPassword } from "./sshAuth";
 import {
   buildSshDeepLinkConnectionHost,
+  buildSshDeepLinkEphemeralHost,
+  buildSshDeepLinkEphemeralHostFromSaved,
   buildSshDeepLinkHostDraft,
   buildSshDeepLinkOpenHost,
   buildSshNoteLinkOpenHost,
@@ -40,6 +43,120 @@ test("parseSshDeepLink accepts IPv6 hosts", () => {
     hostname: "2001:db8::10",
     port: 2222,
   });
+});
+
+test("parseSshDeepLink extracts and percent-decodes passwords", () => {
+  assert.deepEqual(parseSshDeepLink("ssh://alice:secret@example.com"), {
+    rawUrl: "ssh://alice:secret@example.com",
+    username: "alice",
+    password: "secret",
+    hostname: "example.com",
+  });
+  assert.deepEqual(parseSshDeepLink("ssh://alice:p%40ss@example.com:2200"), {
+    rawUrl: "ssh://alice:p%40ss@example.com:2200",
+    username: "alice",
+    password: "p@ss",
+    hostname: "example.com",
+    port: 2200,
+  });
+});
+
+test("parseSshDeepLink omits password when not present", () => {
+  const target = parseSshDeepLink("ssh://alice@example.com");
+  assert.ok(target);
+  assert.equal(target.password, undefined);
+});
+
+test("buildSshDeepLinkEphemeralHost includes password auth and disables mosh and et", () => {
+  const ephemeral = buildSshDeepLinkEphemeralHost(
+    parseSshDeepLink("ssh://alice:secret@example.com:2200")!,
+    { id: "ephemeral-id", now: 789 },
+  );
+
+  assert.equal(ephemeral.id, "ephemeral-id");
+  assert.equal(ephemeral.password, "secret");
+  assert.equal(ephemeral.authMethod, "password");
+  assert.equal(ephemeral.savePassword, false);
+  assert.equal(resolveHostAutofillPassword({ host: ephemeral, keys: [] }), undefined);
+  assert.equal(ephemeral.moshEnabled, false);
+  assert.equal(ephemeral.etEnabled, false);
+  assert.equal(ephemeral.protocol, "ssh");
+  assert.equal(ephemeral.ephemeral, true);
+});
+
+test("buildSshDeepLinkEphemeralHost omits password fields when target has no password", () => {
+  const ephemeral = buildSshDeepLinkEphemeralHost(
+    parseSshDeepLink("ssh://alice@example.com")!,
+    { id: "ephemeral-id", now: 789 },
+  );
+
+  assert.equal(ephemeral.password, undefined);
+  assert.equal(ephemeral.authMethod, undefined);
+  assert.equal(ephemeral.savePassword, false);
+  assert.equal(ephemeral.moshEnabled, false);
+  assert.equal(ephemeral.etEnabled, false);
+});
+
+test("buildSshDeepLinkEphemeralHostFromSaved keeps saved settings but overrides credentials", () => {
+  // Effective host: group defaults already resolved, including
+  // group-inherited credentials that must not survive the build.
+  const effectiveSavedHost = {
+    id: "saved-id",
+    label: "Saved Host",
+    hostname: "example.com",
+    username: "vault-user",
+    port: 2200,
+    group: "prod",
+    tags: ["bastion"],
+    os: "linux" as const,
+    identityId: "group-identity-1",
+    identityFileId: "group-key-1",
+    identityFilePaths: ["/home/user/.ssh/id_ed25519"],
+    password: "vault-password",
+    savePassword: true,
+    authMethod: "key" as const,
+    proxyProfileId: "proxy-1",
+    hostChain: { hostIds: ["jump-1"] },
+    charset: "utf8",
+    moshEnabled: true,
+    createdAt: 1,
+  };
+
+  const ephemeral = buildSshDeepLinkEphemeralHostFromSaved(
+    effectiveSavedHost,
+    parseSshDeepLink("ssh://alice:otp@example.com:2200")!,
+    { id: "ephemeral-id", now: 789 },
+  );
+
+  assert.equal(ephemeral.id, "ephemeral-id");
+  assert.equal(ephemeral.ephemeral, true);
+  assert.equal(ephemeral.username, "alice");
+  assert.equal(ephemeral.password, "otp");
+  assert.equal(ephemeral.authMethod, "password");
+  assert.equal(ephemeral.identityId, undefined);
+  assert.equal(ephemeral.identityFileId, undefined);
+  assert.equal(ephemeral.identityFilePaths, undefined);
+  assert.equal(ephemeral.savePassword, false);
+  assert.equal(resolveHostAutofillPassword({ host: ephemeral, keys: [] }), undefined);
+  // Group is cleared so effective-host resolution cannot re-inherit
+  // group credentials over the one-time password.
+  assert.equal(ephemeral.group, "");
+  assert.equal(ephemeral.proxyProfileId, "proxy-1");
+  assert.deepEqual(ephemeral.hostChain, { hostIds: ["jump-1"] });
+  assert.equal(ephemeral.charset, "utf8");
+  assert.equal(ephemeral.protocol, "ssh");
+  assert.equal(ephemeral.moshEnabled, false);
+  assert.equal(ephemeral.etEnabled, false);
+});
+
+test("buildSshDeepLinkHostDraft never includes a password", () => {
+  const draft = buildSshDeepLinkHostDraft(
+    parseSshDeepLink("ssh://alice:secret@example.com")!,
+    { id: "draft-id", now: 123 },
+  );
+
+  assert.equal(draft.password, undefined);
+  assert.equal(draft.authMethod, undefined);
 });
 
 test("parseSshDeepLink rejects unsupported or incomplete links", () => {

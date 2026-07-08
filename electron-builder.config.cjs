@@ -21,6 +21,14 @@ module.exports = {
         {
             name: 'SSH URL',
             schemes: ['ssh']
+        },
+        {
+            name: 'Telnet URL',
+            schemes: ['telnet']
+        },
+        {
+            name: 'JumpServer URL',
+            schemes: ['jms']
         }
     ],
     electronLanguages: ['en', 'en-US', 'zh_CN', 'zh-CN', 'zh_TW', 'zh-TW', 'ru'],
@@ -61,7 +69,6 @@ module.exports = {
         'infrastructure/config/terminalFlowConstants.json',
         'lib/**/*.cjs',
         'lib/**/*.json',
-        '!electron/.dev-config.json',
         'skills/**/*',
         '!public/**/*',
         '!**/*.map',
@@ -183,7 +190,15 @@ module.exports = {
         extendInfo: {
             NSCameraUsageDescription: 'Netcatty may use the camera for video calls',
             NSMicrophoneUsageDescription: 'Netcatty may use the microphone for audio',
-            NSLocalNetworkUsageDescription: 'Netcatty needs local network access for SSH connections'
+            NSLocalNetworkUsageDescription: 'Netcatty needs local network access for SSH connections',
+            CFBundleDocumentTypes: [
+                {
+                    CFBundleTypeName: 'Folder',
+                    CFBundleTypeRole: 'Viewer',
+                    LSHandlerRank: 'Alternate',
+                    LSItemContentTypes: ['public.folder']
+                }
+            ]
         },
         extraResources: [...moshExtraResources('darwin'), ...etExtraResources('darwin')]
     },
@@ -245,6 +260,11 @@ module.exports = {
         // Use gzip instead of default xz(lzma) for better compatibility with
         // Deepin OS and other distros that have issues with lzma decompression
         compression: 'gz'
+    },
+    rpm: {
+        // Avoid rpm's generated /usr/lib/.build-id symlinks. Those hashes are
+        // global on the host, so owning them can conflict with other RPMs.
+        fpm: ['--rpm-rpmbuild-define', '_build_id_links none']
     },
     pacman: {
         // FPM-generated .pacman packages bypass Arch's alpm hooks that

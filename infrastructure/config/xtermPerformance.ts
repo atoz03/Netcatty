@@ -124,6 +124,12 @@ export const XTERM_PERFORMANCE_CONFIG = {
     writeRefreshBudgetMs: 4,
     // Process dirty contiguous lines in chunks so budget checks can preempt.
     dirtySegmentChunkSize: 48,
+    // User-scroll catch-up should be almost invisible to the renderer.
+    scrollSettleDebounceMs: 120,
+    // Keep highlighting deprioritized briefly after a large output burst.
+    largeOutputQuietMs: 320,
+    // Give interactive typing priority over keyword highlight catch-up.
+    inputQuietMs: 180,
   },
 };
 

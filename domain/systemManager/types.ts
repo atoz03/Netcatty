@@ -129,7 +129,7 @@ export type DockerImageManageAction =
   | { action: 'prune'; all?: boolean }
   | { action: 'tag'; imageId: string; repository: string; tag?: string };
 
-export type SystemManagerSubTab = 'processes' | 'tmux' | 'zellij' | 'docker';
+export type SystemManagerSubTab = 'overview' | 'processes' | 'tmux' | 'zellij' | 'docker';
 
 export interface TerminalPopupIcon {
   kind: 'image';

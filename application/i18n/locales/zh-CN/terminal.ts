@@ -20,6 +20,9 @@ export const zhCNTerminalMessages: Messages = {
   'terminal.osc7Setup.sent': '目录追踪配置已发送到终端',
   'terminal.toolbar.timestampsEnable': '显示时间戳',
   'terminal.toolbar.timestampsDisable': '隐藏时间戳',
+  'terminal.progress.enterReconnectHint': '按 Enter 重新连接',
+  'terminal.progress.autoReconnectScheduled': '连接已断开，将在 {seconds} 秒后自动重连（第 {attempt} 次）。',
+  'terminal.progress.autoReconnectAttempt': '正在自动重连（第 {attempt} 次）...',
   'terminal.connection.protocol.et': 'EternalTerminal',
   'terminal.et.proxyUnsupported': 'EternalTerminal 目前不支持 Netcatty 的代理设置。请改用 SSH，或移除该主机的代理。',
   'terminal.et.multiJumpUnsupported': 'EternalTerminal 目前在 Netcatty 中最多支持一个跳板机。',
@@ -101,9 +104,12 @@ export const zhCNTerminalMessages: Messages = {
   'settings.sftp.doubleClickBehavior.transfer': '传输到另一侧',
   'settings.sftp.doubleClickBehavior.openDesc': '使用默认应用程序打开文件',
   'settings.sftp.doubleClickBehavior.transferDesc': '将文件传输到另一窗格的活动主机',
-  'settings.sshDeepLink.title': 'SSH 链接',
-  'settings.sshDeepLink.enable': '用 Netcatty 打开 ssh:// 链接',
-  'settings.sshDeepLink.enableDesc': '允许 Netcatty 接管来自浏览器和其他应用的 ssh:// 链接。',
+  'settings.sshDeepLink.title': 'SSH 和 Telnet 链接',
+  'settings.sshDeepLink.enable': '用 Netcatty 打开 ssh:// 和 telnet:// 链接',
+  'settings.sshDeepLink.enableDesc': '允许 Netcatty 接管来自浏览器和其他应用的 ssh://、telnet:// 链接。',
+  'settings.jmsDeepLink.title': 'JumpServer 链接',
+  'settings.jmsDeepLink.enable': '处理 jms:// 链接',
+  'settings.jmsDeepLink.enableDesc': '将 Netcatty 注册为 JumpServer jms:// 客户端链接的处理程序，可能与官方 JumpServer 客户端冲突。',
 
   // Settings > SFTP Auto Sync
   'settings.sftp.autoSync': '自动同步到远程',
@@ -247,9 +253,18 @@ export const zhCNTerminalMessages: Messages = {
   'settings.terminal.behavior.middleClick.menu': '显示菜单',
   'settings.terminal.behavior.middleClick.paste': '粘贴',
   'settings.terminal.behavior.middleClick.disabled': '无动作',
+  'settings.terminal.behavior.wordSeparators': '单词分隔符',
+  'settings.terminal.behavior.wordSeparators.desc':
+    '双击选择文本时作为边界的字符。空格也算；可添加 =、逗号或 :，方便选择 uid=name 里的部分内容。',
   'settings.terminal.behavior.bracketedPaste': '括号粘贴模式',
   'settings.terminal.behavior.bracketedPaste.desc':
     '粘贴文本时使用转义序列包裹，以便终端区分粘贴和键入。如果出现 ^[[200~ 字样请关闭此选项。',
+  'settings.terminal.behavior.shiftEnterNewline': 'Shift+Enter 发送文本',
+  'settings.terminal.behavior.shiftEnterNewline.desc':
+    '在终端中按 Shift+Enter 时发送配置的文本，而不是普通回车。',
+  'settings.terminal.behavior.shiftEnterNewlineText': '发送内容',
+  'settings.terminal.behavior.shiftEnterNewlineText.desc':
+    '使用 \\n 表示换行，\\t 表示 Tab，\\\\ 表示反斜杠。',
   'settings.terminal.behavior.clearWipesScrollback': '`clear` 同时清空回滚历史',
   'settings.terminal.behavior.clearWipesScrollback.desc':
     '`clear` 命令同时清空回滚历史（POSIX 默认行为）。关闭则保留历史。',
@@ -332,6 +347,8 @@ export const zhCNTerminalMessages: Messages = {
   'settings.terminal.localShell.startDir.notFound': '目录不存在',
   'settings.terminal.localShell.startDir.isFile': '路径是文件，不是目录',
   'settings.terminal.section.connection': '连接',
+  'settings.terminal.connection.sshAutoReconnectEnabled': 'SSH 断线后自动重连',
+  'settings.terminal.connection.sshAutoReconnectEnabled.desc': '打开后，已连上的 SSH 会话意外断开时会每 5 秒尝试重新连接，直到关闭标签页或连接恢复。',
   'settings.terminal.connection.keepaliveInterval': '会话保持间隔',
   'settings.terminal.connection.keepaliveInterval.desc': '向服务器发送 SSH 保活数据包的频率（秒）。设为 0 表示全局禁用——单个主机可在自己的设置里覆盖此值。',
   'settings.terminal.connection.keepaliveCountMax': '最大无响应保活次数',

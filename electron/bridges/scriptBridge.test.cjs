@@ -266,6 +266,182 @@ test("script run uses renderer sessionMeta when main-process session map is empt
   assert.match(finalRun.logs.map((entry) => entry.message).join("\n"), /10\.0\.0\.1@root/);
 });
 
+test("script run sends form dialog requests and resolves object responses", async () => {
+  const handlers = new Map();
+  const sentRunUpdates = [];
+  let dialogRequest;
+  const sessionId = "session-form-dialog";
+
+  scriptBridge.removeSessionBuffer(sessionId);
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {
+      app: {
+        getVersion: () => "test",
+        getPath: () => process.cwd(),
+      },
+      webContents: {
+        fromId: () => null,
+      },
+    },
+    terminalBridge: {
+      writeToSession() {},
+    },
+    terminalWorkerManager: null,
+    getMainWindow: () => ({
+      webContents: {
+        id: 1,
+        send(channel, payload) {
+          if (channel === "netcatty:script:runs-updated") {
+            sentRunUpdates.push(payload.runs);
+          }
+          if (channel === "netcatty:script:screen-snapshot-request") {
+            setImmediate(() => {
+              handlers.get("netcatty:script:screen-snapshot-response")({}, {
+                requestId: payload.requestId,
+                snapshot: {
+                  rows: 24,
+                  cols: 80,
+                  currentRow: 0,
+                  lines: ["user@host:~$ "],
+                },
+              });
+            });
+          }
+          if (channel === "netcatty:script:dialog-request") {
+            dialogRequest = payload;
+            setImmediate(() => {
+              handlers.get("netcatty:script:dialog-response")({}, {
+                requestId: payload.requestId,
+                value: { env: "prod", restart: true, mode: "safe" },
+              });
+            });
+          }
+        },
+      },
+    }),
+  });
+  scriptBridge.registerHandlers({
+    handle(channel, handler) {
+      handlers.set(channel, handler);
+    },
+  });
+
+  await handlers.get("netcatty:script:run")({}, {
+    scriptId: "form-dialog",
+    scriptLabel: "Form dialog",
+    sessionId,
+    content: `
+      const values = await nct.dialog.form({
+        title: 'Deploy',
+        message: 'Choose options',
+        fields: [
+          { type: 'select', name: 'env', label: 'Environment', options: ['dev', 'prod'], defaultValue: 'dev' },
+          { type: 'checkbox', name: 'restart', label: 'Restart', defaultValue: false },
+          { type: 'radio', name: 'mode', label: 'Mode', options: ['safe', 'fast'], defaultValue: 'fast' },
+        ],
+      });
+      nct.log(values.env + ':' + values.restart + ':' + values.mode);
+    `,
+    permissionMode: "auto",
+  });
+
+  assert.equal(dialogRequest.type, "form");
+  assert.equal(dialogRequest.message, "Choose options");
+  assert.equal(dialogRequest.form.title, "Deploy");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(dialogRequest.form.fields.map((field) => [field.type, field.name, field.defaultValue]))),
+    [
+      ["select", "env", "dev"],
+      ["checkbox", "restart", false],
+      ["radio", "mode", "fast"],
+    ],
+  );
+
+  const finalRun = sentRunUpdates.at(-1).find((run) => run.scriptId === "form-dialog");
+  assert.equal(finalRun.status, "completed");
+  assert.match(finalRun.logs.map((entry) => entry.message).join("\n"), /prod:true:safe/);
+  scriptBridge.removeSessionBuffer(sessionId);
+});
+
+test("script run treats cancelled form dialogs as script failures", async () => {
+  const handlers = new Map();
+  const sentRunUpdates = [];
+  const sessionId = "session-form-cancel";
+
+  scriptBridge.removeSessionBuffer(sessionId);
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {
+      app: {
+        getVersion: () => "test",
+        getPath: () => process.cwd(),
+      },
+      webContents: {
+        fromId: () => null,
+      },
+    },
+    terminalBridge: {
+      writeToSession() {},
+    },
+    terminalWorkerManager: null,
+    getMainWindow: () => ({
+      webContents: {
+        id: 1,
+        send(channel, payload) {
+          if (channel === "netcatty:script:runs-updated") {
+            sentRunUpdates.push(payload.runs);
+          }
+          if (channel === "netcatty:script:screen-snapshot-request") {
+            setImmediate(() => {
+              handlers.get("netcatty:script:screen-snapshot-response")({}, {
+                requestId: payload.requestId,
+                snapshot: {
+                  rows: 24,
+                  cols: 80,
+                  currentRow: 0,
+                  lines: ["user@host:~$ "],
+                },
+              });
+            });
+          }
+          if (channel === "netcatty:script:dialog-request") {
+            setImmediate(() => {
+              handlers.get("netcatty:script:dialog-response")({}, {
+                requestId: payload.requestId,
+                cancelled: true,
+              });
+            });
+          }
+        },
+      },
+    }),
+  });
+  scriptBridge.registerHandlers({
+    handle(channel, handler) {
+      handlers.set(channel, handler);
+    },
+  });
+
+  await handlers.get("netcatty:script:run")({}, {
+    scriptId: "form-cancel",
+    scriptLabel: "Form cancel",
+    sessionId,
+    content: `
+      await nct.dialog.form({
+        message: 'Choose options',
+        fields: [{ type: 'checkbox', name: 'restart', label: 'Restart' }],
+      });
+    `,
+    permissionMode: "auto",
+  });
+
+  const finalRun = sentRunUpdates.at(-1).find((run) => run.scriptId === "form-cancel");
+  assert.equal(finalRun.status, "failed");
+  assert.equal(finalRun.error, "Dialog cancelled");
+  scriptBridge.removeSessionBuffer(sessionId);
+});
+
 test("script waitFor ignores keywords from the startup screen snapshot until new output arrives", async () => {
   const handlers = new Map();
   const sentRunUpdates = [];

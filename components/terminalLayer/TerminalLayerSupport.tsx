@@ -1,4 +1,4 @@
-import React, { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import React, { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 import { activeTabStore } from '../../application/state/activeTabStore';
 import { useTerminalLayoutSuppressActive } from '../../application/state/terminalLayoutSuppressStore';
@@ -7,6 +7,7 @@ import { createTerminalSelectionAttachment } from '../../application/state/termi
 import { getTopTabInsertionTarget, isPointInsideRect, WORKSPACE_SESSION_DRAG_TYPE } from '../../application/state/terminalDragData';
 import { useAIState } from '../../application/state/useAIState';
 import { useStoredBoolean } from '../../application/state/useStoredBoolean';
+import { isSavedVaultHost } from '../../domain/ephemeralHosts';
 import { collectSessionIds, SplitDirection } from '../../domain/workspace';
 import { resolveSessionTabTitle } from '../../domain/sessionTabTitle';
 import { KeyBinding, TerminalSettings } from '../../domain/models';
@@ -14,7 +15,7 @@ import { STORAGE_KEY_AI_SHOW_TERMINAL_SELECTION_ACTION } from '../../infrastruct
 import { cn } from '../../lib/utils';
 import { LazyLoadBoundary } from '../ui/lazy-load-boundary';
 import type { DropEntry } from '../../lib/sftpFileUtils';
-import type { GroupConfig, Host, Identity, KnownHost, ProxyProfile, SSHKey, Snippet, TerminalSession, TerminalTheme, VaultNote, Workspace } from '../../types';
+import type { GroupConfig, Host, Identity, KnownHost, ProxyProfile, SSHKey, Snippet, TerminalSession, VaultNote, Workspace } from '../../types';
 import type { ExecutorContext } from '../../infrastructure/ai/cattyAgent/executor';
 import Terminal from '../Terminal';
 import { removePaneVisible, setPaneVisible } from '../terminal/paneVisibilityStore';
@@ -23,6 +24,8 @@ import type { TerminalContextReader } from '../../domain/terminalContextRead';
 import {
   getTerminalPaneRenderSnapshot,
   parseTerminalPaneRenderSnapshot,
+  resolveHiddenTerminalPaneStyle,
+  type TerminalPaneHiddenSize,
 } from '../terminalPaneVisibility';
 import type { ResolvedAppearance, TerminalAppearanceHostScope } from '../../domain/terminalAppearanceRuntime';
 import type { TerminalSidePanelAutoOpenTab } from '../../domain/terminalSidePanelAutoOpen';
@@ -139,12 +142,6 @@ export const clearTerminalPreviewVars = (sessionId: string | null) => {
   pane.style.removeProperty('--terminal-preview-toolbar-btn-active');
 };
 
-export const clearTerminalPreviewVarsForSessions = (sessionIds: Iterable<string>) => {
-  for (const sessionId of sessionIds) {
-    clearTerminalPreviewVars(sessionId);
-  }
-};
-
 export const setStylePropertyIfChanged = (element: HTMLElement, property: string, value: string) => {
   if (element.style.getPropertyValue(property) === value) return;
   element.style.setProperty(property, value);
@@ -171,29 +168,6 @@ const getHostTreePreviewRoots = (): HTMLElement[] => {
   return Array.from(document.querySelectorAll<HTMLElement>(
     '[data-section="app-host-tree-layer"], [data-section="terminal-host-tree-sidebar"]',
   ));
-};
-
-export const applyHostTreePreviewThemeVars = (theme: TerminalTheme) => {
-  const roots = getHostTreePreviewRoots();
-  if (roots.length === 0) return;
-  const bg = theme.colors.background;
-  const fg = theme.colors.foreground;
-  const values = {
-    '--terminal-host-tree-bg': bg,
-    '--terminal-host-tree-fg': fg,
-    '--terminal-host-tree-muted': `color-mix(in srgb, ${fg} 55%, ${bg} 45%)`,
-    '--terminal-host-tree-separator': `color-mix(in srgb, ${fg} 10%, ${bg} 90%)`,
-    '--terminal-host-tree-hover-bg': `color-mix(in srgb, ${fg} 8%, transparent)`,
-    '--terminal-host-tree-active-bg': `color-mix(in srgb, ${fg} 14%, transparent)`,
-    '--terminal-host-tree-drop-bg': `color-mix(in srgb, ${fg} 20%, transparent)`,
-    '--terminal-host-tree-folder-fg': `color-mix(in srgb, ${fg} 75%, ${bg} 25%)`,
-  } satisfies Record<(typeof HOST_TREE_PREVIEW_PROPERTIES)[number], string>;
-
-  for (const root of roots) {
-    for (const property of HOST_TREE_PREVIEW_PROPERTIES) {
-      setStylePropertyIfChanged(root, property, values[property]);
-    }
-  }
 };
 
 export const clearHostTreePreviewVars = () => {
@@ -820,7 +794,7 @@ interface TerminalPaneProps {
 }
 
 const getPaneAppearanceThemeId = (props: TerminalPaneProps): string => {
-  const isEphemeral = !props.hostMap.has(props.host.id);
+  const isEphemeral = !isSavedVaultHost(props.hostMap.get(props.host.id));
   return props.resolveSessionAppearance({ host: props.host, isEphemeral }).themeId;
 };
 
@@ -1006,6 +980,8 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   const { paneState, isFocusedPane } = parseTerminalPaneRenderSnapshot(renderSnapshot);
   const activeWorkspaceId = paneState.workspaceId;
   const isVisible = paneState.isVisible;
+  const paneElementRef = useRef<HTMLDivElement | null>(null);
+  const lastVisiblePaneSizeRef = useRef<TerminalPaneHiddenSize | null>(null);
 
   // Publish visibility to the per-session store so TerminalServerStats /
   // TerminalAutocomplete can self-subscribe — keeping isVisible out of the
@@ -1068,12 +1044,24 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   const paneLayoutKey = paneLayoutKeyRef.current;
   const style: React.CSSProperties = { ...layoutStyle };
 
+  useLayoutEffect(() => {
+    if (!isVisible) return;
+    const element = paneElementRef.current;
+    if (!element) return;
+    const width = element.clientWidth;
+    const height = element.clientHeight;
+    if (width > 0 && height > 0) {
+      lastVisiblePaneSizeRef.current = { width, height };
+    }
+  }, [
+    isVisible,
+    layoutStyle.height,
+    layoutStyle.width,
+    activeWorkspaceId,
+  ]);
+
   if (!isVisible) {
-    style.visibility = 'hidden';
-    style.pointerEvents = 'none';
-    // Preserve xterm state while keeping hidden terminals out of layout.
-    style.left = '-9999px';
-    style.top = '-9999px';
+    Object.assign(style, resolveHiddenTerminalPaneStyle(style, lastVisiblePaneSizeRef.current));
   }
 
   const workspaceFocusHandler = activeWorkspaceId
@@ -1085,7 +1073,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   const splitHorizontalHandler = splitHorizontalHandlersRef.current.get(session.id);
   const splitVerticalHandler = splitVerticalHandlersRef.current.get(session.id);
   const broadcastEnabled = activeWorkspaceId ? !!isBroadcastEnabled?.(activeWorkspaceId) : false;
-  const isHostEphemeral = !hostMap.has(host.id);
+  const isHostEphemeral = !isSavedVaultHost(hostMap.get(host.id));
   const sessionAppearance = useMemo(
     () => resolveSessionAppearance({ host, isEphemeral: isHostEphemeral }),
     [resolveSessionAppearance, host, isHostEphemeral],
@@ -1293,6 +1281,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
 
   return (
     <div
+      ref={paneElementRef}
       data-session-id={session.id}
       data-section="terminal-split-pane"
       data-focused={isFocusedPane ? 'true' : undefined}

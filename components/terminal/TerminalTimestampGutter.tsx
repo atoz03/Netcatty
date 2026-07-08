@@ -6,6 +6,7 @@ import {
   getVisibleTerminalLineTimestampRows,
   onTerminalLineTimestampsChange,
 } from "./runtime/terminalLineTimestamps";
+import type { TerminalTimestampGutterRow } from "./runtime/terminalLineTimestamps";
 
 export const TERMINAL_TIMESTAMP_GUTTER_MIN_WIDTH = 56;
 export const TERMINAL_TIMESTAMP_GUTTER_HORIZONTAL_PADDING = 16;
@@ -95,6 +96,30 @@ export const resolveTerminalTimestampGutterWidth = ({
     TERMINAL_TIMESTAMP_GUTTER_MIN_WIDTH,
     textWidth + TERMINAL_TIMESTAMP_GUTTER_HORIZONTAL_PADDING,
   ));
+};
+
+export const resolveTerminalTimestampGutterRenderSignature = ({
+  screenTop,
+  cellHeight,
+  color,
+  fontFamily,
+  fontSize,
+  fontWeight,
+  rows,
+}: {
+  screenTop: number;
+  cellHeight: number;
+  color: string;
+  fontFamily: string;
+  fontSize: number;
+  fontWeight: string | number;
+  rows: readonly TerminalTimestampGutterRow[];
+}): string => {
+  let signature = `${screenTop}|${cellHeight}|${color}|${fontFamily}|${fontSize}|${fontWeight}`;
+  for (const { row, label } of rows) {
+    signature += `|${row}:${label}`;
+  }
+  return signature;
 };
 
 export function TerminalTimestampGutter({
@@ -189,7 +214,7 @@ export function TerminalTimestampGutter({
       const gutterRect = gutter.getBoundingClientRect();
       const screenTop = screenRect.top - gutterRect.top;
       const visibleRows = getVisibleTerminalLineTimestampRows(term);
-      const signature = JSON.stringify({
+      const signature = resolveTerminalTimestampGutterRenderSignature({
         screenTop,
         cellHeight,
         color,

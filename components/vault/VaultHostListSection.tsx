@@ -7,6 +7,8 @@ import {
   getVaultDropIntent,
   getVaultDropPosition,
   hasVaultDragType,
+  handleVaultHostDropToGroup,
+  handleVaultRootDrop,
   markVaultDropIndicator,
   useVaultGridLayoutAnimation,
 } from "./vaultReorderDrag";
@@ -45,6 +47,44 @@ export function VaultHostListSection({ ctx }: { ctx: VaultHostListSectionContext
     lastPreviewReorderRef.current = null;
     setDragOverDropTarget(null);
   }, [setDragOverDropTarget]);
+
+  const renderHostEditButton = (host: any, compact = false) => (
+    <Button
+      variant="ghost"
+      size="icon"
+      aria-label={`Edit ${host.label || "host"}`}
+      data-vault-host-edit-button={host.id}
+      className={cn(
+        "opacity-0 group-hover:opacity-100 transition-opacity shrink-0",
+        compact ? "h-6 w-6" : "h-8 w-8",
+      )}
+      onClick={(e: React.MouseEvent) => {
+        e.stopPropagation();
+        handleEditHost(host);
+      }}
+    >
+      <Edit2 size={compact ? 13 : 14} />
+    </Button>
+  );
+
+  const renderGroupEditButton = (groupPath: string, compact = false) => (
+    <Button
+      variant="ghost"
+      size="icon"
+      aria-label={`Edit ${groupPath || "group"}`}
+      data-vault-group-edit-button={groupPath}
+      className={cn(
+        "opacity-0 group-hover:opacity-100 transition-opacity shrink-0",
+        compact ? "h-6 w-6" : "h-8 w-8",
+      )}
+      onClick={(e: React.MouseEvent) => {
+        e.stopPropagation();
+        handleEditGroupConfig(groupPath);
+      }}
+    >
+      <Edit2 size={compact ? 13 : 14} />
+    </Button>
+  );
 
   return <div
           ref={hostListScrollRef}
@@ -141,7 +181,7 @@ export function VaultHostListSection({ ctx }: { ctx: VaultHostListSectionContext
           }}
         >
                 {viewMode !== "tree" && (
-                  <section className="space-y-2">
+                  <section className="space-y-2 pt-2">
                     <div className="flex items-center gap-2 text-sm font-semibold">
                       <button
                         className={cn(
@@ -163,12 +203,14 @@ export function VaultHostListSection({ ctx }: { ctx: VaultHostListSectionContext
                           );
                         }}
                         onDrop={(e) => {
-                          e.preventDefault();
-                          setDragOverDropTarget(null);
-                          const groupPath = e.dataTransfer.getData("group-path");
-                          const hostId = e.dataTransfer.getData("host-id");
-                          if (groupPath) moveGroup(groupPath, null);
-                          if (hostId) moveHostToGroup(hostId, null);
+                          handleVaultRootDrop({
+                            dataTransfer: e.dataTransfer,
+                            preventDefault: () => e.preventDefault(),
+                            setDragOverDropTarget,
+                            moveGroup,
+                            moveHostToGroup,
+                            resetHostDragState,
+                          });
                         }}
                       >
                         {t("vault.hosts.allHosts")}
@@ -273,23 +315,14 @@ export function VaultHostListSection({ ctx }: { ctx: VaultHostListSectionContext
                                         <span className="text-sm font-semibold truncate leading-5">
                                           {safeHost.label}
                                         </span>
+                                        {viewMode !== "grid" && renderHostEditButton(host, true)}
                                         <HostNotesIndicator notes={safeHost.notes} />
                                       </div>
                                       <div className="text-[11px] text-muted-foreground font-mono truncate leading-4">
                                         {safeHost.username}@{safeHost.hostname}
                                       </div>
                                     </div>
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleEditHost(host);
-                                      }}
-                                    >
-                                      <Edit2 size={14} />
-                                    </Button>
+                                    {viewMode === "grid" && renderHostEditButton(host)}
                                   </div>
                                 </div>
                               </ContextMenuTrigger>
@@ -383,23 +416,14 @@ export function VaultHostListSection({ ctx }: { ctx: VaultHostListSectionContext
                                         <span className="text-sm font-semibold truncate leading-5">
                                           {safeHost.label}
                                         </span>
+                                        {viewMode !== "grid" && renderHostEditButton(host, true)}
                                         <HostNotesIndicator notes={safeHost.notes} />
                                       </div>
                                       <div className="text-[11px] text-muted-foreground font-mono truncate leading-4">
                                         {safeHost.username}@{safeHost.hostname}
                                       </div>
                                     </div>
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleEditHost(host);
-                                      }}
-                                    >
-                                      <Edit2 size={14} />
-                                    </Button>
+                                    {viewMode === "grid" && renderHostEditButton(host)}
                                   </div>
                                 </div>
                               </ContextMenuTrigger>
@@ -457,9 +481,13 @@ export function VaultHostListSection({ ctx }: { ctx: VaultHostListSectionContext
                       onDrop={(e) => {
                         e.preventDefault();
                         e.stopPropagation();
-                        const hostId = e.dataTransfer.getData("host-id");
+                        if (handleVaultHostDropToGroup({
+                          dataTransfer: e.dataTransfer,
+                          groupPath: selectedGroupPath,
+                          moveHostToGroup,
+                          resetHostDragState,
+                        })) return;
                         const groupPath = e.dataTransfer.getData("group-path");
-                        if (hostId) moveHostToGroup(hostId, selectedGroupPath);
                         if (groupPath && selectedGroupPath !== null)
                           moveGroup(groupPath, selectedGroupPath);
                       }}
@@ -512,11 +540,14 @@ export function VaultHostListSection({ ctx }: { ctx: VaultHostListSectionContext
                                 e.preventDefault();
                                 e.stopPropagation();
                                 setDragOverDropTarget(null);
-                                const hostId =
-                                  e.dataTransfer.getData("host-id");
+                                if (handleVaultHostDropToGroup({
+                                  dataTransfer: e.dataTransfer,
+                                  groupPath: node.path,
+                                  moveHostToGroup,
+                                  resetHostDragState,
+                                })) return;
                                 const groupPath =
                                   e.dataTransfer.getData("group-path");
-                                if (hostId) moveHostToGroup(hostId, node.path);
                                 if (groupPath) {
                                   const intent = getVaultDropIntent(e.currentTarget, e.clientX, e.clientY, viewMode === "grid");
                                   if (intent === "inside") moveGroup(groupPath, node.path);
@@ -529,8 +560,9 @@ export function VaultHostListSection({ ctx }: { ctx: VaultHostListSectionContext
                                   icon={<FolderTree size={20} />}
                                 />
                                 <div className="flex-1 min-w-0">
-                                  <div className="text-sm font-semibold truncate flex items-center gap-2">
-                                    {node.name}
+                                  <div className="text-sm font-semibold flex items-center gap-1.5 min-w-0">
+                                    <span className="truncate">{node.name}</span>
+                                    {viewMode !== "grid" && renderGroupEditButton(node.path, true)}
                                     {managedGroupPaths.has(node.path) && (
                                       <span className="inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded bg-primary/15 text-primary shrink-0">
                                         <FileSymlink size={10} />
@@ -542,17 +574,7 @@ export function VaultHostListSection({ ctx }: { ctx: VaultHostListSectionContext
                                     {t("vault.groups.hostsCount", { count: node.totalHostCount ?? node.hosts.length })}
                                   </div>
                                 </div>
-                                <Button
-                                  variant="ghost"
-                                  size="icon"
-                                  className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleEditGroupConfig(node.path);
-                                  }}
-                                >
-                                  <Edit2 size={14} />
-                                </Button>
+                                {viewMode === "grid" && renderGroupEditButton(node.path)}
                               </div>
                             </div>
                           </ContextMenuTrigger>
@@ -721,6 +743,7 @@ export function VaultHostListSection({ ctx }: { ctx: VaultHostListSectionContext
                                               <span className="text-sm font-semibold truncate leading-5">
                                                 {safeHost.label}
                                               </span>
+                                              {viewMode !== "grid" && renderHostEditButton(host, true)}
                                               {safeHost.managedSourceId && (
                                                 <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
                                                   managed
@@ -732,17 +755,7 @@ export function VaultHostListSection({ ctx }: { ctx: VaultHostListSectionContext
                                               {safeHost.username}@{safeHost.hostname}
                                             </div>
                                           </div>
-                                          <Button
-                                            variant="ghost"
-                                            size="icon"
-                                            className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-                                            onClick={(e) => {
-                                              e.stopPropagation();
-                                              handleEditHost(host);
-                                            }}
-                                          >
-                                            <Edit2 size={14} />
-                                          </Button>
+                                          {viewMode === "grid" && renderHostEditButton(host)}
                                         </div>
                                       </div>
                                     </ContextMenuTrigger>
@@ -870,6 +883,7 @@ export function VaultHostListSection({ ctx }: { ctx: VaultHostListSectionContext
                                         <span className="text-sm font-semibold truncate leading-5">
                                           {safeHost.label}
                                         </span>
+                                        {viewMode !== "grid" && renderHostEditButton(host, true)}
                                         {safeHost.managedSourceId && (
                                           <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4 shrink-0">
                                             managed
@@ -881,17 +895,7 @@ export function VaultHostListSection({ ctx }: { ctx: VaultHostListSectionContext
                                         {safeHost.username}@{safeHost.hostname}
                                       </div>
                                     </div>
-                                    <Button
-                                      variant="ghost"
-                                      size="icon"
-                                      className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-                                      onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleEditHost(host);
-                                      }}
-                                    >
-                                      <Edit2 size={14} />
-                                    </Button>
+                                    {viewMode === "grid" && renderHostEditButton(host)}
                                   </div>
                                 </div>
                               </ContextMenuTrigger>

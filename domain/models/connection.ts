@@ -144,6 +144,12 @@ export interface Host {
   deviceType?: 'general' | 'network';
   identityFileId?: string; // Reference to SSHKey
   protocol?: 'ssh' | 'telnet' | 'local' | 'serial'; // Default/primary protocol
+  // Runtime marker for in-memory-only hosts (e.g. password deep links).
+  // Ephemeral hosts are never persisted to the vault or session restore.
+  ephemeral?: boolean;
+  // Runtime hint for deep-link launches that target file transfer (e.g.
+  // JumpServer sftp payloads): auto-open the SFTP side panel on connect.
+  autoOpenSftpPanel?: boolean;
   password?: string;
   savePassword?: boolean; // Whether to save the password (default: true)
   authMethod?: 'password' | 'key' | 'certificate';
@@ -246,6 +252,7 @@ export interface Host {
   localShellArgs?: string[];
   localShellName?: string;
   localShellIcon?: string;
+  localStartDir?: string;
   /** User-authored Markdown notes (project, hardware, region, etc.) */
   notes?: string;
   order?: number;

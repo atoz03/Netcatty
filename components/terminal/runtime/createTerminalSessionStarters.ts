@@ -15,6 +15,7 @@ import {
   closeOrphanBackendSession,
   getFlowController,
   isTerminalBootActive,
+  notePendingOutputScrollIfEnabled,
   resetTerminalLineTimestampState,
   tryAttachSessionToTerminal,
   writeSessionData,
@@ -621,12 +622,15 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         ctx.setError(null);
         ctx.setNeedsAuth(true);
         ctx.setAuthRetryMessage(
-          "Authentication failed. Please check your credentials and try again.",
+          tr(
+            "terminal.auth.retryMessage",
+            "Authentication failed. Please check your credentials and try again.",
+          ),
         );
         ctx.setAuthPassword("");
         ctx.setProgressLogs((prev) => [
           ...prev,
-          "Authentication failed. Please try again.",
+          tr("terminal.auth.retryLog", "Authentication failed. Please try again."),
         ]);
         ctx.setStatus("connecting");
       } else {
@@ -1269,7 +1273,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       // otherwise omit them so the backend uses its own default shell detection.
       const sessionShell = ctx.host.localShell;
       const sessionShellArgs = ctx.host.localShellArgs;
-      const localStartDir = ctx.terminalSettings?.localStartDir;
+      const localStartDir = ctx.host.localStartDir || ctx.terminalSettings?.localStartDir;
 
       const id = await ctx.terminalBackend.startLocalSession({
         sessionId: ctx.sessionId,
@@ -1298,11 +1302,15 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       ctx.disposeDataRef.current = ctx.terminalBackend.onSessionData(
         id,
         (chunk, meta) => {
-          writeSessionData(ctx, term, chunk);
+          writeSessionData(ctx, term, chunk, chunk.length, meta);
           ctx.onTerminalOutput?.(chunk, meta);
           if (!ctx.hasConnectedRef.current) {
             ctx.updateStatus("connected");
             setTimeout(() => {
+              if (ctx.isVisibleRef?.current === false) {
+                notePendingOutputScrollIfEnabled(ctx);
+                return;
+              }
               if (!ctx.fitAddonRef.current) return;
               try {
                 ctx.fitAddonRef.current.fit();

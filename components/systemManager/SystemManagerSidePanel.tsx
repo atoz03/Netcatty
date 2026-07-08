@@ -1,4 +1,5 @@
-import { Activity, Box, LayoutList, Loader2, TerminalSquare } from 'lucide-react';
+import { Activity, Box, Gauge, LayoutList, Loader2, TerminalSquare } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import React, { memo, useMemo, useState } from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { useSystemManagerBackend } from '../../application/state/useSystemManagerBackend';
@@ -6,11 +7,12 @@ import type { TerminalSettings } from '../../domain/models';
 import type { Host } from '../../domain/models/connection';
 import type { SystemManagerSubTab } from '../../domain/systemManager/types';
 import { resolveCapabilityPanelState } from '../../domain/systemManagerPanelState';
-import { buildSystemManagerTabs } from '../../domain/systemManager/systemTarget';
+import { buildSystemManagerTabs, shouldCollectServerStats } from '../../domain/systemManager/systemTarget';
 import type { Snippet, TerminalSession } from '../../types';
 import { cn } from '../../lib/utils';
 import { DockerManagerTab } from './DockerManagerTab';
 import { ProcessManagerTab } from './ProcessManagerTab';
+import { SystemOverviewTab } from './SystemOverviewTab';
 import { TmuxManagerTab } from './TmuxManagerTab';
 import { ZellijManagerTab } from './ZellijManagerTab';
 import { WorkspaceSidebarHostHeader } from '../terminalLayer/WorkspaceSidebarHostHeader';
@@ -69,9 +71,13 @@ export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
     () => buildSystemManagerTabs(sessionHost, capabilities, session),
     [capabilities, session, sessionHost],
   );
+  const isStatsSupportedOs = useMemo(
+    () => shouldCollectServerStats(sessionHost, capabilities, session),
+    [capabilities, session, sessionHost],
+  );
 
-  const [activeTab, setActiveTab] = useState<SystemManagerSubTab>('processes');
-  const resolvedTab = availableTabs.includes(activeTab) ? activeTab : 'processes';
+  const [activeTab, setActiveTab] = useState<SystemManagerSubTab>('overview');
+  const resolvedTab = availableTabs.includes(activeTab) ? activeTab : 'overview';
 
   // Must be defined before early returns to comply with React rules of hooks.
   const prevTabRef = React.useRef(resolvedTab);
@@ -163,7 +169,8 @@ export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
     );
   }
 
-  const tabDefs: { id: SystemManagerSubTab; icon: typeof LayoutList; label: string }[] = [
+  const tabDefs: { id: SystemManagerSubTab; icon: LucideIcon; label: string }[] = [
+    { id: 'overview', icon: Gauge, label: t('systemManager.tabs.overview') },
     { id: 'processes', icon: LayoutList, label: t('systemManager.tabs.processes') },
     { id: 'tmux', icon: TerminalSquare, label: t('systemManager.tabs.tmux') },
     { id: 'zellij', icon: TerminalSquare, label: t('systemManager.tabs.zellij') },
@@ -212,6 +219,16 @@ export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
       </div>
 
       <div className="flex-1 min-h-0 flex flex-col">
+        <div className={cn('flex-1 min-h-0 flex flex-col', resolvedTab !== 'overview' && 'hidden')}>
+          {resolvedTab === 'overview' && (
+            <SystemOverviewTab
+              sessionId={sessionId}
+              isVisible={isVisible}
+              isSupportedOs={isStatsSupportedOs}
+              refreshIntervalSec={terminalSettings.serverStatsRefreshInterval}
+            />
+          )}
+        </div>
         <div className={cn('flex-1 min-h-0 flex flex-col', resolvedTab !== 'processes' && 'hidden')}>
           <ProcessManagerTab
             sessionId={sessionId}

@@ -49,6 +49,21 @@ test("split session clones reuse only connected SSH sources", () => {
   );
 });
 
+test("session clones preserve the ephemeral-host marker", () => {
+  assert.equal(
+    createSplitTerminalSessionClone(session({ ephemeralHost: true }), { id: "split-1" }).ephemeralHost,
+    true,
+  );
+  assert.equal(
+    createCopiedTerminalSessionClone(session({ ephemeralHost: true }), { id: "copy-1" }).ephemeralHost,
+    true,
+  );
+  assert.equal(
+    createSplitTerminalSessionClone(session(), { id: "split-2" }).ephemeralHost,
+    undefined,
+  );
+});
+
 test("copy session clones reuse SSH sources and preserve serial config", () => {
   const copied = createCopiedTerminalSessionClone(
     session({
@@ -59,4 +74,20 @@ test("copy session clones reuse SSH sources and preserve serial config", () => {
 
   assert.equal(copied.reuseConnectionFromSessionId, "session-1");
   assert.deepEqual(copied.serialConfig, { path: "/dev/tty.usbserial", baudRate: 115200 });
+});
+
+test("split and copy session clones preserve local start directory", () => {
+  const source = session({
+    protocol: "local",
+    localStartDir: "/Users/alice/project with spaces ",
+  });
+
+  assert.equal(
+    createSplitTerminalSessionClone(source, { id: "split-local" }).localStartDir,
+    "/Users/alice/project with spaces ",
+  );
+  assert.equal(
+    createCopiedTerminalSessionClone(source, { id: "copy-local" }).localStartDir,
+    "/Users/alice/project with spaces ",
+  );
 });

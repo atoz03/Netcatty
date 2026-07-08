@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any, react-hooks/exhaustive-deps */
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef } from 'react';
 
 import { terminalLayoutSuppressStore } from '../../application/state/terminalLayoutSuppressStore';
 import { AI_PANEL_FORCE_HIDE_SHELL } from '../ai/aiPanelDiagnostics';
@@ -179,43 +179,43 @@ export function useTerminalLayerEffects(ctx: TerminalLayerEffectsContext) {
   // Discrete layout changes (side panel toggle, compose bar, workspace tab/view mode)
   // can miss a ResizeObserver tick; host-tree width is handled by the observer
   // because it updates continuously during drag.
-  useEffect(() => {
-      if (!isTerminalLayerVisible) return;
-      const el = workspaceInnerRef.current;
-      const width = el?.clientWidth ?? 0;
-      const height = el?.clientHeight ?? 0;
-      const prev = layoutEffectSnapshotRef.current;
-      const dimensionsUnchanged = width > 0
-        && height > 0
-        && prev.width === width
-        && prev.height === height
-        && prev.shellWidth === sidePanelShellWidth;
-      if (
-        dimensionsUnchanged
-        && prev.workspaceId === activeWorkspaceId
-        && prev.viewMode === activeWorkspaceViewMode
-        && prev.composeBarOpen === isComposeBarOpen
-      ) {
-        return;
-      }
-      layoutEffectSnapshotRef.current = {
-        workspaceId: activeWorkspaceId,
-        viewMode: activeWorkspaceViewMode,
-        composeBarOpen: isComposeBarOpen,
-        shellWidth: sidePanelShellWidth,
-        width,
-        height,
-      };
-      scheduleWorkspaceAreaRemeasure();
-    }, [
-      activeWorkspaceId,
-      activeWorkspaceViewMode,
-      isComposeBarOpen,
-      isTerminalLayerVisible,
-      scheduleWorkspaceAreaRemeasure,
-      sidePanelPosition,
-      sidePanelShellWidth,
-    ]);
+  useLayoutEffect(() => {
+    if (!isTerminalLayerVisible) return;
+    const el = workspaceInnerRef.current;
+    const width = el?.clientWidth ?? 0;
+    const height = el?.clientHeight ?? 0;
+    const prev = layoutEffectSnapshotRef.current;
+    const dimensionsUnchanged = width > 0
+      && height > 0
+      && prev.width === width
+      && prev.height === height
+      && prev.shellWidth === sidePanelShellWidth;
+    if (
+      dimensionsUnchanged
+      && prev.workspaceId === activeWorkspaceId
+      && prev.viewMode === activeWorkspaceViewMode
+      && prev.composeBarOpen === isComposeBarOpen
+    ) {
+      return;
+    }
+    layoutEffectSnapshotRef.current = {
+      workspaceId: activeWorkspaceId,
+      viewMode: activeWorkspaceViewMode,
+      composeBarOpen: isComposeBarOpen,
+      shellWidth: sidePanelShellWidth,
+      width,
+      height,
+    };
+    scheduleWorkspaceAreaRemeasure();
+  }, [
+    activeWorkspaceId,
+    activeWorkspaceViewMode,
+    isComposeBarOpen,
+    isTerminalLayerVisible,
+    scheduleWorkspaceAreaRemeasure,
+    sidePanelPosition,
+    sidePanelShellWidth,
+  ]);
   
   // Keep sftpHostForTab in sync with focus changes in workspace mode
     // so that the toggle check uses the currently displayed host.

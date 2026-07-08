@@ -41,6 +41,51 @@ export const getVaultDropIntent = (
 export const hasVaultDragType = (dataTransfer: DataTransfer, type: string) =>
   Array.from(dataTransfer.types).includes(type);
 
+export const handleVaultRootDrop = ({
+  dataTransfer,
+  preventDefault,
+  setDragOverDropTarget,
+  moveGroup,
+  moveHostToGroup,
+  resetHostDragState,
+}: {
+  dataTransfer: Pick<DataTransfer, "getData">;
+  preventDefault: () => void;
+  setDragOverDropTarget: (target: null) => void;
+  moveGroup: (groupPath: string, targetParentPath: string | null) => void;
+  moveHostToGroup: (hostId: string, targetPath: string | null) => void;
+  resetHostDragState: () => void;
+}) => {
+  preventDefault();
+  setDragOverDropTarget(null);
+  const groupPath = dataTransfer.getData("group-path");
+  const hostId = dataTransfer.getData("host-id");
+  if (groupPath) moveGroup(groupPath, null);
+  if (hostId) {
+    moveHostToGroup(hostId, null);
+    resetHostDragState();
+  }
+};
+
+export const handleVaultHostDropToGroup = ({
+  dataTransfer,
+  groupPath,
+  moveHostToGroup,
+  resetHostDragState,
+}: {
+  dataTransfer: Pick<DataTransfer, "getData">;
+  groupPath: string | null;
+  moveHostToGroup: (hostId: string, targetPath: string | null) => void;
+  resetHostDragState: () => void;
+}) => {
+  const hostId = dataTransfer.getData("host-id");
+  if (!hostId) return false;
+
+  moveHostToGroup(hostId, groupPath);
+  resetHostDragState();
+  return true;
+};
+
 let activeVaultDropIndicator: HTMLElement | null = null;
 
 export const clearVaultDropIndicator = () => {

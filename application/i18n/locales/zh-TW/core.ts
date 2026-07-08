@@ -450,6 +450,12 @@ export const zhTWCoreMessages: Messages = {
   'vault.groups.errors.invalidChars': "分組名稱不能包含 '/' 或 '\\\\'.",
   'vault.groups.errors.duplicatePath': '該位置已存在同名分組。',
 
+  'vault.deleteConfirm.title': '刪除「{name}」？',
+  'vault.deleteConfirm.desc': '此操作不可復原。',
+  'vault.deleteConfirm.packageDesc': '這會刪除程式碼包，包內程式碼片段會保留，並移出該程式碼包。',
+  'vault.deleteConfirm.noteGroupDesc': '這會刪除資料夾，資料夾內筆記會保留，並移出該資料夾。',
+  'vault.deleteConfirm.portForwardingDesc': '這會刪除此埠轉發規則。',
+
   'vault.managedSource.unmanage': '取消託管',
   'vault.managedSource.unmanageSuccess': '已取消託管分組',
 
@@ -492,6 +498,9 @@ export const zhTWCoreMessages: Messages = {
   'vault.hosts.empty.title': '設定你的主機',
   'vault.hosts.empty.desc': '儲存主機以快速連線到你的伺服器、虛擬機器和容器。',
   'deepLink.ssh.invalid': '無效的 ssh:// 連結',
+  'deepLink.telnet.invalid': '無效的 telnet:// 連結',
+  'deepLink.jms.invalid': '無效的 JumpServer 連結',
+  'deepLink.jms.unsupported': '不支援的 JumpServer 協定：{{protocol}}',
 
   // Vault import
   'vault.import.title': '新增資料到你的 Vault',

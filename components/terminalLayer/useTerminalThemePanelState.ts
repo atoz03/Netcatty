@@ -15,6 +15,7 @@ import {
   resolveHostTerminalFontWeight,
   resolveHostTerminalThemeId,
 } from '../../domain/terminalAppearance';
+import { isSavedVaultHost } from '../../domain/ephemeralHosts';
 import { isSameResolvedTerminalFont } from '../../infrastructure/config/fonts';
 import type { Host, TerminalSession, TerminalTheme, Workspace } from '../../types';
 import { getScopedTopTabsThemeId } from '../terminalTopTabsTheme';
@@ -102,7 +103,7 @@ export function useTerminalThemePanelState({
   const isFocusedHostEphemeral = useMemo(() => {
     if (isFocusedHostLocal) return true;
     if (!focusedHost) return true;
-    return !hostMap.has(focusedHost.id);
+    return !isSavedVaultHost(hostMap.get(focusedHost.id));
   }, [focusedHost, isFocusedHostLocal, hostMap]);
 
   const rawFocusedHost = useMemo(() => {
@@ -148,7 +149,7 @@ export function useTerminalThemePanelState({
       previewedOrVisibleThemeId,
       resolveSessionThemeId: (sessionId) => {
         const host = sessionHostsMap.get(sessionId) ?? null;
-        const isEphemeral = !host || !hostMap.has(host.id);
+        const isEphemeral = !host || !isSavedVaultHost(hostMap.get(host.id));
         return resolveFocusedAppearance({ host, isEphemeral }).themeId;
       },
     }),
@@ -226,6 +227,13 @@ export function useTerminalThemePanelState({
         return;
       }
       if (isFocusedHostEphemeral) {
+        // Ephemeral hosts cannot persist host-level overrides; keep the
+        // change per-session (same path Ctrl+zoom uses) when possible.
+        const targetSessionId = focusedSessionId ?? activeSession?.id;
+        if (targetSessionId) {
+          onUpdateSessionFontSize?.(targetSessionId, newFontSize);
+          return;
+        }
         onUpdateTerminalFontSize?.(newFontSize);
         return;
       }
@@ -233,7 +241,7 @@ export function useTerminalThemePanelState({
         onUpdateHost({ ...rawFocusedHost, fontSize: newFontSize, fontSizeOverride: true });
       }
     });
-  }, [activeWorkspace, focusedHost, focusedFontSize, focusedSessionId, isFocusedHostEphemeral, onUpdateSessionFontSize, onUpdateTerminalFontSize, onUpdateHost, rawFocusedHost]);
+  }, [activeSession, activeWorkspace, focusedHost, focusedFontSize, focusedSessionId, isFocusedHostEphemeral, onUpdateSessionFontSize, onUpdateTerminalFontSize, onUpdateHost, rawFocusedHost]);
 
   const handleFontSizeResetForFocusedSession = useCallback(() => {
     if (!focusedHost) return;
@@ -241,9 +249,14 @@ export function useTerminalThemePanelState({
       onClearSessionFontSizeOverride?.(focusedSessionId);
       return;
     }
-    if (isFocusedHostEphemeral || !rawFocusedHost) return;
+    if (isFocusedHostEphemeral) {
+      const targetSessionId = focusedSessionId ?? activeSession?.id;
+      if (targetSessionId) onClearSessionFontSizeOverride?.(targetSessionId);
+      return;
+    }
+    if (!rawFocusedHost) return;
     onUpdateHost(clearHostFontSizeOverride(rawFocusedHost));
-  }, [activeWorkspace, focusedHost, focusedSessionId, isFocusedHostEphemeral, onClearSessionFontSizeOverride, onUpdateHost, rawFocusedHost]);
+  }, [activeSession, activeWorkspace, focusedHost, focusedSessionId, isFocusedHostEphemeral, onClearSessionFontSizeOverride, onUpdateHost, rawFocusedHost]);
 
   const handleFontWeightChangeForFocusedSession = useCallback((newFontWeight: number) => {
     if (!focusedHost || newFontWeight === focusedFontWeight) return;

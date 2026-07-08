@@ -3,7 +3,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
 import {
+  formatTerminalTitleConnectionAddress,
   getLineTimestampToggleHostUpdate,
+  shouldBlockTerminalReconnectForTarget,
+  shouldReconnectTerminalOnEnterKey,
   shouldShowSelectionAIOverlay,
   shouldShowLineTimestampToolbarToggle,
 } from "./TerminalView.tsx";
@@ -63,6 +66,104 @@ test("selection AI overlay honors the visibility preference", () => {
     }),
     false,
   );
+});
+
+test("disconnected terminal reconnects on plain Enter when input is not claimed elsewhere", () => {
+  assert.equal(
+    shouldReconnectTerminalOnEnterKey({
+      key: "Enter",
+      status: "disconnected",
+      hasRetryHandler: true,
+      isSearchOpen: false,
+      isComposeBarOpen: false,
+      needsAuth: false,
+      needsHostKeyVerification: false,
+      hasBlockingOverlay: false,
+    }),
+    true,
+  );
+});
+
+test("terminal enter reconnect ignores active controls and non-disconnected states", () => {
+  const base = {
+    key: "Enter",
+    status: "disconnected" as const,
+    hasRetryHandler: true,
+    isSearchOpen: false,
+    isComposeBarOpen: false,
+    needsAuth: false,
+    needsHostKeyVerification: false,
+    hasBlockingOverlay: false,
+  };
+
+  assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, status: "connected" }), false);
+  assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, key: "a" }), false);
+  assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, hasRetryHandler: false }), false);
+  assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, isSearchOpen: true }), false);
+  assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, isComposeBarOpen: true }), false);
+  assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, needsAuth: true }), false);
+  assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, needsHostKeyVerification: true }), false);
+  assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, hasBlockingOverlay: true }), false);
+  assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, altKey: true }), false);
+});
+
+test("terminal enter reconnect ignores interactive controls outside xterm only", () => {
+  assert.equal(
+    shouldBlockTerminalReconnectForTarget({
+      isWithinXterm: false,
+      hasInteractiveAncestor: true,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldBlockTerminalReconnectForTarget({
+      isWithinXterm: true,
+      hasInteractiveAncestor: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldBlockTerminalReconnectForTarget({
+      isWithinXterm: false,
+      hasInteractiveAncestor: false,
+    }),
+    false,
+  );
+});
+
+test("terminal title formats the connection address for remote sessions", () => {
+  assert.equal(
+    formatTerminalTitleConnectionAddress({
+      protocol: "ssh",
+      username: "root",
+      hostname: "10.1.2.34",
+      port: 2222,
+    }),
+    "root@10.1.2.34:2222",
+  );
+  assert.equal(formatTerminalTitleConnectionAddress({ protocol: "local", hostname: "localhost" }), null);
+});
+
+test("terminal title row does not render a status dot beside the address", () => {
+  const source = readFileSync(new URL("./TerminalView.tsx", import.meta.url), "utf8");
+  const titleStart = source.indexOf("data-terminal-detach-drag-handle");
+  const titleEnd = source.indexOf("shouldShowLineTimestampToolbarToggle", titleStart);
+  assert.notEqual(titleStart, -1);
+  assert.notEqual(titleEnd, -1);
+
+  assert.doesNotMatch(source.slice(titleStart, titleEnd), /statusDotTone/);
+});
+
+test("terminal title keeps the copy host action beside the address", () => {
+  const source = readFileSync(new URL("./TerminalView.tsx", import.meta.url), "utf8");
+  const titleStart = source.indexOf("data-terminal-detach-drag-handle");
+  const copyAction = source.indexOf('aria-label={t("terminal.statusbar.copyHostname.label")}', titleStart);
+  const timestampToggle = source.indexOf("shouldShowLineTimestampToolbarToggle", titleStart);
+
+  assert.notEqual(titleStart, -1);
+  assert.notEqual(copyAction, -1);
+  assert.notEqual(timestampToggle, -1);
+  assert.ok(copyAction < timestampToggle);
 });
 
 test("popup terminals disable line timestamp controls", () => {

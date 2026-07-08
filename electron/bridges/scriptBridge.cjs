@@ -164,6 +164,10 @@ function writeToSession(sessionId, data, options = {}) {
   };
   const webContentsId = getMainWindow?.()?.webContents?.id;
   if (terminalWorkerManager) {
+    // Mirror input-based log rewrites into the main-process stream manager
+    // (see the netcatty:write forwarder in terminalBridge.registerHandlers);
+    // the real write handler runs in the terminal worker process.
+    sessionLogStreamManager.registerSudoAutofillInput(sessionId, data);
     terminalWorkerManager.send("netcatty:write", payload, { webContentsId });
   } else {
     terminalBridge?.writeToSession?.(
@@ -222,6 +226,7 @@ function showDialog(type, message, defaultValue, extras = {}) {
   if (!webContents) {
     if (type === "confirm") return Promise.resolve(false);
     if (type === "prompt") return Promise.resolve(defaultValue || "");
+    if (type === "form") return Promise.resolve({});
     if (type === "waitForTimeout") return Promise.resolve("abort");
     return Promise.resolve(undefined);
   }
@@ -517,6 +522,8 @@ function handleScriptDialogResponse(_event, payload = {}) {
     pending.resolve(Boolean(payload.value));
   } else if (pending.type === "prompt") {
     pending.resolve(typeof payload.value === "string" ? payload.value : "");
+  } else if (pending.type === "form") {
+    pending.resolve(payload.value && typeof payload.value === "object" ? payload.value : {});
   } else if (pending.type === "waitForTimeout") {
     pending.resolve(typeof payload.value === "string" ? payload.value : "abort");
   } else {

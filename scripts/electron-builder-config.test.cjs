@@ -95,11 +95,19 @@ test("beforePack installs missing Cursor SDK platform runtime packages", () => {
   assert.equal(config.beforePack, "./scripts/beforePackCursorSdk.cjs");
 });
 
-test("packaged app declares ssh URL protocol support", () => {
+test("packaged app declares ssh, telnet, and jms URL protocol support", () => {
   assert.deepEqual(config.protocols, [
     {
       name: "SSH URL",
       schemes: ["ssh"],
+    },
+    {
+      name: "Telnet URL",
+      schemes: ["telnet"],
+    },
+    {
+      name: "JumpServer URL",
+      schemes: ["jms"],
     },
   ]);
 });
@@ -159,6 +167,14 @@ test("linux packaging includes an Arch Linux pacman package target", () => {
     config.linux.target,
     ["AppImage", "deb", "rpm", "pacman"],
     "linux package builds must publish AppImage, Debian, RPM, and Arch pacman artifacts",
+  );
+});
+
+test("rpm packaging disables generated build-id symlinks", () => {
+  assert.deepEqual(
+    config.rpm?.fpm,
+    ["--rpm-rpmbuild-define", "_build_id_links none"],
+    "RPM packages must not own /usr/lib/.build-id links that can conflict with other RPMs",
   );
 });
 

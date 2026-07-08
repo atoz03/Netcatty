@@ -35,6 +35,14 @@ type TimestampStore = {
   timestampOnlyPrefix: string;
 };
 
+type XTermWithUnicodeService = XTerm & {
+  _core?: {
+    unicodeService?: {
+      wcwidth?: (codePoint: number) => 0 | 1 | 2;
+    };
+  };
+};
+
 export type TerminalTimestampGutterEntry = {
   marker: { line: number; isDisposed?: boolean };
   label: string;
@@ -45,8 +53,48 @@ export type TerminalTimestampGutterRow = {
   label: string;
 };
 
+export type TerminalLineTimestampPerfStep =
+  | {
+    kind: "segment";
+    durationMs: number;
+    dataChars: number;
+    segmentCount: number;
+    dataSegmentCount: number;
+    timestampSegmentCount: number;
+    parsedChars: number;
+  }
+  | {
+    kind: "batched-write";
+    dataChars: number;
+    timestamps: number;
+    measureMs: number;
+    writeCallbackMs: number;
+    markerMs: number;
+    rowOffset: number;
+    columns: number;
+  }
+  | {
+    kind: "segmented-write";
+    dataChars: number;
+    timestamps: number;
+    writeCalls: number;
+    writeChars: number;
+    writeCallbackMs: number;
+    totalMs: number;
+  }
+  | {
+    kind: "fallback-write";
+    dataChars: number;
+    writeCallbackMs: number;
+  };
+
+export type TerminalLineTimestampDiagnostics = {
+  onStep?: (step: TerminalLineTimestampPerfStep) => void;
+};
+
 const stores = new WeakMap<XTerm, TimestampStore>();
 const MAX_SEGMENTED_TIMESTAMP_WRITES = 64;
+const BULK_TIMESTAMP_BATCH_MIN_BYTES = 4096;
 
 const pad2 = (value: number): string => value.toString().padStart(2, "0");
 
@@ -167,6 +215,13 @@ const getWraparoundAction = (sequence: string): boolean | null => {
   return modes.includes(7) ? final === "h" : null;
 };
 
+const isSgrSequence = (sequence: string): boolean =>
+  getCsiFinal(sequence) === "m";
+
+const isBulkMeasurableEscapeSequence = (sequence: string): boolean =>
+  getAlternateScreenAction(sequence) === null
+  && (getWraparoundAction(sequence) !== null || isSgrSequence(sequence));
+
 const isPotentialAlternateScreenSequence = (sequence: string): boolean => {
   if (!sequence.startsWith("\x1b[?")) return false;
 
@@ -200,6 +255,17 @@ const pushDataSegment = (
   segments.push({ kind: "data", data });
 };
 
+/** Characters that can change segmenter state outside alternate screen. */
+// eslint-disable-next-line no-control-regex
+const SEGMENTER_BOUNDARY_SCAN = /[\u001b\n\r]/g;
+
+/** Index of the next ESC/LF/CR at or after `from`, or `input.length`. */
+const nextSegmenterBoundary = (input: string, from: number): number => {
+  SEGMENTER_BOUNDARY_SCAN.lastIndex = from;
+  const match = SEGMENTER_BOUNDARY_SCAN.exec(input);
+  return match === null ? input.length : match.index;
+};
+
 export const createTerminalLineTimestampSegmenter = (
   options: TerminalLineTimestampSegmenterOptions = {},
 ): TerminalLineTimestampSegmenter => {
@@ -230,7 +296,7 @@ export const createTerminalLineTimestampSegmenter = (
       pendingEscapeSequence = "";
       const segments: TerminalLineTimestampSegment[] = [];
 
-      for (let index = 0; index < input.length; index += 1) {
+      for (let index = 0; index < input.length;) {
         const char = input[index];
 
         if (char === "\x1b") {
@@ -242,77 +308,49 @@ export const createTerminalLineTimestampSegmenter = (
             }
             const alternateScreenAction = getAlternateScreenAction(sequence.sequence);
             if (alternateScreenAction === "enter") {
-              pushDataSegment(segments, sequence.sequence);
               suspendedForAlternateScreen = true;
               resetLineState();
-              index = sequence.endIndex;
-              continue;
-            }
-            if (alternateScreenAction === "leave") {
-              pushDataSegment(segments, sequence.sequence);
+            } else if (alternateScreenAction === "leave") {
               suspendedForAlternateScreen = false;
               resetLineState();
-              index = sequence.endIndex;
-              continue;
             }
             pushDataSegment(segments, sequence.sequence);
-            index = sequence.endIndex;
+            index = sequence.endIndex + 1;
             continue;
           }
         }
 
-        // \n and \r are single-char runs: they never carry a timestamp and
-        // they re-arm atLineStart / resetLineState for the NEXT line, so a
-        // following printable char gets stamped. Folding them into a longer
-        // run would skip that re-arm and miss the next line's timestamp.
-        if (char === "\n" || char === "\r") {
-          pushDataSegment(segments, char);
-          if (!suspendedForAlternateScreen) {
-            if (char === "\n") {
-              resetLineState();
-            } else {
-              atLineStart = true;
-            }
-          }
+        if (suspendedForAlternateScreen) {
+          // Nothing but an ESC sequence can change state while suspended;
+          // hop to the next ESC and append the span in one slice.
+          const nextEsc = input.indexOf("\x1b", index + 1);
+          const end = nextEsc === -1 ? input.length : nextEsc;
+          pushDataSegment(segments, input.slice(index, end));
+          index = end;
           continue;
         }
 
-        // Batch consecutive plain characters into a single slice instead of
-        // pushing them one at a time. The original loop called pushDataSegment
-        // per character, and since pushDataSegment mutates the trailing data
-        // segment via `previous.data += data`, that was an O(n) string concat
-        // per character — O(n²) over a large write. Claude Code's high-rate
-        // streaming writes made this the dominant per-frame cost. Slicing up
-        // to the next special byte (\x1b, \n, \r) collapses it to one concat
-        // per run of plain text. Behavior is unchanged: timestamps are still
-        // stamped at the first printable char of a line.
-        //
-        // A run may start with a non-printable byte (e.g. a stray ST 
-        // left over from a split OSC), so we stamp the timestamp iff the run
-        // contains at least one printable char — matching the original
-        // per-char loop, which stamped on the first printable it saw.
-        const runStart = index;
-        let next = index + 1;
-        while (next < input.length) {
-          const c = input[next];
-          if (c === "\x1b" || c === "\n" || c === "\r") break;
-          next += 1;
-        }
-        const run = input.slice(runStart, next);
-        if (!suspendedForAlternateScreen) {
-          let runHasPrintable = isPrintableOutput(char);
-          if (!runHasPrintable) {
-            for (let i = 1; i < run.length; i += 1) {
-              if (isPrintableOutput(run[i])) { runHasPrintable = true; break; }
-            }
+        if (!isPrintableOutput(char)) {
+          // Single control character (e.g. \n, \r, BEL, backspace).
+          pushDataSegment(segments, char);
+          if (char === "\n") {
+            resetLineState();
+          } else if (char === "\r") {
+            atLineStart = true;
           }
-          if (runHasPrintable) {
-            pushTimestampIfNeeded(segments);
-            atLineStart = false;
-          }
+          index += 1;
+          continue;
         }
-        pushDataSegment(segments, run);
-        index = next - 1;
+
+        // Printable character: stamp the line if needed, then hop to the next
+        // state-changing character (ESC/LF/CR) and append the span in one
+        // slice. Control chars inside the span (BEL, backspace, DEL, C1)
+        // never change segmenter state, matching the per-char loop.
+        pushTimestampIfNeeded(segments);
+        atLineStart = false;
+        const end = nextSegmenterBoundary(input, index + 1);
+        pushDataSegment(segments, input.slice(index, end));
+        index = end;
       }
 
       return segments;
@@ -421,9 +459,81 @@ const getTerminalWraparoundMode = (term: XTerm): boolean => (
   ((term as XTerm & { modes?: { wraparoundMode?: boolean } }).modes?.wraparoundMode) !== false
 );
 
-const canMeasureVisualRows = (data: string): boolean => {
+const isUnsafeGraphemeSequenceCodePoint = (codePoint: number): boolean => (
+  codePoint === 0x200d
+  || codePoint === 0x20e3
+  || (codePoint >= 0x1f1e6 && codePoint <= 0x1f1ff)
+  || (codePoint >= 0x1f3fb && codePoint <= 0x1f3ff)
+  || (codePoint >= 0xfe00 && codePoint <= 0xfe0f)
+  || (codePoint >= 0xe0020 && codePoint <= 0xe007f)
+  || (codePoint >= 0xe0100 && codePoint <= 0xe01ef)
+);
+
+const isUnsafeFormatCodePoint = (codePoint: number): boolean => (
+  (codePoint >= 0x200b && codePoint <= 0x200f)
+  || (codePoint >= 0x202a && codePoint <= 0x202e)
+  || (codePoint >= 0x2060 && codePoint <= 0x206f)
+  || codePoint === 0xfeff
+  || (codePoint >= 0xfff9 && codePoint <= 0xfffb)
+);
+
+const unicodeMarkPattern = /\p{Mark}/u;
+
+const isHangulJamoCodePoint = (codePoint: number): boolean => (
+  (codePoint >= 0x1100 && codePoint <= 0x11ff)
+  || (codePoint >= 0xa960 && codePoint <= 0xa97f)
+  || (codePoint >= 0xd7b0 && codePoint <= 0xd7ff)
+);
+
+const isContextSensitiveGraphemeCodePoint = (codePoint: number): boolean => (
+  unicodeMarkPattern.test(String.fromCodePoint(codePoint))
+  || isHangulJamoCodePoint(codePoint)
+);
+
+const getCodePointCellWidth = (term: XTerm, codePoint: number): 0 | 1 | 2 | null => {
+  if (codePoint < 0x80) return 1;
+  const unicodeService = (term as XTermWithUnicodeService)._core?.unicodeService;
+  if (typeof unicodeService?.wcwidth !== "function") return null;
+  try {
+    const width = unicodeService.wcwidth(codePoint);
+    return width === 0 || width === 1 || width === 2 ? width : null;
+  } catch {
+    return null;
+  }
+};
+
+const canMeasureVisualRows = (term: XTerm, data: string): boolean => {
   for (let index = 0; index < data.length; index += 1) {
-    if (data.charCodeAt(index) > 0x7f) return false;
+    const char = data[index];
+    const codePoint = data.codePointAt(index);
+    if (codePoint === undefined) return false;
+    if (char === "\x1b") {
+      const sequence = readEscapeSequence(data, index);
+      if (!sequence?.complete || !isBulkMeasurableEscapeSequence(sequence.sequence)) {
+        return false;
+      }
+      index = sequence.endIndex;
+      continue;
+    }
+    if (char === "\n" || char === "\r" || char === "\b" || char === "\t") {
+      continue;
+    }
+    if (
+      codePoint < 0x20
+      || codePoint === 0x7f
+      || (codePoint >= 0x80 && codePoint <= 0x9f)
+      || isUnsafeGraphemeSequenceCodePoint(codePoint)
+      || isUnsafeFormatCodePoint(codePoint)
+      || isContextSensitiveGraphemeCodePoint(codePoint)
+    ) {
+      return false;
+    }
+    if (getCodePointCellWidth(term, codePoint) === null) {
+      return false;
+    }
+    if (codePoint > 0xffff) {
+      index += 1;
+    }
   }
   return true;
 };
@@ -471,6 +581,7 @@ const advanceMeasuredTab = (
 };
 
 const measureTerminalRows = (
+  term: XTerm,
   data: string,
   startColumn: number,
   columns: number,
@@ -511,7 +622,24 @@ const measureTerminalRows = (
     if (char < " " || char === "\u007f") {
       continue;
     }
-    ({ column, rowOffset } = advanceMeasuredColumns(column, rowOffset, columns, 1, wraparoundMode));
+    const codePoint = data.codePointAt(index);
+    if (codePoint === undefined) {
+      continue;
+    }
+    const width = getCodePointCellWidth(term, codePoint);
+    if (width === null) {
+      continue;
+    }
+    ({ column, rowOffset } = advanceMeasuredColumns(
+      column,
+      rowOffset,
+      columns,
+      width,
+      wraparoundMode,
+    ));
+    if (codePoint > 0xffff) {
+      index += 1;
+    }
   }
 
   return { rowOffset, column, wraparoundMode };
@@ -523,27 +651,34 @@ const writeBatchedTimestampSegments = (
   data: string,
   segments: TerminalLineTimestampSegment[],
   done: () => void,
+  diagnostics?: TerminalLineTimestampDiagnostics,
 ): void => {
   const timestamps: Array<{ label: string; rowOffset: number }> = [];
   const columns = getTerminalColumnCount(term);
   let column = getTerminalCursorColumn(term);
   let wraparoundMode = getTerminalWraparoundMode(term);
   let rowOffset = 0;
+  const shouldMeasureDiagnostics = Boolean(diagnostics);
+  const measureStartedAt = shouldMeasureDiagnostics ? performance.now() : 0;
 
   for (const segment of segments) {
     if (segment.kind === "timestamp") {
       timestamps.push({ label: segment.label, rowOffset });
       continue;
     }
-    const measured = Number.isFinite(columns) && canMeasureVisualRows(segment.data)
-      ? measureTerminalRows(segment.data, column, columns, wraparoundMode)
+    const measured = canMeasureVisualRows(term, segment.data)
+      ? measureTerminalRows(term, segment.data, column, columns, wraparoundMode)
       : { rowOffset: countLineFeeds(segment.data), column, wraparoundMode };
     rowOffset += measured.rowOffset;
     column = measured.column;
     wraparoundMode = measured.wraparoundMode;
   }
+  const measureMs = shouldMeasureDiagnostics ? performance.now() - measureStartedAt : 0;
 
+  const writeStartedAt = shouldMeasureDiagnostics ? performance.now() : 0;
   term.write(data, () => {
+    const writeCallbackMs = shouldMeasureDiagnostics ? performance.now() - writeStartedAt : 0;
+    const markerStartedAt = shouldMeasureDiagnostics ? performance.now() : 0;
     let timestampRecorded = false;
     for (const timestamp of timestamps) {
       timestampRecorded = recordTerminalLineTimestamp(
@@ -556,6 +691,18 @@ const writeBatchedTimestampSegments = (
     }
     if (timestampRecorded) {
       notifyTimestampStore(store);
+    }
+    if (diagnostics) {
+      diagnostics.onStep?.({
+        kind: "batched-write",
+        dataChars: data.length,
+        timestamps: timestamps.length,
+        measureMs,
+        writeCallbackMs,
+        markerMs: performance.now() - markerStartedAt,
+        rowOffset,
+        columns,
+      });
     }
     done();
   });
@@ -654,10 +801,22 @@ export const writeTerminalDataWithLineTimestamps = (
   term: XTerm,
   data: string,
   done: () => void,
+  diagnostics?: TerminalLineTimestampDiagnostics,
 ) => {
+  const shouldMeasureDiagnostics = Boolean(diagnostics);
   const registerMarker = (term as XTerm & { registerMarker?: unknown }).registerMarker;
   if (typeof registerMarker !== "function") {
-    term.write(data, done);
+    const writeStartedAt = shouldMeasureDiagnostics ? performance.now() : 0;
+    term.write(data, () => {
+      if (diagnostics) {
+        diagnostics.onStep?.({
+          kind: "fallback-write",
+          dataChars: data.length,
+          writeCallbackMs: performance.now() - writeStartedAt,
+        });
+      }
+      done();
+    });
     return;
   }
 
@@ -668,6 +827,7 @@ export const writeTerminalDataWithLineTimestamps = (
   const timestampOnlyPrefix = store.timestampOnlyPrefix;
   store.timestampOnlyPrefix = "";
   const dataForTimestamps = `${timestampOnlyPrefix}${data}`;
+  const segmentStartedAt = shouldMeasureDiagnostics ? performance.now() : 0;
   const segments = store.segmenter.append(dataForTimestamps);
   const parsedData = segments
     .filter((segment): segment is { kind: "data"; data: string } => segment.kind === "data")
@@ -676,12 +836,40 @@ export const writeTerminalDataWithLineTimestamps = (
   const dataSegmentCount = segments.reduce((count, segment) => (
     segment.kind === "data" && segment.data ? count + 1 : count
   ), 0);
+  if (diagnostics) {
+    diagnostics.onStep?.({
+      kind: "segment",
+      durationMs: performance.now() - segmentStartedAt,
+      dataChars: data.length,
+      segmentCount: segments.length,
+      dataSegmentCount,
+      timestampSegmentCount: segments.length - dataSegmentCount,
+      parsedChars: parsedData.length,
+    });
+  }
+  const writeFallbackData = (fallbackData: string, onComplete: () => void): void => {
+    const writeStartedAt = shouldMeasureDiagnostics ? performance.now() : 0;
+    term.write(fallbackData, () => {
+      if (diagnostics) {
+        diagnostics.onStep?.({
+          kind: "fallback-write",
+          dataChars: fallbackData.length,
+          writeCallbackMs: performance.now() - writeStartedAt,
+        });
+      }
+      onComplete();
+    });
+  };
   if (
     timestampOnlyPrefix.length === 0
     && parsedData === dataForTimestamps
-    && dataSegmentCount > MAX_SEGMENTED_TIMESTAMP_WRITES
+    && canMeasureVisualRows(term, data)
+    && (
+      dataSegmentCount > MAX_SEGMENTED_TIMESTAMP_WRITES
+      || data.length >= BULK_TIMESTAMP_BATCH_MIN_BYTES
+    )
   ) {
-    writeBatchedTimestampSegments(term, store, data, segments, done);
+    writeBatchedTimestampSegments(term, store, data, segments, done, diagnostics);
     return;
   }
   const writeSegments = (
@@ -691,10 +879,26 @@ export const writeTerminalDataWithLineTimestamps = (
     let index = 0;
     let remainingSkipLength = skipLeadingDataLength;
     let timestampRecorded = false;
+    let timestampCount = 0;
+    let writeCalls = 0;
+    let writeChars = 0;
+    let writeCallbackMs = 0;
+    const startedAt = shouldMeasureDiagnostics ? performance.now() : 0;
 
     const complete = () => {
       if (timestampRecorded) {
         notifyTimestampStore(store);
+      }
+      if (diagnostics) {
+        diagnostics.onStep?.({
+          kind: "segmented-write",
+          dataChars: data.length,
+          timestamps: timestampCount,
+          writeCalls,
+          writeChars,
+          writeCallbackMs,
+          totalMs: performance.now() - startedAt,
+        });
       }
       onComplete();
     };
@@ -709,6 +913,7 @@ export const writeTerminalDataWithLineTimestamps = (
       }
 
       if (segment.kind === "timestamp") {
+        timestampCount += 1;
         timestampRecorded = recordTerminalLineTimestamp(term, store, segment.label, false)
           || timestampRecorded;
         writeNext();
@@ -727,7 +932,15 @@ export const writeTerminalDataWithLineTimestamps = (
         return;
       }
 
-      term.write(segmentData, writeNext);
+      const writeStartedAt = shouldMeasureDiagnostics ? performance.now() : 0;
+      term.write(segmentData, () => {
+        writeCalls += 1;
+        writeChars += segmentData.length;
+        if (shouldMeasureDiagnostics) {
+          writeCallbackMs += performance.now() - writeStartedAt;
+        }
+        writeNext();
+      });
     };
 
     writeNext();
@@ -739,13 +952,14 @@ export const writeTerminalDataWithLineTimestamps = (
       store.timestampOnlyPrefix = pendingEscapeSequence;
     }
     if (!parsedData || !dataForTimestamps.startsWith(parsedData)) {
-      term.write(data, done);
+      writeFallbackData(data, done);
       return;
     }
 
     const parsedCurrentDataLength = Math.max(0, parsedData.length - timestampOnlyPrefix.length);
+    const trailingData = data.slice(parsedCurrentDataLength);
     writeSegments(
-      () => term.write(data.slice(parsedCurrentDataLength), done),
+      () => writeFallbackData(trailingData, done),
       timestampOnlyPrefix.length,
     );
     return;

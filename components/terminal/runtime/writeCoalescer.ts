@@ -23,7 +23,7 @@ export {
 export type WriteCoalescer = {
   push(chunk: string): void;
   /** Flush pending bytes synchronously before ordered writes (exit notices). */
-  flushSync(): void;
+  flushSync(writeOverride?: (data: string) => void): void;
   /** Drop pending bytes without writing (flood recovery / teardown). */
   abort(onDropped?: (bytes: number) => void): void;
   pendingBytes(): number;
@@ -35,6 +35,7 @@ type ScheduleWriteFrame = (callback: () => void) => (() => void) | null;
 export type WriteCoalescerOptions = {
   scheduleFrame?: ScheduleWriteFrame;
   getMaxPendingBytes?: () => number;
+  shouldFlushScheduledFrame?: () => boolean;
 };
 
 const scheduleWriteFrame = (callback: () => void): (() => void) | null => {
@@ -61,6 +62,7 @@ export const createWriteCoalescer = (
   const scheduleFrame = options.scheduleFrame ?? scheduleWriteFrame;
   const getMaxPendingBytes = options.getMaxPendingBytes
     ?? (() => MAX_PENDING_WRITE_COALESCE_BYTES);
+  const shouldFlushScheduledFrame = options.shouldFlushScheduledFrame ?? (() => true);
 
   const cancelScheduledFrame = (): void => {
     if (cancelPendingFrame !== null) {
@@ -69,7 +71,7 @@ export const createWriteCoalescer = (
     }
   };
 
-  const flushSync = (): void => {
+  const flushSync = (writeOverride?: (data: string) => void): void => {
     cancelScheduledFrame();
     if (pendingBytes === 0) {
       return;
@@ -77,7 +79,7 @@ export const createWriteCoalescer = (
     const batch = pending.length === 1 ? pending[0]! : pending.join("");
     pending = [];
     pendingBytes = 0;
-    write(batch);
+    (writeOverride ?? write)(batch);
   };
 
   const abort = (onDropped?: (bytes: number) => void): void => {
@@ -98,15 +100,24 @@ export const createWriteCoalescer = (
     pending.push(chunk);
     pendingBytes += chunk.length;
     if (pendingBytes > getMaxPendingBytes()) {
+      if (!shouldFlushScheduledFrame()) {
+        return;
+      }
       flushSync();
       return;
     }
     if (cancelPendingFrame === null) {
       const cancelFrame = scheduleFrame(() => {
         cancelPendingFrame = null;
+        if (!shouldFlushScheduledFrame()) {
+          return;
+        }
         flushSync();
       });
       if (cancelFrame === null) {
+        if (!shouldFlushScheduledFrame()) {
+          return;
+        }
         flushSync();
         return;
       }

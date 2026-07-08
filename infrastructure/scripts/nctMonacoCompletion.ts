@@ -5,15 +5,31 @@ type CompletionDisposable = { dispose: () => void };
 const NCT_API_COMPLETIONS = [
   {
     label: 'nct.screen.waitForPrompt',
+    sortText: 'nct.screen.waitFor.00.prompt',
     insertText: 'await nct.screen.waitForPrompt(${1:30000});',
     detail: 'Wait for shell prompt',
     documentation: 'Wait until an interactive shell prompt appears (# for root, $ for regular user).',
   },
   {
+    label: 'nct.screen.waitForText',
+    sortText: 'nct.screen.waitFor.01.text',
+    insertText: "await nct.screen.waitForText('${1:text}', ${2:30000});",
+    detail: 'Wait for literal text',
+    documentation: 'Wait until the exact text appears in session output. Regex characters are treated as normal text.',
+  },
+  {
+    label: 'nct.screen.waitForRegex',
+    sortText: 'nct.screen.waitFor.02.regex',
+    insertText: "await nct.screen.waitForRegex('${1:pattern}', ${2:30000});",
+    detail: 'Wait for regex match',
+    documentation: 'Wait until session output matches a regular expression. String patterns use dotAll matching for multiline output.',
+  },
+  {
     label: 'nct.screen.waitFor',
-    insertText: "await nct.screen.waitFor('${1:pattern}', ${2:30000});",
-    detail: 'Wait for terminal output',
-    documentation: 'Wait until the session output matches a literal string or /regex/flags pattern.',
+    sortText: 'nct.screen.waitFor.03.legacy',
+    insertText: "await nct.screen.waitFor('${1:text}', ${2:30000});",
+    detail: 'Wait for terminal output (legacy)',
+    documentation: 'Compatibility helper. Plain string patterns are literal; legacy /regex/flags strings still work, but prefer waitForText for text or waitForRegex for regular expressions.',
   },
   {
     label: 'nct.screen.waitForAny',
@@ -94,6 +110,41 @@ const NCT_API_COMPLETIONS = [
     documentation: 'Show an informational alert dialog.',
   },
   {
+    label: 'nct.dialog.form',
+    insertText: [
+      'const values = await nct.dialog.form({',
+      "  title: '${1:Options}',",
+      "  message: '${2:Choose how to continue}',",
+      '  fields: [',
+      "    { type: 'select', name: '${3:env}', label: '${4:Environment}', options: ['${5:dev}', '${6:prod}'], defaultValue: '${5:dev}' },",
+      "    { type: 'checkbox', name: '${7:restart}', label: '${8:Restart service}', defaultValue: true },",
+      "    { type: 'textarea', name: '${9:notes}', label: '${10:Notes}', required: false, visibleWhen: { field: '${3:env}', notEquals: '${5:dev}' } },",
+      "    { type: 'number', name: '${11:retries}', label: '${12:Retries}', defaultValue: 3, min: 0, step: 1 },",
+      '  ],',
+      '});',
+    ].join('\n'),
+    detail: 'Form dialog',
+    documentation: 'Show a form dialog with select, checkbox, radio, textarea, and number fields. Fields can use visibleWhen for conditional display. Returns an object keyed by visible field name.',
+  },
+  {
+    label: 'nct.dialog.select',
+    insertText: "const value = await nct.dialog.select('${1:Choose one}', ['${2:first}', '${3:second}'], '${2:first}');",
+    detail: 'Select dialog',
+    documentation: 'Show a single-select dialog and return the selected option value.',
+  },
+  {
+    label: 'nct.dialog.radio',
+    insertText: "const value = await nct.dialog.radio('${1:Choose one}', ['${2:first}', '${3:second}'], '${2:first}');",
+    detail: 'Radio dialog',
+    documentation: 'Show a radio-choice dialog and return the selected option value.',
+  },
+  {
+    label: 'nct.dialog.checkbox',
+    insertText: "const checked = await nct.dialog.checkbox('${1:Enable option}', ${2:true});",
+    detail: 'Checkbox dialog',
+    documentation: 'Show a checkbox dialog and return whether it is checked.',
+  },
+  {
     label: 'nct.log',
     insertText: "nct.log('${1:message}');",
     detail: 'Script log',
@@ -162,6 +213,7 @@ export function registerNctMonacoCompletionProvider(monaco: Monaco): CompletionD
           insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
           detail: item.detail,
           documentation: item.documentation,
+          sortText: item.sortText ?? item.label,
           range,
         }));
 

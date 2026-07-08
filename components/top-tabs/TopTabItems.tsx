@@ -1,5 +1,5 @@
 import { Copy, FileCode, FileText, LayoutGrid, Minus, Server, Square, TerminalSquare, Usb, X } from 'lucide-react';
-import React, { memo, useCallback, useEffect, useLayoutEffect, useState } from 'react';
+import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { activeTabStore, useActiveTabId, useIsTabActive } from '../../application/state/activeTabStore';
 import type { EditorTab } from '../../application/state/editorTabStore';
 import type { LogView } from '../../application/state/logViewState';
@@ -195,12 +195,18 @@ export const formatSessionTopTabLabel = (
   >,
   dynamicTabTitleMode?: DynamicTabTitleMode,
 ): string => {
-  const baseTitle = resolveSessionTabTitle(session, dynamicTabTitleMode);
-  const address = getSessionTopTabAddress(session);
-  if (!address) return baseTitle;
-  if (!baseTitle) return address;
-  if (baseTitle.trim() === address) return baseTitle;
-  return `${baseTitle} · ${address}`;
+  return resolveSessionTabTitle(session, dynamicTabTitleMode);
+};
+
+export const createSessionTopTabDoubleClickHandler = (
+  onCopySession: (sessionId: string) => void,
+  sessionId: string,
+): React.MouseEventHandler<HTMLDivElement> => () => onCopySession(sessionId);
+
+export const stopCloseButtonDoubleClickPropagation = (
+  event: Pick<React.MouseEvent, 'stopPropagation'>,
+): void => {
+  event.stopPropagation();
 };
 
 // Custom window controls for Windows/Linux (frameless window)
@@ -574,6 +580,10 @@ export const SessionTopTab: React.FC<SessionTopTabProps> = memo(({
   const handleClick = useCallback(() => {
     activeTabStore.setActiveTabId(session.id);
   }, [session.id]);
+  const handleDoubleClick = useMemo(
+    () => createSessionTopTabDoubleClickHandler(onCopySession, session.id),
+    [onCopySession, session.id],
+  );
   const addressTooltip = formatSessionTopTabTooltip(session);
   const tabTitle = formatSessionTopTabLabel(session, dynamicTabTitleMode);
 
@@ -583,6 +593,7 @@ export const SessionTopTab: React.FC<SessionTopTabProps> = memo(({
       data-tab-type="session"
       data-state={isActive ? 'active' : 'inactive'}
       onClick={handleClick}
+      onDoubleClick={handleDoubleClick}
       onMouseDown={handleTabMiddleMouseDown}
       onAuxClick={(e) => handleTabMiddleClickClose(e, () => onCloseSession(session.id))}
       draggable
@@ -638,6 +649,7 @@ export const SessionTopTab: React.FC<SessionTopTabProps> = memo(({
       </div>
       <button
         onClick={(e) => onCloseSession(session.id, e)}
+        onDoubleClick={stopCloseButtonDoubleClickPropagation}
         className="p-1 rounded-full hover:bg-destructive/10 hover:text-destructive transition-colors"
         aria-label={t('tabs.closeSessionAria')}
       >

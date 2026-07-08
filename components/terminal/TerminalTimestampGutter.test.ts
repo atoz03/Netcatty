@@ -6,6 +6,7 @@ import {
   TERMINAL_TIMESTAMP_GUTTER_HORIZONTAL_PADDING,
   TERMINAL_TIMESTAMP_GUTTER_MIN_WIDTH,
   getTerminalTimestampTypography,
+  resolveTerminalTimestampGutterRenderSignature,
   resolveTerminalTimestampGutterColor,
   resolveTerminalTimestampGutterWidth,
 } from "./TerminalTimestampGutter.tsx";
@@ -70,4 +71,50 @@ test("timestamp gutter uses the terminal background", () => {
   assert.doesNotMatch(source, /bg-black\/10/);
   assert.match(source, /boxShadow: "inset -0\.5px 0 0 color-mix\(in srgb, var\(--terminal-ui-fg\) 8%, transparent\)"/);
   assert.doesNotMatch(source, /border-r/);
+});
+
+test("timestamp gutter render signature is stable and changes only for visible inputs", () => {
+  const base = resolveTerminalTimestampGutterRenderSignature({
+    screenTop: 8,
+    cellHeight: 17,
+    color: "#66e8ff",
+    fontFamily: "JetBrains Mono",
+    fontSize: 14,
+    fontWeight: 500,
+    rows: [
+      { row: 0, label: "10:00:00" },
+      { row: 2, label: "10:00:02" },
+    ],
+  });
+
+  assert.equal(
+    resolveTerminalTimestampGutterRenderSignature({
+      screenTop: 8,
+      cellHeight: 17,
+      color: "#66e8ff",
+      fontFamily: "JetBrains Mono",
+      fontSize: 14,
+      fontWeight: 500,
+      rows: [
+        { row: 0, label: "10:00:00" },
+        { row: 2, label: "10:00:02" },
+      ],
+    }),
+    base,
+  );
+  assert.notEqual(
+    resolveTerminalTimestampGutterRenderSignature({
+      screenTop: 8,
+      cellHeight: 17,
+      color: "#66e8ff",
+      fontFamily: "JetBrains Mono",
+      fontSize: 14,
+      fontWeight: 500,
+      rows: [
+        { row: 0, label: "10:00:00" },
+        { row: 3, label: "10:00:02" },
+      ],
+    }),
+    base,
+  );
 });

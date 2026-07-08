@@ -32,8 +32,13 @@ declare global {
     // Fired when an install was requested but blocked by unsaved editors (#1215).
     onUpdateNeedsSave?(cb: () => void): () => void;
     onSshDeepLink?(cb: (payload: { url?: string }) => void): () => void;
+    onTelnetDeepLink?(cb: (payload: { url?: string }) => void): () => void;
+    onOpenTerminalPath?(cb: (payload: { path?: string }) => void): () => void;
     setSshDeepLinkEnabled?(enabled: boolean): Promise<boolean | { success: boolean; enabled: boolean }>;
     getSshDeepLinkEnabled?(): Promise<boolean>;
+    onJmsDeepLink?(cb: (payload: { url?: string }) => void): () => void;
+    setJmsDeepLinkEnabled?(enabled: boolean): Promise<boolean | { success: boolean; enabled: boolean }>;
+    getJmsDeepLinkEnabled?(): Promise<boolean>;
 
     // Global Toggle Hotkey (Quake Mode)
     registerGlobalHotkey?(hotkey: string): Promise<{ success: boolean; enabled?: boolean; error?: string; accelerator?: string }>;
@@ -58,6 +63,7 @@ declare global {
     isCloseToTray?(): Promise<{ enabled: boolean }>;
     updateTrayMenuData?(data: {
       sessions?: Array<{ id: string; label: string; hostLabel: string; status: "connecting" | "connected" | "disconnected"; workspaceId?: string; workspaceTitle?: string }>;
+      hosts?: Array<{ id: string; label?: string; hostname?: string; group?: string; pinned?: boolean; lastConnectedAt?: number; protocol?: string }>;
       portForwardRules?: Array<{
         id: string;
         label: string;
@@ -83,6 +89,7 @@ declare global {
     onTrayPanelRefresh?(callback: () => void): () => void;
     onTrayPanelMenuData?(callback: (data: {
       sessions?: Array<{ id: string; label: string; hostLabel: string; status: "connecting" | "connected" | "disconnected"; workspaceId?: string; workspaceTitle?: string }>;
+      hosts?: Array<{ id: string; label?: string; hostname?: string; group?: string; pinned?: boolean; lastConnectedAt?: number; protocol?: string }>;
       portForwardRules?: Array<{
         id: string;
         label: string;

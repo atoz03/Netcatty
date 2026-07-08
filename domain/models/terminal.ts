@@ -15,6 +15,8 @@ export type LinkModifier = 'none' | 'ctrl' | 'alt' | 'meta';
 export type TerminalEmulationType = 'xterm-256color' | 'xterm-16color' | 'xterm';
 export type DynamicTabTitleMode = 'off' | 'agent' | 'all';
 
+export const DEFAULT_TERMINAL_WORD_SEPARATORS = ' ()[]{}\'"';
+
 // Keyword highlighting configuration
 export interface KeywordHighlightRule {
   id: string;
@@ -54,6 +56,8 @@ export interface TerminalSettings {
   // Keyboard
   altAsMeta: boolean; // Use ⌥ as the Meta key
   optionArrowWordJump: boolean; // macOS: Option+←/→ send Meta-b/f for word jump
+  shiftEnterNewlineEnabled: boolean; // Send configured text on Shift+Enter
+  shiftEnterNewlineText: string; // Backslash-escaped text sent by Shift+Enter
   scrollOnInput: boolean; // Scroll terminal to bottom on input
   scrollOnOutput: boolean; // Scroll terminal to bottom on output
   scrollOnKeyPress: boolean; // Scroll terminal to bottom on key press
@@ -82,6 +86,7 @@ export interface TerminalSettings {
   verifyHostKeys: boolean; // Verify SSH host keys before authenticating
   keepaliveInterval: number; // Seconds between SSH-level keepalive packets (0 = disabled)
   keepaliveCountMax: number; // Unanswered keepalives before declaring the connection dead
+  sshAutoReconnectEnabled: boolean; // Automatically reconnect SSH sessions after unexpected disconnects
   x11Display: string; // Optional local X11 DISPLAY override (empty = use system DISPLAY/default)
 
   // Mosh Connection
@@ -274,11 +279,19 @@ export const normalizeTerminalSettings = (
   settings?: Partial<TerminalSettings> | null,
 ): TerminalSettings => {
   const middleClickBehavior = resolveMiddleClickBehavior(settings);
+  const wordSeparators = typeof settings?.wordSeparators === 'string'
+    ? settings.wordSeparators
+    : DEFAULT_TERMINAL_SETTINGS.wordSeparators;
+  const shiftEnterNewlineText = typeof settings?.shiftEnterNewlineText === 'string'
+    ? settings.shiftEnterNewlineText
+    : DEFAULT_TERMINAL_SETTINGS.shiftEnterNewlineText;
   const mergedSettings = {
     ...DEFAULT_TERMINAL_SETTINGS,
     ...(settings ?? {}),
     middleClickBehavior,
     middleClickPaste: middleClickBehavior === 'paste',
+    wordSeparators,
+    shiftEnterNewlineText,
     dynamicTabTitleMode: isDynamicTabTitleMode(settings?.dynamicTabTitleMode)
       ? settings.dynamicTabTitleMode
       : DEFAULT_TERMINAL_SETTINGS.dynamicTabTitleMode,
@@ -326,6 +339,8 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   minimumContrastRatio: 1,
   altAsMeta: false,
   optionArrowWordJump: false,
+  shiftEnterNewlineEnabled: true,
+  shiftEnterNewlineText: '\\n',
   scrollOnInput: true,
   scrollOnOutput: false,
   scrollOnKeyPress: false,
@@ -335,7 +350,7 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   middleClickBehavior: 'paste',
   copyOnSelect: false,
   middleClickPaste: true,
-  wordSeparators: ' ()[]{}\'"',
+  wordSeparators: DEFAULT_TERMINAL_WORD_SEPARATORS,
   linkModifier: 'none',
   keywordHighlightEnabled: true,
   keywordHighlightRules: DEFAULT_KEYWORD_HIGHLIGHT_RULES,
@@ -350,6 +365,7 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   verifyHostKeys: true,
   keepaliveInterval: 30,
   keepaliveCountMax: 10,
+  sshAutoReconnectEnabled: false,
   x11Display: '', // Empty = use DISPLAY/default local X server
   moshClientPath: '', // Legacy mosh-client override; normal UI uses bundled mosh-client
   showServerStats: true, // Show server stats by default
@@ -437,6 +453,7 @@ export interface TerminalSession {
   localShellArgs?: string[]; // Shell args for local terminals (from discovery)
   localShellName?: string;   // Display name for local shell (e.g., "Zsh", "Ubuntu (WSL)")
   localShellIcon?: string;   // Icon identifier for local shell (e.g., "zsh", "ubuntu")
+  localStartDir?: string;    // Per-session starting directory for local terminals
   // For sessions created from an existing SSH session: the id of the source
   // session whose already-authenticated connection should be reused so the new
   // shell channel does not trigger a second MFA prompt (issue #1204). The
@@ -455,6 +472,14 @@ export interface TerminalSession {
   codingCliProviderId?: CodingCliProviderId;
   /** Runtime marker for sessions reconstructed from startup restore. */
   restoreState?: 'restored-disconnected';
+  /**
+   * Runtime marker for sessions backed by an in-memory-only host (e.g. a
+   * password deep link). Excluded from session restore persistence because
+   * the one-time credentials cannot survive a relaunch.
+   */
+  ephemeralHost?: boolean;
+  /** Runtime hint to auto-open a side panel once the session connects. */
+  autoOpenSidePanel?: 'sftp';
   /** Latest known working directory captured from terminal cwd tracking. */
   lastCwd?: string;
 }

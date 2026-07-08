@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 
 import { useActiveTabId } from '../../application/state/activeTabStore';
 import { sessionCapabilitiesStore } from '../../application/state/sessionCapabilitiesStore';
@@ -15,7 +15,7 @@ import { useTerminalAiContexts } from './useTerminalAiContexts';
 import { useTerminalLayerEffects } from './useTerminalLayerEffects';
 import { useTerminalThemePanelState } from './useTerminalThemePanelState';
 import { useManualTerminalChromeSurfaceInjection } from '../../application/state/useManualTerminalChromeSurfaceInjection';
-import { sidePanelLiveStore } from '../../application/state/sidePanelLiveStore';
+import { sidePanelLiveStore, type SidePanelLiveSnapshot } from '../../application/state/sidePanelLiveStore';
 import { useTerminalWorkspaceLayout } from './useTerminalWorkspaceLayout';
 import type { SidePanelTab } from './TerminalLayerSupport';
 
@@ -215,7 +215,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     !s.followAppTerminalTheme && isTerminalLayerVisible,
   );
 
-  sidePanelLiveStore.update({
+  const sidePanelLiveSnapshot = useMemo<SidePanelLiveSnapshot>(() => ({
     sftpActiveHost,
     activeTerminalSessionIdForSftp,
     activeTerminalCwd,
@@ -234,7 +234,30 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     focusedFontWeight: themeState.focusedFontWeight,
     focusedFontWeightOverridden: themeState.focusedFontWeightOverridden,
     focusedThemeOverridden: themeState.focusedThemeOverridden,
-  });
+  }), [
+    activeSystemSessionHost,
+    activeTerminalCwd,
+    activeTerminalSessionForSystem,
+    activeTerminalSessionIdForSftp,
+    activeWorkspace,
+    effectiveFocusedSessionId,
+    focusedHost,
+    historySessionId,
+    sftpActiveHost,
+    themeState.focusedFontFamilyId,
+    themeState.focusedFontFamilyOverridden,
+    themeState.focusedFontSize,
+    themeState.focusedFontSizeOverridden,
+    themeState.focusedFontWeight,
+    themeState.focusedFontWeightOverridden,
+    themeState.focusedThemeOverridden,
+    themeState.previewedOrVisibleThemeId,
+    themeState.resolvedPreviewTheme,
+  ]);
+
+  useLayoutEffect(() => {
+    sidePanelLiveStore.update(sidePanelLiveSnapshot);
+  }, [sidePanelLiveSnapshot]);
 
   const { aiContextsByTabId, resolveAIExecutorContext } = useTerminalAiContexts({
     hosts: s.hosts,

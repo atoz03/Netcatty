@@ -1256,13 +1256,14 @@ function createStartSessionApi(ctx) {
               // ssh2 closes every channel when the transport errors, so each
               // affected session (the owner and any reused siblings) gets the
               // flag and reports the error via its own stream close handler.
-              if (sessions.has(sessionId)) {
-                const session = sessions.get(sessionId);
-                if (session) session._transportError = err.message;
+              const currentSession = sessions.get(sessionId);
+              const ownsCurrentSession = Boolean(connRef && currentSession?.connRef === connRef);
+              if (ownsCurrentSession) {
+                currentSession._transportError = err.message;
               }
               if (connRef) {
                 for (const sibling of sessions.values()) {
-                  if (sibling !== sessions.get(sessionId) && sibling.connRef === connRef) {
+                  if (sibling !== currentSession && sibling.connRef === connRef) {
                     sibling._transportError = err.message;
                   }
                 }
@@ -1305,7 +1306,15 @@ function createStartSessionApi(ctx) {
             }
 
             sendProgress(totalHops, totalHops, options.hostname, 'error', err.message);
-            safeSend(contents, "netcatty:exit", { sessionId, exitCode: 1, error: err.message, reason: "error" });
+            const suppressPreShellAuthExit = Boolean(options._suppressPreShellAuthExit && isAuthError);
+            if (suppressPreShellAuthExit) {
+              log("suppressing pre-shell auth exit for wrapper-managed retry", {
+                sessionId,
+                hostname: options.hostname,
+              });
+            } else {
+              safeSend(contents, "netcatty:exit", { sessionId, exitCode: 1, error: err.message, reason: "error" });
+            }
             sessionLogStreamManager.stopStream(sessionId, ownerLogStreamToken);
             if (detachX11Forwarding) {
               detachX11Forwarding();
@@ -1345,11 +1354,14 @@ function createStartSessionApi(ctx) {
 
           conn.once("close", () => {
             const contents = event.sender;
+            const currentSession = sessions.get(sessionId);
+            const ownsCurrentSession = Boolean(connRef && currentSession?.connRef === connRef);
             log("connection closed", {
               sessionId,
               hostname: options.hostname,
               settled,
-              transportError: sessions.get(sessionId)?._transportError,
+              staleForCurrentSession: Boolean(currentSession && !ownsCurrentSession),
+              transportError: ownsCurrentSession ? currentSession?._transportError : undefined,
             });
             if (!settled) {
               sendProgress(totalHops, totalHops, options.hostname, 'error', `Connection to ${options.hostname} closed unexpectedly`);
@@ -1360,8 +1372,8 @@ function createStartSessionApi(ctx) {
             // close then no-ops because the session is already gone. Reused
             // sibling channels each clean themselves up via their own stream
             // "close" (ssh2 closes every channel when the transport drops).
-            if (sessions.has(sessionId)) {
-              const session = sessions.get(sessionId);
+            if (ownsCurrentSession) {
+              const session = currentSession;
               const transportError = session?._transportError;
               if (transportError) {
                 // A transport error was recorded — report it as an error exit
@@ -1387,7 +1399,9 @@ function createStartSessionApi(ctx) {
               // Owner already cleaned up (e.g. its stream closed first). Ensure
               // this connection's log stream is stopped defensively, scoped by
               // the captured token so a reconnect's fresh stream is left alone.
-              sessionLogStreamManager.stopStream(sessionId, ownerLogStreamToken);
+              if (ownerLogStreamToken) {
+                sessionLogStreamManager.stopStream(sessionId, ownerLogStreamToken);
+              }
             }
             if (!settled) {
               settled = true;
@@ -1446,8 +1460,15 @@ function createStartSessionApi(ctx) {
         });
       } catch (err) {
         console.error("[Chain] SSH chain connection error:", err.message);
-        const contents = event.sender;
-        safeSend(contents, "netcatty:exit", { sessionId, exitCode: 1, error: err.message });
+        const isAuthError = err.message?.toLowerCase().includes('authentication') ||
+          err.message?.toLowerCase().includes('auth') ||
+          err.message?.toLowerCase().includes('password') ||
+          err.level === 'client-authentication';
+        const suppressPreShellAuthExit = Boolean(options._suppressPreShellAuthExit && isAuthError);
+        if (!suppressPreShellAuthExit) {
+          const contents = event.sender;
+          safeSend(contents, "netcatty:exit", { sessionId, exitCode: 1, error: err.message });
+        }
         throw err;
       }
     }

@@ -9,14 +9,24 @@ import {
 import { createWriteCoalescer, type WriteCoalescer } from "./writeCoalescer.ts";
 
 type CoalescerByteCapResolver = () => number;
+type CoalescerFlushGate = () => boolean;
 export type CoalescedTerminalWriteOptions = {
   deferStart?: boolean;
   yieldAfter?: boolean;
+  preservePerfTrace?: boolean;
 };
+type CoalescedTerminalWriteNow = (
+  data: string,
+  ingressBytes: number,
+  options?: CoalescedTerminalWriteOptions,
+) => void;
 
 const terminalWriteCoalescers = new WeakMap<XTerm, WriteCoalescer>();
 const terminalWriteCoalescerIngress = new WeakMap<XTerm, number>();
+const terminalWriteCoalescerChunkCounts = new WeakMap<XTerm, number>();
 const terminalWriteCoalescerByteCapResolvers = new WeakMap<XTerm, CoalescerByteCapResolver>();
+const terminalWriteCoalescerFlushGates = new WeakMap<XTerm, CoalescerFlushGate>();
+const terminalWriteCoalescerWriters = new WeakMap<XTerm, CoalescedTerminalWriteNow>();
 
 const defaultCoalescerByteCap = (): number => MAX_PENDING_WRITE_COALESCE_BYTES;
 
@@ -36,6 +46,9 @@ const resolveCoalescerByteCap = (term: XTerm): number => {
   return resolver?.() ?? defaultCoalescerByteCap();
 };
 
+const shouldAutoFlushCoalescer = (term: XTerm): boolean =>
+  terminalWriteCoalescerFlushGates.get(term)?.() ?? true;
+
 const getPendingCoalescedBytes = (term: XTerm): number =>
   terminalWriteCoalescers.get(term)?.pendingBytes() ?? 0;
 
@@ -43,6 +56,23 @@ const takePendingIngressBytes = (term: XTerm, fallback = 0): number => {
   const pending = terminalWriteCoalescerIngress.get(term) ?? fallback;
   terminalWriteCoalescerIngress.delete(term);
   return pending;
+};
+
+const takePendingChunkCount = (term: XTerm): number => {
+  const count = terminalWriteCoalescerChunkCounts.get(term) ?? 1;
+  terminalWriteCoalescerChunkCounts.delete(term);
+  return count;
+};
+
+export const setTerminalWriteCoalescerFlushGate = (
+  term: XTerm,
+  gate?: CoalescerFlushGate,
+): void => {
+  if (gate) {
+    terminalWriteCoalescerFlushGates.set(term, gate);
+  } else {
+    terminalWriteCoalescerFlushGates.delete(term);
+  }
 };
 
 const splitIngressBytes = (
@@ -63,20 +93,27 @@ const splitIngressBytes = (
 const isPlainTerminalOutput = (data: string): boolean =>
   !data.includes("\x1b") && !data.includes("\x9b");
 
+const LINE_BREAK_SCAN = /[\n\r]/g;
+
 const hasLongUnbrokenRun = (data: string, maxRunBytes: number): boolean => {
-  let runBytes = 0;
-  for (let index = 0; index < data.length; index += 1) {
-    const char = data[index];
-    if (char === "\n" || char === "\r") {
-      runBytes = 0;
-      continue;
-    }
-    runBytes += 1;
-    if (runBytes > maxRunBytes) {
+  if (data.length <= maxRunBytes) {
+    return false;
+  }
+  // Hot path for every flushed batch: hop between line breaks with a native
+  // regex scan instead of visiting each character in JS.
+  let runStart = 0;
+  LINE_BREAK_SCAN.lastIndex = 0;
+  for (
+    let match = LINE_BREAK_SCAN.exec(data);
+    match !== null;
+    match = LINE_BREAK_SCAN.exec(data)
+  ) {
+    if (match.index - runStart > maxRunBytes) {
       return true;
     }
+    runStart = match.index + 1;
   }
-  return false;
+  return data.length - runStart > maxRunBytes;
 };
 
 const resolveTerminalWriteBatchBytes = (
@@ -100,6 +137,7 @@ const writeLargeTerminalBatch = (
     ingressBytes: number,
     options?: CoalescedTerminalWriteOptions,
   ) => void,
+  options: CoalescedTerminalWriteOptions = {},
 ): void => {
   const batchSize = Math.max(1, maxBatchBytes);
   const isSliced = data.length > batchSize;
@@ -118,10 +156,18 @@ const writeLargeTerminalBatch = (
         remainingIngressBytes,
       );
     remainingIngressBytes -= sliceIngress;
-    writeNow(slice, sliceIngress, isSliced ? {
-      deferStart: true,
-      yieldAfter: true,
-    } : undefined);
+    const nextOptions = {
+      ...options,
+      ...(isSliced ? {
+        deferStart: true,
+        yieldAfter: true,
+      } : {}),
+    };
+    writeNow(
+      slice,
+      sliceIngress,
+      Object.keys(nextOptions).length > 0 ? nextOptions : undefined,
+    );
     offset = end;
   }
 };
@@ -129,18 +175,16 @@ const writeLargeTerminalBatch = (
 export const enqueueCoalescedTerminalWrite = (
   term: XTerm,
   data: string,
-  writeNow: (
-    data: string,
-    ingressBytes: number,
-    options?: CoalescedTerminalWriteOptions,
-  ) => void,
+  writeNow: CoalescedTerminalWriteNow,
   ingressBytes: number = data.length,
 ): void => {
   const maxPendingBytes = resolveCoalescerByteCap(term);
-  if (getPendingCoalescedBytes(term) + data.length > maxPendingBytes) {
+  const canAutoFlush = shouldAutoFlushCoalescer(term);
+  if (canAutoFlush && getPendingCoalescedBytes(term) + data.length > maxPendingBytes) {
     flushTerminalWriteCoalescer(term);
   }
-  if (data.length > maxPendingBytes) {
+  terminalWriteCoalescerWriters.set(term, writeNow);
+  if (canAutoFlush && data.length > maxPendingBytes) {
     writeLargeTerminalBatch(
       data,
       ingressBytes,
@@ -154,34 +198,64 @@ export const enqueueCoalescedTerminalWrite = (
     term,
     (terminalWriteCoalescerIngress.get(term) ?? 0) + ingressBytes,
   );
+  terminalWriteCoalescerChunkCounts.set(
+    term,
+    (terminalWriteCoalescerChunkCounts.get(term) ?? 0) + 1,
+  );
 
   let coalescer = terminalWriteCoalescers.get(term);
   if (!coalescer) {
     coalescer = createWriteCoalescer((batch) => {
       const batchIngress = takePendingIngressBytes(term, batch.length);
+      const chunkCount = takePendingChunkCount(term);
+      const activeWriteNow = terminalWriteCoalescerWriters.get(term) ?? writeNow;
       writeLargeTerminalBatch(
         batch,
         batchIngress,
         resolveTerminalWriteBatchBytes(batch, resolveCoalescerByteCap(term)),
-        writeNow,
+        activeWriteNow,
+        chunkCount === 1 ? {} : { preservePerfTrace: false },
       );
     }, {
       getMaxPendingBytes: () => resolveCoalescerByteCap(term),
+      shouldFlushScheduledFrame: () => terminalWriteCoalescerFlushGates.get(term)?.() ?? true,
     });
     terminalWriteCoalescers.set(term, coalescer);
   }
   coalescer.push(data);
 };
 
-export const flushTerminalWriteCoalescer = (term: XTerm): void => {
-  terminalWriteCoalescers.get(term)?.flushSync();
+export const flushTerminalWriteCoalescer = (
+  term: XTerm,
+  writeNow?: CoalescedTerminalWriteNow,
+): void => {
+  const coalescer = terminalWriteCoalescers.get(term);
+  if (!coalescer) return;
+  if (!writeNow) {
+    coalescer.flushSync();
+    return;
+  }
+  coalescer.flushSync((batch) => {
+    const batchIngress = takePendingIngressBytes(term, batch.length);
+    const chunkCount = takePendingChunkCount(term);
+    writeLargeTerminalBatch(
+      batch,
+      batchIngress,
+      resolveTerminalWriteBatchBytes(batch, resolveCoalescerByteCap(term)),
+      writeNow,
+      chunkCount === 1 ? {} : { preservePerfTrace: false },
+    );
+  });
 };
 
 export const resetTerminalWriteCoalescer = (term: XTerm): void => {
   terminalWriteCoalescers.get(term)?.dispose();
   terminalWriteCoalescers.delete(term);
   terminalWriteCoalescerIngress.delete(term);
+  terminalWriteCoalescerChunkCounts.delete(term);
   terminalWriteCoalescerByteCapResolvers.delete(term);
+  terminalWriteCoalescerFlushGates.delete(term);
+  terminalWriteCoalescerWriters.delete(term);
 };
 
 export const getTerminalWriteCoalescerPendingBytes = (term: XTerm): number =>
@@ -200,6 +274,7 @@ export const abortTerminalWriteCoalescer = (
     term,
     coalescer.pendingBytes(),
   );
+  takePendingChunkCount(term);
   coalescer.abort();
   if (ingressDropped > 0) {
     onDropped?.(ingressDropped);

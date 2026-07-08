@@ -11,6 +11,24 @@ const {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const createTerminalPerfMeta = (id = "perf-1") => ({
+  id,
+  emittedAt: 1234,
+  sessionId: "session-1",
+  chars: 5,
+  lineFeeds: 0,
+});
+
+function createFakePort() {
+  return {
+    onmessage: null,
+    close() {},
+    emit(data) {
+      this.onmessage?.({ data });
+    },
+  };
+}
+
 function loadPreloadWithFakeElectron() {
   const handlers = new Map();
   let exposedApi = null;
@@ -114,6 +132,33 @@ test("keeps terminal output metadata while trimming backlog data", () => {
 
   assert.deepEqual(backlog.takeEntry("session-1"), {
     data: "world",
+    meta: { droppedOutputMayAffectTerminalState: true },
+  });
+});
+
+test("keeps terminal perf metadata for a single backlog chunk", () => {
+  const backlog = createTerminalDataBacklog({ maxBytesPerSession: 64 });
+  const terminalPerf = createTerminalPerfMeta();
+
+  backlog.append("session-1", "hello", { terminalPerf });
+
+  assert.deepEqual(backlog.takeEntry("session-1"), {
+    data: "hello",
+    meta: { terminalPerf },
+  });
+});
+
+test("drops terminal perf metadata after backlog data is merged or trimmed", () => {
+  const backlog = createTerminalDataBacklog({ maxBytesPerSession: 8 });
+
+  backlog.append("session-1", "hello", { terminalPerf: createTerminalPerfMeta("perf-1") });
+  backlog.append("session-1", " world", {
+    terminalPerf: createTerminalPerfMeta("perf-2"),
+    droppedOutputMayAffectTerminalState: true,
+  });
+
+  assert.deepEqual(backlog.takeEntry("session-1"), {
+    data: "lo world",
     meta: { droppedOutputMayAffectTerminalState: true },
   });
 });
@@ -223,8 +268,10 @@ test("onSessionData replays pending terminal data metadata on subscribe", () => 
   const dataListeners = new Map();
   const displayDataListeners = new Map();
   const terminalDataBacklog = createTerminalDataBacklog();
+  const terminalPerf = createTerminalPerfMeta();
   terminalDataBacklog.append("session-1", "early output", {
     droppedOutputMayAffectTerminalState: true,
+    terminalPerf,
   });
 
   const api = createPreloadApi({
@@ -249,8 +296,85 @@ test("onSessionData replays pending terminal data metadata on subscribe", () => 
 
   assert.deepEqual(received, [{
     chunk: "early output",
-    meta: { droppedOutputMayAffectTerminalState: true },
+    meta: { droppedOutputMayAffectTerminalState: true, terminalPerf },
   }]);
+});
+
+test("legacy terminal data delivery preserves terminal perf metadata", () => {
+  const preload = loadPreloadWithFakeElectron();
+  try {
+    const terminalPerf = createTerminalPerfMeta();
+    const received = [];
+    preload.api.onSessionData("session-1", (chunk, meta) => {
+      received.push({ chunk, meta });
+    });
+
+    preload.handlers.get("netcatty:data")?.({}, {
+      sessionId: "session-1",
+      data: "hello",
+      meta: { terminalPerf },
+    });
+
+    assert.deepEqual(received, [{
+      chunk: "hello",
+      meta: { terminalPerf },
+    }]);
+  } finally {
+    preload.cleanup();
+  }
+});
+
+test("terminal output port delivery preserves terminal perf metadata", () => {
+  const preload = loadPreloadWithFakeElectron();
+  try {
+    const terminalPerf = createTerminalPerfMeta();
+    const received = [];
+    const port = createFakePort();
+    preload.api.onSessionData("session-1", (chunk, meta) => {
+      received.push({ chunk, meta });
+    });
+
+    preload.handlers.get("netcatty:terminal-output-port")?.({ ports: [port] }, { sessionId: "session-1" });
+    port.emit({
+      sessionId: "session-1",
+      data: "hello",
+      meta: { terminalPerf },
+    });
+
+    assert.deepEqual(received, [{
+      chunk: "hello",
+      meta: { terminalPerf },
+    }]);
+  } finally {
+    preload.cleanup();
+  }
+});
+
+test("MCP-filtered terminal perf metadata is not carried to later output", () => {
+  const preload = loadPreloadWithFakeElectron();
+  try {
+    const received = [];
+    preload.api.onSessionData("session-1", (chunk, meta) => {
+      received.push({ chunk, meta });
+    });
+
+    preload.handlers.get("netcatty:data")?.({}, {
+      sessionId: "session-1",
+      data: "__NCMCP_TEST\n",
+      meta: { terminalPerf: createTerminalPerfMeta() },
+    });
+    preload.handlers.get("netcatty:data")?.({}, {
+      sessionId: "session-1",
+      data: "READY\n",
+    });
+
+    assert.deepEqual(received, [{
+      chunk: "READY\n",
+      meta: undefined,
+    }]);
+  } finally {
+    preload.cleanup();
+  }
 });
 
 test("delayed MCP terminal data flush preserves metadata", async () => {
@@ -557,7 +681,7 @@ test("backend exit preserves live listeners for same-id reconnect", async () => 
   }
 });
 
-test("backend exit after explicit close still cleans per-session listeners", () => {
+test("zmodem events after explicit close and backend exit are gated", () => {
   const preload = loadPreloadWithFakeElectron();
   try {
     const zmodemEvents = [];
@@ -586,6 +710,127 @@ test("backend exit after explicit close still cleans per-session listeners", () 
   } finally {
     preload.cleanup();
   }
+});
+
+test("zmodem listeners survive backend exit and fire after same-session reconnect", async () => {
+  const preload = loadPreloadWithFakeElectron();
+  try {
+    const zmodemEvents = [];
+    const overwriteRequests = [];
+    preload.api.onZmodemEvent("session-1", (evt) => {
+      zmodemEvents.push(evt.type);
+    });
+    preload.api.onZmodemOverwriteRequest("session-1", (payload) => {
+      overwriteRequests.push(payload);
+    });
+
+    preload.handlers.get("netcatty:exit")?.({}, {
+      sessionId: "session-1",
+      reason: "error",
+    });
+    await preload.api.startLocalSession({ sessionId: "session-1" });
+    preload.handlers.get("netcatty:zmodem:detect")?.({}, {
+      sessionId: "session-1",
+    });
+    preload.handlers.get("netcatty:zmodem:overwrite-request")?.({}, {
+      sessionId: "session-1",
+      requestId: "r1",
+      filename: "f",
+    });
+
+    assert.deepEqual(zmodemEvents, ["detect"]);
+    assert.deepEqual(overwriteRequests, [{
+      sessionId: "session-1",
+      requestId: "r1",
+      filename: "f",
+    }]);
+  } finally {
+    preload.cleanup();
+  }
+});
+
+test("zmodem listeners survive reconnect-style closeSession and resume after restart", async () => {
+  const preload = loadPreloadWithFakeElectron();
+  try {
+    const zmodemEvents = [];
+    const overwriteRequests = [];
+    preload.api.onZmodemEvent("session-1", (evt) => {
+      zmodemEvents.push(evt.type);
+    });
+    preload.api.onZmodemOverwriteRequest("session-1", (payload) => {
+      overwriteRequests.push(payload.requestId);
+    });
+
+    // Reconnect path: closeSession is called while the terminal component
+    // stays mounted, then the session restarts with the same id.
+    preload.api.closeSession("session-1");
+    preload.handlers.get("netcatty:zmodem:detect")?.({}, {
+      sessionId: "session-1",
+    });
+    assert.deepEqual(zmodemEvents, []);
+
+    await preload.api.startLocalSession({ sessionId: "session-1" });
+    preload.handlers.get("netcatty:zmodem:detect")?.({}, {
+      sessionId: "session-1",
+    });
+    preload.handlers.get("netcatty:zmodem:overwrite-request")?.({}, {
+      sessionId: "session-1",
+      requestId: "r1",
+      filename: "f",
+    });
+
+    assert.deepEqual(zmodemEvents, ["detect"]);
+    assert.deepEqual(overwriteRequests, ["r1"]);
+  } finally {
+    preload.cleanup();
+  }
+});
+
+test("onWindowFocusRequested is wired to the focus-requested IPC", () => {
+  const preload = loadPreloadWithFakeElectron();
+  try {
+    const calls = [];
+    const unsubscribe = preload.api.onWindowFocusRequested(() => {
+      calls.push("focus");
+    });
+
+    preload.handlers.get("netcatty:window:focus-requested")?.();
+
+    assert.deepEqual(calls, ["focus"]);
+
+    unsubscribe();
+    preload.handlers.get("netcatty:window:focus-requested")?.();
+
+    assert.deepEqual(calls, ["focus"]);
+  } finally {
+    preload.cleanup();
+  }
+});
+
+test("onZmodemEvent unsubscribe removes empty listener set", () => {
+  const zmodemListeners = new Map();
+  const api = createPreloadApi({
+    ipcRenderer: {
+      invoke() {},
+      send() {},
+      on() {},
+      removeListener() {},
+    },
+    os: {
+      release: () => "10.0.19045",
+    },
+    dataListeners: new Map(),
+    displayDataListeners: new Map(),
+    terminalDataBacklog: createTerminalDataBacklog(),
+    zmodemListeners,
+  });
+
+  const off = api.onZmodemEvent("session-1", () => {});
+  assert.equal(zmodemListeners.has("session-1"), true);
+
+  off();
+
+  assert.equal(zmodemListeners.has("session-1"), false);
 });
 
 test("onSessionExit unsubscribe removes empty listener set", () => {
@@ -627,6 +872,12 @@ test("closeSession clears terminal data state and marks the session closed", () 
   const telnetEchoModeListeners = new Map([
     ["session-1", new Set([listener])],
   ]);
+  const zmodemListeners = new Map([
+    ["session-1", new Set([listener])],
+  ]);
+  const zmodemOverwriteListeners = new Map([
+    ["session-1", new Set([listener])],
+  ]);
   const sent = [];
   const closedPorts = [];
   terminalDataBacklog.append("session-1", "pending");
@@ -648,6 +899,8 @@ test("closeSession clears terminal data state and marks the session closed", () 
     terminalDataBacklog,
     closedTerminalDataSessions,
     telnetEchoModeListeners,
+    zmodemListeners,
+    zmodemOverwriteListeners,
     terminalOutputPorts: {
       closeSession(sessionId) {
         closedPorts.push(sessionId);
@@ -662,6 +915,10 @@ test("closeSession clears terminal data state and marks the session closed", () 
   assert.equal(terminalDataBacklog.take("session-1"), "");
   assert.equal(closedTerminalDataSessions.has("session-1"), true);
   assert.equal(telnetEchoModeListeners.has("session-1"), false);
+  // Zmodem listeners are preserved: reconnect closes the session without
+  // unmounting the subscriber, so cleanup is left to subscriber dispose.
+  assert.equal(zmodemListeners.has("session-1"), true);
+  assert.equal(zmodemOverwriteListeners.has("session-1"), true);
   assert.deepEqual(closedPorts, ["session-1"]);
   assert.deepEqual(sent, [
     { channel: "netcatty:close", payload: { sessionId: "session-1" } },

@@ -11,12 +11,21 @@ import {
   syncPromptLineBreakState,
 } from "./promptLineBreak";
 import { createOutputFlowController, type OutputFlowController } from "./outputFlowController";
-import type { TerminalSessionStartersContext } from "./createTerminalSessionStarters.types";
+import type {
+  TerminalSessionDataMeta,
+  TerminalSessionStartersContext,
+} from "./createTerminalSessionStarters.types";
 import { clearConnectionToken } from "./terminalDistroDetection";
 import {
   resetTerminalLineTimestamps,
+  type TerminalLineTimestampPerfStep,
   writeTerminalDataWithLineTimestamps,
 } from "./terminalLineTimestamps";
+import {
+  createTerminalOutputPerfTrace,
+  logTerminalOutputPerf,
+  type TerminalOutputPerfTrace,
+} from "./terminalPerformanceDiagnostics";
 import {
   noteTerminalOutputPressureData,
   resetTerminalOutputPressure,
@@ -34,6 +43,7 @@ import {
   flushTerminalWriteCoalescer,
   resolveFloodCoalescerByteCap,
   setTerminalWriteCoalescerByteCapResolver,
+  setTerminalWriteCoalescerFlushGate,
 } from "./terminalWriteCoalescer";
 import {
   accumulateDeferredTerminalWriteAck,
@@ -55,6 +65,7 @@ import {
 } from "./terminalFlowAckBuffer";
 import {
   enqueueTerminalWrite,
+  flushTerminalWriteQueueBypassingTimers,
   isTerminalWriteQueueInFloodMode,
   setTerminalWriteQueueDropHandler,
 } from "./terminalWriteQueue";
@@ -64,8 +75,11 @@ import {
   teardownTerminalOutputPipeline,
 } from "./terminalOutputPipeline";
 import {
+  flushTerminalWriteBufferBypassingTimers,
+  hasPendingTerminalWrites,
   maybeFlushTerminalWriteCoalescerWhenUnfocused,
   scheduleTerminalRepaintWhenUnfocused,
+  shouldFlushTerminalWritesForBackgroundOutput,
 } from "./terminalUnfocusedRepaint";
 
 export { FLOW_HIGH_WATER_MARK, FLOW_LOW_WATER_MARK };
@@ -94,16 +108,188 @@ const handleTerminalOutputAutoScroll = (
   }
 
   if (ctx.isVisibleRef?.current === false) {
-    if (ctx.pendingOutputScrollRef) {
-      ctx.pendingOutputScrollRef.current = true;
-    }
+    notePendingOutputScrollIfEnabled(ctx);
     return;
   }
 
   term.scrollToBottom();
 };
 
+export const notePendingOutputScrollIfEnabled = (
+  ctx: TerminalSessionStartersContext,
+): void => {
+  const settings = ctx.terminalSettingsRef?.current ?? ctx.terminalSettings;
+  if (!shouldScrollOnTerminalOutput(settings)) return;
+  if (ctx.pendingOutputScrollRef) {
+    ctx.pendingOutputScrollRef.current = true;
+  }
+};
+
 const terminalFlowControllers = new WeakMap<XTerm, OutputFlowController>();
+
+type TerminalSessionWriteOptions = CoalescedTerminalWriteOptions & {
+  flushXtermWriteBuffer?: boolean;
+  perfTrace?: TerminalOutputPerfTrace | null;
+};
+
+const BACKGROUND_OUTPUT_FLUSH_MAX_PASSES = 64;
+const LARGE_WRITE_FLUSH_WATCHDOG_BYTES = 64 * 1024;
+const LARGE_WRITE_FLUSH_WATCHDOG_MS = 250;
+const VISIBLE_WRITE_IDLE_FLUSH_MS = 64;
+const HIDDEN_PANE_DRAIN_MS = 160;
+const visibleWriteIdleFlushTimers = new WeakMap<XTerm, ReturnType<typeof setTimeout>>();
+const hiddenPaneDrainTimers = new WeakMap<XTerm, ReturnType<typeof setTimeout>>();
+
+type LineTimestampPerfTotals = {
+  segmentCalls: number;
+  segmentMs: number;
+  dataSegments: number;
+  timestampSegments: number;
+  batchedWrites: number;
+  segmentedWrites: number;
+  fallbackWrites: number;
+  writeCalls: number;
+  timestamps: number;
+  measureMs: number;
+  markerMs: number;
+  xtermWriteCallbackMs: number;
+  parsedChars: number;
+  measuredRows: number;
+};
+
+const createLineTimestampPerfTotals = (): LineTimestampPerfTotals => ({
+  segmentCalls: 0,
+  segmentMs: 0,
+  dataSegments: 0,
+  timestampSegments: 0,
+  batchedWrites: 0,
+  segmentedWrites: 0,
+  fallbackWrites: 0,
+  writeCalls: 0,
+  timestamps: 0,
+  measureMs: 0,
+  markerMs: 0,
+  xtermWriteCallbackMs: 0,
+  parsedChars: 0,
+  measuredRows: 0,
+});
+
+const roundMs = (value: number): number => Number(value.toFixed(1));
+
+const recordLineTimestampPerfStep = (
+  totals: LineTimestampPerfTotals,
+  step: TerminalLineTimestampPerfStep,
+): void => {
+  if (step.kind === "segment") {
+    totals.segmentCalls += 1;
+    totals.segmentMs += step.durationMs;
+    totals.dataSegments += step.dataSegmentCount;
+    totals.timestampSegments += step.timestampSegmentCount;
+    totals.parsedChars += step.parsedChars;
+    return;
+  }
+  if (step.kind === "batched-write") {
+    totals.batchedWrites += 1;
+    totals.writeCalls += 1;
+    totals.timestamps += step.timestamps;
+    totals.measureMs += step.measureMs;
+    totals.markerMs += step.markerMs;
+    totals.xtermWriteCallbackMs += step.writeCallbackMs;
+    totals.measuredRows += step.rowOffset;
+    return;
+  }
+  if (step.kind === "segmented-write") {
+    totals.segmentedWrites += 1;
+    totals.writeCalls += step.writeCalls;
+    totals.timestamps += step.timestamps;
+    totals.xtermWriteCallbackMs += step.writeCallbackMs;
+    return;
+  }
+  totals.fallbackWrites += 1;
+  totals.writeCalls += 1;
+  totals.xtermWriteCallbackMs += step.writeCallbackMs;
+};
+
+const summarizeLineTimestampPerf = (totals: LineTimestampPerfTotals) => ({
+  segmentCalls: totals.segmentCalls,
+  segmentMs: roundMs(totals.segmentMs),
+  dataSegments: totals.dataSegments,
+  timestampSegments: totals.timestampSegments,
+  batchedWrites: totals.batchedWrites,
+  segmentedWrites: totals.segmentedWrites,
+  fallbackWrites: totals.fallbackWrites,
+  writeCalls: totals.writeCalls,
+  timestamps: totals.timestamps,
+  measureMs: roundMs(totals.measureMs),
+  markerMs: roundMs(totals.markerMs),
+  xtermWriteCallbackMs: roundMs(totals.xtermWriteCallbackMs),
+  parsedChars: totals.parsedChars,
+  measuredRows: totals.measuredRows,
+});
+
+const flushTerminalWritesForBackgroundOutput = (term: XTerm): void => {
+  flushTerminalWriteBufferBypassingTimers(term);
+  for (let pass = 0; pass < BACKGROUND_OUTPUT_FLUSH_MAX_PASSES; pass += 1) {
+    if (!flushTerminalWriteQueueBypassingTimers(term)) {
+      return;
+    }
+    flushTerminalWriteBufferBypassingTimers(term);
+  }
+};
+
+const cancelHiddenPaneDrain = (term: XTerm): void => {
+  const timer = hiddenPaneDrainTimers.get(term);
+  if (timer === undefined) return;
+  clearTimeout(timer);
+  hiddenPaneDrainTimers.delete(term);
+};
+
+function flushHiddenPaneWritesNow(term: XTerm, isPaneVisible: () => boolean): void {
+  if (isPaneVisible()) return;
+  flushTerminalWriteCoalescer(term);
+  flushTerminalWritesForBackgroundOutput(term);
+  if (!isPaneVisible() && hasPendingTerminalWrites(term)) {
+    scheduleHiddenPaneDrain(term, isPaneVisible);
+  }
+}
+
+function scheduleHiddenPaneDrain(term: XTerm, isPaneVisible: () => boolean): void {
+  if (isPaneVisible()) return;
+  if (hiddenPaneDrainTimers.has(term)) return;
+
+  const timer = setTimeout(() => {
+    hiddenPaneDrainTimers.delete(term);
+    flushHiddenPaneWritesNow(term, isPaneVisible);
+  }, HIDDEN_PANE_DRAIN_MS);
+  if (typeof timer === "object" && "unref" in timer && typeof timer.unref === "function") {
+    timer.unref();
+  }
+  hiddenPaneDrainTimers.set(term, timer);
+}
+
+const scheduleVisibleTerminalWriteIdleFlush = (term: XTerm, isPaneVisible: () => boolean): void => {
+  if (!isPaneVisible()) return;
+  const existingTimer = visibleWriteIdleFlushTimers.get(term);
+  if (existingTimer !== undefined) {
+    clearTimeout(existingTimer);
+  }
+
+  const timer = setTimeout(() => {
+    visibleWriteIdleFlushTimers.delete(term);
+    if (!isPaneVisible()) {
+      flushHiddenPaneWritesNow(term, isPaneVisible);
+      return;
+    }
+    flushTerminalWriteCoalescer(term);
+    flushTerminalWriteBufferBypassingTimers(term);
+    flushTerminalWriteQueueBypassingTimers(term);
+    flushTerminalWriteBufferBypassingTimers(term);
+  }, VISIBLE_WRITE_IDLE_FLUSH_MS);
+  if (typeof timer === "object" && "unref" in timer && typeof timer.unref === "function") {
+    timer.unref();
+  }
+  visibleWriteIdleFlushTimers.set(term, timer);
+};
 
 export const getFlowControllerForTerm = (term: XTerm): OutputFlowController | undefined =>
   terminalFlowControllers.get(term);
@@ -127,12 +313,6 @@ export const getFlowController = (
       },
     });
     terminalFlowControllers.set(term, controller);
-    setTerminalWriteCoalescerByteCapResolver(term, () => (
-      resolveFloodCoalescerByteCap(
-        controller!.isPaused(),
-        isTerminalWriteQueueInFloodMode(term),
-      )
-    ));
     setTerminalWriteQueueDropHandler(term, (bytes) => {
       if (bytes <= 0) return;
       controller?.written(bytes);
@@ -143,6 +323,13 @@ export const getFlowController = (
       }
     });
   }
+  setTerminalWriteCoalescerByteCapResolver(term, () => (
+    resolveFloodCoalescerByteCap(
+      controller!.isPaused(),
+      isTerminalWriteQueueInFloodMode(term),
+    )
+  ));
+  setTerminalWriteCoalescerFlushGate(term, () => ctx.isVisibleRef?.current !== false);
   return controller;
 };
 
@@ -178,17 +365,54 @@ export const writeSessionData = (
   term: XTerm,
   data: string,
   ingressBytes: number = data.length,
+  meta?: TerminalSessionDataMeta,
 ) => {
   const flow = getFlowController(ctx, term);
+  const isPaneCurrentlyVisible = () => ctx.isVisibleRef?.current !== false;
+  const isPaneVisible = isPaneCurrentlyVisible();
+  const perfTrace = createTerminalOutputPerfTrace({
+    sessionId: ctx.sessionRef.current ?? ctx.sessionId,
+    data,
+    ingressBytes,
+    meta,
+  });
+  logTerminalOutputPerf("renderer-receive", perfTrace, {
+    visible: isPaneVisible,
+  });
   flow.received(ingressBytes);
-  setTerminalOutputPressureVisibility(term, ctx.isVisibleRef?.current !== false);
+  setTerminalOutputPressureVisibility(term, isPaneVisible);
   noteTerminalOutputPressureData(term, data);
+  if (shouldFlushTerminalWritesForBackgroundOutput(isPaneVisible)) {
+    const writeBackgroundOutputData = (
+      batch: string,
+      batchIngress: number,
+      writeOptions?: CoalescedTerminalWriteOptions,
+    ): void => {
+      writeSessionDataImmediate(ctx, term, batch, batchIngress, {
+        ...writeOptions,
+        flushXtermWriteBuffer: true,
+        perfTrace: writeOptions?.preservePerfTrace === false ? null : perfTrace,
+      });
+      flushTerminalWritesForBackgroundOutput(term);
+    };
+    flushTerminalWriteCoalescer(term, writeBackgroundOutputData);
+    flushTerminalWritesForBackgroundOutput(term);
+    enqueueCoalescedTerminalWrite(term, data, writeBackgroundOutputData, ingressBytes);
+    flushTerminalWriteCoalescer(term, writeBackgroundOutputData);
+    flushTerminalWritesForBackgroundOutput(term);
+    return;
+  }
   enqueueCoalescedTerminalWrite(term, data, (batch, batchIngress, writeOptions) => {
-    writeSessionDataImmediate(ctx, term, batch, batchIngress, writeOptions);
+    writeSessionDataImmediate(ctx, term, batch, batchIngress, {
+      ...writeOptions,
+      perfTrace: writeOptions?.preservePerfTrace === false ? null : perfTrace,
+    });
   }, ingressBytes);
+  scheduleVisibleTerminalWriteIdleFlush(term, isPaneCurrentlyVisible);
+  scheduleHiddenPaneDrain(term, isPaneCurrentlyVisible);
   maybeFlushTerminalWriteCoalescerWhenUnfocused(
     term,
-    ctx.isVisibleRef?.current !== false,
+    isPaneVisible,
   );
 };
 
@@ -197,10 +421,13 @@ const writeSessionDataImmediate = (
   term: XTerm,
   data: string,
   ingressBytes: number = data.length,
-  writeOptions: CoalescedTerminalWriteOptions = {},
+  writeOptions: TerminalSessionWriteOptions = {},
 ) => {
   const flow = getFlowController(ctx, term);
   enqueueTerminalWrite(term, ingressBytes, (done) => {
+    const shouldMeasurePerf = Boolean(writeOptions.perfTrace);
+    const queueItemStartedAt = shouldMeasurePerf ? performance.now() : 0;
+    const prepareStartedAt = shouldMeasurePerf ? performance.now() : 0;
     const settings = ctx.terminalSettingsRef?.current ?? ctx.terminalSettings;
     const filteredData = filterTerminalSessionData(term, data);
     const displayData = appendEraseScrollbackAfterFullErases(filteredData, {
@@ -219,6 +446,7 @@ const writeSessionDataImmediate = (
       ctx.promptLineBreakStateRef?.current,
       forcePromptNewLine,
     );
+    const prepareMs = shouldMeasurePerf ? performance.now() - prepareStartedAt : 0;
     ctx.onTerminalLogData?.(pasteDisplayData);
     const clearPasteResidualAndCapture = () => {
       const cleanupData = clearPasteResidualAfterTerminalWrite(term);
@@ -238,6 +466,8 @@ const writeSessionDataImmediate = (
         handleTerminalOutputAutoScroll(ctx, term);
       }
       if (ctx.isVisibleRef?.current !== false) {
+        // Unfocused-but-visible windows have no rAF-driven render; this
+        // debounced sync repaint is the only path that updates pixels (#1761).
         scheduleTerminalRepaintWhenUnfocused(term);
       }
       done();
@@ -254,7 +484,8 @@ const writeSessionDataImmediate = (
       flushIpcAck(clearDeferredTerminalWriteAck(term));
     };
     const deferredBeforeWrite = getDeferredTerminalWriteAckBytes(term);
-    const deferFlowAck = !forcePromptNewLine
+    const deferFlowAck = !writeOptions.flushXtermWriteBuffer
+      && !forcePromptNewLine
       && shouldDeferTerminalWriteCallback(
         preparedDisplayData.length,
         deferredBeforeWrite,
@@ -263,8 +494,60 @@ const writeSessionDataImmediate = (
         XTERM_WRITE_CALLBACK_BATCH_BYTES,
       );
 
+    const writePreparedDisplayData = (callback: () => void): void => {
+      const lineTimestampPerf = shouldMeasurePerf ? createLineTimestampPerfTotals() : null;
+      const writeStartedAt = shouldMeasurePerf ? performance.now() : 0;
+      let completed = false;
+      let watchdog: ReturnType<typeof setTimeout> | undefined;
+      const finishWrite = () => {
+        if (completed) return;
+        completed = true;
+        if (watchdog !== undefined) {
+          clearTimeout(watchdog);
+          watchdog = undefined;
+        }
+        if (shouldMeasurePerf && lineTimestampPerf) {
+          const now = performance.now();
+          logTerminalOutputPerf("renderer-write-done", writeOptions.perfTrace, {
+            batchChars: data.length,
+            preparedChars: preparedDisplayData.length,
+            ingressBytes,
+            prepareMs: roundMs(prepareMs),
+            writeMs: roundMs(now - writeStartedAt),
+            totalMs: roundMs(now - queueItemStartedAt),
+            deferredAck: deferFlowAck,
+            lineTimestamps: summarizeLineTimestampPerf(lineTimestampPerf),
+          });
+        }
+        callback();
+      };
+      writeTerminalDataWithLineTimestamps(
+        term,
+        preparedDisplayData,
+        finishWrite,
+        shouldMeasurePerf && lineTimestampPerf
+          ? { onStep: (step) => recordLineTimestampPerfStep(lineTimestampPerf, step) }
+          : undefined,
+      );
+      if (
+        !writeOptions.flushXtermWriteBuffer
+        && !completed
+        && preparedDisplayData.length >= LARGE_WRITE_FLUSH_WATCHDOG_BYTES
+      ) {
+        watchdog = setTimeout(() => {
+          watchdog = undefined;
+          if (!completed) {
+            flushTerminalWriteBufferBypassingTimers(term);
+          }
+        }, LARGE_WRITE_FLUSH_WATCHDOG_MS);
+      }
+      if (writeOptions.flushXtermWriteBuffer) {
+        flushTerminalWriteBufferBypassingTimers(term);
+      }
+    };
+
     if (deferFlowAck) {
-      writeTerminalDataWithLineTimestamps(term, preparedDisplayData, () => {
+      writePreparedDisplayData(() => {
         finishQueueItem();
         flow.written(ingressBytes);
         const deferredTotal = accumulateDeferredTerminalWriteAck(term, ingressBytes);
@@ -279,13 +562,13 @@ const writeSessionDataImmediate = (
 
     const deferredBeforeCallback = clearDeferredTerminalWriteAck(term);
     const ackOnCallback = deferredBeforeCallback + ingressBytes;
-    writeTerminalDataWithLineTimestamps(term, preparedDisplayData, () => {
+    writePreparedDisplayData(() => {
       finishQueueItem();
       flow.written(ingressBytes);
       if (deferredBeforeCallback > 0) {
         flushIpcAck(ackOnCallback);
       } else {
-        commitIpcAck(ackOnCallback);
+        flushIpcAck(ackOnCallback);
       }
     });
   }, {
@@ -335,8 +618,10 @@ export const releaseTerminalFlowBeforeHibernate = (
   options?: { resumeBackend?: boolean },
 ): void => {
   const flow = terminalFlowControllers.get(term);
+  cancelHiddenPaneDrain(term);
   releaseTerminalFlowOutputForTerm(term, backend, sessionId, flow, options);
   setTerminalWriteCoalescerByteCapResolver(term);
+  setTerminalWriteCoalescerFlushGate(term);
   resetDeferredTerminalWriteAck(term);
   terminalFlowControllers.delete(term);
 };
@@ -403,12 +688,16 @@ export const attachSessionToTerminal = (
         data = data.replace(/(?<!\r)\n/g, "\r\n");
       }
       data = sudoAutofill?.handleOutput(data) ?? data;
-      writeSessionData(ctx, term, data, ingressBytes);
+      writeSessionData(ctx, term, data, ingressBytes, meta);
       ctx.onTerminalOutput?.(data, meta);
       if (!ctx.hasConnectedRef.current) {
         ctx.updateStatus("connected");
         opts?.onConnected?.();
         setTimeout(() => {
+          if (ctx.isVisibleRef?.current === false) {
+            notePendingOutputScrollIfEnabled(ctx);
+            return;
+          }
           if (!ctx.fitAddonRef.current) return;
           try {
             ctx.fitAddonRef.current.fit();

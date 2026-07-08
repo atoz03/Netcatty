@@ -64,6 +64,8 @@ export const appendPaneToWorkspaceRoot = (
   sessionId: string,
   direction: SplitDirection = 'vertical',
 ): WorkspaceNode => {
+  if (collectSessionIds(root).includes(sessionId)) return root;
+
   const newPane: WorkspaceNode = { id: crypto.randomUUID(), type: 'pane', sessionId };
 
   if (root.type === 'split' && root.direction === direction) {
@@ -105,6 +107,8 @@ export const insertPaneIntoWorkspace = (
   sessionId: string,
   hint: SplitHint
 ): WorkspaceNode => {
+  if (collectSessionIds(root).includes(sessionId)) return root;
+
   const pane: WorkspaceNode = { id: crypto.randomUUID(), type: 'pane', sessionId };
 
   if (!hint.targetSessionId) {

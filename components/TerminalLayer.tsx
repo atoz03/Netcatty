@@ -65,6 +65,7 @@ import {
 import { ThemeSidePanel } from './terminal/ThemeSidePanel';
 import { focusTerminalSessionInput } from './terminal/focusTerminalSession';
 import { TerminalComposeBar } from './terminal/TerminalComposeBar';
+import { resolveTerminalFontSizeUpdateTarget } from './terminalLayer/terminalFontSizeUpdate';
 import {
   AUTO_RUN_SNIPPET_LINE_DELAY_MS,
   shouldDelayAutoRunSnippetInput,
@@ -418,7 +419,8 @@ const TerminalLayerInner: React.FC<TerminalLayerProps> = ({
 
     if (sidePanelOpenTabsRef.current.has(tabId)) return;
 
-    const autoOpenTarget = resolveTerminalSidePanelAutoOpen({
+    const sessionAutoOpenTarget = session.autoOpenSidePanel === 'sftp' && sftpAvailable ? 'sftp' : null;
+    const autoOpenTarget = sessionAutoOpenTarget ?? resolveTerminalSidePanelAutoOpen({
       enabled: terminalSidePanelAutoOpenRef.current,
       selectedTab: terminalSidePanelAutoOpenTabRef.current,
       sftpAvailable,
@@ -904,24 +906,17 @@ const TerminalLayerInner: React.FC<TerminalLayerProps> = ({
 
   const handleTerminalFontSizeChange = useCallback((sessionId: string, nextFontSize: number) => {
     const session = sessionsRef.current.find((candidate) => candidate.id === sessionId);
-    // Workspace panes keep per-session font size so zooming one split does not
-    // change global defaults or sibling panes (even when they share a host).
-    if (session?.workspaceId) {
-      onUpdateSessionFontSize?.(sessionId, nextFontSize);
-      return;
-    }
-
     const sessionHost = sessionHostsMapRef.current.get(sessionId);
-    if (!sessionHost) return;
-
-    const rawHost = hostMapRef.current.get(sessionHost.id);
-    const usesGlobalFontSize = sessionHost.protocol === 'local' || sessionHost.id?.startsWith('local-') || !rawHost;
-    if (usesGlobalFontSize) {
+    const rawHost = sessionHost ? hostMapRef.current.get(sessionHost.id) : null;
+    const target = resolveTerminalFontSizeUpdateTarget({ session, sessionHost, rawHost });
+    if (target.kind === 'none') return;
+    if (target.kind === 'session') {
+      onUpdateSessionFontSize?.(sessionId, nextFontSize);
+    } else if (target.kind === 'global') {
       onUpdateTerminalFontSize?.(nextFontSize);
-      return;
+    } else {
+      onUpdateHost({ ...target.host, fontSize: nextFontSize, fontSizeOverride: true });
     }
-
-    onUpdateHost({ ...rawHost, fontSize: nextFontSize, fontSizeOverride: true });
   }, [onUpdateHost, onUpdateSessionFontSize, onUpdateTerminalFontSize]);
 
   const validAIScopeTargetIds = useMemo(() => {

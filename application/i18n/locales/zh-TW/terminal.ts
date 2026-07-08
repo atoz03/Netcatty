@@ -20,6 +20,9 @@ export const zhTWTerminalMessages: Messages = {
   'terminal.osc7Setup.sent': '目錄追蹤設定已傳送到終端',
   'terminal.toolbar.timestampsEnable': '顯示時間戳',
   'terminal.toolbar.timestampsDisable': '隱藏時間戳',
+  'terminal.progress.enterReconnectHint': '按 Enter 重新連線',
+  'terminal.progress.autoReconnectScheduled': '連線已斷開，將在 {seconds} 秒後自動重連（第 {attempt} 次）。',
+  'terminal.progress.autoReconnectAttempt': '正在自動重連（第 {attempt} 次）...',
   'terminal.connection.protocol.et': 'EternalTerminal',
   'terminal.et.proxyUnsupported': 'EternalTerminal 目前不支援 Netcatty 的代理設定。請改用 SSH，或移除該主機的代理。',
   'terminal.et.multiJumpUnsupported': 'EternalTerminal 目前在 Netcatty 中最多支援一個跳板機。',
@@ -101,9 +104,12 @@ export const zhTWTerminalMessages: Messages = {
   'settings.sftp.doubleClickBehavior.transfer': '傳輸到另一側',
   'settings.sftp.doubleClickBehavior.openDesc': '使用預設應用程式開啟檔案',
   'settings.sftp.doubleClickBehavior.transferDesc': '將檔案傳輸到另一窗格的使用中主機',
-  'settings.sshDeepLink.title': 'SSH 連結',
-  'settings.sshDeepLink.enable': '用 Netcatty 開啟 ssh:// 連結',
-  'settings.sshDeepLink.enableDesc': '允許 Netcatty 接管來自瀏覽器和其他應用程式的 ssh:// 連結。',
+  'settings.sshDeepLink.title': 'SSH 和 Telnet 連結',
+  'settings.sshDeepLink.enable': '用 Netcatty 開啟 ssh:// 和 telnet:// 連結',
+  'settings.sshDeepLink.enableDesc': '允許 Netcatty 接管來自瀏覽器和其他應用程式的 ssh://、telnet:// 連結。',
+  'settings.jmsDeepLink.title': 'JumpServer 連結',
+  'settings.jmsDeepLink.enable': '處理 jms:// 連結',
+  'settings.jmsDeepLink.enableDesc': '將 Netcatty 註冊為 JumpServer jms:// 用戶端連結的處理程式，可能與官方 JumpServer 用戶端衝突。',
 
   // Settings > SFTP Auto Sync
   'settings.sftp.autoSync': '自動同步到遠端',
@@ -247,9 +253,18 @@ export const zhTWTerminalMessages: Messages = {
   'settings.terminal.behavior.middleClick.menu': '顯示選單',
   'settings.terminal.behavior.middleClick.paste': '貼上',
   'settings.terminal.behavior.middleClick.disabled': '無動作',
+  'settings.terminal.behavior.wordSeparators': '單字分隔符',
+  'settings.terminal.behavior.wordSeparators.desc':
+    '雙擊選取文字時作為邊界的字元。空格也算；可加入 =、逗號或 :，方便選取 uid=name 裡的部分內容。',
   'settings.terminal.behavior.bracketedPaste': '括號貼上模式',
   'settings.terminal.behavior.bracketedPaste.desc':
     '貼上文字時使用轉義序列包裹，以便終端區分貼上和鍵入。如果出現 ^[[200~ 字樣請關閉此選項。',
+  'settings.terminal.behavior.shiftEnterNewline': 'Shift+Enter 傳送文字',
+  'settings.terminal.behavior.shiftEnterNewline.desc':
+    '在終端中按 Shift+Enter 時傳送設定的文字，而不是普通 Enter。',
+  'settings.terminal.behavior.shiftEnterNewlineText': '傳送內容',
+  'settings.terminal.behavior.shiftEnterNewlineText.desc':
+    '使用 \\n 表示換行，\\t 表示 Tab，\\\\ 表示反斜線。',
   'settings.terminal.behavior.clearWipesScrollback': '`clear` 同時清空捲動緩衝',
   'settings.terminal.behavior.clearWipesScrollback.desc':
     '`clear` 指令同時清空捲動緩衝（POSIX 預設行為）。關閉則保留歷史。',
@@ -332,6 +347,8 @@ export const zhTWTerminalMessages: Messages = {
   'settings.terminal.localShell.startDir.notFound': '目錄不存在',
   'settings.terminal.localShell.startDir.isFile': '路徑是檔案，不是目錄',
   'settings.terminal.section.connection': '連線',
+  'settings.terminal.connection.sshAutoReconnectEnabled': 'SSH 斷線後自動重連',
+  'settings.terminal.connection.sshAutoReconnectEnabled.desc': '開啟後，已連上的 SSH 工作階段意外斷開時會每 5 秒嘗試重新連線，直到關閉標籤頁或連線恢復。',
   'settings.terminal.connection.keepaliveInterval': '工作階段保持間隔',
   'settings.terminal.connection.keepaliveInterval.desc': '向伺服器傳送 SSH 保活資料包的頻率（秒）。設為 0 表示全域停用——單個主機可在自己的設定裡覆蓋此值。',
   'settings.terminal.connection.keepaliveCountMax': '最大無響應保活次數',

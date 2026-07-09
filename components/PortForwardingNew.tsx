@@ -31,6 +31,14 @@ import {
   AsidePanelFooter,
 } from "./ui/aside-panel";
 import { Button } from "./ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "./ui/dialog";
 import { Dropdown, DropdownContent, DropdownTrigger } from "./ui/dropdown";
 import { SortDropdown } from "./ui/sort-dropdown";
 import { toast } from "./ui/toast";

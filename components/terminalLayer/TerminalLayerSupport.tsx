@@ -977,10 +977,9 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   const paneElementRef = useRef<HTMLDivElement | null>(null);
   const lastVisiblePaneSizeRef = useRef<TerminalPaneHiddenSize | null>(null);
 
-  // Publish visibility to the per-session store so TerminalServerStats /
-  // TerminalAutocomplete can self-subscribe — keeping isVisible out of the
-  // TerminalView ctx so visibility toggles don't re-render TerminalView.
-  useEffect(() => {
+  // Publish visibility before paint so hibernate / write-path readers see the
+  // new value in the same frame as the CSS hide/show (#1985).
+  useLayoutEffect(() => {
     setPaneVisible(session.id, isVisible);
   }, [session.id, isVisible]);
   useEffect(() => () => removePaneVisible(session.id), [session.id]);

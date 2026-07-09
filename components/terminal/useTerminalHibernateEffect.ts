@@ -148,23 +148,10 @@ export function useTerminalHibernateEffect({
       });
     };
 
-    if (!hibernateEnabled) {
-      clearHibernateTimer();
-      if (hibernatedRef.current || softHiddenRef.current) {
-        tryWake();
-      }
-      const unsubscribeDisabled = subscribePaneVisible(sessionId, () => {
-        if ((hibernatedRef.current || softHiddenRef.current) && resolveVisible()) {
-          tryWake();
-        }
-      });
-      return () => {
-        unsubscribeDisabled();
-      };
-    }
-
     const applyVisibility = (visible: boolean) => {
       paneVisibleRef.current = visible;
+      // Keep the write/recovery ref current even when Terminal memo used to skip
+      // isVisible-only updates, and even when hibernate itself is disabled.
       isVisibleRef.current = visible;
 
       if (visible) {
@@ -174,7 +161,9 @@ export function useTerminalHibernateEffect({
         return;
       }
 
-      scheduleHibernate();
+      if (hibernateEnabled) {
+        scheduleHibernate();
+      }
     };
 
     applyVisibility(resolveVisible());

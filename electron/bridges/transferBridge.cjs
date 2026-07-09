@@ -10,6 +10,42 @@ const { encodePathForSession, ensureRemoteDirForSession, requireSftpChannel, res
 const { TRANSFER_CHUNK_SIZE, TRANSFER_CONCURRENCY } = require("./transferLimits.cjs");
 
 /**
+ * Verify a completed remote upload matches the expected byte count.
+ * Without this check, fastPut/stream uploads can report success while leaving
+ * a truncated file on servers that mishandle large WRITE packets (#2022).
+ */
+async function assertRemoteUploadSize(client, remotePath, expectedSize) {
+  if (!Number.isFinite(expectedSize) || expectedSize < 0) return;
+  if (!client || typeof client.stat !== "function") return;
+
+  let attrs;
+  try {
+    attrs = await client.stat(remotePath);
+  } catch (err) {
+    throw new Error(
+      `Upload completed but remote file could not be verified (${remotePath}): ${err.message || String(err)}`,
+    );
+  }
+
+  const remoteSize = Number(attrs?.size);
+  if (!Number.isFinite(remoteSize)) {
+    throw new Error(`Upload completed but remote file size is unavailable (${remotePath})`);
+  }
+  if (remoteSize !== expectedSize) {
+    try {
+      if (typeof client.delete === "function") {
+        await client.delete(remotePath);
+      }
+    } catch {
+      // Best-effort cleanup of the corrupt remote file.
+    }
+    throw new Error(
+      `Upload size mismatch for ${remotePath}: expected ${expectedSize} bytes, got ${remoteSize}`,
+    );
+  }
+}
+
+/**
  * Safely ensure a local directory exists.
  * On Windows, `mkdir("E:\\", { recursive: true })` throws EPERM for drive roots.
  * We catch that and verify the directory already exists before re-throwing.
@@ -305,7 +341,7 @@ async function uploadFile(localPath, remotePath, client, fileSize, transfer, sen
     }
 
     if (fastSftp && typeof fastSftp.fastPut === "function") {
-      return new Promise((resolve, reject) => {
+      await new Promise((resolve, reject) => {
         let settled = false;
         let onFastSftpError = null;
         const finish = (err) => {
@@ -348,6 +384,8 @@ async function uploadFile(localPath, remotePath, client, fileSize, transfer, sen
           },
         }, finish);
       });
+      await assertRemoteUploadSize(client, remotePath, fileSize);
+      return;
     }
 
     if (fastSftp && typeof fastSftp.end === "function") {
@@ -355,19 +393,23 @@ async function uploadFile(localPath, remotePath, client, fileSize, transfer, sen
     }
   }
 
-  // Fallback: sequential stream piping
-  return new Promise((resolve, reject) => {
+  // Fallback: sequential stream piping.
+  // Require both 'finish' (bytes flushed) and 'close' (remote handle closed).
+  // Resolving on finish alone can miss close-time server errors (quota/disk full);
+  // resolving on close alone can treat a premature destroy as success (#2022).
+  await new Promise((resolve, reject) => {
     const readStream = fs.createReadStream(localPath, { highWaterMark: TRANSFER_CHUNK_SIZE });
     const writeStream = sftp.createWriteStream(remotePath, { highWaterMark: TRANSFER_CHUNK_SIZE });
     let transferred = 0;
-    let finished = false;
+    let settled = false;
+    let sawFinish = false;
 
     transfer.readStream = readStream;
     transfer.writeStream = writeStream;
 
     const cleanup = (err) => {
-      if (finished) return;
-      finished = true;
+      if (settled) return;
+      settled = true;
       readStream.removeAllListeners();
       writeStream.removeAllListeners();
       if (err) {
@@ -386,12 +428,27 @@ async function uploadFile(localPath, remotePath, client, fileSize, transfer, sen
     });
     readStream.on('error', cleanup);
     writeStream.on('error', cleanup);
+    writeStream.on('finish', () => {
+      if (transfer.cancelled) {
+        cleanup(new Error('Transfer cancelled'));
+        return;
+      }
+      sawFinish = true;
+    });
     writeStream.on('close', () => {
-      if (transfer.cancelled) cleanup(new Error('Transfer cancelled'));
-      else cleanup(null);
+      if (transfer.cancelled) {
+        cleanup(new Error('Transfer cancelled'));
+        return;
+      }
+      if (!sawFinish) {
+        cleanup(new Error('Upload stream closed before finish'));
+        return;
+      }
+      cleanup(null);
     });
     readStream.pipe(writeStream);
   });
+  await assertRemoteUploadSize(client, remotePath, fileSize);
 }
 
 /**

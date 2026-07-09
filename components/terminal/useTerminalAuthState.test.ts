@@ -4,7 +4,10 @@ import test from "node:test";
 import { applyGroupDefaults } from "../../domain/groupConfig";
 import { resolveHostAuth } from "../../domain/sshAuth";
 import type { Host, Identity } from "../../types";
-import { buildSavedAuthHostUpdate } from "./hooks/useTerminalAuthState";
+import {
+  buildSavedAuthHostUpdate,
+  isAuthPasswordProvided,
+} from "./hooks/useTerminalAuthState";
 
 const baseHost: Host = {
   id: "host-1",
@@ -18,6 +21,13 @@ const baseHost: Host = {
   tags: [],
   os: "linux",
 };
+
+test("isAuthPasswordProvided accepts whitespace-only passwords (#2036)", () => {
+  assert.equal(isAuthPasswordProvided(""), false);
+  assert.equal(isAuthPasswordProvided(" "), true);
+  assert.equal(isAuthPasswordProvided("  "), true);
+  assert.equal(isAuthPasswordProvided("secret"), true);
+});
 
 test("password save clears identityId and identityFileId", () => {
   const updated = buildSavedAuthHostUpdate(baseHost, {
@@ -33,6 +43,18 @@ test("password save clears identityId and identityFileId", () => {
   assert.equal(updated.savePassword, true);
   assert.equal(updated.authMethod, "password");
   assert.equal(updated.username, "root");
+});
+
+test("password save preserves a single-space password (#2036)", () => {
+  const updated = buildSavedAuthHostUpdate(baseHost, {
+    authMethod: "password",
+    username: "root",
+    password: " ",
+    keyId: null,
+  });
+
+  assert.equal(updated.password, " ");
+  assert.equal(updated.savePassword, true);
 });
 
 test("key save clears identityId and sets identityFileId", () => {

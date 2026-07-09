@@ -188,7 +188,8 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
         return true;
       case "auth":
         if (authMethod === "password") {
-          return password.trim().length > 0;
+          // Whitespace-only passwords are valid SSH secrets (issue #2036).
+          return password.length > 0;
         }
         return !!selectedKeyId;
     }
@@ -434,7 +435,7 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
               className="pr-10"
               autoFocus
               onKeyDown={(e) => {
-                if (e.key === "Enter" && password.trim()) {
+                if (e.key === "Enter" && password.length > 0) {
                   handleConnect();
                 }
               }}

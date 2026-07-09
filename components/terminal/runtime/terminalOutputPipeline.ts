@@ -46,6 +46,7 @@ export type TerminalInterruptDisplayFilterReason =
   | "interrupt-echo"
   | "prompt-candidate"
   | "prompt-gap"
+  | "password-prompt"
   | "quiet-gap"
   | "max-drain";
 
@@ -171,6 +172,10 @@ const PRIVATE_MODE_PATTERN = new RegExp(`^${ANSI_ESCAPE}\\[\\?([0-9;:]*)([hl])$`
 const TRAILING_RESTORE_CONTROL_PREFIX_PATTERN = new RegExp(
   `^${ANSI_ESCAPE}\\[\\?[0-9;:]*$`,
 );
+// Incomplete CSI (params/intermediates, no final byte) — e.g. ESC[0 or ESC[31
+const TRAILING_CSI_CONTROL_PREFIX_PATTERN = new RegExp(
+  `^${ANSI_ESCAPE}\\[[0-?]*[ -/]*$`,
+);
 
 const getPrivateModeParams = (raw: string): { params: number[]; final: "h" | "l" } | null => {
   const match = PRIVATE_MODE_PATTERN.exec(raw);
@@ -198,7 +203,9 @@ const getTrailingRestoreControlPrefix = (text: string): string => {
   if (escapeIndex < 0) return "";
   const suffix = text.slice(escapeIndex);
   if (suffix === ANSI_ESCAPE) return suffix;
-  if (suffix === `${ANSI_ESCAPE}[`) return suffix;
+  // Hold any incomplete CSI (ESC[ / ESC[0 / ESC[31 / ESC[?1049), not only
+  // private-mode restore prefixes — styled password prompts can split mid-SGR.
+  if (TRAILING_CSI_CONTROL_PREFIX_PATTERN.test(suffix)) return suffix;
   if (
     suffix.startsWith(`${ANSI_ESCAPE}[?`)
     && TRAILING_RESTORE_CONTROL_PREFIX_PATTERN.test(suffix)
@@ -268,6 +275,11 @@ const finalizeAcceptedTextAfterPendingDisplayControl = (
   if (oscMatch?.index === 0 && oscMatch[0].length > pending.length) {
     return { data: combined, droppedBytes: 0 };
   }
+  // Held password-prompt prefixes (plain or SGR-styled). Keep them when
+  // quiet/max-drain resumes so a split "Pass"+"word: " is not lost.
+  if (isProbablePasswordPromptPrefix(pending)) {
+    return { data: combined, droppedBytes: 0 };
+  }
   return { data: text, droppedBytes: charLength(pending) };
 };
 
@@ -278,6 +290,304 @@ export const shouldArmTerminalInterruptDisplayGateForProtocol = (
   return normalized === "ssh";
 };
 
+const isCompletePasswordPrompt = (candidate: string): boolean => {
+  const trimmed = candidate.trimEnd();
+  if (!trimmed) return false;
+  // Align with terminalSudoAutofill's Kylin coverage (#1293): prompts may end
+  // with 密码/口令 and no colon (e.g. "用户 的密码"). Still require a password
+  // keyword so ordinary lines like "Password authentication failed" stay out.
+  return (
+    /(?:\bpassword\b|密\s*码|口\s*令)/i.test(trimmed)
+    && (
+      /[:：]\s*$/.test(trimmed)
+      || /\[sudo/i.test(trimmed)
+      || /(?:密\s*码|口\s*令)\s*$/.test(trimmed)
+      || /^input\s+password\s*$/i.test(trimmed)
+      || /^password\s*$/i.test(trimmed)
+    )
+  );
+};
+
+const isProbablePasswordPromptPrefix = (candidate: string): boolean => {
+  // Strip SGR/OSC for matching so styled chunks like "\x1b[31mPass" still hold,
+  // while callers keep the raw pending bytes for display.
+  let trimmed = stripAnsi(candidate).trimEnd();
+  // Incomplete CSI/OSC left after stripAnsi (e.g. trailing "\x1b[") must not
+  // prevent matching a held password prefix.
+  const trailingControl = getTrailingDisplayControlPrefix(trimmed);
+  if (trailingControl) {
+    trimmed = trimmed.slice(0, -trailingControl.length).trimEnd();
+  }
+  if (!trimmed || trimmed.length > 160) return false;
+  if (/[\r\n]/.test(trimmed)) return false;
+  if (isCompletePasswordPrompt(trimmed)) return false;
+
+  const lower = trimmed.toLowerCase();
+  const prefixTargets = [
+    "password",
+    "password:",
+    "password：",
+    "[sudo",
+    "密码",
+    "密码：",
+    "口令",
+    "口令：",
+    "输入密码",
+    "输入密码：",
+    "input password",
+    "input password:",
+  ];
+  if (prefixTargets.some((target) => target.startsWith(lower))) return true;
+
+  // Allow an unfinished "[sudo…]" tag, or "[sudo…] " + a password-word prefix.
+  const sudoTag = trimmed.match(/^\[sudo[^\]]*\]?\s*/i);
+  if (sudoTag) {
+    const remainder = trimmed.slice(sudoTag[0].length);
+    if (!remainder) {
+      if (/^\[sudo(?:[^\]]*)\]?\s*$/i.test(trimmed)) return true;
+    } else {
+      const remLower = remainder.toLowerCase();
+      const remTargets = [
+        "password",
+        "password:",
+        "password：",
+        "密码",
+        "密码：",
+        "口令",
+        "口令：",
+        "输入密码",
+        "输入密码：",
+        "input password",
+        "input password:",
+      ];
+      if (remTargets.some((target) => target.startsWith(remLower))) return true;
+    }
+  }
+
+  // Prompts with leading text split mid-keyword, e.g. `alice@host's pass` +
+  // `word:` or `用户 的密` + `码`. Hold when a trailing suffix is a real
+  // password-keyword prefix at a word boundary.
+  return hasTrailingPasswordKeywordPrefix(trimmed);
+};
+
+const hasTrailingPasswordKeywordPrefix = (trimmed: string): boolean => {
+  const lower = trimmed.toLowerCase();
+  const keywordTargets = [
+    "password",
+    "password:",
+    "password：",
+    "密码",
+    "密码：",
+    "口令",
+    "口令：",
+    "输入密码",
+    "输入密码：",
+    "input password",
+    "input password:",
+  ];
+
+  for (const target of keywordTargets) {
+    const maxLen = Math.min(lower.length, target.length);
+    // ASCII keywords: require >= 3 chars ("pas"/"pass") so lone "p"/"pa" mid-line
+    // noise is not held. CJK keywords can match a single character ("密").
+    // Ignore punctuation (incl. full-width ：) so "password：" stays ASCII minLen.
+    const keywordBody = target.replace(/[:：\s]/g, "");
+    let isAsciiKeyword = true;
+    for (let i = 0; i < keywordBody.length; i += 1) {
+      if (keywordBody.charCodeAt(i) > 0x7f) {
+        isAsciiKeyword = false;
+        break;
+      }
+    }
+    const minLen = isAsciiKeyword ? 3 : 1;
+    for (let len = maxLen; len >= minLen; len -= 1) {
+      const suffix = lower.slice(-len);
+      if (!target.startsWith(suffix)) continue;
+      const before = lower.slice(0, -len);
+      if (before.length === 0) return true;
+      const prev = before[before.length - 1]!;
+      if (!/[a-z0-9]/i.test(prev)) return true;
+    }
+  }
+  return false;
+};
+
+const getTrailingPasswordPromptPrefix = (text: string): string => {
+  const lastBreak = Math.max(text.lastIndexOf("\n"), text.lastIndexOf("\r"));
+  const trailing = text.slice(lastBreak + 1);
+  if (!trailing) return "";
+  return isProbablePasswordPromptPrefix(trailing) ? trailing : "";
+};
+
+/**
+ * Restore sequences already counted in `preserved` can also sit at the start of
+ * the trailing password-prefix line (e.g. "stale\n\x1b[?1049lPass", or multiple
+ * restores "\x1b[?25hstale\n\x1b[?1049lPass"). Strip only complete leading
+ * restore sequences that are a real suffix of `preserved` — never peel chars
+ * like the final "l" of "\x1b[?1049l" off "login pass".
+ */
+const stripLeadingPreservedOverlap = (
+  passwordPending: string,
+  preserved: string,
+): string => {
+  let pending = passwordPending;
+  let keep = preserved;
+  if (!pending || !keep) return pending;
+  if (pending.startsWith(keep)) return pending.slice(keep.length);
+
+  while (pending && keep) {
+    TERMINAL_STATE_RESTORE_SEQUENCE_PATTERN.lastIndex = 0;
+    const match = TERMINAL_STATE_RESTORE_SEQUENCE_PATTERN.exec(pending);
+    TERMINAL_STATE_RESTORE_SEQUENCE_PATTERN.lastIndex = 0;
+    if (!match || match.index !== 0) break;
+    const seq = match[0];
+    if (!shouldPreserveTerminalStateRestore(seq) || !keep.endsWith(seq)) break;
+    pending = pending.slice(seq.length);
+    keep = keep.slice(0, -seq.length);
+  }
+  return pending;
+};
+
+/**
+ * When discarding a held prefix that ends mid-CSI, also drop the CSI final
+ * byte(s) from the next chunk so "Pass\x1b[0" + "m$ " does not leak as "m$ ".
+ */
+const consumeTrailingCsiCompletion = (
+  pending: string,
+  text: string,
+): { text: string; extraDroppedBytes: number } => {
+  const control = getTrailingDisplayControlPrefix(pending);
+  if (!control || !control.startsWith(`${ANSI_ESCAPE}[`)) {
+    return { text, extraDroppedBytes: 0 };
+  }
+  let i = 0;
+  while (i < text.length) {
+    const code = text.charCodeAt(i);
+    // CSI parameter bytes 0–? and intermediate bytes SP–/
+    if ((code >= 0x30 && code <= 0x3f) || (code >= 0x20 && code <= 0x2f)) {
+      i += 1;
+      continue;
+    }
+    // CSI final byte @–~
+    if (code >= 0x40 && code <= 0x7e) {
+      return { text: text.slice(i + 1), extraDroppedBytes: i + 1 };
+    }
+    break;
+  }
+  return { text, extraDroppedBytes: 0 };
+};
+
+const isStandaloneHoldableControlPrefix = (pending: string): boolean => {
+  if (!pending) return false;
+  if (pending === ANSI_ESCAPE || pending === `${ANSI_ESCAPE}[`) return true;
+  // Incomplete private-mode restore CSI and OSC title prefixes are safe to hold
+  // alone; incomplete SGR CSI (ESC[31) is not — it can leak into "$ ".
+  if (
+    pending.startsWith(`${ANSI_ESCAPE}[?`)
+    && TRAILING_RESTORE_CONTROL_PREFIX_PATTERN.test(pending)
+  ) {
+    return true;
+  }
+  if (pending.startsWith(`${ANSI_ESCAPE}]`)) return true;
+  return false;
+};
+
+const extractDrainHold = (
+  text: string,
+  options: { holdTrailingPartial?: boolean } = {},
+): { preserved: string; pending: string; droppedBytes: number } => {
+  const restoreControls = extractTerminalStateRestoreControls(text, options);
+  if (!options.holdTrailingPartial) {
+    return restoreControls;
+  }
+
+  // A styled prompt can split mid-CSI, e.g. "\x1b[31mPass\x1b[" + "0mword: ".
+  // Keep both the password-prefix body and the trailing control prefix so the
+  // next chunk can still complete "Password:" (#2010 Codex follow-up).
+  const controlPending = restoreControls.pending;
+  const textWithoutControl = controlPending
+    ? text.slice(0, -controlPending.length)
+    : text;
+  let passwordPending = getTrailingPasswordPromptPrefix(textWithoutControl);
+  passwordPending = stripLeadingPreservedOverlap(
+    passwordPending,
+    restoreControls.preserved,
+  );
+  if (!passwordPending || !isProbablePasswordPromptPrefix(passwordPending)) {
+    // Incomplete SGR CSI (ESC[31) must not be held alone — otherwise the next
+    // shell prompt can be accepted as "\x1b[31$ " and leak stale color bytes.
+    // Restore/OSC prefixes stay held as before.
+    if (controlPending && !isStandaloneHoldableControlPrefix(controlPending)) {
+      return {
+        preserved: restoreControls.preserved,
+        pending: "",
+        droppedBytes: Math.max(
+          0,
+          charLength(text) - charLength(restoreControls.preserved),
+        ),
+      };
+    }
+    return restoreControls;
+  }
+
+  const pending = `${passwordPending}${controlPending}`;
+  return {
+    preserved: restoreControls.preserved,
+    pending,
+    droppedBytes: Math.max(
+      0,
+      charLength(text) - charLength(restoreControls.preserved) - charLength(pending),
+    ),
+  };
+};
+
+const isPasswordPrefixPending = (pending: string): boolean =>
+  Boolean(pending) && isProbablePasswordPromptPrefix(pending);
+
+const getLastVisibleLine = (text: string): string => {
+  const normalized = stripAnsi(text).replace(/\r/g, "\n");
+  const lastLineStart = normalized.lastIndexOf("\n") + 1;
+  return normalized.slice(lastLineStart).trimEnd();
+};
+
+/**
+ * A held "Pass" / "[sudo] pass" must only survive when the next chunk continues
+ * or completes a password prompt. Otherwise discard it before the generic
+ * shell-prompt matcher can accept junk like "Pass$ " (#2010 Codex follow-up).
+ */
+const resolveHeldPasswordPrefix = (
+  pending: string,
+  text: string,
+): { pending: string; text: string; droppedPendingBytes: number } => {
+  if (!isPasswordPrefixPending(pending)) {
+    return { pending, text, droppedPendingBytes: 0 };
+  }
+
+  // Held prefixes must continue on the same line. A leading line break means
+  // the next chunk is a fresh line (e.g. "Pass" then "\nPassword: "), not a
+  // completion of the held prefix — discard so quiet-gap still applies.
+  if (/^[\r\n]/.test(text)) {
+    return {
+      pending: "",
+      text,
+      droppedPendingBytes: charLength(pending),
+    };
+  }
+
+  const combined = `${pending}${text}`;
+  const lastLine = getLastVisibleLine(combined);
+  if (isCompletePasswordPrompt(lastLine) || isProbablePasswordPromptPrefix(lastLine)) {
+    return { pending: "", text: combined, droppedPendingBytes: 0 };
+  }
+
+  const consumed = consumeTrailingCsiCompletion(pending, text);
+  return {
+    pending: "",
+    text: consumed.text,
+    droppedPendingBytes: charLength(pending) + consumed.extraDroppedBytes,
+  };
+};
+
 const getPromptCandidateSuffix = (text: string): string | null => {
   const normalized = stripAnsi(text).replace(/\r/g, "\n");
   const lastLineStart = normalized.lastIndexOf("\n") + 1;
@@ -285,8 +595,12 @@ const getPromptCandidateSuffix = (text: string): string | null => {
   if (!candidate) return null;
   if (candidate.length > 160) return null;
 
+  // Password prompts are interactive resume points too. Without this, Ctrl+C
+  // drain treats "[sudo] password for …:" as stale flood and drops it, so the
+  // remote waits for a password while the terminal shows nothing (#2010).
   const looksLikePrompt = (
-    /^[#$>%]\s*$/.test(candidate)
+    isCompletePasswordPrompt(candidate)
+    || /^[#$>%]\s*$/.test(candidate)
     || /^[^ \t\r\n<>]{1,80}[#$>%]\s*$/.test(candidate)
     || /^[^\r\n<>]{1,120}[#$>%]\s*$/.test(candidate)
     || /^<[^>\r\n]{1,80}>\s*$/.test(candidate)
@@ -334,17 +648,37 @@ export const filterTerminalInterruptDisplayOutput = (
   data: string,
   options: Pick<TerminalInputPriorityOptions, "now"> = {},
 ): TerminalInterruptDisplayFilterResult => {
-  const text = String(data || "");
+  const incomingText = String(data || "");
   const gate = readTerminalInterruptDisplayGate(term);
   if (!gate?.active) {
-    return { accepted: true, data: text, droppedBytes: 0, reason: "inactive" };
+    return { accepted: true, data: incomingText, droppedBytes: 0, reason: "inactive" };
   }
 
   const now = nowFromPriorityOptions(options);
-  const pendingDisplayControl = takePendingDisplayControl(gate);
+  const rawPendingDisplayControl = takePendingDisplayControl(gate);
+  const hadHeldPasswordPrefix = isPasswordPrefixPending(rawPendingDisplayControl);
+  const resolvedPasswordPrefix = resolveHeldPasswordPrefix(
+    rawPendingDisplayControl,
+    incomingText,
+  );
+  const prefixDropBytes = resolvedPasswordPrefix.droppedPendingBytes;
+  // Only treat the held prefix as continued when it was merged into this chunk
+  // (not discarded across a line break / non-prompt continuation).
+  const heldPasswordPrefixContinued = (
+    hadHeldPasswordPrefix
+    && prefixDropBytes === 0
+    && resolvedPasswordPrefix.pending === ""
+  );
+  if (prefixDropBytes > 0) {
+    gate.droppedBytes += prefixDropBytes;
+    gate.droppedChunks += 1;
+  }
+  const pendingDisplayControl = resolvedPasswordPrefix.pending;
+  const text = resolvedPasswordPrefix.text;
   const combinedText = `${pendingDisplayControl}${text}`;
   const bytes = charLength(combinedText);
   const quietGapMs = gate.lastDroppedAt > 0 ? now - gate.lastDroppedAt : 0;
+  const withPrefixDrop = (droppedBytes: number): number => droppedBytes + prefixDropBytes;
 
   if (gate.pendingInterruptCaret) {
     gate.pendingInterruptCaret = false;
@@ -357,7 +691,7 @@ export const filterTerminalInterruptDisplayOutput = (
       return {
         accepted: true,
         data: `${restoreControls.preserved}^${text}`,
-        droppedBytes,
+        droppedBytes: withPrefixDrop(droppedBytes),
         acceptedBytes: bytes,
         reason: "interrupt-echo",
       };
@@ -375,9 +709,40 @@ export const filterTerminalInterruptDisplayOutput = (
     return {
       accepted: true,
       data: `${restoreControls.preserved}${combinedText.slice(interruptEchoIndex)}`,
-      droppedBytes,
+      droppedBytes: withPrefixDrop(droppedBytes),
       reason: "interrupt-echo",
     };
+  }
+
+  // Complete password prompts resume immediately — including one-chunk prompts
+  // before promptQuietMs, held-prefix completions, and last-line prompts that
+  // arrive after a large stale prefix. Unlike shell prompts, password prompts
+  // often emit nothing further until the user types; dropping them leaves a
+  // blank terminal while the remote waits (#2010). Detect the last-line
+  // password candidate independently of the whole-chunk promptCandidateBytes
+  // cap used for ordinary shell prompts.
+  {
+    const passwordPromptCandidate = getPromptCandidateSuffix(combinedText);
+    if (
+      passwordPromptCandidate
+      && isCompletePasswordPrompt(stripAnsi(passwordPromptCandidate))
+    ) {
+      const droppedPrefix = combinedText.slice(
+        0,
+        combinedText.length - passwordPromptCandidate.length,
+      );
+      const restoreControls = extractTerminalStateRestoreControls(droppedPrefix);
+      const droppedBytes = restoreControls.droppedBytes;
+      gate.droppedBytes += droppedBytes;
+      gate.droppedChunks += droppedBytes > 0 ? 1 : 0;
+      disarmTerminalInterruptDisplayGate(term);
+      return {
+        accepted: true,
+        data: `${restoreControls.preserved}${passwordPromptCandidate}`,
+        droppedBytes: withPrefixDrop(droppedBytes),
+        reason: heldPasswordPrefixContinued ? "prompt-gap" : "password-prompt",
+      };
+    }
   }
 
   const promptCandidate = bytes <= gate.promptCandidateBytes
@@ -393,7 +758,7 @@ export const filterTerminalInterruptDisplayOutput = (
     return {
       accepted: true,
       data: `${restoreControls.preserved}${promptCandidate}`,
-      droppedBytes,
+      droppedBytes: withPrefixDrop(droppedBytes),
       reason: "prompt-candidate",
     };
   }
@@ -408,7 +773,7 @@ export const filterTerminalInterruptDisplayOutput = (
     return {
       accepted: true,
       data: `${restoreControls.preserved}${promptCandidate}`,
-      droppedBytes,
+      droppedBytes: withPrefixDrop(droppedBytes),
       reason: "prompt-gap",
     };
   }
@@ -421,7 +786,7 @@ export const filterTerminalInterruptDisplayOutput = (
     return {
       accepted: true,
       data: accepted.data,
-      droppedBytes: accepted.droppedBytes,
+      droppedBytes: withPrefixDrop(accepted.droppedBytes),
       reason: "quiet-gap",
     };
   }
@@ -434,12 +799,12 @@ export const filterTerminalInterruptDisplayOutput = (
     return {
       accepted: true,
       data: accepted.data,
-      droppedBytes: accepted.droppedBytes,
+      droppedBytes: withPrefixDrop(accepted.droppedBytes),
       reason: "max-drain",
     };
   }
 
-  const restoreControls = extractTerminalStateRestoreControls(combinedText, {
+  const restoreControls = extractDrainHold(combinedText, {
     holdTrailingPartial: true,
   });
   const droppedBytes = restoreControls.droppedBytes;
@@ -449,9 +814,19 @@ export const filterTerminalInterruptDisplayOutput = (
   gate.droppedBytes += droppedBytes;
   gate.droppedChunks += droppedBytes > 0 ? 1 : 0;
   if (restoreControls.preserved) {
-    return { accepted: true, data: restoreControls.preserved, droppedBytes, reason: "draining" };
+    return {
+      accepted: true,
+      data: restoreControls.preserved,
+      droppedBytes: withPrefixDrop(droppedBytes),
+      reason: "draining",
+    };
   }
-  return { accepted: false, data: "", droppedBytes, reason: "draining" };
+  return {
+    accepted: false,
+    data: "",
+    droppedBytes: withPrefixDrop(droppedBytes),
+    reason: "draining",
+  };
 };
 
 const resolvePrioritizeTerminalInputArgs = (

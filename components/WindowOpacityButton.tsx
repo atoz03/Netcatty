@@ -63,7 +63,7 @@ export const WindowOpacityButton: React.FC<WindowOpacityButtonProps> = ({
               type="range"
               min={50}
               max={100}
-              step={5}
+              step={1}
               value={percent}
               onChange={(e) => setWindowOpacity(Number(e.target.value) / 100)}
               className="flex-1 accent-primary"

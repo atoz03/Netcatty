@@ -1,11 +1,75 @@
 "use strict";
 
+const { shellPromptPatterns } = require("./shellPromptPatterns.cjs");
+
 const DEFAULT_BUFFER_SIZE = 1024 * 1024;
 /** Matches within this many bytes of buffer end count as live terminal output. */
 const FRESH_MATCH_TAIL_SLACK = 512;
 
 function isFreshTailMatch(textLength, matchEndAbsolute) {
   return matchEndAbsolute >= textLength - FRESH_MATCH_TAIL_SLACK;
+}
+
+function stripTrailingBlankLines(text) {
+  return String(text || "").replace(/(?:[ \t]*\r?\n)*$/u, "");
+}
+
+/**
+ * Drop any prefix of trailingFresh that the viewport snapshot already shows.
+ * Handles blank-padded full-viewport snapshots and partial overlaps where the
+ * snapshot captured only the start of the sync-race bytes.
+ *
+ * `syncStartText` is the live buffer at snapshot-request time. When the
+ * viewport still matches that pre-sync content, trailingFresh is genuinely new
+ * even if it happens to equal the visible suffix (e.g. a second READY).
+ */
+function trimOverlappingTrailingFresh(viewportText, trailingFresh, syncStartText = "") {
+  const trailing = String(trailingFresh || "");
+  if (!trailing) return "";
+  const viewport = String(viewportText || "");
+  const viewportCore = stripTrailingBlankLines(viewport);
+  const trailingCore = stripTrailingBlankLines(trailing);
+  const syncCore = stripTrailingBlankLines(syncStartText);
+
+  // Stale snapshot: still showing pre-sync content → keep all trailingFresh.
+  // Exact match covers a second identical marker while the snapshot IPC is in
+  // flight. Proper-suffix match covers scrollback-backed buffers where the
+  // visible viewport is only the tail of syncStartText (e.g. banner\nREADY vs
+  // READY) so equality alone would miss the stale case and trim a real duplicate.
+  if (
+    syncCore
+    && viewportCore
+    && (
+      viewportCore === syncCore
+      || (syncCore.length > viewportCore.length && syncCore.endsWith(viewportCore))
+    )
+  ) {
+    return trailing;
+  }
+
+  if (
+    viewport.endsWith(trailing)
+    || (trailingCore && viewportCore.endsWith(trailingCore))
+  ) {
+    return "";
+  }
+
+  // Partial overlap: prefer the unpadded core so blank-padded snapshots still
+  // trim, then fall back to the full viewport for newline-accurate matches.
+  const candidates = [viewportCore, viewport].filter(Boolean);
+  for (const candidate of candidates) {
+    const max = Math.min(candidate.length, trailing.length);
+    for (let len = max; len > 0; len -= 1) {
+      if (!candidate.endsWith(trailing.slice(0, len))) continue;
+      let remainder = trailing.slice(len);
+      // Avoid turning blank padding + overlapped newline into an extra blank.
+      while (remainder.startsWith("\n") && viewport.endsWith("\n")) {
+        remainder = remainder.slice(1);
+      }
+      return remainder;
+    }
+  }
+  return trailing;
 }
 
 function isRegExpLike(pattern) {
@@ -251,6 +315,8 @@ class SessionOutputBuffer {
     this.scanOffset = 0;
     this.waiters = [];
     this.preservedTailMatch = null;
+    /** @type {number | null} Absolute end of a seeded visible viewport that stays fully waitable. */
+    this.seededLength = null;
   }
 
   append(data) {
@@ -263,6 +329,9 @@ class SessionOutputBuffer {
       const removedLength = removed.length;
       this.totalLength -= removedLength;
       this.scanOffset = Math.max(0, this.scanOffset - removedLength);
+      if (typeof this.seededLength === "number") {
+        this.seededLength = Math.max(0, this.seededLength - removedLength);
+      }
       for (const waiter of this.waiters) {
         if (typeof waiter.freshBoundary === "number") {
           waiter.freshBoundary = Math.max(0, waiter.freshBoundary - removedLength);
@@ -296,7 +365,86 @@ class SessionOutputBuffer {
   }
 
   currentFreshBoundary() {
-    return Math.max(this.scanOffset, this.getText().length - FRESH_MATCH_TAIL_SLACK);
+    const textLength = this.getText().length;
+    const normalBoundary = Math.max(this.scanOffset, textLength - FRESH_MATCH_TAIL_SLACK);
+    if (typeof this.seededLength === "number" && this.scanOffset < this.seededLength) {
+      // Startup viewport rows must all be waitable for waitFor / waitForText /
+      // waitForRegex, even when the visible screen is longer than
+      // FRESH_MATCH_TAIL_SLACK (bastion menus, etc.).
+      return this.scanOffset;
+    }
+    if (typeof this.seededLength === "number" && this.scanOffset >= this.seededLength) {
+      this.seededLength = null;
+    }
+    return normalBoundary;
+  }
+
+  /**
+   * Freshness for waitForPrompt (allowPreservedTailMatch): live tail only, and
+   * never rematch prompts that only exist inside the still-unconsumed seeded
+   * viewport. After live output clears preservedTailMatch, a short seed like
+   * `root# ` must not satisfy waitForPrompt via the normal 512-byte window.
+   * Generic waitForAny uses currentFreshBoundary instead.
+   */
+  currentTailFreshBoundary() {
+    const textLength = this.getText().length;
+    let boundary = Math.max(this.scanOffset, textLength - FRESH_MATCH_TAIL_SLACK);
+    if (typeof this.seededLength === "number") {
+      if (this.scanOffset >= this.seededLength) {
+        this.seededLength = null;
+      } else {
+        boundary = Math.max(boundary, this.seededLength);
+      }
+    }
+    return boundary;
+  }
+
+  /**
+   * Replace buffer contents with the current visible terminal screen.
+   * The entire seeded viewport is treated as fresh for waitFor / waitForText /
+   * waitForRegex / generic waitForAny. waitForPrompt still uses the live tail
+   * window. `trailingFresh` (bytes that arrived during snapshot sync) stays
+   * outside seededLength so consuming a startup prompt does not discard it.
+   */
+  replaceWithVisibleScreen(screenText, trailingFresh = "", syncStartText = "") {
+    const normalized = String(screenText || "").endsWith("\n")
+      ? String(screenText || "")
+      : `${String(screenText || "")}\n`;
+    // Snapshot and live taps can both observe the same suffix. Full-viewport
+    // snapshots often pad with blank rows, and the snapshot may only include a
+    // prefix of trailingFresh — trim any overlapping prefix before appending.
+    const trailing = trimOverlappingTrailingFresh(normalized, trailingFresh, syncStartText);
+    this.clear();
+    this.append(normalized);
+    // Seed only the visible viewport — not sync-race trailing bytes.
+    this.seededLength = this.getText().length;
+    // Preserve a live-tail shell prompt from the viewport for waitForPrompt,
+    // matching the old markOutputConsumedThrough(preserveTailPatterns) behavior.
+    this.preservedTailMatch = null;
+    const viewportText = this.getText();
+    const fresh = findFreshTailMatchAny(viewportText, shellPromptPatterns());
+    if (trailing) {
+      this.append(trailing);
+    }
+    if (fresh !== null) {
+      this.preservedTailMatch = {
+        textLength: this.getText().length,
+        value: fresh.matched.value,
+        endOffset: fresh.matched.endOffset,
+      };
+    }
+  }
+
+  /**
+   * After the script sends automated input, startup snapshot content must not
+   * satisfy later waits (sendLine then waitForPrompt / waitForText). Consume
+   * everything currently buffered — including sync-race trailingFresh that
+   * arrived before the input — so waits require post-command output.
+   */
+  invalidateStartupSeed() {
+    this.seededLength = null;
+    this.preservedTailMatch = null;
+    this.scanOffset = this.getText().length;
   }
 
   consumeFreshPendingMatch(pattern, freshBoundary = this.currentFreshBoundary()) {
@@ -382,6 +530,15 @@ class SessionOutputBuffer {
   advanceScanOffset(endOffset) {
     const absoluteEnd = this.scanOffset + endOffset;
     this.scanOffset = Math.min(absoluteEnd, this.getText().length);
+    // Normal waits that consume past a preserved startup prompt invalidate it
+    // (e.g. waitForText matched trailingFresh after the prompt). Baseline via
+    // markOutputConsumedThrough sets scanOffset directly and keeps the prompt.
+    if (this.preservedTailMatch && this.scanOffset > this.preservedTailMatch.endOffset) {
+      this.preservedTailMatch = null;
+    }
+    if (typeof this.seededLength === "number" && this.scanOffset >= this.seededLength) {
+      this.seededLength = null;
+    }
   }
 
   markCurrentOutputConsumed(options = {}) {
@@ -394,6 +551,9 @@ class SessionOutputBuffer {
     const consumedText = text.slice(0, consumedLength);
     this.scanOffset = consumedLength;
     this.preservedTailMatch = null;
+    if (typeof this.seededLength === "number" && this.scanOffset >= this.seededLength) {
+      this.seededLength = null;
+    }
 
     const preserveTailPatterns = Array.isArray(options.preserveTailPatterns)
       ? options.preserveTailPatterns
@@ -422,6 +582,23 @@ class SessionOutputBuffer {
     if (fresh === null) return null;
 
     this.preservedTailMatch = null;
+    // Consuming the startup prompt must also consume the whole seeded viewport
+    // from that snapshot. Advancing only to the prompt end leaves later bytes
+    // from the same screen (e.g. `root@host:~# \nold READY`) waitable for the
+    // next waitForText/waitForRegex.
+    const consumeThrough = typeof this.seededLength === "number"
+      ? Math.max(fresh.matched.endOffset, this.seededLength)
+      : Math.max(fresh.matched.endOffset, preserved.textLength);
+    this.scanOffset = Math.max(this.scanOffset, consumeThrough);
+    // Sync-race trailingFresh sits past the original seededLength. Keep it fully
+    // waitable even when longer than FRESH_MATCH_TAIL_SLACK; otherwise a marker
+    // near the start of a large burst (READY + long menu) times out after prompt.
+    const textLength = this.getText().length;
+    if (textLength > this.scanOffset) {
+      this.seededLength = textLength;
+    } else {
+      this.seededLength = null;
+    }
     return fresh;
   }
 
@@ -430,6 +607,7 @@ class SessionOutputBuffer {
     this.totalLength = 0;
     this.scanOffset = 0;
     this.preservedTailMatch = null;
+    this.seededLength = null;
   }
 
   flushWaiters() {
@@ -504,10 +682,7 @@ class SessionOutputBuffer {
 
   waitFor(pattern, timeoutMs = 30000, shouldAbort) {
     if (isRegexCompatibleWaitPattern(pattern)) {
-      const minFreshStartAbsolute = Math.max(
-        this.scanOffset,
-        this.getText().length - FRESH_MATCH_TAIL_SLACK,
-      );
+      const minFreshStartAbsolute = this.currentFreshBoundary();
       const immediate = this.consumeFreshPendingRegex(pattern, { minFreshStartAbsolute });
       if (immediate !== null) {
         this.advanceScanOffset(immediate.endOffset);
@@ -576,10 +751,7 @@ class SessionOutputBuffer {
   }
 
   waitForRegex(pattern, timeoutMs = 30000, shouldAbort) {
-    const minFreshStartAbsolute = Math.max(
-      this.scanOffset,
-      this.getText().length - FRESH_MATCH_TAIL_SLACK,
-    );
+    const minFreshStartAbsolute = this.currentFreshBoundary();
     const immediate = this.consumeFreshPendingRegex(pattern, { minFreshStartAbsolute });
     if (immediate !== null) {
       this.advanceScanOffset(immediate.endOffset);
@@ -617,7 +789,12 @@ class SessionOutputBuffer {
         return preserved.index;
       }
     }
-    const freshBoundary = this.currentFreshBoundary();
+    // Generic waitForAny must see the full seeded viewport (menu labels near
+    // the top). waitForPrompt passes allowPreservedTailMatch and stays on the
+    // live-tail window so older visible prompts are not readiness signals.
+    const freshBoundary = options.allowPreservedTailMatch === true
+      ? this.currentTailFreshBoundary()
+      : this.currentFreshBoundary();
     const fresh = this.consumeFreshPendingMatchAny(patterns, freshBoundary);
     if (fresh !== null) {
       this.advanceScanOffset(fresh.matched.endOffset);
@@ -700,6 +877,7 @@ class SessionOutputBuffer {
     this.totalLength = 0;
     this.scanOffset = 0;
     this.preservedTailMatch = null;
+    this.seededLength = null;
   }
 }
 

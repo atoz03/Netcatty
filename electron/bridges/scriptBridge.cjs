@@ -176,8 +176,26 @@ function writeToSession(sessionId, data, options = {}) {
     );
   }
   if (options.automated !== false && data && data !== "\x03") {
+    // Sending a command means later waits must observe post-input output, not
+    // the startup viewport / preserved prompt that was seeded for #1960.
+    getOrCreateBuffer(sessionId).invalidateStartupSeed();
     notifyScriptSessionInput(sessionId, data);
   }
+}
+
+function bufferFallbackSnapshot(sessionId) {
+  return {
+    rows: 24,
+    cols: 80,
+    currentRow: 0,
+    lines: getOrCreateBuffer(sessionId).getText().split("\n"),
+    // Not a real terminal viewport — full script buffer / scrollback only.
+    source: "buffer-fallback",
+  };
+}
+
+function isViewportSnapshot(snapshot) {
+  return snapshot?.source !== "buffer-fallback";
 }
 
 async function requestScreenSnapshot(sessionId) {
@@ -186,24 +204,14 @@ async function requestScreenSnapshot(sessionId) {
     ? electronModule.webContents.fromId(session.webContentsId)
     : getMainWindow?.()?.webContents;
   if (!webContents) {
-    return {
-      rows: 24,
-      cols: 80,
-      currentRow: 0,
-      lines: getOrCreateBuffer(sessionId).getText().split("\n"),
-    };
+    return bufferFallbackSnapshot(sessionId);
   }
 
   const requestId = randomUUID();
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
       pendingScreenSnapshots.delete(requestId);
-      resolve({
-        rows: 24,
-        cols: 80,
-        currentRow: 0,
-        lines: getOrCreateBuffer(sessionId).getText().split("\n"),
-      });
+      resolve(bufferFallbackSnapshot(sessionId));
     }, 3000);
     pendingScreenSnapshots.set(requestId, {
       sessionId,
@@ -269,35 +277,40 @@ function showWaitForTimeoutDialog(pattern, timeoutMs) {
 async function syncOutputBufferFromSnapshot(sessionId) {
   const buffer = getOrCreateBuffer(sessionId);
   const syncStartText = buffer.getText();
-  let consumedLength = syncStartText.length;
   try {
     const snapshot = await requestScreenSnapshot(sessionId);
     const screenText = (snapshot.lines || []).join("\n");
-    if (!screenText) return;
-    if (buffer.getText() !== syncStartText) return;
-    const existing = buffer.getText();
-    if (!existing) {
-      buffer.append(screenText.endsWith("\n") ? screenText : `${screenText}\n`);
-      consumedLength = buffer.getText().length;
+
+    // Buffer-fallback snapshots are the full script output/scrollback, not the
+    // visible viewport. Seeding them as waitable would rematch scrolled-off
+    // text (#1821). Keep the consumed baseline for that path — but only through
+    // the pre-sync length so bytes that arrived during the await stay fresh
+    // (same trailingFresh idea as the viewport path).
+    if (!isViewportSnapshot(snapshot) || !screenText) {
+      buffer.markOutputConsumedThrough(syncStartText.length, {
+        preserveTailPatterns: shellPromptPatterns(),
+      });
       return;
     }
-    const tail = screenText.slice(-8192);
-    if (!tail) return;
-    const existingTail = existing.slice(-8192);
-    if (tail === existingTail || existing.endsWith(tail)) return;
-    if (existingTail && tail.includes(existingTail)) {
-      buffer.append(tail.slice(tail.indexOf(existingTail) + existingTail.length));
-      consumedLength = buffer.getText().length;
-      return;
-    }
-    if (!existing.includes(tail.trim())) {
-      buffer.append(tail.startsWith("\n") ? tail : `\n${tail}`);
-      consumedLength = buffer.getText().length;
-    }
+
+    // Seed the script buffer from the current visible screen so waits can match
+    // text already on screen (e.g. bastion "SSH资源" near the top of a long menu).
+    // Marking the whole buffer consumed made those waits time out (#1960).
+    // If live output arrived during the snapshot IPC round-trip (BEL keepalives,
+    // etc.), keep that trailing fresh data after the viewport instead of
+    // discarding the snapshot.
+    const currentText = buffer.getText();
+    const trailingFresh = currentText.startsWith(syncStartText)
+      ? currentText.slice(syncStartText.length)
+      : "";
+    buffer.replaceWithVisibleScreen(screenText, trailingFresh, syncStartText);
   } catch {
-    // Keep startup synchronization best-effort; the current buffer is still baselined below.
-  } finally {
-    buffer.markOutputConsumedThrough(consumedLength, { preserveTailPatterns: shellPromptPatterns() });
+    // Snapshot failed: baseline existing buffer so waits require new output.
+    if (buffer.getText() === syncStartText) {
+      buffer.markOutputConsumedThrough(syncStartText.length, {
+        preserveTailPatterns: shellPromptPatterns(),
+      });
+    }
   }
 }
 
@@ -536,12 +549,7 @@ function handleScriptScreenSnapshotResponse(_event, payload = {}) {
   const pending = pendingScreenSnapshots.get(payload.requestId);
   if (!pending) return { ok: false };
   pendingScreenSnapshots.delete(payload.requestId);
-  pending.resolve(payload.snapshot || {
-    rows: 24,
-    cols: 80,
-    currentRow: 0,
-    lines: getOrCreateBuffer(pending.sessionId).getText().split("\n"),
-  });
+  pending.resolve(payload.snapshot || bufferFallbackSnapshot(pending.sessionId));
   return { ok: true };
 }
 

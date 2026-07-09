@@ -36,3 +36,13 @@ test("hasUserConfiguredKey prefers explicit inline key over empty paths", () => 
     true,
   );
 });
+
+test("isPasswordProvided accepts whitespace-only passwords (#2036)", () => {
+  const { isPasswordProvided } = require("./sshAuthHelper.cjs");
+  assert.equal(isPasswordProvided(""), false);
+  assert.equal(isPasswordProvided(" "), true);
+  assert.equal(isPasswordProvided("  "), true);
+  assert.equal(isPasswordProvided("secret"), true);
+  assert.equal(isPasswordProvided(null), false);
+  assert.equal(isPasswordProvided(undefined), false);
+});

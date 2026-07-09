@@ -6,6 +6,14 @@ import type { PendingAuth } from "../runtime/createTerminalSessionStarters";
 import type { TerminalAuthMethod } from "../TerminalAuthDialog";
 import { logger } from "../../../lib/logger";
 
+/**
+ * Password auth is valid when the user typed something — including a single
+ * space. SSH passwords may be whitespace-only; do not trim before this check
+ * (issue #2036).
+ */
+export const isAuthPasswordProvided = (password: string): boolean =>
+  password.length > 0;
+
 export const buildSavedAuthHostUpdate = (
   host: Host,
   auth: {
@@ -74,7 +82,7 @@ export const useTerminalAuthState = ({
 
   const isValid = useMemo(() => {
     if (!authUsername.trim()) return false;
-    if (authMethod === "password") return authPassword.trim().length > 0;
+    if (authMethod === "password") return isAuthPasswordProvided(authPassword);
     if (authMethod === "key" || authMethod === "certificate") return !!authKeyId;
     return false;
   }, [authKeyId, authMethod, authPassword, authUsername]);

@@ -512,6 +512,16 @@ function hasUserConfiguredKey(options) {
 }
 
 /**
+ * True when a password string should be attached to SSH connect options.
+ * Whitespace-only passwords are valid SSH secrets (issue #2036) — do not trim.
+ * @param {unknown} password
+ * @returns {boolean}
+ */
+function isPasswordProvided(password) {
+  return typeof password === "string" && password.length > 0;
+}
+
+/**
  * Build authentication handler with default key fallback support
  * @param {Object} options
  * @param {string} [options.privateKey] - Explicitly configured private key
@@ -1041,6 +1051,7 @@ module.exports = {
   loadIdentityFileForAuth,
   loadFirstIdentityFileForAuth,
   hasUserConfiguredKey,
+  isPasswordProvided,
   PassphraseCancelledError,
   isPassphraseCancelledError,
 };

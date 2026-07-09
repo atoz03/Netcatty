@@ -5,6 +5,7 @@ import type { Terminal as XTerm } from "@xterm/xterm";
 
 import { createOutputFlowController } from "./outputFlowController.ts";
 import {
+  armTerminalInterruptDisplayGate,
   filterTerminalInterruptDisplayOutput,
   prioritizeTerminalInput,
   releaseTerminalFlowOutputForTerm,
@@ -517,6 +518,122 @@ test("interrupt display drain preserves alternate-screen exit controls", () => {
   );
 });
 
+test("interrupt display drain excludes preserved restore from held password prefixes", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 6250,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "stale\n\x1b[?1049lPass", { now: 6251 }),
+    {
+      accepted: true,
+      data: "\x1b[?1049l",
+      droppedBytes: "stale\n".length,
+      reason: "draining",
+    },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "word: ", { now: 6252 }),
+    {
+      accepted: true,
+      data: "Password: ",
+      droppedBytes: 0,
+      reason: "prompt-gap",
+    },
+  );
+});
+
+test("interrupt display drain excludes last of multiple restores from password prefixes", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 6255,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "\x1b[?25hstale\n\x1b[?1049lPass", { now: 6256 }),
+    {
+      accepted: true,
+      data: "\x1b[?25h\x1b[?1049l",
+      droppedBytes: "stale\n".length,
+      reason: "draining",
+    },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "word: ", { now: 6257 }),
+    {
+      accepted: true,
+      data: "Password: ",
+      droppedBytes: 0,
+      reason: "prompt-gap",
+    },
+  );
+});
+
+test("interrupt display drain does not peel restore suffix from later password prefixes", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 6260,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "\x1b[?1049l\nlogin pass", { now: 6261 }),
+    {
+      accepted: true,
+      data: "\x1b[?1049l",
+      droppedBytes: 1,
+      reason: "draining",
+    },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "word: ", { now: 6262 }),
+    {
+      accepted: true,
+      data: "login password: ",
+      droppedBytes: 0,
+      reason: "prompt-gap",
+    },
+  );
+});
+
+test("interrupt display drain does not leak incomplete SGR CSI into shell prompts", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 6270,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "old\x1b[31", { now: 6271 }),
+    {
+      accepted: false,
+      data: "",
+      droppedBytes: "old\x1b[31".length,
+      reason: "draining",
+    },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "$ ", { now: 6400 }),
+    {
+      accepted: true,
+      data: "$ ",
+      droppedBytes: 0,
+      reason: "prompt-gap",
+    },
+  );
+});
+
 test("interrupt display drain preserves split alternate-screen exit controls", () => {
   clearTerminalSessionFlowAck("sess-1");
   const term = createFakeTerm();
@@ -863,4 +980,413 @@ test("interrupt priority leaves display output alone below pressure threshold", 
     },
   );
   clearTerminalSessionFlowAck("sess-low-pressure");
+});
+
+test("interrupt display drain accepts a sudo password prompt (#2010)", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 8000,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.equal(
+    filterTerminalInterruptDisplayOutput(term, "Reading package lists...\n", { now: 8001 }).accepted,
+    false,
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "[sudo] password for alice: ", { now: 8010 }),
+    {
+      accepted: true,
+      data: "[sudo] password for alice: ",
+      droppedBytes: 0,
+      reason: "password-prompt",
+    },
+  );
+});
+
+test("interrupt display drain accepts localized password prompts (#2010)", () => {
+  for (const prompt of ["Password: ", "[sudo] alice 的密码：", "输入密码", "用户 的密码"]) {
+    const term = createFakeTerm();
+    armTerminalInterruptDisplayGate(term, {
+      now: 8100,
+      quietMs: 500,
+      promptQuietMs: 80,
+      maxDrainMs: 2500,
+    });
+    assert.equal(
+      filterTerminalInterruptDisplayOutput(term, "stale\n", { now: 8101 }).accepted,
+      false,
+    );
+    assert.deepEqual(
+      filterTerminalInterruptDisplayOutput(term, prompt, { now: 8110 }),
+      {
+        accepted: true,
+        data: prompt,
+        droppedBytes: 0,
+        reason: "password-prompt",
+      },
+      `expected password prompt to resume drain: ${JSON.stringify(prompt)}`,
+    );
+  }
+});
+
+test("interrupt display drain holds a split Password: prompt across chunks (#2010)", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 8300,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.equal(
+    filterTerminalInterruptDisplayOutput(term, "stale\n", { now: 8301 }).accepted,
+    false,
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "Pass", { now: 8302 }),
+    { accepted: false, data: "", droppedBytes: 0, reason: "draining" },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "word: ", { now: 8303 }),
+    {
+      accepted: true,
+      data: "Password: ",
+      droppedBytes: 0,
+      reason: "prompt-gap",
+    },
+  );
+});
+
+test("interrupt display drain holds a split ANSI-colored Password: prompt", () => {
+  const term = createFakeTerm();
+  const red = "\x1b[31m";
+  const reset = "\x1b[0m";
+  armTerminalInterruptDisplayGate(term, {
+    now: 8350,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.equal(
+    filterTerminalInterruptDisplayOutput(term, "stale\n", { now: 8351 }).accepted,
+    false,
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, `${red}Pass`, { now: 8352 }),
+    { accepted: false, data: "", droppedBytes: 0, reason: "draining" },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, `word:${reset} `, { now: 8353 }),
+    {
+      accepted: true,
+      data: `${red}Password:${reset} `,
+      droppedBytes: 0,
+      reason: "prompt-gap",
+    },
+  );
+});
+
+test("interrupt display drain holds a password prefix split before trailing ANSI", () => {
+  const term = createFakeTerm();
+  const red = "\x1b[31m";
+  const reset = "\x1b[0m";
+  armTerminalInterruptDisplayGate(term, {
+    now: 8370,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.equal(
+    filterTerminalInterruptDisplayOutput(term, "stale\n", { now: 8371 }).accepted,
+    false,
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, `${red}Pass\x1b[`, { now: 8372 }),
+    { accepted: false, data: "", droppedBytes: 0, reason: "draining" },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, `0mword: `, { now: 8373 }),
+    {
+      accepted: true,
+      data: `${red}Pass${reset}word: `,
+      droppedBytes: 0,
+      reason: "prompt-gap",
+    },
+  );
+});
+
+test("interrupt display drain holds a password prefix split mid CSI parameter", () => {
+  const term = createFakeTerm();
+  const red = "\x1b[31m";
+  const reset = "\x1b[0m";
+  armTerminalInterruptDisplayGate(term, {
+    now: 8380,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.equal(
+    filterTerminalInterruptDisplayOutput(term, "stale\n", { now: 8381 }).accepted,
+    false,
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, `${red}Pass\x1b[0`, { now: 8382 }),
+    { accepted: false, data: "", droppedBytes: 0, reason: "draining" },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, `mword: `, { now: 8383 }),
+    {
+      accepted: true,
+      data: `${red}Pass${reset}word: `,
+      droppedBytes: 0,
+      reason: "prompt-gap",
+    },
+  );
+});
+
+test("interrupt display drain discards a held password prefix that does not complete", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 8400,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.equal(
+    filterTerminalInterruptDisplayOutput(term, "stale\n", { now: 8401 }).accepted,
+    false,
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "Pass", { now: 8402 }),
+    { accepted: false, data: "", droppedBytes: 0, reason: "draining" },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "$ ", { now: 8600 }),
+    {
+      accepted: true,
+      data: "$ ",
+      droppedBytes: 4,
+      reason: "prompt-gap",
+    },
+  );
+});
+
+test("interrupt display drain discards CSI finals when mid-CSI password prefix fails", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 8420,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.equal(
+    filterTerminalInterruptDisplayOutput(term, "stale\n", { now: 8421 }).accepted,
+    false,
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "Pass\x1b[0", { now: 8422 }),
+    { accepted: false, data: "", droppedBytes: 0, reason: "draining" },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "m$ ", { now: 8600 }),
+    {
+      accepted: true,
+      data: "$ ",
+      droppedBytes: "Pass\x1b[0".length + 1,
+      reason: "prompt-gap",
+    },
+  );
+});
+
+test("interrupt display drain does not hold ordinary password-related output", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 8700,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.equal(
+    filterTerminalInterruptDisplayOutput(term, "stale\n", { now: 8701 }).accepted,
+    false,
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "Password authentication failed", { now: 8702 }),
+    {
+      accepted: false,
+      data: "",
+      droppedBytes: "Password authentication failed".length,
+      reason: "draining",
+    },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "$ ", { now: 8900 }),
+    {
+      accepted: true,
+      data: "$ ",
+      droppedBytes: 0,
+      reason: "prompt-gap",
+    },
+  );
+});
+
+test("interrupt display drain holds split password prompts with leading text", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 9000,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.equal(
+    filterTerminalInterruptDisplayOutput(term, "stale\n", { now: 9001 }).accepted,
+    false,
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "alice@host's pass", { now: 9002 }),
+    { accepted: false, data: "", droppedBytes: 0, reason: "draining" },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "word: ", { now: 9003 }),
+    {
+      accepted: true,
+      data: "alice@host's password: ",
+      droppedBytes: 0,
+      reason: "prompt-gap",
+    },
+  );
+});
+
+test("interrupt display drain accepts a fresh one-chunk password prompt before the quiet gap", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 9100,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.equal(
+    filterTerminalInterruptDisplayOutput(term, "old flood\n", { now: 9101 }).accepted,
+    false,
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "Password: ", { now: 9110 }),
+    {
+      accepted: true,
+      data: "Password: ",
+      droppedBytes: 0,
+      reason: "password-prompt",
+    },
+  );
+});
+
+test("interrupt display drain accepts a last-line password prompt after a large stale prefix", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 9120,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+    promptCandidateBytes: 512,
+  });
+
+  assert.equal(
+    filterTerminalInterruptDisplayOutput(term, "stale\n", { now: 9121 }).accepted,
+    false,
+  );
+  const largeChunk = `${"x".repeat(600)}\n[sudo] password for alice: `;
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, largeChunk, { now: 9130 }),
+    {
+      accepted: true,
+      data: "[sudo] password for alice: ",
+      droppedBytes: 601,
+      reason: "password-prompt",
+    },
+  );
+});
+
+test("interrupt display drain does not hold short ASCII trailing letters as password prefixes", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 9300,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.equal(
+    filterTerminalInterruptDisplayOutput(term, "stale\n", { now: 9301 }).accepted,
+    false,
+  );
+  // Full-width "password：" must not lower ASCII minLen to 1, or "copy p" is held
+  // and a later "assword:" chunk can bypass quiet-gap.
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "copy p", { now: 9302 }),
+    {
+      accepted: false,
+      data: "",
+      droppedBytes: "copy p".length,
+      reason: "draining",
+    },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "assword: ", { now: 9310 }),
+    {
+      accepted: false,
+      data: "",
+      droppedBytes: "assword: ".length,
+      reason: "draining",
+    },
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "$ ", { now: 9500 }),
+    {
+      accepted: true,
+      data: "$ ",
+      droppedBytes: 0,
+      reason: "prompt-gap",
+    },
+  );
+});
+
+test("interrupt display drain rejects held password-prefix completion across a line break", () => {
+  const term = createFakeTerm();
+  armTerminalInterruptDisplayGate(term, {
+    now: 9200,
+    quietMs: 500,
+    promptQuietMs: 80,
+    maxDrainMs: 2500,
+  });
+
+  assert.equal(
+    filterTerminalInterruptDisplayOutput(term, "stale\n", { now: 9201 }).accepted,
+    false,
+  );
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "Pass", { now: 9202 }),
+    { accepted: false, data: "", droppedBytes: 0, reason: "draining" },
+  );
+  // A newline before Password: discards the held "Pass" prefix (not a same-line
+  // completion), but the fresh complete password line is still preserved.
+  assert.deepEqual(
+    filterTerminalInterruptDisplayOutput(term, "\nPassword: ", { now: 9210 }),
+    {
+      accepted: true,
+      data: "Password: ",
+      droppedBytes: 4 + 1,
+      reason: "password-prompt",
+    },
+  );
 });

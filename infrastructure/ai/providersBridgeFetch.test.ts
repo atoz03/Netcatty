@@ -5,6 +5,55 @@ import { z } from 'zod';
 import { createBridgeFetchForSDK, createModelFromConfig } from './sdk/providers';
 import type { OpenAIChatAssistantFields } from './providerContinuation';
 
+test('buffers stream events emitted before the Response stream starts', async (t) => {
+  const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+  t.after(() => {
+    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+  });
+
+  const dataHandlers = new Map<string, (data: string) => void>();
+  const endHandlers = new Map<string, () => void>();
+
+  (globalThis as typeof globalThis & { window?: unknown }).window = {
+    netcatty: {
+      aiFetch: async () => ({ ok: true, status: 200, data: '{}' }),
+      aiChatCancel: async () => true,
+      onAiStreamData: (requestId: string, cb: (data: string) => void) => {
+        dataHandlers.set(requestId, cb);
+        return () => dataHandlers.delete(requestId);
+      },
+      onAiStreamEnd: (requestId: string, cb: () => void) => {
+        endHandlers.set(requestId, cb);
+        return () => endHandlers.delete(requestId);
+      },
+      onAiStreamError: () => () => undefined,
+      aiChatStream: async (requestId: string) => {
+        const emit = dataHandlers.get(requestId);
+        assert.ok(emit, 'stream data handler should be registered before aiChatStream starts');
+        emit(JSON.stringify({
+          id: 'chatcmpl-fast-stream',
+          object: 'chat.completion.chunk',
+          choices: [{ index: 0, delta: { content: 'fast' } }],
+        }));
+        endHandlers.get(requestId)?.();
+        return { ok: true, statusCode: 200, statusText: 'OK' };
+      },
+    },
+  };
+
+  const fetch = createBridgeFetchForSDK('deepseek-custom');
+  const response = await fetch('https://api.example.test/v1/chat/completions', {
+    method: 'POST',
+    body: JSON.stringify({
+      stream: true,
+      messages: [{ role: 'user', content: 'hello' }],
+    }),
+  });
+
+  const text = await response.text();
+  assert.match(text, /"content":"fast"/);
+});
+
 test('captures OpenAI-compatible reasoning_content before the tool follow-up request', async (t) => {
   const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
   t.after(() => {

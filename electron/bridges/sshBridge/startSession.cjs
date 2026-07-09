@@ -699,7 +699,8 @@ function createStartSessionApi(ctx) {
           }
         }
 
-        if (options.password && typeof options.password === "string" && options.password.trim().length > 0) {
+        // Whitespace-only passwords are valid SSH secrets (issue #2036).
+        if (isPasswordProvided(options.password)) {
           connectOpts.password = options.password;
         }
 

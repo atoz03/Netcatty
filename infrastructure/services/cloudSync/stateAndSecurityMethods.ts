@@ -37,6 +37,20 @@ import type { CloudAdapter } from '../adapters';
 import type { SyncManagerState } from '../CloudSyncManager';
 import { getConvergentSyncLocalConfig } from '../convergentSyncConfig';
 
+/**
+ * The generic storage helpers these mixin methods call on their host.
+ *
+ * `this: SyncManagerStorageHost` turns `this.loadFromStorage<T>(...)` into an untyped call, and
+ * TypeScript rejects type arguments on those (TS2347). Declaring just those two
+ * members keeps the rest of the sync manager reachable through the index
+ * signature without spelling out the whole class here.
+ */
+export type SyncManagerStorageHost = Record<string, any> & {
+  loadFromStorage<T>(key: string): T | null;
+  safeJsonParse<T>(value: string | null): T | null;
+};
+
+
 const SYNC_HISTORY_STORAGE_KEY = 'netcatty_sync_history_v1';
 
 /** Ensure per-provider sequence counters exist (dynamic plugins arrive late). */
@@ -62,7 +76,7 @@ function ensureProviderSeqCounters(manager: any, provider: CloudProvider): void 
   }
 }
 
-export function loadInitialStateImpl(this: any): SyncManagerState {
+export function loadInitialStateImpl(this: SyncManagerStorageHost): SyncManagerState {
     // Load persisted configuration
     const masterKeyConfig = this.loadFromStorage<MasterKeyConfig>(
       SYNC_STORAGE_KEYS.MASTER_KEY_CONFIG
@@ -137,7 +151,7 @@ export function loadInitialStateImpl(this: any): SyncManagerState {
     };
   }
 
-export function loadProviderConnectionImpl(this: any,provider: CloudProvider): ProviderConnection {
+export function loadProviderConnectionImpl(this: SyncManagerStorageHost,provider: CloudProvider): ProviderConnection {
     const key = providerConnectionStorageKey(provider);
     const stored = this.loadFromStorage<Partial<ProviderConnection>>(key);
 
@@ -199,7 +213,7 @@ export function enforceLegacySingleProviderConnected(
   }
 }
 
-export function listRegisteredPluginProviderIdsImpl(this: any): string[] {
+export function listRegisteredPluginProviderIdsImpl(this: SyncManagerStorageHost): string[] {
   const raw = this.loadFromStorage<unknown>(SYNC_STORAGE_KEYS.PLUGIN_CLOUD_PROVIDERS);
   if (!Array.isArray(raw)) return [];
   return raw
@@ -207,7 +221,7 @@ export function listRegisteredPluginProviderIdsImpl(this: any): string[] {
     .sort();
 }
 
-export function listAvailablePluginSyncProviderIdsImpl(this: any): string[] {
+export function listAvailablePluginSyncProviderIdsImpl(this: SyncManagerStorageHost): string[] {
   if (typeof this.loadFromStorage !== 'function') return [];
   const raw = this.loadFromStorage(SYNC_STORAGE_KEYS.AVAILABLE_PLUGIN_SYNC_PROVIDERS) as unknown;
   if (!Array.isArray(raw)) return [];
@@ -216,14 +230,14 @@ export function listAvailablePluginSyncProviderIdsImpl(this: any): string[] {
     .sort();
 }
 
-export function markPluginSyncProviderAvailableImpl(this: any, provider: CloudProvider): void {
+export function markPluginSyncProviderAvailableImpl(this: SyncManagerStorageHost, provider: CloudProvider): void {
   if (!isPluginCloudProviderId(provider)) return;
   const next = new Set(listAvailablePluginSyncProviderIdsImpl.call(this));
   next.add(provider);
   this.saveToStorage(SYNC_STORAGE_KEYS.AVAILABLE_PLUGIN_SYNC_PROVIDERS, [...next].sort());
 }
 
-export function markPluginSyncProviderUnavailableImpl(this: any, provider: CloudProvider): void {
+export function markPluginSyncProviderUnavailableImpl(this: SyncManagerStorageHost, provider: CloudProvider): void {
   if (!isPluginCloudProviderId(provider)) return;
   const next = listAvailablePluginSyncProviderIdsImpl.call(this).filter((id) => id !== provider);
   if (next.length === 0) {
@@ -239,7 +253,7 @@ export function markPluginSyncProviderUnavailableImpl(this: any, provider: Cloud
  * providers stop rejoining sync cycles after restart.
  */
 export function setAvailablePluginSyncProviderIdsImpl(
-  this: any,
+  this: SyncManagerStorageHost,
   providerIds: readonly string[],
 ): void {
   const previous = listAvailablePluginSyncProviderIdsImpl.call(this);
@@ -321,7 +335,7 @@ export function setAvailablePluginSyncProviderIdsImpl(
   }
 }
 
-export function registerPluginProviderIdImpl(this: any, provider: CloudProvider): void {
+export function registerPluginProviderIdImpl(this: SyncManagerStorageHost, provider: CloudProvider): void {
   if (!isPluginCloudProviderId(provider)) return;
   const next = new Set(listRegisteredPluginProviderIdsImpl.call(this));
   next.add(provider);
@@ -329,7 +343,7 @@ export function registerPluginProviderIdImpl(this: any, provider: CloudProvider)
   markPluginSyncProviderAvailableImpl.call(this, provider);
 }
 
-export function unregisterPluginProviderIdImpl(this: any, provider: CloudProvider): void {
+export function unregisterPluginProviderIdImpl(this: SyncManagerStorageHost, provider: CloudProvider): void {
   if (!isPluginCloudProviderId(provider)) return;
   const next = listRegisteredPluginProviderIdsImpl.call(this).filter((id) => id !== provider);
   if (next.length === 0) {
@@ -340,7 +354,7 @@ export function unregisterPluginProviderIdImpl(this: any, provider: CloudProvide
   markPluginSyncProviderUnavailableImpl.call(this, provider);
 }
 
-export async function initProviderDecryptionImpl(this: any): Promise<void> {
+export async function initProviderDecryptionImpl(this: SyncManagerStorageHost): Promise<void> {
     const providers: CloudProvider[] = [
       ...BUILTIN_CLOUD_PROVIDERS,
       ...listRegisteredPluginProviderIdsImpl.call(this),
@@ -369,7 +383,7 @@ export async function initProviderDecryptionImpl(this: any): Promise<void> {
     this.notifyStateChange();
   }
 
-export async function saveProviderConnectionImpl(this: any,
+export async function saveProviderConnectionImpl(this: SyncManagerStorageHost,
   provider: CloudProvider,
   connection: ProviderConnection,
   authAttemptId?: number
@@ -399,19 +413,19 @@ export async function saveProviderConnectionImpl(this: any,
     }
   }
 
-export function loadFromStorageImpl<T>(this: any,key: string): T | null {
+export function loadFromStorageImpl<T>(this: SyncManagerStorageHost,key: string): T | null {
     return localStorageAdapter.read<T>(key);
   }
 
-export function saveToStorageImpl(this: any,key: string, value: unknown): boolean {
+export function saveToStorageImpl(this: SyncManagerStorageHost,key: string, value: unknown): boolean {
     return localStorageAdapter.write(key, value);
   }
 
-export function removeFromStorageImpl(this: any,key: string): void {
+export function removeFromStorageImpl(this: SyncManagerStorageHost,key: string): void {
     localStorageAdapter.remove(key);
   }
 
-export function setupCrossWindowSyncImpl(this: any): void {
+export function setupCrossWindowSyncImpl(this: SyncManagerStorageHost): void {
     if (this.hasStorageListener) return;
     if (typeof window === 'undefined') return;
 
@@ -419,7 +433,7 @@ export function setupCrossWindowSyncImpl(this: any): void {
     this.hasStorageListener = true;
   }
 
-export function safeJsonParseImpl<T>(this: any,value: string | null): T | null {
+export function safeJsonParseImpl<T>(this: SyncManagerStorageHost,value: string | null): T | null {
     if (!value) return null;
     try {
       return JSON.parse(value) as T;
@@ -428,7 +442,7 @@ export function safeJsonParseImpl<T>(this: any,value: string | null): T | null {
     }
   }
 
-export function handleStorageEventImpl(this: any, event: StorageEvent): void {
+export function handleStorageEventImpl(this: SyncManagerStorageHost, event: StorageEvent): void {
     if (event.storageArea !== window.localStorage) return;
     const key = event.key;
     if (!key) return;
@@ -643,7 +657,7 @@ export function handleStorageEventImpl(this: any, event: StorageEvent): void {
     }
   }
 
-export async function getConnectedAdapterImpl(this: any,provider: CloudProvider): Promise<CloudAdapter> {
+export async function getConnectedAdapterImpl(this: SyncManagerStorageHost,provider: CloudProvider): Promise<CloudAdapter> {
     // Ensure startup decryption has finished before reading tokens
     await this.decryptionReady;
     ensureProviderSeqCounters(this, provider);
@@ -737,7 +751,7 @@ export async function getConnectedAdapterImpl(this: any,provider: CloudProvider)
  * without it (GitHub, WebDAV, S3) are no-ops.
  */
 export function attachTokenRefreshPersistence(
-  this: any,
+  this: SyncManagerStorageHost,
   provider: CloudProvider,
   adapter: CloudAdapter,
 ): void {
@@ -758,7 +772,7 @@ export function attachTokenRefreshPersistence(
  * sequence to serialize the encrypted persist.
  */
 export function persistRefreshedProviderTokensImpl(
-  this: any,
+  this: SyncManagerStorageHost,
   provider: CloudProvider,
   tokens: import('../../../domain/sync').OAuthTokens,
 ): void {
@@ -791,7 +805,7 @@ export function persistRefreshedProviderTokensImpl(
  * provider or error.
  */
 export function handleProviderReauthRequiredImpl(
-  this: any,
+  this: SyncManagerStorageHost,
   provider: CloudProvider,
   error: unknown,
 ): boolean {
@@ -825,7 +839,7 @@ export function handleProviderReauthRequiredImpl(
   return true;
 }
 
-export async function setupMasterKeyImpl(this: any,password: string): Promise<void> {
+export async function setupMasterKeyImpl(this: SyncManagerStorageHost,password: string): Promise<void> {
     if (this.state.masterKeyConfig) {
       throw new Error('Master key already exists. Use changeMasterKey instead.');
     }
@@ -843,7 +857,7 @@ export async function setupMasterKeyImpl(this: any,password: string): Promise<vo
     await this.unlock(password);
   }
 
-export async function unlockImpl(this: any,password: string): Promise<boolean> {
+export async function unlockImpl(this: SyncManagerStorageHost,password: string): Promise<boolean> {
     if (!this.state.masterKeyConfig) {
       throw new Error('No master key configured');
     }
@@ -875,7 +889,7 @@ export async function unlockImpl(this: any,password: string): Promise<boolean> {
     return true;
   }
 
-export function lockImpl(this: any): void {
+export function lockImpl(this: SyncManagerStorageHost): void {
     if (this.state.securityState !== 'UNLOCKED') {
       return;
     }
@@ -892,7 +906,7 @@ export function lockImpl(this: any): void {
     this.emit({ type: 'SECURITY_STATE_CHANGED', state: 'LOCKED' });
   }
 
-export async function changeMasterKeyImpl(this: any,oldPassword: string, newPassword: string): Promise<boolean> {
+export async function changeMasterKeyImpl(this: SyncManagerStorageHost,oldPassword: string, newPassword: string): Promise<boolean> {
     if (!this.state.masterKeyConfig) {
       throw new Error('No master key configured');
     }
@@ -944,7 +958,7 @@ export async function changeMasterKeyImpl(this: any,oldPassword: string, newPass
     return true;
   }
 
-export async function verifyPasswordImpl(this: any,password: string): Promise<boolean> {
+export async function verifyPasswordImpl(this: SyncManagerStorageHost,password: string): Promise<boolean> {
     if (!this.state.masterKeyConfig) {
       return false;
     }

@@ -28,16 +28,17 @@ import {
   registerPluginProviderIdImpl,
   unregisterPluginProviderIdImpl,
 } from './stateAndSecurityMethods';
+import type { SyncManagerStorageHost } from './stateAndSecurityMethods.ts';
 
 const SYNC_REMOTE_ANCHOR_STORAGE_KEY = 'netcatty_sync_remote_anchor_v1';
 
-export function clearProviderMergeStateImpl(this: any, provider: CloudProvider): void {
+export function clearProviderMergeStateImpl(this: SyncManagerStorageHost, provider: CloudProvider): void {
   this.removeFromStorage(this.syncBaseKey(provider));
   this.removeFromStorage(this.convergentProviderBaselineKey(provider));
   this.clearSyncAnchor(provider);
 }
 
-export async function startProviderAuthImpl(this: any,
+export async function startProviderAuthImpl(this: SyncManagerStorageHost,
   provider: CloudProvider,
   redirectUri?: string
 ): Promise<StartProviderAuthResult> {
@@ -99,7 +100,7 @@ export async function startProviderAuthImpl(this: any,
     }
   }
 
-export async function completeGitHubAuthImpl(this: any,
+export async function completeGitHubAuthImpl(this: SyncManagerStorageHost,
   deviceCode: string,
   interval: number,
   expiresAt: number,
@@ -186,7 +187,7 @@ export async function completeGitHubAuthImpl(this: any,
     }
   }
 
-export async function completePKCEAuthImpl(this: any,
+export async function completePKCEAuthImpl(this: SyncManagerStorageHost,
   provider: 'google' | 'onedrive',
   code: string,
   redirectUri: string,
@@ -280,7 +281,7 @@ export async function completePKCEAuthImpl(this: any,
     }
   }
 
-export async function connectConfigProviderImpl(this: any,
+export async function connectConfigProviderImpl(this: SyncManagerStorageHost,
   provider: 'webdav' | 's3',
   config: WebDAVConfig | S3Config
 ): Promise<void> {
@@ -320,7 +321,7 @@ export async function connectConfigProviderImpl(this: any,
  * owned JSON; Netcatty still owns encryption and only forwards encrypted objects.
  */
 export async function connectPluginProviderImpl(
-  this: any,
+  this: SyncManagerStorageHost,
   providerId: string,
   configuration: unknown = {},
   credential?: unknown,
@@ -450,7 +451,7 @@ export async function connectPluginProviderImpl(
   }
 }
 
-export function resetProviderStatusImpl(this: any,provider: CloudProvider, authAttemptId?: number): void {
+export function resetProviderStatusImpl(this: SyncManagerStorageHost,provider: CloudProvider, authAttemptId?: number): void {
     const restoreState = this.providerAuthRestoreState[provider];
     if (
       authAttemptId != null &&
@@ -477,18 +478,18 @@ export function resetProviderStatusImpl(this: any,provider: CloudProvider, authA
     }
   }
 
-export function setProviderErrorImpl(this: any,provider: CloudProvider, error: string): void {
+export function setProviderErrorImpl(this: SyncManagerStorageHost,provider: CloudProvider, error: string): void {
     this.updateProviderStatus(provider, 'error', error);
   }
 
-export function clearConnectingStatusImpl(this: any,provider: CloudProvider): void {
+export function clearConnectingStatusImpl(this: SyncManagerStorageHost,provider: CloudProvider): void {
     if (this.state.providers[provider]?.status !== 'connecting') {
       return;
     }
     this.updateProviderStatus(provider, 'disconnected');
   }
 
-export function clearProviderErrorImpl(this: any,provider: CloudProvider): void {
+export function clearProviderErrorImpl(this: SyncManagerStorageHost,provider: CloudProvider): void {
     const connection = this.state.providers[provider];
     if (!connection?.error && connection?.status !== 'error') {
       return;
@@ -501,7 +502,7 @@ export function clearProviderErrorImpl(this: any,provider: CloudProvider): void 
     this.notifyStateChange();
   }
 
-export function cancelProviderAuthAttemptImpl(this: any,provider: CloudProvider, authAttemptId?: number): void {
+export function cancelProviderAuthAttemptImpl(this: SyncManagerStorageHost,provider: CloudProvider, authAttemptId?: number): void {
     if (
       authAttemptId != null &&
       !this.isActiveAuthAttempt(provider, authAttemptId)
@@ -516,7 +517,7 @@ export function cancelProviderAuthAttemptImpl(this: any,provider: CloudProvider,
     }
   }
 
-export async function disconnectProviderImpl(this: any,provider: CloudProvider): Promise<void> {
+export async function disconnectProviderImpl(this: SyncManagerStorageHost,provider: CloudProvider): Promise<void> {
     this.cancelProviderAuthAttempt(provider);
     const adapter = this.adapters.get(provider);
     if (adapter) {
@@ -556,7 +557,7 @@ export async function disconnectProviderImpl(this: any,provider: CloudProvider):
     this.notifyStateChange(); // Ensure UI updates immediately after disconnect
   }
 
-export function updateProviderStatusImpl(this: any,
+export function updateProviderStatusImpl(this: SyncManagerStorageHost,
   provider: CloudProvider,
   status: ProviderConnection['status'],
   error?: string
@@ -571,11 +572,11 @@ export function updateProviderStatusImpl(this: any,
     this.notifyStateChange(); // Notify UI of status change
   }
 
-export function isActiveAuthAttemptImpl(this: any,provider: CloudProvider, authAttemptId: number): boolean {
+export function isActiveAuthAttemptImpl(this: SyncManagerStorageHost,provider: CloudProvider, authAttemptId: number): boolean {
     return this.providerAuthAttemptSeq[provider] === authAttemptId;
   }
 
-export function buildAccountFromConfigImpl(this: any,
+export function buildAccountFromConfigImpl(this: SyncManagerStorageHost,
   provider: 'webdav' | 's3',
   config: WebDAVConfig | S3Config
 ): ProviderAccount {
@@ -587,19 +588,19 @@ export function buildAccountFromConfigImpl(this: any,
     return { id: `${s3.bucket}@${s3.endpoint}`, name: `${s3.bucket} (${s3.region})` };
   }
 
-export function syncAnchorKeyImpl(this: any,provider: CloudProvider): string {
+export function syncAnchorKeyImpl(this: SyncManagerStorageHost,provider: CloudProvider): string {
     return `${SYNC_REMOTE_ANCHOR_STORAGE_KEY}_${provider}`;
   }
 
-export function createSyncedFileSignatureImpl(this: any,syncedFile: SyncedFile | null): Promise<string | null> {
+export function createSyncedFileSignatureImpl(this: SyncManagerStorageHost,syncedFile: SyncedFile | null): Promise<string | null> {
     return createSyncedFileSignatureCore(syncedFile);
   }
 
-export function loadSyncAnchorImpl(this: any,provider: CloudProvider): ProviderSyncAnchor | null {
+export function loadSyncAnchorImpl(this: SyncManagerStorageHost,provider: CloudProvider): ProviderSyncAnchor | null {
     return this.loadFromStorage<ProviderSyncAnchor>(this.syncAnchorKey(provider));
   }
 
-export async function saveSyncAnchorImpl(this: any,
+export async function saveSyncAnchorImpl(this: SyncManagerStorageHost,
   provider: CloudProvider,
   syncedFile: SyncedFile | null,
   resourceId?: string | null,
@@ -614,7 +615,7 @@ export async function saveSyncAnchorImpl(this: any,
     } satisfies ProviderSyncAnchor);
   }
 
-export function clearSyncAnchorImpl(this: any,provider?: CloudProvider): void {
+export function clearSyncAnchorImpl(this: SyncManagerStorageHost,provider?: CloudProvider): void {
     if (provider) {
       this.removeFromStorage(this.syncAnchorKey(provider));
       return;
@@ -635,7 +636,7 @@ export function clearSyncAnchorImpl(this: any,provider?: CloudProvider): void {
     }
   }
 
-export async function inspectProviderRemoteStateImpl(this: any,
+export async function inspectProviderRemoteStateImpl(this: SyncManagerStorageHost,
   provider: CloudProvider,
   adapter: CloudAdapter,
 ): Promise<{
@@ -675,7 +676,7 @@ export async function inspectProviderRemoteStateImpl(this: any,
     }
   }
 
-export async function checkProviderConflictImpl(this: any,
+export async function checkProviderConflictImpl(this: SyncManagerStorageHost,
   provider: CloudProvider,
   adapter: CloudAdapter
 ): Promise<{
@@ -692,7 +693,7 @@ export async function checkProviderConflictImpl(this: any,
     };
   }
 
-export async function inspectProviderRemoteImpl(this: any,provider: CloudProvider): Promise<{
+export async function inspectProviderRemoteImpl(this: SyncManagerStorageHost,provider: CloudProvider): Promise<{
   remoteChanged: boolean;
   remoteFile: SyncedFile | null;
   payload: SyncPayload | null;
@@ -722,7 +723,7 @@ export async function inspectProviderRemoteImpl(this: any,provider: CloudProvide
     };
   }
 
-export async function commitRemoteInspectionImpl(this: any,
+export async function commitRemoteInspectionImpl(this: SyncManagerStorageHost,
   provider: CloudProvider,
   remoteFile: SyncedFile,
   payload: SyncPayload,

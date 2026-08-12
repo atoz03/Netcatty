@@ -14,7 +14,7 @@ test("master key replacement from another window locks the current window and cl
   let stopAutoSyncCount = 0;
   let syncSecurityGenerationCount = 0;
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  (globalThis as unknown as { window?: unknown }).window = {
     localStorage: fakeStorage,
   };
 
@@ -44,7 +44,7 @@ test("master key replacement from another window locks the current window and cl
       newValue: JSON.stringify(newConfig),
     } as StorageEvent);
   } finally {
-    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
   }
 
   assert.equal(manager.state.masterKeyConfig.verificationHash, newConfig.verificationHash);

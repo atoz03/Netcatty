@@ -83,9 +83,16 @@ function createFakeTerm() {
       fontFamily: "monospace",
     },
     buffer: {
+      // Cases that exercise wrapping also stub baseY/getLine, so the fake's
+      // buffer is declared wider than the two fields it starts with.
       active: {
         cursorX: 2,
         cursorY: 0,
+      } as {
+        cursorX: number;
+        cursorY: number;
+        baseY?: number;
+        getLine?: (line: number) => { translateToString: () => string } | undefined;
       },
     },
     _core: {

@@ -124,7 +124,7 @@ test('attachTokenRefreshPersistence persists Google tokens refreshed mid-session
     resourceId: 'gfile-1',
   } as ProviderConnection;
 
-  const g = globalThis as typeof globalThis & { window?: unknown };
+  const g = globalThis as unknown as { window?: unknown };
   const originalWindow = g.window;
   g.window = {
     netcatty: {

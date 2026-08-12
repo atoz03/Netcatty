@@ -6,15 +6,15 @@ import { createBridgeFetchForSDK, createModelFromConfig } from './sdk/providers'
 import type { OpenAIChatAssistantFields } from './providerContinuation';
 
 test('buffers stream events emitted before the Response stream starts', async (t) => {
-  const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
   t.after(() => {
-    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
   });
 
   const dataHandlers = new Map<string, (data: string) => void>();
   const endHandlers = new Map<string, () => void>();
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  (globalThis as unknown as { window?: unknown }).window = {
     netcatty: {
       aiFetch: async () => ({ ok: true, status: 200, data: '{}' }),
       aiChatCancel: async () => true,
@@ -55,9 +55,9 @@ test('buffers stream events emitted before the Response stream starts', async (t
 });
 
 test('captures OpenAI-compatible reasoning_content before the tool follow-up request', async (t) => {
-  const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
   t.after(() => {
-    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
   });
 
   const dataHandlers = new Map<string, (data: string) => void>();
@@ -71,7 +71,7 @@ test('captures OpenAI-compatible reasoning_content before the tool follow-up req
     function: { name: 'terminal_exec', arguments: '{}' },
   };
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  (globalThis as unknown as { window?: unknown }).window = {
     netcatty: {
       aiFetch: async () => ({ ok: true, status: 200, data: '{}' }),
       aiChatCancel: async () => true,
@@ -134,9 +134,9 @@ test('captures OpenAI-compatible reasoning_content before the tool follow-up req
 });
 
 test('does not duplicate reasoning_content when tool calls stream across chunks', async (t) => {
-  const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
   t.after(() => {
-    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
   });
 
   const dataHandlers = new Map<string, (data: string) => void>();
@@ -144,7 +144,7 @@ test('does not duplicate reasoning_content when tool calls stream across chunks'
   const sentBodies: Array<Record<string, unknown>> = [];
   const assistantFields: Array<OpenAIChatAssistantFields | undefined> = [];
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  (globalThis as unknown as { window?: unknown }).window = {
     netcatty: {
       aiFetch: async () => ({ ok: true, status: 200, data: '{}' }),
       aiChatCancel: async () => true,
@@ -237,9 +237,9 @@ test('does not duplicate reasoning_content when tool calls stream across chunks'
 });
 
 test('keeps captured reasoning_content aligned across consecutive tool calls', async (t) => {
-  const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
   t.after(() => {
-    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
   });
 
   const dataHandlers = new Map<string, (data: string) => void>();
@@ -252,7 +252,7 @@ test('keeps captured reasoning_content aligned across consecutive tool calls', a
     function: { name: 'terminal_exec', arguments: '{}' },
   });
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  (globalThis as unknown as { window?: unknown }).window = {
     netcatty: {
       aiFetch: async () => ({ ok: true, status: 200, data: '{}' }),
       aiChatCancel: async () => true,
@@ -333,9 +333,9 @@ test('keeps captured reasoning_content aligned across consecutive tool calls', a
 });
 
 test('replays reasoning_content through the SDK tool loop', async (t) => {
-  const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
   t.after(() => {
-    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
   });
 
   const dataHandlers = new Map<string, (data: string) => void>();
@@ -359,7 +359,7 @@ test('replays reasoning_content through the SDK tool loop', async (t) => {
     }));
   };
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  (globalThis as unknown as { window?: unknown }).window = {
     netcatty: {
       aiFetch: async () => ({ ok: true, status: 200, data: '{}' }),
       aiChatCancel: async () => true,
@@ -436,9 +436,9 @@ test('replays reasoning_content through the SDK tool loop', async (t) => {
 });
 
 test('continues OpenAI-compatible tool streams when the introductory tool chunk omits id', async (t) => {
-  const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
   t.after(() => {
-    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
   });
 
   const dataHandlers = new Map<string, (data: string) => void>();
@@ -454,7 +454,7 @@ test('continues OpenAI-compatible tool streams when the introductory tool chunk 
     }));
   };
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  (globalThis as unknown as { window?: unknown }).window = {
     netcatty: {
       aiFetch: async () => ({ ok: true, status: 200, data: '{}' }),
       aiChatCancel: async () => true,
@@ -542,9 +542,9 @@ test('continues OpenAI-compatible tool streams when the introductory tool chunk 
 });
 
 test('continues OpenAI-compatible streams when provider chunks omit the top-level id', async (t) => {
-  const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
   t.after(() => {
-    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
   });
 
   const dataHandlers = new Map<string, (data: string) => void>();
@@ -559,7 +559,7 @@ test('continues OpenAI-compatible streams when provider chunks omit the top-leve
     }));
   };
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  (globalThis as unknown as { window?: unknown }).window = {
     netcatty: {
       aiFetch: async () => ({ ok: true, status: 200, data: '{}' }),
       aiChatCancel: async () => true,
@@ -647,9 +647,9 @@ test('continues OpenAI-compatible streams when provider chunks omit the top-leve
 });
 
 test('continues DeepSeek-compatible tool streams when empty id, type, and name precede the real tool name', async (t) => {
-  const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
   t.after(() => {
-    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
   });
 
   const dataHandlers = new Map<string, (data: string) => void>();
@@ -665,7 +665,7 @@ test('continues DeepSeek-compatible tool streams when empty id, type, and name p
     }));
   };
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  (globalThis as unknown as { window?: unknown }).window = {
     netcatty: {
       aiFetch: async () => ({ ok: true, status: 200, data: '{}' }),
       aiChatCancel: async () => true,
@@ -763,9 +763,9 @@ test('continues DeepSeek-compatible tool streams when empty id, type, and name p
 });
 
 test('continues DeepSeek-compatible tool streams when later argument chunks keep empty id and type', async (t) => {
-  const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
   t.after(() => {
-    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
   });
 
   const dataHandlers = new Map<string, (data: string) => void>();
@@ -781,7 +781,7 @@ test('continues DeepSeek-compatible tool streams when later argument chunks keep
     }));
   };
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  (globalThis as unknown as { window?: unknown }).window = {
     netcatty: {
       aiFetch: async () => ({ ok: true, status: 200, data: '{}' }),
       aiChatCancel: async () => true,
@@ -872,9 +872,9 @@ test('continues DeepSeek-compatible tool streams when later argument chunks keep
 });
 
 test('continues OpenAI-compatible tool streams when arguments arrive before the tool id and name', async (t) => {
-  const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
   t.after(() => {
-    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
   });
 
   const dataHandlers = new Map<string, (data: string) => void>();
@@ -890,7 +890,7 @@ test('continues OpenAI-compatible tool streams when arguments arrive before the 
     }));
   };
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  (globalThis as unknown as { window?: unknown }).window = {
     netcatty: {
       aiFetch: async () => ({ ok: true, status: 200, data: '{}' }),
       aiChatCancel: async () => true,
@@ -983,9 +983,9 @@ test('continues OpenAI-compatible tool streams when arguments arrive before the 
 });
 
 test('recovers tool streams when the first named chunk carries a non-standard tool call type', async (t) => {
-  const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
   t.after(() => {
-    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
   });
 
   const dataHandlers = new Map<string, (data: string) => void>();
@@ -1001,7 +1001,7 @@ test('recovers tool streams when the first named chunk carries a non-standard to
     }));
   };
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  (globalThis as unknown as { window?: unknown }).window = {
     netcatty: {
       aiFetch: async () => ({ ok: true, status: 200, data: '{}' }),
       aiChatCancel: async () => true,
@@ -1100,9 +1100,9 @@ test('recovers tool streams when the first named chunk carries a non-standard to
 });
 
 test('re-injects the remembered tool name when the SDK missed the naming chunk', async (t) => {
-  const originalWindow = (globalThis as typeof globalThis & { window?: unknown }).window;
+  const originalWindow = (globalThis as unknown as { window?: unknown }).window;
   t.after(() => {
-    (globalThis as typeof globalThis & { window?: unknown }).window = originalWindow;
+    (globalThis as unknown as { window?: unknown }).window = originalWindow;
   });
 
   const dataHandlers = new Map<string, (data: string) => void>();
@@ -1118,7 +1118,7 @@ test('re-injects the remembered tool name when the SDK missed the naming chunk',
     }));
   };
 
-  (globalThis as typeof globalThis & { window?: unknown }).window = {
+  (globalThis as unknown as { window?: unknown }).window = {
     netcatty: {
       aiFetch: async () => ({ ok: true, status: 200, data: '{}' }),
       aiChatCancel: async () => true,

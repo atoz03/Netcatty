@@ -160,8 +160,10 @@ export interface Host {
   // Optional reference to a reusable identity (username + auth) stored in Keychain.
   identityId?: string;
   group?: string;
-  tags: string[];
-  os: 'linux' | 'windows' | 'macos';
+  // Optional in practice: hosts arrive from CSV/plugin imports, deep links and
+  // agent drafts that carry neither, and the vault fills them in later.
+  tags?: string[];
+  os?: 'linux' | 'windows' | 'macos';
   // Device type: 'general' for standard servers, 'network' for switches/routers/firewalls.
   // Network devices use raw command execution (no shell wrapping) for AI agent compatibility.
   deviceType?: 'general' | 'network';

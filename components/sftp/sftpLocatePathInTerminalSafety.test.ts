@@ -40,8 +40,15 @@ test("locate-path uses the confirmed toolbar path rather than an optimistic navi
 
 test("locate-path uses focused session fallback when SFTP cannot reuse the terminal", () => {
   assert.match(sidePanelSource, /resolveLocateSftpPathSessionId\(\{\s*activeSessionId,\s*focusedSessionId,/);
+  // Gated on liveBound, not bare visibility: during a tab switch the slot turns
+  // visible one commit before the live store describes it, and the id sitting
+  // there belongs to the tab being left.
   assert.match(
     slotSource,
-    /focusedSessionId=\{isVisible \? live\.focusedSessionId : null\}/,
+    /const liveBound = isVisible && live\.tabId === tabId;/,
+  );
+  assert.match(
+    slotSource,
+    /focusedSessionId=\{liveBound \? live\.focusedSessionId : null\}/,
   );
 });

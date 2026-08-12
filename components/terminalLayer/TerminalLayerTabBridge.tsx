@@ -246,6 +246,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
   );
 
   const sidePanelLiveSnapshot = useMemo<SidePanelLiveSnapshot>(() => ({
+    tabId: activeTabId ?? null,
     sftpActiveHost,
     activeTerminalSessionIdForSftp,
     activeTerminalCwd,
@@ -266,6 +267,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     focusedThemeOverridden: themeState.focusedThemeOverridden,
   }), [
     activeSystemSessionHost,
+    activeTabId,
     activeTerminalCwd,
     activeTerminalSessionForSystem,
     activeTerminalSessionIdForSftp,

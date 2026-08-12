@@ -6,6 +6,7 @@ import { activeTabStore } from '../../application/state/activeTabStore';
 import { getSftpCurrentPathMemoryKey } from '../../application/state/sftp/sftpReopenLocation';
 import {
   getSidePanelLiveSnapshot,
+  getSidePanelLiveSnapshotForTab,
   subscribeSidePanelLiveSnapshot,
 } from '../../application/state/sidePanelLiveStore';
 import {
@@ -49,15 +50,18 @@ const subscribeShellHistoryNoop = () => () => {};
 const getEmptyShellHistorySnapshot = () => EMPTY_SHELL_HISTORY;
 
 function useSidePanelLiveSnapshotForTab(tabId: string, subscribe: boolean) {
+  // Scoped to `tabId`: the store is written from a layout effect, so between the
+  // active-tab change and that write a slot that has already flipped to visible
+  // would otherwise read the tab it replaced.
   const getSnapshot = useCallback(
-    () => getSidePanelLiveSnapshot(subscribe),
+    () => getSidePanelLiveSnapshotForTab(subscribe, tabId),
+    [subscribe, tabId],
+  );
+  const subscribeToStore = useCallback(
+    (listener: () => void) => subscribeSidePanelLiveSnapshot(subscribe, listener),
     [subscribe],
   );
-  return useSyncExternalStore(
-    (listener) => subscribeSidePanelLiveSnapshot(subscribe, listener),
-    getSnapshot,
-    getSnapshot,
-  );
+  return useSyncExternalStore(subscribeToStore, getSnapshot, getSnapshot);
 }
 
 function SidePanelSftpSlotInner({
@@ -73,6 +77,12 @@ function SidePanelSftpSlotInner({
   ownerPanelOpen: boolean;
 }) {
   const live = useSidePanelLiveSnapshotForTab(tabId, isVisible);
+  // The live store republishes from a layout effect, so for one commit after a
+  // tab switch this slot is visible while the store still describes the tab we
+  // left. Auto-connect keys off the host it is handed, and the stored host is
+  // built from a different source than the live one — letting it run against
+  // either during that window is what rebinds a healthy browse session.
+  const liveBound = isVisible && live.tabId === tabId;
 
   const {
     SftpSidePanel,
@@ -109,7 +119,7 @@ function SidePanelSftpSlotInner({
   } = ctx;
 
   const storedSftpHost = sftpHostForTab.get(tabId) ?? null;
-  const panelActiveHost = isVisible
+  const panelActiveHost = liveBound
     ? (live.sftpActiveHost ?? storedSftpHost)
     : storedSftpHost;
 
@@ -192,15 +202,18 @@ function SidePanelSftpSlotInner({
         onAddKnownHost={handleAddKnownHost}
         sftpDefaultViewMode={sftpDefaultViewMode}
         activeHost={panelActiveHost}
-        activeSessionId={isVisible ? live.activeTerminalSessionIdForSftp : null}
-        focusedSessionId={isVisible ? live.focusedSessionId : null}
-        initialLocation={isVisible ? (sftpInitialLocationForTab.get(tabId) ?? null) : null}
+        activeSessionId={liveBound ? live.activeTerminalSessionIdForSftp : null}
+        focusedSessionId={liveBound ? live.focusedSessionId : null}
+        initialLocation={liveBound ? (sftpInitialLocationForTab.get(tabId) ?? null) : null}
         onInitialLocationApplied={handleInitialLocationApplied}
         onCurrentPathChange={handleCurrentPathChange}
         onActiveTransfersChange={handleActiveTransfersChange}
         onActiveExternalEditsChange={handleActiveExternalEditsChange}
         showWorkspaceHostHeader={isVisible && !!live.activeWorkspace}
-        isVisible={isVisible}
+        // Auto-connect is gated on this, so it stays false until the live store
+        // owns the tab. The wrapper above still uses the real visibility, so
+        // nothing flickers while the panel waits one commit for its own values.
+        isVisible={liveBound}
         ownerPanelOpen={ownerPanelOpen}
         renderOverlays={isVisible}
         pendingUpload={sftpPendingUploadsForTab.get(tabId) ?? null}

@@ -4,7 +4,7 @@ on:
   pull_request:
   push:
     branches:
-      - "**"
+      - main
 
 concurrency:
   group: test-${{ github.workflow }}-${{ github.ref }}
@@ -17,12 +17,13 @@ jobs:
   test:
     name: lint-and-test
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: npm
@@ -30,7 +31,7 @@ jobs:
       - name: Install shell test dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y fish
+          sudo apt-get install -y fish xvfb
 
       - name: Install deps
         run: npm ci
@@ -43,5 +44,17 @@ jobs:
           npm run generate:capability-tools
           git diff --exit-code infrastructure/ai/harness/generated/cattyToolSpecs.json
 
+      - name: Verify Codex App Server schema
+        run: npm run check:codex-app-server-schema
+
       - name: Test
         run: npm test
+
+      - name: Test terminal decoration performance
+        env:
+          NETCATTY_TERMINAL_PERF_SHOW_WINDOW: "1"
+        # GitHub-hosted runners do not configure Electron's SUID sandbox helper.
+        run: xvfb-run -a ./node_modules/.bin/electron --no-sandbox scripts/xterm-decoration-performance.live.test.cjs
+
+      - name: Build
+        run: npm run build

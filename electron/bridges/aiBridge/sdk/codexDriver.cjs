@@ -39,7 +39,7 @@ function buildCodexPromptInput(prompt, attachments) {
   ];
 }
 
-function toCodexMcpConfig(injectedMcpServers) {
+function toCodexMcpConfig(injectedMcpServers, { defaultToolsApprovalMode } = {}) {
   const mcp_servers = {};
   for (const cfg of injectedMcpServers || []) {
     if (!cfg || !cfg.name) continue;
@@ -47,6 +47,9 @@ function toCodexMcpConfig(injectedMcpServers) {
       command: cfg.command,
       args: cfg.args || [],
       env: mcpEnvPairsToObject(cfg.env),
+      ...(defaultToolsApprovalMode
+        ? { default_tools_approval_mode: defaultToolsApprovalMode }
+        : {}),
     };
   }
   return mcp_servers;
@@ -72,8 +75,26 @@ function buildCodexConstructorOptions({ codexPath, env, apiKey, injectedMcpServe
   return options;
 }
 
-// codex-sdk reasoning-effort levels.
-const CODEX_REASONING_EFFORTS = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+// codex-sdk reasoning-effort levels (GPT-5.6 also advertises max/ultra).
+const CODEX_REASONING_EFFORTS = new Set([
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+]);
+
+function parseCodexModelSelection(model) {
+  const value = String(model || "");
+  const slash = value.lastIndexOf("/");
+  const effort = slash > 0 ? value.slice(slash + 1) : "";
+  if (slash > 0 && CODEX_REASONING_EFFORTS.has(effort)) {
+    return { model: value.slice(0, slash), effort };
+  }
+  return { model: value || undefined, effort: undefined };
+}
 
 function buildCodexThreadOptions({ cwd, model }) {
   // model + sandboxMode + workingDirectory belong to ThreadOptions (startThread).
@@ -104,14 +125,9 @@ function buildCodexThreadOptions({ cwd, model }) {
     // (e.g. "gpt-5.5/high"). codex-sdk wants them as separate ThreadOptions.
     // Only split when the trailing segment is a real effort — custom/OpenRouter
     // model ids may legitimately contain "/".
-    const slash = model.lastIndexOf("/");
-    const effort = slash > 0 ? model.slice(slash + 1) : "";
-    if (slash > 0 && CODEX_REASONING_EFFORTS.has(effort)) {
-      opts.model = model.slice(0, slash);
-      opts.modelReasoningEffort = effort;
-    } else {
-      opts.model = model;
-    }
+    const selection = parseCodexModelSelection(model);
+    opts.model = selection.model;
+    if (selection.effort) opts.modelReasoningEffort = selection.effort;
   }
   return opts;
 }
@@ -176,6 +192,26 @@ function emitCodexToolResultOnce(item, emitter, state, output, toolName) {
 }
 
 /**
+ * Codex emits mid-turn `type:"error"` JSONL events while it reconnects after a
+ * dropped SSE/response body (`Reconnecting...`, `retrying N/M`). Those are
+ * recoverable — the same turn keeps producing items afterward. Treating them
+ * as fatal settles the Netcatty sidebar turn and stops UI refresh while the CLI
+ * process continues (issue #2456).
+ *
+ * Explicit `willRetry: false` / `will_retry: false` means Codex exhausted its
+ * retry budget — always fatal, even when the message still mentions stream /
+ * transport wording. Truly terminal failures also arrive as `turn.failed`.
+ */
+function isCodexRetryableStreamError(event) {
+  if (!event || typeof event !== "object") return false;
+  if (event.willRetry === false || event.will_retry === false) return false;
+  if (event.willRetry === true || event.will_retry === true) return true;
+  const message = String(event.message || "").toLowerCase();
+  if (!message) return false;
+  return /\breconnecting\b/.test(message) || /\bretrying\b/.test(message);
+}
+
+/**
  * Translate one Codex ThreadEvent into emitter calls.
  * `state` ({ reasoningOpen }) is threaded across events so reasoning summary
  * items render as a single collapsible thinking panel that closes when the first
@@ -190,7 +226,41 @@ function translateCodexEvent(event, emitter, state) {
 
   if (event.type === "turn.failed") {
     closeReasoning();
+    st.fatalError = true;
     emitter.emitError(event.error?.message || "Codex turn failed");
+    return;
+  }
+  if (event.type === "error") {
+    const message = event.message || "Codex stream failed";
+    if (isCodexRetryableStreamError(event)) {
+      // Keep reasoning open — the turn is still in progress after Codex retries.
+      const warningCount = (st.streamWarningCount = (st.streamWarningCount || 0) + 1);
+      emitter.warning(`codex-stream-error:${warningCount}`, message);
+      return;
+    }
+    closeReasoning();
+    st.fatalError = true;
+    emitter.emitError(message);
+    return;
+  }
+  if (event.type === "turn.completed") {
+    const usage = event.usage;
+    const hasUsage = usage && [
+      usage.input_tokens,
+      usage.cached_input_tokens,
+      usage.output_tokens,
+      usage.reasoning_output_tokens,
+    ].some((value) => Number.isFinite(value));
+    if (!hasUsage) return;
+    const inputTokens = Number(usage.input_tokens) || 0;
+    const outputTokens = Number(usage.output_tokens) || 0;
+    emitter.usage({
+      inputTokens,
+      cachedInputTokens: Number(usage.cached_input_tokens) || 0,
+      outputTokens,
+      reasoningTokens: Number(usage.reasoning_output_tokens) || 0,
+      totalTokens: inputTokens + outputTokens,
+    });
     return;
   }
   if (!["item.started", "item.updated", "item.completed"].includes(event.type) || !event.item) return;
@@ -229,6 +299,34 @@ function translateCodexEvent(event, emitter, state) {
       }
       return;
     }
+    case "file_change":
+      if (event.type === "item.completed") {
+        emitter.fileChange(
+          item.id,
+          Array.isArray(item.changes) ? item.changes : [],
+          item.status === "failed" ? "failed" : "completed",
+        );
+      }
+      return;
+    case "web_search":
+      emitter.webSearch(
+        item.id,
+        item.query || "",
+        event.type === "item.completed" ? "completed" : "running",
+      );
+      return;
+    case "todo_list":
+      emitter.planUpdate(
+        item.id,
+        Array.isArray(item.items) ? item.items : [],
+        event.type === "item.completed" ? "completed" : "running",
+      );
+      return;
+    case "error":
+      if (event.type === "item.completed") {
+        emitter.warning(item.id, item.message || "Codex reported a recoverable error");
+      }
+      return;
     default:
       return;
   }
@@ -276,11 +374,15 @@ async function runCodexTurn({
       if (signal?.aborted) break;
       if (event?.type === "item.completed") hasContent = true;
       translateCodexEvent(event, emitter, state);
+      if (state.fatalError) break;
     }
     if (state.reasoningOpen) emitter.reasoningEnd();
     if (!threadId) {
       threadId = thread.id || resumeThreadId || null;
       if (threadId) emitter.sessionId(threadId);
+    }
+    if (state.fatalError) {
+      return { threadId };
     }
     if (!hasContent && !signal?.aborted) {
       emitter.emitError(
@@ -309,6 +411,7 @@ module.exports = {
   buildCodexConstructorOptions,
   buildCodexThreadOptions,
   buildCodexPromptInput,
+  parseCodexModelSelection,
   translateCodexEvent,
   runCodexTurn,
   toCodexMcpConfig,

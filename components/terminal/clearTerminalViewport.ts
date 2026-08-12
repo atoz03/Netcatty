@@ -30,9 +30,19 @@ type ClearTerminalViewportOptions = {
   wipeScrollback?: boolean;
 };
 
+type ClearTerminalViewportAndSyncPtyOptions = ClearTerminalViewportOptions & {
+  syncPty: () => void;
+};
+
 type AppendEraseScrollbackOptions = {
   wipeScrollback: boolean;
   normalScreen: boolean;
+  /**
+   * Open DEC 2026 state carried from a prior PTY chunk (e.g. sync-block filter
+   * saw `\x1b[?2026h` earlier). Chunk-local tracking alone cannot see that, so a
+   * delayed full-redraw `\x1b[2J` would otherwise get a spurious `\x1b[3J`.
+   */
+  startInDec2026SyncBlock?: boolean;
 };
 
 type EraseInDisplayHandlerOptions = {
@@ -122,20 +132,20 @@ export const preserveTerminalViewportInScrollback = (term: XTerm): void => {
 export const clearTerminalViewport = (
   term: XTerm,
   options: ClearTerminalViewportOptions = {},
-): void => {
+): boolean => {
   const buffer = term.buffer.active;
-  if (buffer.type !== "normal") return;
+  if (buffer.type !== "normal") return false;
 
   const cursorY = buffer.cursorY;
   const cursorX = buffer.cursorX;
 
-  if (cursorY === 0 && buffer.baseY === 0) return;
+  if (cursorY === 0 && buffer.baseY === 0) return false;
 
   const internal = term as InternalTerminal;
   const scroll = internal._core?.scroll;
   const eraseAttr = internal._core?._inputHandler?._eraseAttrData?.();
 
-  if (typeof scroll !== "function" || eraseAttr === undefined) return;
+  if (typeof scroll !== "function" || eraseAttr === undefined) return false;
 
   // Push lines above cursor into scrollback so they are preserved.
   // After cursorY scrolls the prompt line shifts to active-screen row 0.
@@ -150,6 +160,18 @@ export const clearTerminalViewport = (
   term.write(`\x1b[2;1H\x1b[J${eraseScrollback}\x1b[1;${col}H`, () => {
     term.scrollToBottom();
   });
+  return true;
+};
+
+export const clearTerminalViewportAndSyncPty = (
+  term: XTerm,
+  { syncPty, ...options }: ClearTerminalViewportAndSyncPtyOptions,
+): boolean => {
+  const didClearViewport = clearTerminalViewport(term, options);
+  if (didClearViewport) {
+    syncPty();
+  }
+  return didClearViewport;
 };
 
 export const isEraseScrollbackSequence = (params: CsiParam[]): boolean =>
@@ -305,22 +327,26 @@ export const installEraseInDisplayHandlers = (
 
 export const appendEraseScrollbackAfterFullErases = (
   data: string,
-  { wipeScrollback, normalScreen }: AppendEraseScrollbackOptions,
+  {
+    wipeScrollback,
+    normalScreen,
+    startInDec2026SyncBlock = false,
+  }: AppendEraseScrollbackOptions,
 ): string => {
   if (!wipeScrollback || !normalScreen || data.length === 0) {
     return data;
   }
 
-  // Hot path: all rewrites below only ever trigger on a literal \x1b[2J, and
-  // the sync-block/alt-screen tracking is chunk-local, so a chunk without it
-  // passes through verbatim. One native scan replaces the per-char loop.
+  // Hot path: all rewrites below only ever trigger on a literal \x1b[2J.
+  // Sync open state may be carried from a prior chunk; without a 2J this chunk
+  // still needs no rewrite.
   if (!data.includes("\x1b[2J")) {
     return data;
   }
 
   let result = "";
   let index = 0;
-  let inDec2026SyncBlock = false;
+  let inDec2026SyncBlock = startInDec2026SyncBlock;
   let inAlternateScreen = false;
 
   while (index < data.length) {

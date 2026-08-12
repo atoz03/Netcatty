@@ -25,6 +25,130 @@ const normalizeEndpoint = (endpoint: string): string => {
 const ensureLeadingSlash = (value: string): string =>
   value.startsWith('/') ? value : `/${value}`;
 
+/**
+ * Recover from trailing garbage left by non-truncating WebDAV PUT overwrites
+ * (#2223). Node/V8: "Unexpected non-whitespace character after JSON at position N".
+ */
+const parseSyncedFileJson = (raw: string): SyncedFile => {
+  try {
+    return JSON.parse(raw) as SyncedFile;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const match = /Unexpected non-whitespace character after JSON at position (\d+)/i.exec(
+      message,
+    );
+    if (match) {
+      const pos = Number(match[1]);
+      if (Number.isFinite(pos) && pos > 0 && pos <= raw.length) {
+        return JSON.parse(raw.slice(0, pos)) as SyncedFile;
+      }
+    }
+    throw error;
+  }
+};
+
+const utf8ByteLength = (value: string): number =>
+  typeof Buffer !== 'undefined'
+    ? Buffer.byteLength(value, 'utf8')
+    : new TextEncoder().encode(value).length;
+
+/** Strict: intended body plus optional trailing whitespace only. */
+const remoteMatchesUploadedBody = (remoteText: string, body: string): boolean => {
+  if (!remoteText.startsWith(body)) return false;
+  return /^\s*$/.test(remoteText.slice(body.length));
+};
+
+/**
+ * Prefer fixed-name temp PUT + MOVE (with pad + verify); else padded in-place
+ * PUT with strict body match so non-truncating servers cannot leave garbage.
+ */
+const putWebdavFileReplacing = async (
+  client: WebDAVClient,
+  path: string,
+  body: string,
+): Promise<void> => {
+  const tmpPath = `${path}.tmp`;
+  const bodyLen = utf8ByteLength(body);
+
+  const cleanupTemp = async () => {
+    try {
+      if (await client.exists(tmpPath)) {
+        await client.deleteFile(tmpPath);
+      }
+    } catch {
+      // best-effort
+    }
+  };
+
+  const readLen = async (target: string): Promise<number> => {
+    let exists = false;
+    try {
+      exists = await client.exists(target);
+    } catch (error) {
+      throw new Error(
+        `WebDAV replace aborted: could not check existing file (${
+          error instanceof Error ? error.message : String(error)
+        })`,
+      );
+    }
+    if (!exists) return 0;
+    try {
+      const existing = await client.getFileContents(target, { format: 'text' });
+      if (existing == null) return 0;
+      return utf8ByteLength(String(existing));
+    } catch (error) {
+      throw new Error(
+        `WebDAV replace aborted: could not read existing file length (${
+          error instanceof Error ? error.message : String(error)
+        })`,
+      );
+    }
+  };
+
+  try {
+    let tmpMin = 0;
+    try {
+      tmpMin = await readLen(tmpPath);
+    } catch {
+      tmpMin = 0;
+    }
+    const tmpBody = tmpMin > bodyLen ? body + ' '.repeat(tmpMin - bodyLen) : body;
+    await client.putFileContents(tmpPath, tmpBody, { overwrite: true });
+    await client.moveFile(tmpPath, path, { overwrite: true });
+    const moved = String((await client.getFileContents(path, { format: 'text' })) ?? '');
+    if (remoteMatchesUploadedBody(moved, body)) {
+      return;
+    }
+  } catch {
+    // fall through
+  }
+  await cleanupTemp();
+
+  let minLen = await readLen(path);
+  minLen = Math.max(minLen, bodyLen);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const payload = minLen > bodyLen ? body + ' '.repeat(minLen - bodyLen) : body;
+    await client.putFileContents(path, payload, { overwrite: true });
+    let remoteText = '';
+    try {
+      remoteText = String((await client.getFileContents(path, { format: 'text' })) ?? '');
+    } catch (error) {
+      throw new Error(
+        `WebDAV upload verification failed: could not re-read file (${
+          error instanceof Error ? error.message : String(error)
+        })`,
+      );
+    }
+    if (remoteMatchesUploadedBody(remoteText, body)) {
+      return;
+    }
+    minLen = Math.max(minLen, utf8ByteLength(remoteText), bodyLen);
+  }
+  throw new Error(
+    'WebDAV upload verification failed: remote file still does not match uploaded body after padded PUT',
+  );
+};
+
 export class WebDAVAdapter {
   private config: WebDAVConfig | null;
   private resource: string | null;
@@ -91,7 +215,7 @@ export class WebDAVAdapter {
       }
       const client = this.getClient();
       const path = this.getSyncPath();
-      await client.putFileContents(path, JSON.stringify(syncedFile), { overwrite: true });
+      await putWebdavFileReplacing(client, path, JSON.stringify(syncedFile));
       this.resource = path;
       return path;
     });
@@ -113,7 +237,7 @@ export class WebDAVAdapter {
       if (!exists) return null;
       const data = await client.getFileContents(path, { format: 'text' });
       if (!data) return null;
-      return JSON.parse(data as string) as SyncedFile;
+      return parseSyncedFileJson(data as string);
     });
   }
 

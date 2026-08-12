@@ -56,10 +56,12 @@ const bridgeState: {
   localEntries: MockDirEntry[];
   remoteEntriesByPath: Map<string, MockDirEntry[]>;
   remoteCalls: string[];
+  remoteDelayMs: number;
 } = {
   localEntries: [],
   remoteEntriesByPath: new Map(),
   remoteCalls: [],
+  remoteDelayMs: 0,
 };
 
 Object.defineProperty(globalThis, "window", {
@@ -88,6 +90,9 @@ Object.defineProperty(globalThis, "window", {
         limit?: number,
       ) => {
         bridgeState.remoteCalls.push(path);
+        if (bridgeState.remoteDelayMs > 0) {
+          await new Promise((resolve) => setTimeout(resolve, bridgeState.remoteDelayMs));
+        }
         const prefix = (filterPrefix ?? "").toLowerCase();
         const remoteEntries = bridgeState.remoteEntriesByPath.get(path) ?? [];
         const entries = remoteEntries
@@ -101,8 +106,15 @@ Object.defineProperty(globalThis, "window", {
   configurable: true,
 });
 
-const { getCompletions } = await import("./autocomplete/completionEngine.ts");
-const { clearHistory, recordCommand } = await import("./autocomplete/commandHistoryStore.ts");
+const {
+  getCompletions,
+  getPathSuggestionsWithinBudget,
+} = await import("./autocomplete/completionEngine.ts");
+const {
+  clearHistory,
+  recordCommand,
+  removeCommandHistoryEntry,
+} = await import("./autocomplete/commandHistoryStore.ts");
 const {
   normalizePathTokenForLookup,
   shouldPreferRemoteShellCwd,
@@ -114,6 +126,7 @@ test.beforeEach(() => {
   bridgeState.localEntries = [{ name: "package.json", type: "file" }];
   bridgeState.remoteEntriesByPath = new Map();
   bridgeState.remoteCalls = [];
+  bridgeState.remoteDelayMs = 0;
 });
 
 test("getCompletions prioritizes spec-driven path suggestions over history", async () => {
@@ -148,6 +161,51 @@ test("getCompletions does not treat generator-only spec args as path contexts", 
   assert.equal(completions[0]?.source, "history");
   assert.equal(completions[0]?.text, "story pick package-choice");
   assert.equal(completions.some((entry) => entry.source === "path"), false);
+});
+
+test("removeCommandHistoryEntry removes only the matching host's autocomplete record", async () => {
+  recordCommand("bad-command --flag", "host-1");
+  recordCommand("bad-command --flag", "host-2");
+
+  removeCommandHistoryEntry("bad-command --flag", "host-1");
+
+  const completions = await getCompletions("bad-command", {
+    hostId: "host-1",
+    historyScope: "global",
+    protocol: "local",
+    cwd: "/repo",
+  });
+  assert.equal(
+    completions.some((entry) => entry.source === "history" && entry.text === "bad-command --flag"),
+    true,
+  );
+
+  const hostOnlyCompletions = await getCompletions("bad-command", {
+    hostId: "host-1",
+    historyScope: "host",
+    protocol: "local",
+    cwd: "/repo",
+  });
+  assert.equal(
+    hostOnlyCompletions.some((entry) => entry.source === "history" && entry.text === "bad-command --flag"),
+    false,
+  );
+});
+
+test("removeCommandHistoryEntry trims command text like recordCommand", async () => {
+  recordCommand("padded-cmd", "host-trim");
+  assert.equal(removeCommandHistoryEntry("  padded-cmd  ", "host-trim"), true);
+
+  const hostOnlyCompletions = await getCompletions("padded", {
+    hostId: "host-trim",
+    historyScope: "host",
+    protocol: "local",
+    cwd: "/repo",
+  });
+  assert.equal(
+    hostOnlyCompletions.some((entry) => entry.source === "history" && entry.text === "padded-cmd"),
+    false,
+  );
 });
 
 test("getCompletions uses the remote shell cwd for relative path arguments instead of stale home", async () => {
@@ -237,4 +295,150 @@ test("getCompletions does not reuse cached remote relative listings after cwd ch
 
   assert.equal(bridgeState.remoteCalls.length, 2);
   assert.equal(completions[0]?.text, "cat worktree.txt");
+});
+
+test("getCompletions does not reuse in-flight remote relative listings after cwd changes", async () => {
+  bridgeState.remoteDelayMs = 150;
+  bridgeState.remoteEntriesByPath.set(".", [{ name: "home-only.txt", type: "file" }]);
+
+  const first = getCompletions("cat ", {
+    hostId: "host-1",
+    os: "linux",
+    protocol: "ssh",
+    sessionId: "session-inflight-cwd",
+    pathBudgetMs: Infinity,
+  });
+
+  // First listing must be in flight before the shell cwd listing changes.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  bridgeState.remoteEntriesByPath.set(".", [{ name: "worktree.txt", type: "file" }]);
+
+  const second = await getCompletions("cat wo", {
+    hostId: "host-1",
+    os: "linux",
+    protocol: "ssh",
+    sessionId: "session-inflight-cwd",
+    pathBudgetMs: Infinity,
+  });
+  await first;
+
+  assert.equal(bridgeState.remoteCalls.length, 2);
+  assert.equal(second[0]?.text, "cat worktree.txt");
+  assert.equal(second.some((entry) => entry.text === "cat home-only.txt"), false);
+});
+
+test("getCompletions returns local history before a slow remote path listing finishes", async () => {
+  recordCommand("cat worktree.txt", "host-1");
+  bridgeState.remoteDelayMs = 250;
+  bridgeState.remoteEntriesByPath.set(".", [{ name: "worktree.txt", type: "file" }]);
+
+  const started = Date.now();
+  const completions = await getCompletions("cat wo", {
+    hostId: "host-1",
+    os: "linux",
+    protocol: "ssh",
+    sessionId: "session-slow-path",
+    cwd: "~",
+    pathBudgetMs: 40,
+  });
+  const elapsed = Date.now() - started;
+
+  assert.ok(elapsed < 200, `expected local suggestions within budget, took ${elapsed}ms`);
+  assert.ok(
+    completions.some((entry) => entry.source === "history" && entry.text === "cat worktree.txt"),
+  );
+  assert.equal(completions.some((entry) => entry.source === "path"), false);
+});
+
+test("getCompletions surfaces late path suggestions for cache-bypassed relative SSH cwd", async () => {
+  recordCommand("cat worktree.txt", "host-1");
+  bridgeState.remoteDelayMs = 250;
+  bridgeState.remoteEntriesByPath.set(".", [{ name: "worktree.txt", type: "file" }]);
+
+  let latePathSuggestions: Awaited<ReturnType<typeof getCompletions>> | null = null;
+  const latePathPromise = new Promise<void>((resolve) => {
+    void getCompletions("cat wo", {
+      hostId: "host-1",
+      os: "linux",
+      protocol: "ssh",
+      sessionId: "session-late-path",
+      cwd: "/stale-fallback",
+      cwdSource: "fallback",
+      pathBudgetMs: 40,
+      onLatePathSuggestions: (suggestions) => {
+        latePathSuggestions = suggestions;
+        resolve();
+      },
+    }).then((completions) => {
+      assert.equal(completions.some((entry) => entry.source === "path"), false);
+      assert.ok(
+        completions.some((entry) => entry.source === "history" && entry.text === "cat worktree.txt"),
+      );
+    });
+  });
+
+  await latePathPromise;
+  assert.ok(latePathSuggestions);
+  assert.equal(latePathSuggestions![0]?.source, "path");
+  assert.equal(latePathSuggestions![0]?.text, "cat worktree.txt");
+});
+
+test("getPathSuggestionsWithinBudget ignores late rejections after the soft timeout", async () => {
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const pathPromise = new Promise<{ name: string; type: "file" }[]>((_resolve, reject) => {
+      setTimeout(() => reject(new Error("late path failure")), 80);
+    });
+    const entries = await getPathSuggestionsWithinBudget(pathPromise, 20);
+    assert.deepEqual(entries, []);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+    assert.equal(unhandled.length, 0);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("getPathSuggestionsWithinBudget delivers late entries after the soft timeout", async () => {
+  const pathPromise = new Promise<{ name: string; type: "file" }[]>((resolve) => {
+    setTimeout(() => resolve([{ name: "late.txt", type: "file" }]), 80);
+  });
+  let lateEntries: { name: string; type: "file" }[] | null = null;
+  const entries = await getPathSuggestionsWithinBudget(pathPromise, 20, (late) => {
+    lateEntries = late as { name: string; type: "file" }[];
+  });
+  assert.deepEqual(entries, []);
+  await new Promise((resolve) => setTimeout(resolve, 120));
+  assert.deepEqual(lateEntries, [{ name: "late.txt", type: "file" }]);
+});
+
+test("getCompletions includes other hosts' history when historyScope is global", async () => {
+  recordCommand("systemctl restart nginx", "host-a");
+  recordCommand("systemctl status nginx", "host-b");
+
+  const hostScoped = await getCompletions("systemctl", {
+    hostId: "host-a",
+    historyScope: "host",
+  });
+  assert.ok(
+    hostScoped.some((entry) => entry.source === "history" && entry.text === "systemctl restart nginx"),
+  );
+  assert.equal(
+    hostScoped.some((entry) => entry.source === "history" && entry.text === "systemctl status nginx"),
+    false,
+  );
+
+  const globalScoped = await getCompletions("systemctl", {
+    hostId: "host-a",
+    historyScope: "global",
+  });
+  assert.ok(
+    globalScoped.some((entry) => entry.source === "history" && entry.text === "systemctl restart nginx"),
+  );
+  assert.ok(
+    globalScoped.some((entry) => entry.source === "history" && entry.text === "systemctl status nginx"),
+  );
 });

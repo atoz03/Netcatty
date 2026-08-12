@@ -231,6 +231,10 @@ export const QuickScriptEditorDialog: React.FC<QuickScriptEditorDialogProps> = (
     ));
   }, []);
 
+  const handleSelectionChange = useCallback((nextSelectedHostIds: string[]) => {
+    setTargetSelection(nextSelectedHostIds);
+  }, []);
+
   const handleTargetsAllHostsChange = useCallback((checked: boolean) => {
     if (checked) {
       setTargetSelection([]);
@@ -261,6 +265,7 @@ export const QuickScriptEditorDialog: React.FC<QuickScriptEditorDialogProps> = (
       customGroups={customGroups}
       selectedHostIds={targetSelection}
       onSelectHost={handleSelectHost}
+      onSelectionChange={handleSelectionChange}
       targetsAllHosts={Boolean(editingSnippet.targetsAllHosts)}
       onTargetsAllHostsChange={handleTargetsAllHostsChange}
     />

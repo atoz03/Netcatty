@@ -2,7 +2,8 @@ import React from "react";
 import { ChevronRight, Info } from "lucide-react";
 import { applyGroupDefaults, resolveGroupDefaults } from "../domain/groupConfig";
 import { sanitizeCredentialValue } from "../domain/credentials";
-import { resolveBridgeKeyAuth, resolveHostAuth } from "../domain/sshAuth";
+import { hasBridgeSshCredentials, resolveBridgeKeyAuth, resolveBridgeSshAgentAuth, resolveHostAuth } from "../domain/sshAuth";
+import { resolveHostSshConnectionTimeouts } from "../domain/sshConnectionTimeouts";
 import { cn } from "../lib/utils";
 import { Button } from "./ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "./ui/collapsible";
@@ -172,8 +173,17 @@ export const KeychainExportPanel: React.FC<KeychainExportPanelProps> = ({
                     setIsExporting(true);
 
                     try {
+                      // Apply group defaults before resolving authentication
+                      // and connection settings for this one-off SSH command.
+                      const effectiveExportHost = exportHost.group
+                        ? applyGroupDefaults(
+                          exportHost,
+                          resolveGroupDefaults(exportHost.group, groupConfigs),
+                        )
+                        : applyGroupDefaults(exportHost, {});
+                      const connectionTimeouts = resolveHostSshConnectionTimeouts(effectiveExportHost);
                       const exportAuth = resolveHostAuth({
-                        host: exportHost,
+                        host: effectiveExportHost,
                         keys,
                         identities,
                       });
@@ -181,17 +191,24 @@ export const KeychainExportPanel: React.FC<KeychainExportPanelProps> = ({
                         key: exportAuth.key,
                         fallbackIdentityFilePaths: exportAuth.authMethod === "password" || exportAuth.keyId
                           ? undefined
-                          : exportHost.identityFilePaths,
+                          : effectiveExportHost.identityFilePaths,
                         passphrase: exportAuth.passphrase,
                       });
                       const exportPassword = sanitizeCredentialValue(exportAuth.password);
+                      const exportAgentAuth = resolveBridgeSshAgentAuth(
+                        effectiveExportHost,
+                        exportAuth.key,
+                        exportAuth.authMethod,
+                      );
 
                       // Need either password or a usable key to run remote command.
-                      if (
-                        !exportPassword &&
-                        !exportKeyAuth.privateKey &&
-                        !exportKeyAuth.identityFilePaths?.length
-                      ) {
+                      if (!hasBridgeSshCredentials({
+                        authMethod: exportAuth.authMethod,
+                        password: exportPassword,
+                        privateKey: exportKeyAuth.privateKey,
+                        identityFilePaths: exportKeyAuth.identityFilePaths,
+                        useSshAgent: exportAgentAuth.useSshAgent,
+                      })) {
                         throw new Error(
                           t("keychain.export.missingCredentials"),
                         );
@@ -212,22 +229,13 @@ export const KeychainExportPanel: React.FC<KeychainExportPanelProps> = ({
                       // Execute the script directly - SSH exec handles multiline commands
                       const command = scriptWithVars;
 
-                      // Resolve the effective host (applying group
-                      // defaults), so algorithm settings inherited from
-                      // the group reach the bridge — the host object on
-                      // its own only carries explicitly set fields.
-                      const effectiveExportHost = exportHost.group
-                        ? applyGroupDefaults(
-                          exportHost,
-                          resolveGroupDefaults(exportHost.group, groupConfigs),
-                        )
-                        : applyGroupDefaults(exportHost, {});
-
                       // Execute via SSH
                       const result = await execCommand({
                         hostname: effectiveExportHost.hostname,
-                        username: exportAuth.username,
+                        hostId: effectiveExportHost.id,
+                        username: exportAuth.username || "root",
                         port: effectiveExportHost.port || 22,
+                        authMethod: exportAuth.authMethod,
                         password: exportPassword,
                         privateKey: exportKeyAuth.privateKey,
                         certificate: exportAuth.key?.certificate,
@@ -236,6 +244,7 @@ export const KeychainExportPanel: React.FC<KeychainExportPanelProps> = ({
                         keySource: exportAuth.key?.source,
                         passphrase: exportKeyAuth.passphrase,
                         identityFilePaths: exportKeyAuth.identityFilePaths,
+                        ...exportAgentAuth,
                         // Carry the effective host's algorithm settings
                         // (host value falling back to its group default)
                         // so the one-off SSH exec honors them just like
@@ -245,7 +254,10 @@ export const KeychainExportPanel: React.FC<KeychainExportPanelProps> = ({
                         algorithmOverrides: effectiveExportHost.algorithms,
                         command,
                         timeout: 30000,
+                        sshTcpConnectTimeoutMs: connectionTimeouts.tcpConnectTimeoutSeconds * 1000,
+                        sshAuthReadyTimeoutMs: connectionTimeouts.authReadyTimeoutSeconds * 1000,
                         enableKeyboardInteractive: true,
+                        requiresMfa: !!effectiveExportHost.requiresMfa,
                         sessionId: `export-key:${effectiveExportHost.id}:${panel.key.id}`,
                       });
 

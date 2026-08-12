@@ -60,3 +60,13 @@ UI calls `window.electron.*` (preload API) → IPC → bridge handler in main pr
 - Aside panels (VaultView subpages) use the shared design system in `components/ui/aside-panel.tsx` — see `AGENTS.md` for usage patterns.
 - Renderer code is TypeScript/ESM; Electron main/bridges are CommonJS (`.cjs`).
 - Path alias `@/` resolves to the repo root (configured in `vite.config.ts` and `tsconfig.json`).
+
+## Reporting Issues & PRs
+
+Issues that skip the format gate are auto-closed. When opening issues (including via `gh` / API):
+
+- Title must start with `[Bug]`, `[Feature]`, or `[Other]` plus a short summary.
+- Body must use `.github/ISSUE_TEMPLATE/` (Bug Report or Feature Request) and fill required fields.
+- PRs should follow `.github/PULL_REQUEST_TEMPLATE.md`.
+
+See [CONTRIBUTING.md](./CONTRIBUTING.md) and the "Reporting Issues & PRs" section in [AGENTS.md](./AGENTS.md).

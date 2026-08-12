@@ -31,12 +31,14 @@ const STATUS_TEXT = {
 // Dynamic tray menu data (synced from renderer)
 let trayMenuData = {
   sessions: [],        // { id, label, hostLabel, status }
-  portForwardRules: [], // { id, label, type, localPort, remoteHost, remotePort, status, hostId }
+  portForwardRules: [], // { id, label, type, localPort, remoteHost, remotePort, status, hostId, canStop }
   hosts: [],           // { id, label, hostname, group, pinned, lastConnectedAt }
 };
 
 let trayPanelWindow = null;
-
+/** True after the tray panel renderer finishes its first load. */
+let trayPanelReady = false;
+let trayPanelShowWhenReady = false;
 let trayPanelRefreshTimer = null;
 // Watchdog: if `leave-full-screen` never arrives (edge case / stuck transition)
 // we eventually give up and force a hide attempt. Better a visible window than
@@ -217,23 +219,29 @@ async function openMainWindowReady() {
   return win;
 }
 
-async function sendToMainWindow(channel, ...args) {
-  const { win } = await getOrCreateMainWindow();
-  bringMainWindowToForeground(win);
+async function sendToMainWindow(channel, payload, { focus = true, createIfMissing = true } = {}) {
+  const { win } = createIfMissing
+    ? await getOrCreateMainWindow()
+    : { win: getTrackedMainWindow() };
+  if (!win) return false;
+  if (focus) {
+    bringMainWindowToForeground(win);
+  }
   try {
     if (typeof sendWhenRendererReady === "function") {
-      const result = await sendWhenRendererReady(win, channel, args[0], { timeoutMs: 8000 });
+      const result = await sendWhenRendererReady(win, channel, payload, { timeoutMs: 8000 });
       if (!result?.success) {
         console.warn(
           `[GlobalShortcut] Failed to deliver ${channel} to main window:`,
           result?.error || result?.reason || "unknown",
         );
       }
-      return;
+      return result?.success === true;
     }
-    win?.webContents?.send(channel, ...args);
+    win.webContents?.send(channel, payload);
+    return true;
   } catch {
-    // ignore
+    return false;
   }
 }
 
@@ -250,9 +258,25 @@ function getTrayPanelUrl() {
   return "app://netcatty/index.html#/tray";
 }
 
+function pushTrayMenuDataToPanel() {
+  if (!trayPanelWindow || trayPanelWindow.isDestroyed()) return;
+  try {
+    trayPanelWindow.webContents?.send("netcatty:trayPanel:setMenuData", trayMenuData);
+  } catch {
+    // ignore
+  }
+}
+
 function ensureTrayPanelWindow() {
   const { BrowserWindow } = electronModule;
   if (trayPanelWindow && !trayPanelWindow.isDestroyed()) return trayPanelWindow;
+
+  const {
+    windowsCssRoundedOverlayChromeOptions,
+  } = require("./windowManager/windowsWindowChrome.cjs");
+
+  trayPanelReady = false;
+  trayPanelShowWhenReady = false;
 
   trayPanelWindow = new BrowserWindow({
     width: 360,
@@ -266,13 +290,17 @@ function ensureTrayPanelWindow() {
     maximizable: false,
     skipTaskbar: true,
     alwaysOnTop: true,
-    transparent: true,
     hasShadow: true,
+    // Transparent host + clear backdrop so CSS rounded-lg corners are truly
+    // see-through. On Windows, disable OS rounding so it does not stack under
+    // the CSS radius (#2505 / Electron #46468).
+    ...windowsCssRoundedOverlayChromeOptions(),
     webPreferences: {
       preload: path.join(__dirname, "../preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+          spellcheck: false,
     },
   });
 
@@ -294,10 +322,16 @@ function ensureTrayPanelWindow() {
   void trayPanelWindow.loadURL(url);
 
   trayPanelWindow.webContents.on("did-finish-load", () => {
-    try {
-      trayPanelWindow?.webContents?.send("netcatty:trayPanel:setMenuData", trayMenuData);
-    } catch {
-      // ignore
+    trayPanelReady = true;
+    pushTrayMenuDataToPanel();
+    if (trayPanelShowWhenReady && trayPanelWindow && !trayPanelWindow.isDestroyed()) {
+      trayPanelShowWhenReady = false;
+      try {
+        trayPanelWindow.show();
+        trayPanelWindow.focus();
+      } catch {
+        // ignore
+      }
     }
   });
 
@@ -321,14 +355,16 @@ function showTrayPanel() {
   const y = Math.min(trayBounds.y + trayBounds.height + 6, workArea.y + workArea.height - panelBounds.height);
 
   win.setBounds({ x, y, width: panelBounds.width, height: panelBounds.height }, false);
-  win.show();
-  win.focus();
-
-  try {
-    win.webContents?.send("netcatty:trayPanel:setMenuData", trayMenuData);
-  } catch {
-    // ignore
+  // Wait for first paint/load so the opaque main-app splash cannot flash as a
+  // square underlay before the tray route clears it (#2505).
+  if (!trayPanelReady) {
+    trayPanelShowWhenReady = true;
+  } else {
+    win.show();
+    win.focus();
   }
+
+  pushTrayMenuDataToPanel();
 
   if (trayPanelRefreshTimer) clearInterval(trayPanelRefreshTimer);
   trayPanelRefreshTimer = setInterval(() => {
@@ -342,6 +378,7 @@ function showTrayPanel() {
 }
 
 function hideTrayPanel() {
+  trayPanelShowWhenReady = false;
   if (trayPanelWindow && !trayPanelWindow.isDestroyed()) {
     trayPanelWindow.hide();
   }
@@ -353,7 +390,12 @@ function hideTrayPanel() {
 }
 
 function toggleTrayPanel() {
-  if (trayPanelWindow && !trayPanelWindow.isDestroyed() && trayPanelWindow.isVisible()) {
+  // A pending first-load show counts as "open" so a second click cancels it
+  // instead of leaving did-finish-load to pop the panel open later.
+  const isOpenOrPending =
+    trayPanelShowWhenReady
+    || (trayPanelWindow && !trayPanelWindow.isDestroyed() && trayPanelWindow.isVisible());
+  if (isOpenOrPending) {
     hideTrayPanel();
   } else {
     showTrayPanel();
@@ -733,12 +775,11 @@ function buildTrayMenuTemplate() {
       menuTemplate.push({
         label: `  ${session.hostLabel || session.label}  (${statusText})`,
         click: () => {
-          // Focus window and switch to this session
-          const win = getMainWindow();
-          if (win && bringMainWindowToForeground(win)) {
-            // Notify renderer to focus this session
-            win.webContents?.send("netcatty:tray:focusSession", session.id);
-          }
+          // AI silent sessions open a terminal popup from the renderer and must
+          // not be force-focused into a tab-less main-window surface.
+          void sendToMainWindow("netcatty:tray:focusSession", session.id, {
+            focus: session.aiHidden !== true,
+          });
         },
       });
     }
@@ -754,6 +795,7 @@ function buildTrayMenuTemplate() {
     for (const rule of trayMenuData.portForwardRules) {
       const isActive = rule.status === "active";
       const isConnecting = rule.status === "connecting";
+      const isStoppable = isActive || isConnecting || rule.canStop === true;
       const statusText =
         rule.status === "active"
           ? STATUS_TEXT.portForward.active
@@ -773,7 +815,7 @@ function buildTrayMenuTemplate() {
         click: () => {
           const win = getMainWindow();
           if (win) {
-            win.webContents?.send("netcatty:tray:togglePortForward", rule.id, !isActive);
+            win.webContents?.send("netcatty:tray:togglePortForward", rule.id, !isStoppable);
           }
         },
       });
@@ -891,6 +933,7 @@ function setTrayMenuData(data) {
   // Rebuild menu with new data
   updateTrayMenu();
   updateDockMenu();
+  pushTrayMenuDataToPanel();
 }
 
 /**
@@ -1004,13 +1047,28 @@ function registerHandlers(ipcMain) {
   });
 
   ipcMain.handle("netcatty:trayPanel:jumpToSession", async (_event, sessionId) => {
-    await sendToMainWindow("netcatty:trayPanel:jumpToSession", sessionId);
+    // Do not force-focus the main window here. Visible sessions open/focus it
+    // from the renderer; AI silent sessions open a terminal popup instead and
+    // should not steal focus into a tab-less main-window surface.
+    await sendToMainWindow("netcatty:trayPanel:jumpToSession", sessionId, {
+      focus: false,
+    });
     return { success: true };
   });
 
   ipcMain.handle("netcatty:trayPanel:connectToHost", async (_event, hostId) => {
     await connectToHostFromSystemMenu(hostId);
     return { success: true };
+  });
+
+  ipcMain.handle("netcatty:trayPanel:closeSession", async (_event, sessionId) => {
+    const delivered = await sendToMainWindow("netcatty:trayPanel:closeSession", sessionId, {
+      focus: false,
+      createIfMissing: false,
+    });
+    return delivered
+      ? { success: true }
+      : { success: false, error: "Main window is not available" };
   });
 
   ipcMain.handle("netcatty:trayPanel:quitApp", async () => {
@@ -1050,6 +1108,8 @@ function cleanup() {
     }
     trayPanelWindow = null;
   }
+  trayPanelReady = false;
+  trayPanelShowWhenReady = false;
 }
 
 module.exports = {

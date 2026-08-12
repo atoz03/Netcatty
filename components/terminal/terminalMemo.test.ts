@@ -40,6 +40,13 @@ test("terminal memo refreshes when restored local shell type changes", () => {
   );
 });
 
+test("terminal memo refreshes when a popup vault finishes hydrating", () => {
+  assert.equal(
+    terminalPropsAreEqual(baseProps, { ...baseProps, vaultInitializedOverride: true }),
+    false,
+  );
+});
+
 test("terminal memo refreshes when terminal context reader callback changes", () => {
   assert.equal(
     terminalPropsAreEqual(baseProps, {

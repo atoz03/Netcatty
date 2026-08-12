@@ -127,6 +127,7 @@ If you regularly work with a fleet of servers, Netcatty is built for speed and f
 ### 🖥️ Terminal Workspaces
 - **Split panes** — horizontal and vertical splits for multi-tasking
 - **Session management** — run multiple connections side-by-side
+- **Inline images** — render Kitty graphics, SIXEL and iTerm inline images from remote programs
 
 ### 📁 SFTP + Built-in Editor
 - **File workflows** — drag & drop uploads/downloads
@@ -205,6 +206,18 @@ Download the latest release for your platform from [GitHub Releases](https://git
 | **Linux** | x64 / arm64 |
 
 Or browse all releases at [GitHub Releases](https://github.com/binaricat/Netcatty/releases).
+
+### Code signing and privacy
+
+Netcatty is applying to the SignPath Foundation open-source program. Once
+approved, covered Windows release artifacts will use **Free code signing provided by SignPath.io, certificate by SignPath Foundation**.
+See the [code signing policy](CODE_SIGNING_POLICY.md) and
+[privacy policy](PRIVACY.md). Windows releases may remain unsigned until the
+application and integration are complete.
+
+> **Windows portable data:** Exit Netcatty, then create a folder named `data` beside `Netcatty.exe` (zip build) or beside the portable launcher. Netcatty will store its profile there on the next launch. Saved passwords and private keys remain protected by the Windows user account that created them, so they must be re-entered after moving the folder to another computer or Windows account.
+
+> **Open folders in Netcatty on Windows:** The installed version adds **Open in Netcatty** to Explorer's folder context menu and folder-background context menu. It opens a local terminal in that folder. On Windows 11, choose **Show more options** first. Turn the menu off or on in **Settings → System → Windows Explorer**. ZIP and portable versions do not add this menu by default.
 
 > **macOS Users:** Current releases are expected to be code-signed and notarized. If Gatekeeper still warns, make sure you downloaded the latest official build from GitHub Releases.
 
@@ -308,11 +321,11 @@ This project is licensed under the **GPL-3.0 License** - see the [LICENSE](LICEN
 <a name="star-history"></a>
 # Star History
 
-<a href="https://star-history.com/#binaricat/Netcatty&Date">
+<a href="https://www.star-history.com/#binaricat/Netcatty&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=binaricat/Netcatty&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=binaricat/Netcatty&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=binaricat/Netcatty&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/star-history/star-history-dark.svg" />
+   <source media="(prefers-color-scheme: light)" srcset="docs/assets/star-history/star-history-light.svg" />
+   <img alt="Star History Chart" src="docs/assets/star-history/star-history-light.svg" />
  </picture>
 </a>
 

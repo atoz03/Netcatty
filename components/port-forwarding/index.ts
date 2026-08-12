@@ -6,6 +6,7 @@
 export {
   generateRuleLabel,
   getTypeMenuLabel,
+  stopRuntimeTunnelBeforeDelete,
 } from './utils';
 
 export { RuleCard } from './RuleCard';

@@ -17,8 +17,8 @@ import {
   SystemPanelShell,
   SystemPanelToolbar,
 } from './SystemPanelUi';
-import { useAsyncRecordCache } from './hooks/useAsyncRecordCache';
-import { usePolling, useStableTranslate } from './hooks/useSystemManager';
+import { useAsyncRecordCache } from '../../application/state/systemManager/useAsyncRecordCache';
+import { usePolling, useStableTranslate } from '../../application/state/useSystemManager';
 import { TmuxNewSessionModal } from './TmuxNewSessionModal';
 import { TmuxSessionCard } from './TmuxSessionCard';
 import { useStableListOrder, mergePollListByKey } from './listStable';

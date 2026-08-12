@@ -18,6 +18,7 @@ function fakeCreateError(code, message) {
 
 test("getCliRpcMethod resolves implemented cli commands to rpc methods", () => {
   assert.equal(getCliRpcMethod(["exec"]), "netcatty/exec");
+  assert.equal(getCliRpcMethod(["attachment", "read"]), "netcatty/readAttachment");
   assert.equal(getCliRpcMethod(["sftp", "list"]), "netcatty/sftp/list");
   assert.equal(getCliRpcMethod(["vault", "host", "get"]), "vault/host/get");
   assert.equal(getCliRpcMethod(["portforward", "rules", "list"]), "portforward/rules/list");
@@ -27,6 +28,8 @@ test("getCliRpcMethod resolves implemented cli commands to rpc methods", () => {
 test("listCliCapabilities returns implemented commands by default", () => {
   const entries = listCliCapabilities();
   assert.ok(entries.some((entry) => entry.id === "terminal.execute"));
+  assert.ok(entries.some((entry) => entry.id === "attachment.list"));
+  assert.ok(entries.some((entry) => entry.id === "attachment.read"));
   assert.ok(entries.some((entry) => entry.id === "vault.host.get"));
   assert.ok(entries.every((entry) => entry.status === CAPABILITY_STATUS.IMPLEMENTED));
   assert.ok(entries.every((entry) => entry.rpcMethod));
@@ -40,6 +43,15 @@ test("listCliCapabilities can include planned commands", () => {
 test("buildCatalogCliParams maps vault host get flags", () => {
   const params = buildCatalogCliParams("vault.host.get", { hostId: "host-1" }, fakeCreateError);
   assert.deepEqual(params, { hostId: "host-1" });
+});
+
+test("buildCatalogCliParams maps attachment filename", () => {
+  const params = buildCatalogCliParams(
+    "attachment.read",
+    { filename: "hosts.csv" },
+    fakeCreateError,
+  );
+  assert.deepEqual(params, { filename: "hosts.csv" });
 });
 
 test("buildCatalogCliParams parses snippet variables JSON", () => {

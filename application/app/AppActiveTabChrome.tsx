@@ -7,6 +7,7 @@ import {
 } from '../state/activeTabStore';
 import { updateActiveChromeThemeDeps } from '../state/activeChromeThemeSync';
 import { useActiveChromeTheme } from '../state/useActiveChromeTheme';
+import { useAppearanceChromeStore } from '../state/appearanceChromeStore';
 import { netcattyBridge } from '../../infrastructure/services/netcattyBridge';
 import { resolveActiveChromeTheme } from './activeChromeTheme';
 import type { TerminalAppearanceHostScope, ResolvedAppearance } from '../../domain/terminalAppearanceRuntime';
@@ -17,9 +18,9 @@ import type {
   Workspace,
 } from '../../types';
 import type { LogView } from '../state/logViewState';
-import type { EditorTab } from '../state/editorTabStore';
+import type { EditorTabChrome } from '../state/editorTabStore';
 
-interface AppActiveTabChromeProps {
+export interface AppActiveTabChromeProps {
   showSftpTab: boolean;
   setActiveTabId: (id: string) => void;
   applyAppTheme: () => void;
@@ -29,9 +30,7 @@ interface AppActiveTabChromeProps {
   workspaceById: Map<string, Workspace>;
   currentTerminalTheme: TerminalTheme;
   followAppTerminalTheme: boolean;
-  accentMode: 'theme' | 'custom';
-  customAccent: string;
-  editorTabs: readonly EditorTab[];
+  editorTabs: readonly EditorTabChrome[];
   logViews: readonly LogView[];
   resolveSessionAppearance?: (hostScope: TerminalAppearanceHostScope) => ResolvedAppearance;
   t: (key: string) => string;
@@ -44,6 +43,9 @@ interface AppActiveTabChromeProps {
  * re-renders this null-rendering component (and the self-subscribing leaves)
  * instead of forcing the entire App tree (which holds all vault/session/
  * settings state and rebuilds the giant AppView ctx) to re-render.
+ *
+ * Accent comes from appearanceChromeStore so color-picker drag does not
+ * rebuild AppShell chrome props.
  */
 export function AppActiveTabChrome({
   showSftpTab,
@@ -55,14 +57,13 @@ export function AppActiveTabChrome({
   workspaceById,
   currentTerminalTheme,
   followAppTerminalTheme,
-  accentMode,
-  customAccent,
   editorTabs,
   logViews,
   resolveSessionAppearance,
   t,
 }: AppActiveTabChromeProps) {
   const activeTabId = useActiveTabId();
+  const { accentMode, customAccent } = useAppearanceChromeStore();
 
   useEffect(() => {
     if (!showSftpTab && activeTabId === 'sftp') {
@@ -140,7 +141,19 @@ export function AppActiveTabChrome({
   }, [activeTabId, editorTabFileNameCounts, editorTabs, logViews, sessionById, t, workspaceById]);
 
   useEffect(() => {
-    void netcattyBridge.get()?.setWindowTitle?.(activeWindowTitle);
+    // Title is already memoized by activeTabId; skip redundant IPC when the
+    // string did not change (e.g. two tabs sharing the same host label).
+    let cancelled = false;
+    const bridge = netcattyBridge.get();
+    if (!bridge?.setWindowTitle) return;
+    // Defer slightly so the title write does not compete with tab-switch paint.
+    const timer = window.setTimeout(() => {
+      if (!cancelled) void bridge.setWindowTitle?.(activeWindowTitle);
+    }, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
   }, [activeWindowTitle]);
 
   return null;

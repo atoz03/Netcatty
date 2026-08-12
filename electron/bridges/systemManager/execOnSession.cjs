@@ -1,6 +1,7 @@
 /* eslint-disable no-undef */
 
 const { isSshConnAlive, isTransportExecError } = require("./execConnHealth.cjs");
+const { executeBoundedSshCommand } = require("../boundedSshExec.cjs");
 
 function createExecOnSessionApi(ctx) {
   with (ctx) {
@@ -92,61 +93,34 @@ function createExecOnSessionApi(ctx) {
     }
 
     function execOnConnection(conn, command, timeoutMs, execOptions = {}) {
-      return new Promise((resolve) => {
-        let settled = false;
-        let activeStream = null;
-        const maxBuffer = normalizeExecMaxBuffer(execOptions.maxBuffer);
-        const settle = (result) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          resolve(result);
-        };
-        const timer = setTimeout(() => {
-          settle({ success: false, error: "Command timeout" });
-          try { if (activeStream) activeStream.close(); } catch { /* ignore */ }
-        }, timeoutMs);
-
-        try {
-          conn.exec(command, (err, stream) => {
-            if (err) {
-              settle({ success: false, error: err.message || String(err) });
-              return;
-            }
-            activeStream = stream;
-            let stdout = "";
-            let stderr = "";
-            const appendOutput = (streamName, current, chunk) => {
-              const next = current + chunk.toString();
-              if (next.length > maxBuffer) {
-                settle({
-                  success: false,
-                  error: `${streamName} maxBuffer exceeded`,
-                  stdout: "",
-                  stderr: "",
-                  code: 1,
-                });
-                try { stream.close(); } catch { /* ignore */ }
-                return current;
-              }
-              return next;
-            };
-            stream.on("data", (chunk) => { stdout = appendOutput("stdout", stdout, chunk); });
-            if (stream.stderr) {
-              stream.stderr.on("data", (chunk) => { stderr = appendOutput("stderr", stderr, chunk); });
-            }
-            if (typeof execOptions.stdin === "string") {
-              stream.write(execOptions.stdin);
-              stream.end();
-            }
-            stream.on("close", (code) => {
-              settle({ success: true, stdout, stderr, code: code ?? 0 });
-            });
-          });
-        } catch (err) {
-          settle({ success: false, error: err?.message || String(err) });
-        }
-      });
+      const maxBuffer = normalizeExecMaxBuffer(execOptions.maxBuffer);
+      return executeBoundedSshCommand(conn, command, {
+        openingTimeoutMs: timeoutMs,
+        runTimeoutMs: timeoutMs,
+        maxOutputBytes: maxBuffer,
+        onStream(stream) {
+          if (typeof execOptions.stdin === "string") {
+            stream.write(execOptions.stdin);
+            stream.end();
+          }
+        },
+      }).then(
+        ({ stdout, stderr, code }) => ({
+          success: true,
+          stdout,
+          stderr,
+          code: code ?? 0,
+        }),
+        (error) => ({
+          success: false,
+          error: error?.code === "SSH_EXEC_OUTPUT_LIMIT"
+            ? "SSH command maxBuffer exceeded"
+            : error?.message || String(error),
+          stdout: "",
+          stderr: "",
+          code: 1,
+        }),
+      );
     }
 
     async function execOnSshSession(session, sessionId, command, timeoutMs, event, execOptions = {}, allowCompanionRetry = true) {

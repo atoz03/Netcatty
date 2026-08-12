@@ -1,4 +1,11 @@
 /* eslint-disable no-undef */
+// Module-level require: code inside createExecHandlerApi runs under `with (ctx)`
+// where bare `require` resolves to ctx.require (based in electron/bridges/).
+const {
+  ensureSessionShellKind,
+  ensureSessionShellKindForExec,
+} = require("../ai/sessionShellKind.cjs");
+
 function createExecHandlerApi(ctx) {
   with (ctx) {
     function resolveExecContext(params) {
@@ -128,18 +135,29 @@ function createExecHandlerApi(ctx) {
     
       // Prefer the interactive PTY so the user sees command/output in-session.
       if (ptyStream && typeof ptyStream.write === "function") {
-        return runExecution(() => execViaPty(ptyStream, command, {
-          trackForCancellation: activePtyExecs,
-          timeoutMs: commandTimeoutMs,
-          shellKind: session.shellKind,
-          expectedPrompt: getFreshIdlePrompt(session),
-          typedInput: true,
-          echoCommand: (rawCommand) => echoCommandToSession(session, sessionId, rawCommand),
-          chatSessionId,
-          // MCP callers have terminal_start as a fallback for long commands,
-          // so enforce a hard wall-clock timeout here to match the MCP budget.
-          enforceWallTimeout: true,
-        }));
+        // Probe remote login shell once when shellKind is unset so fish
+        // sessions get the fish wrapper instead of the posix default (#1854).
+        // Cancellable: Stop during the probe must not still type the command.
+        return runExecution(async () => {
+          const probed = await ensureSessionShellKindForExec(session, {
+            trackForCancellation: activePtyExecs,
+            chatSessionId,
+          });
+          if (!probed.ok) return probed;
+          return execViaPty(ptyStream, command, {
+            trackForCancellation: activePtyExecs,
+            timeoutMs: commandTimeoutMs,
+            shellKind: session.shellKind,
+            loginShellHint: session._loginShellKind,
+            expectedPrompt: getFreshIdlePrompt(session),
+            typedInput: true,
+            echoCommand: (rawCommand) => echoCommandToSession(session, sessionId, rawCommand),
+            chatSessionId,
+            // MCP callers have terminal_start as a fallback for long commands,
+            // so enforce a hard wall-clock timeout here to match the MCP budget.
+            enforceWallTimeout: true,
+          });
+        });
       }
     
       // Network devices require an interactive PTY for raw command execution.
@@ -215,28 +233,16 @@ function createExecHandlerApi(ctx) {
     
       const jobId = createBackgroundJobId();
       const timeoutMs = Math.max(commandTimeoutMs, DEFAULT_BACKGROUND_JOB_TIMEOUT_MS);
-      let handle;
-      try {
-        handle = startPtyJob(ptyStream, command, {
-          // Intentionally do NOT register in activePtyExecs: terminal_start jobs
-          // are designed to survive SDK agent "Stop" so the model can stop polling
-          // without aborting a long-running build/scan/log stream. The job is
-          // managed via terminal_stop and the per-session execution lock.
-          timeoutMs,
-          shellKind: session.shellKind,
-          chatSessionId,
-          expectedPrompt: getFreshIdlePrompt(session),
-          typedInput: true,
-          echoCommand: (rawCommand) => echoCommandToSession(session, sessionId, rawCommand),
-          maxBufferedChars: MAX_BACKGROUND_JOB_OUTPUT_CHARS,
-          normalizeFinalOutput: false,
-        });
-      } catch (err) {
-        releaseSessionExecution(sessionId, sessionToken);
-        return { ok: false, error: err?.message || String(err) };
-      }
-    
       const startedAt = Date.now();
+
+      // Register the job *before* the shell-kind probe so chat-delete /
+      // cancelBackgroundJobsForSession can see it while we await. Without
+      // this, the first terminal_start on an unprobed remote session has no
+      // backgroundJobs entry during the probe and still starts the PTY job
+      // after cancel (Codex P2 on #2061). Not registered in activePtyExecs —
+      // terminal_start is designed to survive SDK Stop; only chat cancel
+      // (which walks backgroundJobs) should abort a pending start.
+      let probeCancelRequested = false;
       const job = {
         id: jobId,
         sessionId,
@@ -251,62 +257,122 @@ function createExecHandlerApi(ctx) {
         outputBaseOffset: 0,
         totalOutputChars: 0,
         outputTruncated: false,
-        handle,
+        pendingShellProbe: true,
+        handle: {
+          cancel: () => {
+            probeCancelRequested = true;
+          },
+        },
       };
       backgroundJobs.set(jobId, job);
-    
-      handle.resultPromise.then((result) => {
-        job.updatedAt = Date.now();
-        job.exitCode = result.exitCode ?? null;
-        storeCompletedJobOutput(job, result.stdout || "", result);
-        const isForcedCancel = typeof result.error === "string" && result.error.includes("forced");
-        if (result.error === "Cancelled" || isForcedCancel) {
-          // Forced cancel means the process ignored SIGINT for the cancel
-          // wall-clock window. We mark the job as cancelled and release the
-          // lock so the session is reusable; the error message tells the
-          // caller the process may still be running so subsequent commands
-          // should be considered carefully. This is consistent: callers see
-          // completed=true exactly when the lock is no longer held.
+
+      // Probe so fish login shells are not mis-wrapped as posix (#1854).
+      return Promise.resolve(ensureSessionShellKind(session)).then(() => {
+        if (probeCancelRequested || job.status === "stopping") {
           job.status = "cancelled";
-          job.error = result.error;
+          job.error = "Cancelled";
+          job.updatedAt = Date.now();
+          job.pendingShellProbe = false;
           releaseSessionExecution(sessionId, sessionToken);
-          return;
+          return {
+            ok: false,
+            error: "Cancelled",
+            jobId,
+            sessionId,
+            status: "cancelled",
+          };
         }
-        if (result.error) {
+
+        let handle;
+        try {
+          handle = startPtyJob(ptyStream, command, {
+            // Intentionally do NOT register in activePtyExecs: terminal_start jobs
+            // are designed to survive SDK agent "Stop" so the model can stop polling
+            // without aborting a long-running build/scan/log stream. The job is
+            // managed via terminal_stop and the per-session execution lock.
+            timeoutMs,
+            shellKind: session.shellKind,
+            loginShellHint: session._loginShellKind,
+            chatSessionId,
+            expectedPrompt: getFreshIdlePrompt(session),
+            typedInput: true,
+            echoCommand: (rawCommand) => echoCommandToSession(session, sessionId, rawCommand),
+            maxBufferedChars: MAX_BACKGROUND_JOB_OUTPUT_CHARS,
+            normalizeFinalOutput: false,
+          });
+        } catch (err) {
           job.status = "failed";
-          job.error = result.error;
+          job.error = err?.message || String(err);
+          job.updatedAt = Date.now();
+          job.pendingShellProbe = false;
           releaseSessionExecution(sessionId, sessionToken);
-          return;
+          return { ok: false, error: err?.message || String(err) };
         }
-        // A non-zero exit code without an error message still represents a
-        // failed command (e.g. a build/test that returned 1). Mark it as failed
-        // so callers don't have to special-case exitCode against status.
-        if (typeof result.exitCode === "number" && result.exitCode !== 0) {
+
+        job.handle = handle;
+        job.pendingShellProbe = false;
+
+        handle.resultPromise.then((result) => {
+          job.updatedAt = Date.now();
+          job.exitCode = result.exitCode ?? null;
+          storeCompletedJobOutput(job, result.stdout || "", result);
+          const isForcedCancel = typeof result.error === "string" && result.error.includes("forced");
+          if (result.error === "Cancelled" || isForcedCancel) {
+            // Forced cancel means the process ignored SIGINT for the cancel
+            // wall-clock window. We mark the job as cancelled and release the
+            // lock so the session is reusable; the error message tells the
+            // caller the process may still be running so subsequent commands
+            // should be considered carefully. This is consistent: callers see
+            // completed=true exactly when the lock is no longer held.
+            job.status = "cancelled";
+            job.error = result.error;
+            releaseSessionExecution(sessionId, sessionToken);
+            return;
+          }
+          if (result.error) {
+            job.status = "failed";
+            job.error = result.error;
+            releaseSessionExecution(sessionId, sessionToken);
+            return;
+          }
+          // A non-zero exit code without an error message still represents a
+          // failed command (e.g. a build/test that returned 1). Mark it as failed
+          // so callers don't have to special-case exitCode against status.
+          if (typeof result.exitCode === "number" && result.exitCode !== 0) {
+            job.status = "failed";
+            job.error = `Command exited with code ${result.exitCode}`;
+            releaseSessionExecution(sessionId, sessionToken);
+            return;
+          }
+          job.status = "completed";
+          releaseSessionExecution(sessionId, sessionToken);
+        }).catch((err) => {
+          job.updatedAt = Date.now();
           job.status = "failed";
-          job.error = `Command exited with code ${result.exitCode}`;
+          job.error = err?.message || String(err);
+          storeCompletedJobOutput(job, job.stdout || "");
           releaseSessionExecution(sessionId, sessionToken);
-          return;
-        }
-        job.status = "completed";
-        releaseSessionExecution(sessionId, sessionToken);
+        });
+
+        return {
+          ok: true,
+          jobId,
+          sessionId,
+          command,
+          status: "running",
+          startedAt,
+          outputMode: "foreground-mirrored",
+          recommendedPollIntervalMs: DEFAULT_BACKGROUND_JOB_POLL_INTERVAL_MS,
+        };
       }).catch((err) => {
-        job.updatedAt = Date.now();
+        // Probe (or unexpected rejection) must not leave the session lock held.
         job.status = "failed";
         job.error = err?.message || String(err);
-        storeCompletedJobOutput(job, job.stdout || "");
+        job.updatedAt = Date.now();
+        job.pendingShellProbe = false;
         releaseSessionExecution(sessionId, sessionToken);
+        return { ok: false, error: err?.message || String(err) };
       });
-    
-      return {
-        ok: true,
-        jobId,
-        sessionId,
-        command,
-        status: "running",
-        startedAt,
-        outputMode: "foreground-mirrored",
-        recommendedPollIntervalMs: DEFAULT_BACKGROUND_JOB_POLL_INTERVAL_MS,
-      };
     }
     
     function getScopedJob(jobId, chatSessionId) {

@@ -6,7 +6,11 @@ import { ChevronDown, ChevronUp, Save, Tag, Usb } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { useI18n } from '../application/i18n/I18nProvider';
 import { useTerminalBackend } from '../application/state/useTerminalBackend';
-import type { Host, SerialConfig, SerialFlowControl, SerialParity } from '../domain/models';
+import type { GroupConfig, Host, SerialConfig, SerialFlowControl, SerialParity } from '../domain/models';
+import {
+  resolveSerialBackspaceFormValue,
+  resolveSerialBackspaceOverrideOnSave,
+} from '../domain/serialBackspace';
 
 import { Button } from './ui/button';
 import { Combobox, ComboboxOption, MultiCombobox } from './ui/combobox';
@@ -22,6 +26,7 @@ import {
   type AsidePanelResizeProps,
 } from './ui/aside-panel';
 import { HostNotesEditor } from './host/HostNotesEditor';
+import { cn } from '../lib/utils';
 
 interface SerialPort {
   path: string;
@@ -37,9 +42,11 @@ interface SerialHostDetailsPanelProps {
   initialData: Host;
   allTags?: string[];
   groups?: string[];
+  groupDefaults?: Partial<GroupConfig>;
   onSave: (host: Host) => void;
   onCancel: () => void;
   layout?: AsidePanelLayout;
+  className?: string;
 }
 
 type SerialHostDetailsPanelPropsWithResize = SerialHostDetailsPanelProps & AsidePanelResizeProps;
@@ -54,9 +61,11 @@ export const SerialHostDetailsPanel: React.FC<SerialHostDetailsPanelPropsWithRes
   initialData,
   allTags = [],
   groups = [],
+  groupDefaults,
   onSave,
   onCancel,
   layout = 'overlay',
+  className,
   resizable,
   persistWidthStorageKey,
   resizeAriaLabel,
@@ -77,6 +86,10 @@ export const SerialHostDetailsPanel: React.FC<SerialHostDetailsPanelPropsWithRes
   const [flowControl, setFlowControl] = useState<SerialFlowControl>(initialData.serialConfig?.flowControl || 'none');
   const [localEcho, setLocalEcho] = useState(initialData.serialConfig?.localEcho || false);
   const [lineMode, setLineMode] = useState(initialData.serialConfig?.lineMode || false);
+  const [backspaceBehavior, setBackspaceBehavior] = useState(
+    resolveSerialBackspaceFormValue(initialData, groupDefaults),
+  );
+  const [backspaceBehaviorChanged, setBackspaceBehaviorChanged] = useState(false);
   const [charset, setCharset] = useState(initialData.charset || 'UTF-8');
   const [tags, setTags] = useState<string[]>(initialData.tags || []);
   const [group, setGroup] = useState(initialData.group || '');
@@ -110,6 +123,11 @@ export const SerialHostDetailsPanel: React.FC<SerialHostDetailsPanelPropsWithRes
       flowControl,
       localEcho,
       lineMode,
+      backspaceBehavior: resolveSerialBackspaceOverrideOnSave({
+        initialHost: initialData,
+        selectedBehavior: backspaceBehavior,
+        behaviorChanged: backspaceBehaviorChanged,
+      }),
     };
 
     const portName = selectedPort.split('/').pop() || selectedPort;
@@ -122,6 +140,7 @@ export const SerialHostDetailsPanel: React.FC<SerialHostDetailsPanelPropsWithRes
       group,
       charset,
       serialConfig: config,
+      backspaceBehavior: undefined,
       notes: notes.trim() || undefined,
     };
 
@@ -176,7 +195,7 @@ export const SerialHostDetailsPanel: React.FC<SerialHostDetailsPanelPropsWithRes
       onClose={onCancel}
       title={t('serial.edit.title')}
       subtitle={initialData.label}
-      className="z-40"
+      className={cn('z-40', className)}
       layout={layout}
       dataSection="serial-host-details-panel"
       resizable={resizable}
@@ -395,6 +414,28 @@ export const SerialHostDetailsPanel: React.FC<SerialHostDetailsPanelPropsWithRes
 
             {/* Terminal Options */}
             <div className="space-y-3 pt-2 border-t border-border/60">
+              <div className="space-y-2">
+                <Label htmlFor="serial-backspace">{t('serial.field.backspaceBehavior')}</Label>
+                <Select
+                  value={backspaceBehavior}
+                  onValueChange={(value) => {
+                    setBackspaceBehavior(value === 'ctrl-h' ? 'ctrl-h' : 'default');
+                    setBackspaceBehaviorChanged(true);
+                  }}
+                >
+                  <SelectTrigger id="serial-backspace">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="default">{t('serial.backspace.default')}</SelectItem>
+                    <SelectItem value="ctrl-h">{t('serial.backspace.ctrlH')}</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">
+                  {t('serial.field.backspaceBehaviorDesc')}
+                </p>
+              </div>
+
               <div className="flex items-center justify-between">
                 <div className="space-y-0.5">
                   <Label htmlFor="local-echo" className="text-sm font-medium cursor-pointer">

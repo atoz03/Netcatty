@@ -31,22 +31,36 @@ import {
   SystemPanelStatusBadge,
   SystemPanelToolbar,
 } from './SystemPanelUi';
+import { SystemPanelConfirmDialog } from './SystemPanelConfirmDialog';
 import { SystemPanelPromptDialog } from './SystemPanelPromptDialog';
-import { usePolling, useStableTranslate } from './hooks/useSystemManager';
+import { usePolling, useStableTranslate } from '../../application/state/useSystemManager';
+import {
+  getCachedProcessList,
+  setCachedProcessList,
+} from './processListCache';
 
 type Backend = ReturnType<typeof useSystemManagerBackend>;
 type SortKey = 'cpuPercent' | 'memPercent' | 'pid' | 'command' | 'user';
 type ProcessFilter = 'all' | 'running';
+type ProcessSignal = 'STOP' | 'CONT' | 'TERM' | 'KILL';
 
-const PROCESS_CACHE_TTL_MS = 30_000;
+interface PendingProcessSignal {
+  pid: number;
+  signal: ProcessSignal;
+}
+
+function processSignalTitleKey(signal: ProcessSignal): string {
+  switch (signal) {
+    case 'STOP': return 'systemManager.processes.stop';
+    case 'CONT': return 'systemManager.processes.cont';
+    case 'TERM': return 'systemManager.processes.term';
+    case 'KILL': return 'systemManager.processes.kill';
+  }
+}
+
 const PROCESS_ROW_HEIGHT = 56;
 const PROCESS_DETAIL_HEIGHT = 112;
 const PROCESS_OVERSCAN_ROWS = 8;
-
-const processListCache = new Map<string, {
-  processes: SystemProcessInfo[];
-  updatedAt: number;
-}>();
 
 const SORT_OPTIONS: Array<{ key: SortKey; labelKey: string }> = [
   { key: 'cpuPercent', labelKey: 'systemManager.processes.sort.cpu' },
@@ -70,16 +84,6 @@ const mergeProcesses = (
   prev: SystemProcessInfo[] | null,
   next: SystemProcessInfo[],
 ) => mergePollListByKey(prev, next, (p) => p.pid, systemProcessInfoEqual);
-
-function getCachedProcesses(sessionId: string): SystemProcessInfo[] | null {
-  const cached = processListCache.get(sessionId);
-  if (!cached) return null;
-  if (Date.now() - cached.updatedAt > PROCESS_CACHE_TTL_MS) {
-    processListCache.delete(sessionId);
-    return null;
-  }
-  return cached.processes;
-}
 
 const ProcessListLoading = memo(function ProcessListLoading({
   message,
@@ -255,8 +259,10 @@ export const ProcessManagerTab = memo(function ProcessManagerTab({
   const [filter, setFilter] = useState<ProcessFilter>('all');
   const [selectedPid, setSelectedPid] = useState<number | null>(null);
   const [reniceTarget, setReniceTarget] = useState<number | null>(null);
+  const [pendingSignal, setPendingSignal] = useState<PendingProcessSignal | null>(null);
+  const [signalBusy, setSignalBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [cachedProcesses, setCachedProcesses] = useState<SystemProcessInfo[] | null>(() => getCachedProcesses(sessionId));
+  const [cachedProcesses, setCachedProcesses] = useState<SystemProcessInfo[] | null>(() => getCachedProcessList(sessionId));
   const [cachedProcessesSessionId, setCachedProcessesSessionId] = useState(sessionId);
   const [processListPending, setProcessListPending] = useState(false);
   const processFetchGenerationRef = useRef(0);
@@ -269,9 +275,15 @@ export const ProcessManagerTab = memo(function ProcessManagerTab({
 
   useEffect(() => {
     processFetchGenerationRef.current += 1;
-    setCachedProcesses(getCachedProcesses(sessionId));
+    setCachedProcesses(getCachedProcessList(sessionId));
     setCachedProcessesSessionId(sessionId);
     setProcessListPending(false);
+    // Drop in-flight dialogs so a confirm cannot act on a different host/session.
+    setPendingSignal(null);
+    setSignalBusy(false);
+    setReniceTarget(null);
+    setSelectedPid(null);
+    setActionError(null);
   }, [sessionId]);
 
   useEffect(() => () => {
@@ -315,14 +327,14 @@ export const ProcessManagerTab = memo(function ProcessManagerTab({
 
   useEffect(() => {
     if (!processes) return;
-    processListCache.set(sessionId, { processes, updatedAt: Date.now() });
+    setCachedProcessList(sessionId, processes);
     setCachedProcesses(processes);
     setCachedProcessesSessionId(sessionId);
   }, [processes, sessionId]);
 
   const sessionCachedProcesses = cachedProcessesSessionId === sessionId
     ? cachedProcesses
-    : getCachedProcesses(sessionId);
+    : getCachedProcessList(sessionId);
   const visibleProcesses = processes ?? sessionCachedProcesses;
   const showingCachedProcesses = processes === null && sessionCachedProcesses !== null;
 
@@ -377,19 +389,24 @@ export const ProcessManagerTab = memo(function ProcessManagerTab({
     setSelectedPid((cur) => (cur === pid ? null : pid));
   }, []);
 
-  const signalProcess = useCallback(async (pid: number, signal: string) => {
-    const confirmKey = signal === 'KILL'
-      ? 'systemManager.processes.confirmKill'
-      : 'systemManager.processes.confirmSignal';
-    const ok = window.confirm(t(confirmKey, { pid: String(pid), signal }));
-    if (!ok) return;
+  const requestSignal = useCallback((pid: number, signal: string) => {
+    if (signal !== 'STOP' && signal !== 'CONT' && signal !== 'TERM' && signal !== 'KILL') return;
+    setPendingSignal({ pid, signal });
+  }, []);
+
+  const executeSignal = useCallback(async (pid: number, signal: ProcessSignal) => {
+    setSignalBusy(true);
     setActionError(null);
-    const result = await backend.signalSystemProcess({ sessionId, pid, signal });
-    if (!result.success) {
-      setActionError(result.error || t('systemManager.errors.actionFailed'));
-      return;
+    try {
+      const result = await backend.signalSystemProcess({ sessionId, pid, signal });
+      if (!result.success) {
+        setActionError(result.error || t('systemManager.errors.actionFailed'));
+        return;
+      }
+      void refresh();
+    } finally {
+      setSignalBusy(false);
     }
-    void refresh();
   }, [backend, refresh, sessionId, t]);
 
   const reniceProcess = useCallback(async (pid: number, nice: number) => {
@@ -478,10 +495,35 @@ export const ProcessManagerTab = memo(function ProcessManagerTab({
           processes={displayList}
           selectedPid={selectedPid}
           onToggle={togglePid}
-          onSignal={signalProcess}
+          onSignal={requestSignal}
           onRenice={openRenicePrompt}
         />
       )}
+
+      <SystemPanelConfirmDialog
+        open={pendingSignal !== null}
+        title={pendingSignal ? t(processSignalTitleKey(pendingSignal.signal)) : ''}
+        message={pendingSignal
+          ? t(
+            pendingSignal.signal === 'KILL'
+              ? 'systemManager.processes.confirmKill'
+              : 'systemManager.processes.confirmSignal',
+            { pid: String(pendingSignal.pid), signal: pendingSignal.signal },
+          )
+          : ''}
+        confirmLabel={pendingSignal ? t(processSignalTitleKey(pendingSignal.signal)) : ''}
+        destructive={pendingSignal?.signal === 'KILL' || pendingSignal?.signal === 'TERM'}
+        busy={signalBusy}
+        onOpenChange={(open) => {
+          if (!open && !signalBusy) setPendingSignal(null);
+        }}
+        onConfirm={() => {
+          const target = pendingSignal;
+          if (!target) return;
+          setPendingSignal(null);
+          void executeSignal(target.pid, target.signal);
+        }}
+      />
 
       <SystemPanelPromptDialog
         open={reniceTarget !== null}

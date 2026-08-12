@@ -493,7 +493,9 @@ function mapCopilotModels(models) {
  * @param {string} [args.cliPath]
  * @param {object} [args.sdkModule] inject the @github/copilot-sdk module (for tests)
  */
-async function listCopilotModels({ cliPath, sdkModule }) {
+async function listCopilotModels({ cliPath, sdkModule, abortController, signal }) {
+  const externalSignal = signal || abortController?.signal;
+  if (externalSignal?.aborted) return [];
   let resolvedModule = sdkModule;
   if (!resolvedModule) {
     try { resolvedModule = await import("@github/copilot-sdk"); } catch { return []; }
@@ -505,11 +507,37 @@ async function listCopilotModels({ cliPath, sdkModule }) {
     clientOptions.connection = RuntimeConnection.forStdio({ path: cliPath });
   }
   const client = new CopilotClient(clientOptions);
+  let stopPromise;
+  const stopClient = () => {
+    if (!stopPromise) {
+      try { stopPromise = Promise.resolve(client.stop()).catch(() => {}); } catch { stopPromise = Promise.resolve(); }
+    }
+    return stopPromise;
+  };
+  let resolveAbort;
+  const aborted = new Promise((resolve) => { resolveAbort = resolve; });
+  const onAbort = () => {
+    resolveAbort({ type: "aborted" });
+    void stopClient();
+  };
+  externalSignal?.addEventListener("abort", onAbort, { once: true });
+  if (externalSignal?.aborted) onAbort();
   try {
-    await client.start();
-    return mapCopilotModels(await client.listModels());
+    const started = await Promise.race([
+      Promise.resolve(client.start()).then(() => ({ type: "started" })),
+      aborted,
+    ]);
+    if (started.type === "aborted") return [];
+    const result = await Promise.race([
+      Promise.resolve(client.listModels()).then((models) => ({ type: "models", models })),
+      aborted,
+    ]);
+    return result.type === "models" ? mapCopilotModels(result.models) : [];
+  } catch {
+    return [];
   } finally {
-    try { await client.stop(); } catch { /* best effort */ }
+    externalSignal?.removeEventListener("abort", onAbort);
+    void stopClient();
   }
 }
 

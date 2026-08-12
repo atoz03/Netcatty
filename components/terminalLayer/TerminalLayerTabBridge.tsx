@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSyncExternalStore } from 'react';
 
 import { useActiveTabId } from '../../application/state/activeTabStore';
 import { sessionCapabilitiesStore } from '../../application/state/sessionCapabilitiesStore';
@@ -7,23 +7,37 @@ import { useSystemManagerBackend } from '../../application/state/useSystemManage
 import { canReuseTerminalConnection } from '../../application/state/terminalConnectionReuse';
 import { resolveSystemSidebarSession } from '../../domain/systemManager/resolveSystemSession';
 import type { TerminalContextReader } from '../../domain/terminalContextRead';
-import { useSystemCapabilitiesWarmup } from '../systemManager/hooks/useSystemManager';
+import { useSystemCapabilitiesWarmup } from '../../application/state/useSystemManager';
 import { cn } from '../../lib/utils';
 import type { Host, TerminalSession, Workspace } from '../../types';
+import { resolveTerminalHibernateEnabled } from '../../domain/terminalHibernate';
+import { shouldMeasureTerminalLayerLayout } from '../terminalPaneVisibility';
 import { TerminalLayerView } from './TerminalLayerView';
-import { useTerminalAiContexts } from './useTerminalAiContexts';
+import { useTerminalAiContexts } from '../../application/state/useTerminalAiContexts';
 import { useTerminalLayerEffects } from './useTerminalLayerEffects';
 import { useTerminalThemePanelState } from './useTerminalThemePanelState';
 import { useManualTerminalChromeSurfaceInjection } from '../../application/state/useManualTerminalChromeSurfaceInjection';
 import { sidePanelLiveStore, type SidePanelLiveSnapshot } from '../../application/state/sidePanelLiveStore';
+import { terminalCwdStore } from '../../application/state/terminalCwdStore';
 import { useTerminalWorkspaceLayout } from './useTerminalWorkspaceLayout';
 import type { SidePanelTab } from './TerminalLayerSupport';
+import {
+  collectSidePanelPanes,
+  type SidePanelLayout,
+} from '../../domain/sidePanelLayout';
 
 type StableRef = React.MutableRefObject<Record<string, any>>;
 
 export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) {
   const s = stableRef.current;
   const activeTabId = useActiveTabId();
+  // Subscribe to cwd store so OSC 7 updates reach the side-panel live snapshot
+  // without TerminalLayerInner setState.
+  const terminalCwdVersion = useSyncExternalStore(
+    terminalCwdStore.subscribe,
+    terminalCwdStore.getVersion,
+    terminalCwdStore.getVersion,
+  );
   const systemBackend = useSystemManagerBackend();
   const terminalContextReadersRef = useRef<Map<string, TerminalContextReader>>(new Map());
 
@@ -34,6 +48,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
   const sessionHostsMap = s.sessionHostsMap as Map<string, Host>;
   const sftpHostForTab = s.sftpHostForTab as Map<string, Host>;
   const sidePanelOpenTabs = s.sidePanelOpenTabs as Map<string, SidePanelTab>;
+  const sidePanelLayouts = s.sidePanelLayouts as Map<string, SidePanelLayout>;
   const showHostTreeSidebar = s.showHostTreeSidebar as boolean | undefined;
 
   const activeWorkspace = useMemo(
@@ -46,6 +61,17 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
   );
   const isFocusMode = activeWorkspace?.viewMode === 'focus';
   const focusedSessionId = activeWorkspace?.focusedSessionId;
+  const hibernateHiddenTabs = resolveTerminalHibernateEnabled(s.terminalSettings);
+  const localWorkspaceIds = useMemo(() => new Set(
+    sessions
+      .filter((session) => session.workspaceId && sessionHostsMap.get(session.id)?.protocol === 'local')
+      .map((session) => session.workspaceId as string),
+  ), [sessionHostsMap, sessions]);
+  const shouldKeepHiddenWorkspaceLaidOut = useCallback(
+    (workspace: Workspace) => !hibernateHiddenTabs || localWorkspaceIds.has(workspace.id),
+    [hibernateHiddenTabs, localWorkspaceIds],
+  );
+  const keepHiddenLayoutActive = !hibernateHiddenTabs || localWorkspaceIds.size > 0;
   const effectiveFocusedSessionId = useMemo((): string | null => {
     if (activeWorkspace) {
       if (focusedSessionId) return focusedSessionId;
@@ -71,6 +97,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     setDropHint,
     setResizing,
     setWorkspaceArea,
+    workspaceArea,
     workspaceInnerRef,
     workspaceOuterRef,
     workspaceOverlayRef,
@@ -79,6 +106,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     activeSession,
     activeWorkspace,
     isFocusMode,
+    shouldKeepHiddenWorkspaceLaidOut,
     onAddSessionToWorkspace: s.onAddSessionToWorkspace,
     onCreateWorkspaceFromSessions: s.onCreateWorkspaceFromSessions,
     onSetDraggingSessionId: s.onSetDraggingSessionId,
@@ -89,7 +117,12 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
 
   const isSidePanelOpenForCurrentTab = activeTabId ? sidePanelOpenTabs.has(activeTabId) : false;
   const activeSidePanelTab = activeTabId ? sidePanelOpenTabs.get(activeTabId) ?? null : null;
-  const isSftpOpenForCurrentTab = activeSidePanelTab === 'sftp';
+  const activeSidePanelLayout = activeTabId ? sidePanelLayouts.get(activeTabId) ?? null : null;
+  const activeSidePanelTools = useMemo(
+    () => new Set(activeSidePanelLayout ? collectSidePanelPanes(activeSidePanelLayout.root).map((pane) => pane.tool) : []),
+    [activeSidePanelLayout],
+  );
+  const isSftpOpenForCurrentTab = activeSidePanelTools.has('sftp');
 
   const activeHostIdForSidebar = useMemo(() => {
     const sessionId = activeWorkspace ? focusedSessionId : activeSession?.id;
@@ -137,12 +170,15 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     isSftpOpenForCurrentTab,
   ]);
 
-  const activeTerminalCwd = useMemo(() => {
-    if (!linkedTerminalSessionIdForSftp) return null;
-    return s.terminalRendererCwdBySessionRef.current.get(linkedTerminalSessionIdForSftp) ?? null;
-    // terminalCwdRevision bumps when any session cwd changes so linked SFTP can react.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [linkedTerminalSessionIdForSftp, s.terminalCwdRevision]);
+  // Recomputed when terminalCwdVersion changes (useSyncExternalStore above).
+  const activeTerminalCwd = linkedTerminalSessionIdForSftp
+    ? (
+      terminalCwdStore.getCwd(linkedTerminalSessionIdForSftp)
+      ?? s.terminalRendererCwdBySessionRef.current.get(linkedTerminalSessionIdForSftp)
+      ?? null
+    )
+    : null;
+  void terminalCwdVersion;
 
   const historySessionId = effectiveFocusedSessionId;
   const activeTerminalSessionForSystem = useMemo(
@@ -156,11 +192,11 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
   }, [activeTerminalSessionForSystem?.id, sessionHostsMap]);
 
   const systemWarmupSessionIds = useMemo(() => {
-    if (!activeTabId || activeSidePanelTab !== 'system') return [];
+    if (!activeTabId || !activeSidePanelTools.has('system')) return [];
     const session = activeTerminalSessionForSystem;
     if (!session || session.status !== 'connected') return [];
     return [session.id];
-  }, [activeSidePanelTab, activeTabId, activeTerminalSessionForSystem]);
+  }, [activeSidePanelTools, activeTabId, activeTerminalSessionForSystem]);
 
   useSystemCapabilitiesWarmup(
     systemWarmupSessionIds,
@@ -177,17 +213,11 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     if (!historySessionId) return null;
     return sessionHostsMap.get(historySessionId) ?? null;
   }, [historySessionId, sessionHostsMap]);
-  const focusedHostHistoryState = s.remoteHistory?.getState(
-    focusedHost?.id ?? null,
-    historySessionId,
-  );
 
   const themeState = useTerminalThemePanelState({
-    accentMode: s.accentMode,
     activeSession,
-    activeSidePanelTab,
+    activeSidePanelTab: activeSidePanelTools.has('theme') ? 'theme' : activeSidePanelTab,
     activeWorkspace,
-    customAccent: s.customAccent,
     followAppTerminalTheme: s.followAppTerminalTheme,
     focusedSessionId,
     fontSize: s.fontSize,
@@ -288,6 +318,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
 
   useTerminalLayerEffects({
     activeSidePanelTab,
+    activeSidePanelLayout,
     activeTabId,
     activeTabIdRef: s.activeTabIdRef,
     activeWorkspace,
@@ -297,7 +328,9 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     clearTimeout,
     document,
     dropHint,
+    effectiveHosts: s.effectiveHosts,
     filterTabsMap: s.filterTabsMap,
+    onConnectToHost: s.onConnectToHost,
     focusedSessionId,
     getSessionActivityIdsToClear: s.getSessionActivityIdsToClear,
     handleToggleAiFromTopBar: s.handleToggleAiFromTopBar,
@@ -307,6 +340,11 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     isComposeBarOpen: s.isComposeBarOpen,
     isFocusMode,
     isTerminalLayerVisible,
+    shouldMeasureTerminalLayerLayout: shouldMeasureTerminalLayerLayout({
+      isTerminalLayerVisible,
+      keepHiddenLayoutActive,
+      workspaceArea,
+    }),
     lastSidePanelTabRef: s.lastSidePanelTabRef,
     Map,
     Math,
@@ -332,13 +370,14 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     setSystemMountedTabIds: s.setSystemMountedTabIds,
     setThemeMountedTabIds: s.setThemeMountedTabIds,
     setSidePanelOpenTabs: s.setSidePanelOpenTabs,
+    setSidePanelLayouts: s.setSidePanelLayouts,
     setTimeout,
-    setupMcpApprovalBridge: s.setupMcpApprovalBridge,
     setWorkspaceArea,
     sidePanelPosition: s.sidePanelPosition,
     sidePanelWidth: s.sidePanelWidth,
     sftpActiveHost,
     sftpHostForTab,
+    sftpPaneClosedTabIdsRef: s.sftpPaneClosedTabIdsRef,
     shouldMarkSessionActivity: s.shouldMarkSessionActivity,
     sidePanelOpenTabs,
     splitHorizontalHandlersRef: s.splitHorizontalHandlersRef,
@@ -360,6 +399,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     activeHostIdForSidebar,
     activeResizers,
     activeSidePanelTab,
+    activeSidePanelLayout,
     activeTabId,
     activeTerminalCwd,
     activeTerminalSessionIdForSftp,
@@ -391,7 +431,12 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     FolderTree: s.FolderTree,
     followAppTerminalTheme: s.followAppTerminalTheme,
     handleHistoryPaste: s.handleHistoryPaste,
+    handleHistoryDelete: s.handleHistoryDelete,
     handleHistoryRun: s.handleHistoryRun,
+    handleFocusSidePanelPane: s.handleFocusSidePanelPane,
+    handleSplitSidePanelPane: s.handleSplitSidePanelPane,
+    handleCloseSidePanelPane: s.handleCloseSidePanelPane,
+    handleResizeSidePanelSplit: s.handleResizeSidePanelSplit,
     fontSize: s.fontSize,
     getTerminalCwd: s.getTerminalCwd,
     handleAddKnownHost: s.handleAddKnownHost,
@@ -422,11 +467,15 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     History: s.History,
     historySessionId,
     HistorySidePanel: s.HistorySidePanel,
+    // remoteHistory / shellHistory are owned by History side-panel slot stores
+    hibernateHiddenTabs,
     handleOsDetected: s.handleOsDetected,
     handlePendingTerminalSelectionConsumed: s.handlePendingTerminalSelectionConsumed,
     handlePendingUploadHandled: s.handlePendingUploadHandled,
     handleSessionExit: s.handleSessionExit,
     handleSftpCurrentPathChange: s.handleSftpCurrentPathChange,
+    handleSftpActiveTransfersChange: s.handleSftpActiveTransfersChange,
+    handleSftpActiveExternalEditsChange: s.handleSftpActiveExternalEditsChange,
     handleSftpInitialLocationApplied: s.handleSftpInitialLocationApplied,
     persistSidePanelWidth: s.persistSidePanelWidth,
     setSidePanelWidth: s.setSidePanelWidth,
@@ -435,7 +484,6 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     handleRunScriptFromPanel: s.handleRunScriptFromPanel,
     handleRunScriptOnWorkspace: s.handleRunScriptOnWorkspace,
     handleStartRecordingFromPanel: s.handleStartRecordingFromPanel,
-    scriptRuns: s.scriptRuns,
     handleStopScriptRun: s.handleStopScriptRun,
     handlePauseScriptRun: s.handlePauseScriptRun,
     handleResumeScriptRun: s.handleResumeScriptRun,
@@ -475,8 +523,6 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     notesMountedTabIds: s.notesMountedTabIds,
     notesOpenNoteByTab: s.notesOpenNoteByTab,
     NotesManager: s.NotesManager,
-    noteGroups: s.noteGroups,
-    notes: s.notes,
     scriptsMountedTabIds: s.scriptsMountedTabIds,
     systemMountedTabIds: s.systemMountedTabIds,
     themeMountedTabIds: s.themeMountedTabIds,
@@ -492,6 +538,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     onUpdateSessionDynamicTitle: s.onUpdateSessionDynamicTitle,
     onUpdateSessionCodingCliProvider: s.onUpdateSessionCodingCliProvider,
     onRequestAddToWorkspace: s.onRequestAddToWorkspace,
+    onAppendHostToWorkspace: s.onAppendHostToWorkspace,
     onSetWorkspaceFocusedSession: s.onSetWorkspaceFocusedSession,
     onStartSessionRename: s.onStartSessionRename,
     onSubmitSessionRename: s.onSubmitSessionRename,
@@ -511,8 +558,6 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     previewedOrVisibleThemeId: themeState.previewedOrVisibleThemeId,
     refocusActiveTerminalSession: s.refocusActiveTerminalSession,
     refocusTerminalSession: s.refocusTerminalSession,
-    remoteHistory: s.remoteHistory,
-    shellHistory: s.shellHistory,
     resizing,
     resolveAIExecutorContext,
     resolvedPreviewTheme: themeState.resolvedPreviewTheme,
@@ -522,6 +567,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     resolvedSessionHostIds: s.resolvedSessionHostIds,
     sessionLogConfig: s.sessionLogConfig,
     sessionSudoAutofillPasswordsMap: s.sessionSudoAutofillPasswordsMap,
+    sessionSudoAutofillCandidatesMap: s.sessionSudoAutofillCandidatesMap,
     sessions,
     setDropHint,
     setEditorWordWrap: s.setEditorWordWrap,
@@ -538,18 +584,18 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     sftpFollowTerminalCwd: s.sftpFollowTerminalCwd,
     sftpInitialLocationForTab: s.sftpInitialLocationForTab,
     sftpPendingUploadsForTab: s.sftpPendingUploadsForTab,
+    sftpPaneClosedTabIdsRef: s.sftpPaneClosedTabIdsRef,
     sftpShowHiddenFiles: s.sftpShowHiddenFiles,
     SftpSidePanel: s.SftpSidePanel,
     sftpUseCompressedUpload: s.sftpUseCompressedUpload,
     sidePanelPosition: s.sidePanelPosition,
     sidePanelWidth: s.sidePanelWidth,
     sidePanelOpenTabs,
+    sidePanelLayouts,
     snippetPackages: s.snippetPackages,
     snippets: s.snippets,
     updateSnippetPackages: s.updateSnippetPackages,
     updateSnippets: s.updateSnippets,
-    updateNoteGroups: s.updateNoteGroups,
-    updateNotes: s.updateNotes,
     splitHorizontalHandlersRef: s.splitHorizontalHandlersRef,
     splitVerticalHandlersRef: s.splitVerticalHandlersRef,
     sshDebugLogsEnabled: s.sshDebugLogsEnabled,
@@ -570,6 +616,9 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     validAIScopeTargetIds: s.validAIScopeTargetIds,
     workspaceBroadcastHandlersRef: s.workspaceBroadcastHandlersRef,
     workspaceById,
+    // AI scope maintenance (merge/dissolve handoff) needs the full list; do not
+    // rely on workspaceById alone — SidePanelStateRoot reads ctx.workspaces.
+    workspaces: s.workspaces,
     workspaceFocusHandlersRef: s.workspaceFocusHandlersRef,
     workspaceInnerRef,
     workspaceOuterRef,
@@ -582,6 +631,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
   }), [
     activeHostIdForSidebar,
     activeResizers,
+    activeSidePanelLayout,
     activeSidePanelTab,
     activeTabId,
     activeTerminalCwd,
@@ -591,14 +641,11 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     computeSplitHint,
     dropHint,
     focusedHost,
-    focusedHostHistoryState,
     focusedSessionId,
-    s.shellHistory,
     s.restoreTerminalCwd,
-    s.notes,
-    s.noteGroups,
     handleWorkspaceDrop,
     handleTerminalContextReaderChange,
+    hibernateHiddenTabs,
     historySessionId,
     isFocusMode,
     isSidePanelOpenForCurrentTab,
@@ -606,6 +653,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     resizing,
     resolveAIExecutorContext,
     sessionHostsMap,
+    sidePanelLayouts,
     s.resolvedSessionHostIds,
     sessions,
     s.onOpenManagedTerminal,
@@ -615,6 +663,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     s.sftpFollowTerminalCwd,
     themeState,
     workspaceById,
+    s.workspaces,
     workspaceInnerRef,
     workspaceOuterRef,
     workspaceOverlayRef,
@@ -622,7 +671,6 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     s.terminalTheme,
     s.resolveSessionAppearance,
     s.hostMap,
-    s.scriptRuns,
   ]);
 
   return <TerminalLayerView ctx={ctx} />;

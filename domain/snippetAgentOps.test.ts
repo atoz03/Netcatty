@@ -26,6 +26,7 @@ const host: Host = {
 test('getScriptApiReference includes nct API and wrapper rules', () => {
   const ref = getScriptApiReference();
   assert.match(ref, /nct\.screen\.waitForPrompt/);
+  assert.match(ref, /nct\.session\.name/);
   assert.match(ref, /Only JavaScript is executed/);
   assert.match(ref, /onConnect/);
 });

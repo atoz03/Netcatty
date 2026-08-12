@@ -71,10 +71,11 @@ function createMoshStatsConnectionApi(ctx) {
 
     // Read identity files from disk without prompting. Only unencrypted keys
     // (or keys whose stored passphrase parses them) are returned.
-    async function resolveNonInteractiveIdentityFile(identityFilePaths, passphrase) {
+    async function resolveNonInteractiveIdentityFiles(identityFilePaths, passphrase) {
       if (!Array.isArray(identityFilePaths) || identityFilePaths.length === 0) {
-        return null;
+        return [];
       }
+      const keys = [];
       for (const rawPath of identityFilePaths) {
         if (typeof rawPath !== "string" || rawPath.trim().length === 0) continue;
         const resolvedPath = expandIdentityFilePath(rawPath);
@@ -86,9 +87,9 @@ function createMoshStatsConnectionApi(ctx) {
         }
         if (!content) continue;
         const key = resolveNonInteractiveKey(content, passphrase);
-        if (key) return key;
+        if (key) keys.push(key);
       }
-      return null;
+      return keys;
     }
 
     // An ssh2 hostVerifier that ACCEPTS the transport only when the live host
@@ -156,14 +157,22 @@ function createMoshStatsConnectionApi(ctx) {
 
     // A function-form ssh2 authHandler that offers, in order: none, agent (if
     // available), publickey (if a key was resolved), and — only when the host
-    // key is trusted — password and keyboard-interactive. Returning method
-    // name strings lets ssh2 pull the credential data from connectOpts. This
-    // is what actually withholds the password from an untrusted host while
-    // still letting key/agent auth succeed.
-    function createGatedAuthHandler({ hasAgent, hasKey, hasPassword, trust }) {
+    // key is trusted — password and keyboard-interactive. Agent/password
+    // methods use names from connectOpts; identity files use explicit key
+    // objects so every discovered key can be attempted. This is what actually
+    // withholds the password from an untrusted host while still letting
+    // key/agent auth succeed.
+    function createGatedAuthHandler({ hasAgent, keys, hasPassword, trust, username }) {
       const methods = ["none"];
       if (hasAgent) methods.push("agent");
-      if (hasKey) methods.push("publickey");
+      for (const key of keys) {
+        methods.push({
+          type: "publickey",
+          username,
+          key: key.privateKey,
+          passphrase: key.passphrase,
+        });
+      }
       let index = 0;
       let trustedMethodsAppended = false;
       return (_methodsLeft, _partialSuccess, callback) => {
@@ -203,9 +212,16 @@ function createMoshStatsConnectionApi(ctx) {
 
       const hasCertificate =
         typeof auth.certificate === "string" && auth.certificate.trim().length > 0;
-      const key =
-        resolveNonInteractiveKey(auth.privateKey, auth.passphrase) ||
-        await resolveNonInteractiveIdentityFile(auth.identityFilePaths, auth.passphrase);
+      const allowLocalKeyFallbackWithAgent = auth.authMethod === "auto";
+      const inlineKey = auth.useSshAgent && !allowLocalKeyFallbackWithAgent
+        ? null
+        : resolveNonInteractiveKey(auth.privateKey, auth.passphrase);
+      const keys = inlineKey
+        ? [inlineKey]
+        : auth.useSshAgent && !allowLocalKeyFallbackWithAgent
+          ? []
+          : await resolveNonInteractiveIdentityFiles(auth.identityFilePaths, auth.passphrase);
+      const key = keys[0] || null;
 
       let agent = null;
       if (hasCertificate && key) {
@@ -233,6 +249,10 @@ function createMoshStatsConnectionApi(ctx) {
         if (key.passphrase) connectOpts.passphrase = key.passphrase;
       }
 
+      if (!agent && auth.useSshAgent && typeof prepareSystemSshAgentForAuth === "function") {
+        connectOpts.agent = await prepareSystemSshAgentForAuth(auth, `[${label} Stats]`);
+      }
+
       if (typeof auth.password === "string" && auth.password.length > 0) {
         connectOpts.password = auth.password;
         // Many SSH servers (PAM-backed) only offer password auth through
@@ -252,8 +272,8 @@ function createMoshStatsConnectionApi(ctx) {
       // any saved password (ssh2 tries agent before password), so a
       // public-key host that also happens to have a stored password still
       // authenticates via the agent instead of failing on password-only.
-      if (!agent && !connectOpts.privateKey) {
-        const agentSocket = getSshAgentSocket();
+      if (auth.useSshAgent !== false && !connectOpts.agent && !agent && !inlineKey) {
+        const agentSocket = getSshAgentSocket(auth.identityAgent);
         if (agentSocket) {
           connectOpts.agent = agentSocket;
         }
@@ -282,12 +302,14 @@ function createMoshStatsConnectionApi(ctx) {
       // flag in the authHandler (defense in depth): key/agent methods are
       // offered first, and the password / keyboard-interactive methods only
       // once the verifier has confirmed the host key is trusted.
-      if (connectOpts.password) {
+      const authKeys = agent ? [] : keys;
+      if (connectOpts.password || authKeys.length > 1) {
         connectOpts.authHandler = createGatedAuthHandler({
           hasAgent: Boolean(connectOpts.agent),
-          hasKey: Boolean(connectOpts.privateKey),
-          hasPassword: true,
+          keys: authKeys,
+          hasPassword: Boolean(connectOpts.password),
           trust,
+          username: connectOpts.username,
         });
       }
 

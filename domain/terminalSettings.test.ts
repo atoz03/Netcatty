@@ -3,10 +3,57 @@ import assert from "node:assert/strict";
 
 import { normalizeTerminalSettings } from "./models";
 
+test("normalizeTerminalSettings disables cursor line highlight by default", () => {
+  assert.equal(normalizeTerminalSettings().highlightCursorLine, false);
+});
+
+test("normalizeTerminalSettings preserves enabled cursor line highlight", () => {
+  assert.equal(normalizeTerminalSettings({ highlightCursorLine: true }).highlightCursorLine, true);
+});
+
 test("normalizeTerminalSettings disables prompt line breaks by default", () => {
   const settings = normalizeTerminalSettings();
 
   assert.equal(settings.forcePromptNewLine, false);
+});
+
+test("normalizeTerminalSettings defaults password prompt assist to hint", () => {
+  assert.equal(normalizeTerminalSettings().passwordPromptAssist, "hint");
+});
+
+test("normalizeTerminalSettings preserves password prompt assist modes", () => {
+  assert.equal(normalizeTerminalSettings({ passwordPromptAssist: "off" }).passwordPromptAssist, "off");
+  assert.equal(normalizeTerminalSettings({ passwordPromptAssist: "hint" }).passwordPromptAssist, "hint");
+  assert.equal(normalizeTerminalSettings({ passwordPromptAssist: "picker" }).passwordPromptAssist, "picker");
+});
+
+test("normalizeTerminalSettings falls back for unsupported password prompt assist modes", () => {
+  assert.equal(
+    normalizeTerminalSettings({ passwordPromptAssist: "legacy" as never }).passwordPromptAssist,
+    "hint",
+  );
+});
+
+test("normalizeTerminalSettings defaults autocomplete history scope to host", () => {
+  assert.equal(normalizeTerminalSettings().autocompleteHistoryScope, "host");
+});
+
+test("normalizeTerminalSettings preserves autocomplete history scope", () => {
+  assert.equal(
+    normalizeTerminalSettings({ autocompleteHistoryScope: "global" }).autocompleteHistoryScope,
+    "global",
+  );
+  assert.equal(
+    normalizeTerminalSettings({ autocompleteHistoryScope: "host" }).autocompleteHistoryScope,
+    "host",
+  );
+});
+
+test("normalizeTerminalSettings falls back for unsupported autocomplete history scope", () => {
+  assert.equal(
+    normalizeTerminalSettings({ autocompleteHistoryScope: "legacy" as never }).autocompleteHistoryScope,
+    "host",
+  );
 });
 
 test("normalizeTerminalSettings enables Shift+Enter newline by default", () => {
@@ -14,6 +61,14 @@ test("normalizeTerminalSettings enables Shift+Enter newline by default", () => {
 
   assert.equal(settings.shiftEnterNewlineEnabled, true);
   assert.equal(settings.shiftEnterNewlineText, "\\n");
+});
+
+test("normalizeTerminalSettings disables Kitty keyboard protocol by default", () => {
+  assert.equal(normalizeTerminalSettings().kittyKeyboardProtocolEnabled, false);
+  assert.equal(
+    normalizeTerminalSettings({ kittyKeyboardProtocolEnabled: true }).kittyKeyboardProtocolEnabled,
+    true,
+  );
 });
 
 test("normalizeTerminalSettings preserves Shift+Enter text", () => {
@@ -55,6 +110,14 @@ test("normalizeTerminalSettings enables font smoothing by default", () => {
   assert.equal(normalizeTerminalSettings().fontSmoothing, true);
 });
 
+test("normalizeTerminalSettings enables terminal auto-close by default", () => {
+  assert.equal(normalizeTerminalSettings().autoCloseOnExit, true);
+});
+
+test("normalizeTerminalSettings preserves disabled terminal auto-close", () => {
+  assert.equal(normalizeTerminalSettings({ autoCloseOnExit: false }).autoCloseOnExit, false);
+});
+
 test("normalizeTerminalSettings disables SSH auto reconnect by default", () => {
   assert.equal(normalizeTerminalSettings().sshAutoReconnectEnabled, false);
 });
@@ -62,6 +125,30 @@ test("normalizeTerminalSettings disables SSH auto reconnect by default", () => {
 test("normalizeTerminalSettings preserves explicit SSH auto reconnect settings", () => {
   assert.equal(normalizeTerminalSettings({ sshAutoReconnectEnabled: true }).sshAutoReconnectEnabled, true);
   assert.equal(normalizeTerminalSettings({ sshAutoReconnectEnabled: false }).sshAutoReconnectEnabled, false);
+});
+
+test("normalizeTerminalSettings shows the host information bar by default", () => {
+  assert.equal(normalizeTerminalSettings().showHostInfoBar, true);
+});
+
+test("normalizeTerminalSettings preserves a hidden host information bar", () => {
+  assert.equal(normalizeTerminalSettings({ showHostInfoBar: false }).showHostInfoBar, false);
+});
+
+test("normalizeTerminalSettings defaults host info bar title mode to address", () => {
+  assert.equal(normalizeTerminalSettings().hostInfoBarTitleMode, "address");
+});
+
+test("normalizeTerminalSettings preserves supported host info bar title modes", () => {
+  assert.equal(normalizeTerminalSettings({ hostInfoBarTitleMode: "label" }).hostInfoBarTitleMode, "label");
+  assert.equal(normalizeTerminalSettings({ hostInfoBarTitleMode: "address" }).hostInfoBarTitleMode, "address");
+});
+
+test("normalizeTerminalSettings falls back for unsupported host info bar title modes", () => {
+  assert.equal(
+    normalizeTerminalSettings({ hostInfoBarTitleMode: "both" as never }).hostInfoBarTitleMode,
+    "address",
+  );
 });
 
 test("normalizeTerminalSettings disables hibernate for hidden tabs by default", () => {
@@ -101,6 +188,11 @@ test("normalizeTerminalSettings defaults middle-click behavior to paste", () => 
   assert.equal(settings.middleClickPaste, true);
 });
 
+test("normalizeTerminalSettings enables normalizeTextOnCopy by default", () => {
+  assert.equal(normalizeTerminalSettings().normalizeTextOnCopy, true);
+  assert.equal(normalizeTerminalSettings({ normalizeTextOnCopy: false }).normalizeTextOnCopy, false);
+});
+
 test("normalizeTerminalSettings defaults word separators to xterm-compatible boundaries", () => {
   assert.equal(normalizeTerminalSettings().wordSeparators, " ()[]{}'\"");
 });
@@ -133,4 +225,22 @@ test("normalizeTerminalSettings prefers explicit middle-click behavior over lega
 
   assert.equal(settings.middleClickBehavior, "context-menu");
   assert.equal(settings.middleClickPaste, false);
+});
+
+test("normalizeTerminalSettings migrates legacy autocompleteMaxSuggestions default 8 to 50", () => {
+  assert.equal(
+    normalizeTerminalSettings({ autocompleteMaxSuggestions: 8 }).autocompleteMaxSuggestions,
+    50,
+  );
+});
+
+test("normalizeTerminalSettings preserves intentional custom autocompleteMaxSuggestions", () => {
+  assert.equal(
+    normalizeTerminalSettings({ autocompleteMaxSuggestions: 6 }).autocompleteMaxSuggestions,
+    6,
+  );
+  assert.equal(
+    normalizeTerminalSettings({ autocompleteMaxSuggestions: 20 }).autocompleteMaxSuggestions,
+    20,
+  );
 });

@@ -65,6 +65,30 @@
     "agentKind": "global"
   },
   {
+    "capabilityId": "session.close",
+    "toolName": "session_close",
+    "rpcMethod": "session/close",
+    "localExecution": false,
+    "description": "Close a terminal session previously opened by host_open in the current AI scope.",
+    "inputShape": {
+      "sessionId": {
+        "type": "string",
+        "optional": false,
+        "description": "The session ID returned by host_open."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": true,
+      "bypassesObserverBlock": true,
+      "bypassesApproval": true,
+      "bypassesChatCancel": true
+    },
+    "agentKind": "global"
+  },
+  {
     "capabilityId": "terminal.execute",
     "toolName": "terminal_execute",
     "rpcMethod": "netcatty/exec",
@@ -180,7 +204,7 @@
     "toolName": "sftp_list",
     "rpcMethod": "netcatty/sftp/list",
     "localExecution": false,
-    "description": "List a remote directory over SFTP.",
+    "description": "List a remote directory over the session file backend (SFTP or SCP-mode).",
     "inputShape": {
       "sessionId": {
         "type": "string",
@@ -209,7 +233,7 @@
     "toolName": "sftp_read_file",
     "rpcMethod": "netcatty/sftp/read",
     "localExecution": false,
-    "description": "Read a remote file over SFTP.",
+    "description": "Read a remote file over the session file backend (SFTP or SCP-mode).",
     "inputShape": {
       "sessionId": {
         "type": "string",
@@ -238,7 +262,7 @@
     "toolName": "sftp_write_file",
     "rpcMethod": "netcatty/sftp/write",
     "localExecution": false,
-    "description": "Write a remote file over SFTP.",
+    "description": "Write a remote file over the session file backend (SFTP or SCP-mode).",
     "inputShape": {
       "sessionId": {
         "type": "string",
@@ -340,7 +364,7 @@
     "toolName": "sftp_stat",
     "rpcMethod": "netcatty/sftp/stat",
     "localExecution": false,
-    "description": "Get remote file metadata over SFTP.",
+    "description": "Get remote file metadata over the session file backend (SFTP or SCP-mode).",
     "inputShape": {
       "sessionId": {
         "type": "string",
@@ -393,7 +417,7 @@
     "toolName": "sftp_mkdir",
     "rpcMethod": "netcatty/sftp/mkdir",
     "localExecution": false,
-    "description": "Create a remote directory over SFTP.",
+    "description": "Create a remote directory over the session file backend (SFTP or SCP-mode).",
     "inputShape": {
       "sessionId": {
         "type": "string",
@@ -422,7 +446,7 @@
     "toolName": "sftp_delete",
     "rpcMethod": "netcatty/sftp/delete",
     "localExecution": false,
-    "description": "Delete a remote file or directory over SFTP.",
+    "description": "Delete a remote file or directory over the session file backend (SFTP or SCP-mode).",
     "inputShape": {
       "sessionId": {
         "type": "string",
@@ -451,7 +475,7 @@
     "toolName": "sftp_rename",
     "rpcMethod": "netcatty/sftp/rename",
     "localExecution": false,
-    "description": "Rename a remote file or directory over SFTP.",
+    "description": "Rename a remote file or directory over the session file backend (SFTP or SCP-mode).",
     "inputShape": {
       "sessionId": {
         "type": "string",
@@ -485,7 +509,7 @@
     "toolName": "sftp_chmod",
     "rpcMethod": "netcatty/sftp/chmod",
     "localExecution": false,
-    "description": "Change remote file permissions over SFTP.",
+    "description": "Change remote file permissions over the session file backend (SFTP or SCP-mode).",
     "inputShape": {
       "sessionId": {
         "type": "string",
@@ -557,16 +581,40 @@
     "agentKind": "global"
   },
   {
+    "capabilityId": "vault.host.open",
+    "toolName": "host_open",
+    "rpcMethod": "vault/hosts/open",
+    "localExecution": false,
+    "description": "Open a vault host by creating a new terminal tab and starting the connection. Returns the new sessionId so you can run terminal/SFTP tools against it. Use vault_hosts_list first when you only know the label or hostname. Opens a terminal tab for a saved vault host (same as clicking the host in Netcatty). Connection may still be establishing when the tool returns — use get_environment or wait briefly before terminal_execute if needed. Call session_close with the returned sessionId when the task is finished. Auth prompts (passphrase / keyboard-interactive) still require the user in the Netcatty UI.",
+    "inputShape": {
+      "hostId": {
+        "type": "string",
+        "optional": false,
+        "description": "Vault host ID to open. Use vault_hosts_list / host_get to resolve id from label or hostname."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    },
+    "agentKind": "global"
+  },
+  {
     "capabilityId": "vault.hosts.create",
     "toolName": "vault_hosts_create",
     "rpcMethod": "vault/hosts/create",
     "localExecution": false,
-    "description": "Create vault hosts from structured host objects. Use when the user wants to add/create a host (Vault → Hosts). NOT for Vault → Notes sidebar documentation. Use when the user wants to add/create a host in Vault → Hosts (创建主机、SSH 连接凭据). NOT for Vault → Notes sidebar docs. Put SSH password in password field; long remarks/admin tables in host notes field. Never fall back to vault_notes_create if this fails.",
+    "description": "Create vault hosts from structured host objects. Use when the user wants to add/create a host (Vault → Hosts). NOT for Vault → Notes sidebar documentation. Use when the user wants to add/create a host in Vault → Hosts (创建主机、SSH 连接凭据). NOT for Vault → Notes sidebar docs. Put SSH password in password, or a local private-key file path in keyPath. If that key is encrypted and the user supplied its passphrase, put it in passphrase so later connections do not prompt. Put long remarks/admin tables in host notes. Never fall back to vault_notes_create if this fails.",
     "inputShape": {
       "hosts": {
         "type": "string",
         "optional": false,
-        "description": "JSON array of host objects you extracted from the user's text. Each object: hostname (required), label, port, username, password, group, tags (array or comma-separated string), notes (Host Details remarks — NOT Vault sidebar Notes), protocol (ssh|telnet|local)."
+        "description": "JSON array of host objects you extracted from the user's text. Each object: hostname (required; host/ip aliases accepted), label (name alias accepted), port, username, password, keyPath or keypath (local private-key file path), passphrase (saved passphrase for that key path), group, tags (array or comma-separated string), notes (Host Details remarks — NOT Vault sidebar Notes), protocol (ssh|telnet|local)."
       },
       "dryRun": {
         "type": "string",
@@ -577,6 +625,189 @@
         "type": "string",
         "optional": true,
         "description": "Set to false to create even when a matching host already exists (default true)."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    },
+    "agentKind": "global"
+  },
+  {
+    "capabilityId": "vault.host.update",
+    "toolName": "vault_hosts_update",
+    "rpcMethod": "vault/hosts/update",
+    "localExecution": false,
+    "description": "Update selected fields on an existing vault host. Use vault_hosts_list first to resolve the hostId. Update only fields the user requested. Use vault_hosts_list first to resolve hostId. Empty group, tags, notes, password, keyPath, or passphrase values clear those fields or saved credentials.",
+    "inputShape": {
+      "hostId": {
+        "type": "string",
+        "optional": false,
+        "description": "Vault host ID from vault_hosts_list."
+      },
+      "label": {
+        "type": "string",
+        "optional": true,
+        "description": "New display name."
+      },
+      "name": {
+        "type": "string",
+        "optional": true,
+        "description": "Alias for label."
+      },
+      "hostname": {
+        "type": "string",
+        "optional": true,
+        "description": "New hostname or IP address."
+      },
+      "host": {
+        "type": "string",
+        "optional": true,
+        "description": "Alias for hostname."
+      },
+      "ip": {
+        "type": "string",
+        "optional": true,
+        "description": "Alias for hostname."
+      },
+      "port": {
+        "type": "number",
+        "optional": true,
+        "description": "New connection port (1-65535)."
+      },
+      "username": {
+        "type": "string",
+        "optional": true,
+        "description": "New login username. Clears any reusable identity binding so this value takes effect."
+      },
+      "password": {
+        "type": "string",
+        "optional": true,
+        "description": "New password without changing key-based login. Password identities are detached so the new value takes effect. Empty string clears it and blocks inherited saved passwords. Pair with keyPath set to an empty string to switch from key login to password login."
+      },
+      "savePassword": {
+        "type": "string",
+        "optional": true,
+        "description": "Set to true or false to enable or disable saved passwords. Pass true when setting a new password after clearing one."
+      },
+      "keyPath": {
+        "type": "string",
+        "optional": true,
+        "description": "Local private-key file path. Empty string clears and blocks an inherited path."
+      },
+      "keypath": {
+        "type": "string",
+        "optional": true,
+        "description": "Alias for keyPath."
+      },
+      "passphrase": {
+        "type": "string",
+        "optional": true,
+        "description": "Saved passphrase for the host's local private-key path. Empty string clears the saved passphrase."
+      },
+      "group": {
+        "type": "string",
+        "optional": true,
+        "description": "New group path. Empty string moves the host to the root."
+      },
+      "tags": {
+        "type": "string",
+        "optional": true,
+        "description": "JSON array or comma-separated tag names. Empty string clears tags."
+      },
+      "notes": {
+        "type": "string",
+        "optional": true,
+        "description": "Host Details remarks. Empty string clears notes."
+      },
+      "protocol": {
+        "type": "string",
+        "optional": true,
+        "description": "New protocol: ssh, telnet, local, or serial."
+      },
+      "identityId": {
+        "type": "string",
+        "optional": true,
+        "description": "Reusable identity ID from vault_identities_list. Empty string detaches the identity."
+      },
+      "jumpHostIds": {
+        "type": "string",
+        "optional": true,
+        "description": "JSON array of vault host IDs in jump order. Empty array clears the chain."
+      },
+      "proxyProfileId": {
+        "type": "string",
+        "optional": true,
+        "description": "Reusable proxy ID from vault_proxy_profiles_list. Empty string clears it."
+      },
+      "startupCommand": {
+        "type": "string",
+        "optional": true,
+        "description": "Command to run after connecting. Empty string clears it."
+      },
+      "startupCommandRunMode": {
+        "type": "string",
+        "optional": true,
+        "description": "paste or lineDelay."
+      },
+      "environmentVariables": {
+        "type": "string",
+        "optional": true,
+        "description": "JSON object or array of {name,value} entries. Empty object clears them."
+      },
+      "moshEnabled": {
+        "type": "string",
+        "optional": true,
+        "description": "true or false."
+      },
+      "moshServerPath": {
+        "type": "string",
+        "optional": true,
+        "description": "Optional mosh-server path."
+      },
+      "etEnabled": {
+        "type": "string",
+        "optional": true,
+        "description": "true or false."
+      },
+      "etPort": {
+        "type": "number",
+        "optional": true,
+        "description": "Eternal Terminal server port."
+      },
+      "serialConfig": {
+        "type": "string",
+        "optional": true,
+        "description": "JSON object for serial connections: path, baudRate, and optional dataBits, stopBits, parity, flowControl, localEcho, lineMode, backspaceBehavior (default or ctrl-h). Existing backspaceBehavior is preserved when omitted."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    },
+    "agentKind": "global"
+  },
+  {
+    "capabilityId": "vault.host.delete",
+    "toolName": "vault_hosts_delete",
+    "rpcMethod": "vault/hosts/delete",
+    "localExecution": false,
+    "description": "Delete a saved vault host by id. Use vault_hosts_list first to resolve the hostId. Permanently deletes one saved host. Use vault_hosts_list first to resolve hostId and rely on the normal write approval flow before deleting.",
+    "inputShape": {
+      "hostId": {
+        "type": "string",
+        "optional": false,
+        "description": "Vault host ID from vault_hosts_list."
       }
     },
     "policy": {
@@ -809,6 +1040,176 @@
         "type": "string",
         "optional": true,
         "description": "Optional JSON array of tag strings."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    },
+    "agentKind": "global"
+  },
+  {
+    "capabilityId": "vault.note.delete",
+    "toolName": "vault_notes_delete",
+    "rpcMethod": "vault/notes/delete",
+    "localExecution": false,
+    "description": "Delete a Vault → Notes entry by id.",
+    "inputShape": {
+      "noteId": {
+        "type": "string",
+        "optional": false,
+        "description": "Vault note ID to delete."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    },
+    "agentKind": "global"
+  },
+  {
+    "capabilityId": "vault.identity.list",
+    "toolName": "vault_identities_list",
+    "rpcMethod": "vault/identities/list",
+    "localExecution": false,
+    "description": "List reusable vault identities without passwords, private keys, or passphrases.",
+    "inputShape": {},
+    "policy": {
+      "write": false,
+      "sensitiveRead": true,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": true,
+      "bypassesChatCancel": true
+    },
+    "agentKind": "global"
+  },
+  {
+    "capabilityId": "vault.proxyProfile.list",
+    "toolName": "vault_proxy_profiles_list",
+    "rpcMethod": "vault/proxyProfiles/list",
+    "localExecution": false,
+    "description": "List reusable proxy profiles without credentials.",
+    "inputShape": {},
+    "policy": {
+      "write": false,
+      "sensitiveRead": true,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": true,
+      "bypassesChatCancel": true
+    },
+    "agentKind": "global"
+  },
+  {
+    "capabilityId": "vault.group.list",
+    "toolName": "vault_groups_list",
+    "rpcMethod": "vault/groups/list",
+    "localExecution": false,
+    "description": "List vault groups and their safe default settings.",
+    "inputShape": {},
+    "policy": {
+      "write": false,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": true,
+      "bypassesChatCancel": true
+    },
+    "agentKind": "global"
+  },
+  {
+    "capabilityId": "vault.group.create",
+    "toolName": "vault_groups_create",
+    "rpcMethod": "vault/groups/create",
+    "localExecution": false,
+    "description": "Create a vault group with optional default connection settings.",
+    "inputShape": {
+      "path": {
+        "type": "string",
+        "optional": false,
+        "description": "New group path, for example prod/web."
+      },
+      "defaults": {
+        "type": "string",
+        "optional": true,
+        "description": "JSON object of group defaults: username, identityId, proxyProfileId, jumpHostIds, startupCommand, environmentVariables, moshEnabled, moshServerPath, etEnabled, etPort."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    },
+    "agentKind": "global"
+  },
+  {
+    "capabilityId": "vault.group.update",
+    "toolName": "vault_groups_update",
+    "rpcMethod": "vault/groups/update",
+    "localExecution": false,
+    "description": "Update or rename a vault group and its default connection settings.",
+    "inputShape": {
+      "path": {
+        "type": "string",
+        "optional": false,
+        "description": "Existing group path."
+      },
+      "newPath": {
+        "type": "string",
+        "optional": true,
+        "description": "Optional replacement path to rename or move the group and descendants."
+      },
+      "defaults": {
+        "type": "string",
+        "optional": true,
+        "description": "JSON object containing only group defaults to change."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    },
+    "agentKind": "global"
+  },
+  {
+    "capabilityId": "vault.group.delete",
+    "toolName": "vault_groups_delete",
+    "rpcMethod": "vault/groups/delete",
+    "localExecution": false,
+    "description": "Delete a vault group, moving its hosts to the root unless deleteHosts is true.",
+    "inputShape": {
+      "path": {
+        "type": "string",
+        "optional": false,
+        "description": "Group path to delete, including descendants."
+      },
+      "deleteHosts": {
+        "type": "string",
+        "optional": true,
+        "description": "Set true to delete hosts in the group; default moves them to the root."
       }
     },
     "policy": {
@@ -1577,6 +1978,177 @@
       "bypassesObserverBlock": false,
       "bypassesApproval": true,
       "bypassesChatCancel": true
+    },
+    "agentKind": "global"
+  },
+  {
+    "capabilityId": "portforward.rules.create",
+    "toolName": "portforward_rules_create",
+    "rpcMethod": "portforward/rules/create",
+    "localExecution": false,
+    "description": "Create a persisted port forwarding rule.",
+    "inputShape": {
+      "label": {
+        "type": "string",
+        "optional": true,
+        "description": "Rule label."
+      },
+      "type": {
+        "type": "string",
+        "optional": false,
+        "description": "local, remote, or dynamic."
+      },
+      "localPort": {
+        "type": "number",
+        "optional": false,
+        "description": "Local listening port (1-65535)."
+      },
+      "bindAddress": {
+        "type": "string",
+        "optional": true,
+        "description": "Bind address; default 127.0.0.1."
+      },
+      "remoteHost": {
+        "type": "string",
+        "optional": true,
+        "description": "Required except for dynamic forwarding."
+      },
+      "remotePort": {
+        "type": "number",
+        "optional": true,
+        "description": "Required except for dynamic forwarding."
+      },
+      "hostId": {
+        "type": "string",
+        "optional": false,
+        "description": "Vault host ID used for the tunnel."
+      },
+      "autoStart": {
+        "type": "string",
+        "optional": true,
+        "description": "true or false."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    },
+    "agentKind": "global"
+  },
+  {
+    "capabilityId": "portforward.rules.update",
+    "toolName": "portforward_rules_update",
+    "rpcMethod": "portforward/rules/update",
+    "localExecution": false,
+    "description": "Update a persisted port forwarding rule.",
+    "inputShape": {
+      "ruleId": {
+        "type": "string",
+        "optional": false,
+        "description": "Port forwarding rule ID."
+      },
+      "label": {
+        "type": "string",
+        "optional": true,
+        "description": "New rule label."
+      },
+      "type": {
+        "type": "string",
+        "optional": true,
+        "description": "local, remote, or dynamic."
+      },
+      "localPort": {
+        "type": "number",
+        "optional": true,
+        "description": "Local listening port."
+      },
+      "bindAddress": {
+        "type": "string",
+        "optional": true,
+        "description": "Bind address."
+      },
+      "remoteHost": {
+        "type": "string",
+        "optional": true,
+        "description": "Remote host."
+      },
+      "remotePort": {
+        "type": "number",
+        "optional": true,
+        "description": "Remote port."
+      },
+      "hostId": {
+        "type": "string",
+        "optional": true,
+        "description": "Vault host ID used for the tunnel."
+      },
+      "autoStart": {
+        "type": "string",
+        "optional": true,
+        "description": "true or false."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    },
+    "agentKind": "global"
+  },
+  {
+    "capabilityId": "portforward.rules.duplicate",
+    "toolName": "portforward_rules_duplicate",
+    "rpcMethod": "portforward/rules/duplicate",
+    "localExecution": false,
+    "description": "Duplicate a persisted port forwarding rule.",
+    "inputShape": {
+      "ruleId": {
+        "type": "string",
+        "optional": false,
+        "description": "Port forwarding rule ID to copy."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    },
+    "agentKind": "global"
+  },
+  {
+    "capabilityId": "portforward.rules.delete",
+    "toolName": "portforward_rules_delete",
+    "rpcMethod": "portforward/rules/delete",
+    "localExecution": false,
+    "description": "Delete a persisted port forwarding rule.",
+    "inputShape": {
+      "ruleId": {
+        "type": "string",
+        "optional": false,
+        "description": "Port forwarding rule ID to delete."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
     },
     "agentKind": "global"
   },

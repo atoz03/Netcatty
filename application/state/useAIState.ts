@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { localStorageAdapter } from '../../infrastructure/persistence/localStorageAdapter';
 import {
   STORAGE_KEY_AI_PROVIDERS,
@@ -23,6 +23,7 @@ import type { AIQuickMessage } from '../../infrastructure/ai/quickMessages';
 import { sanitizeQuickMessages } from '../../infrastructure/ai/quickMessages';
 import type {
   AIDraft,
+  AISessionContextCompaction,
   AISession,
   AIPermissionMode,
   AIToolIntegrationMode,
@@ -49,13 +50,13 @@ import {
 } from './aiDraftState';
 import { convertFilesToUploads } from './useFileUpload';
 import { removeProviderReferences } from './aiProviderCleanup';
-
+import { publishAISessionsSnapshot } from './aiSessionsStore';
 import {
   AI_STATE_CHANGED_DRAFTS_BY_SCOPE,
   AI_STATE_CHANGED_PANEL_VIEW_BY_SCOPE,
   bumpDraftMutationVersion,
   bumpDraftUploadGeneration,
-  cleanupSdkAgentSessions,
+  cleanupDeletedAIChatSessions,
   cleanupOrphanedAISessions,
   getAIBridge,
   getDraftUploadGeneration,
@@ -72,6 +73,11 @@ import {
   type PanelViewByScope,
 } from './aiStateSnapshots';
 import { AI_STATE_CHANGED_EVENT, emitAIStateChanged } from './aiStateEvents';
+import {
+  handoffDissolvedWorkspaceAIScope,
+  retargetWorkspaceActiveChatAfterMemberLoss,
+  seedWorkspaceAIActiveSessionFromMembers,
+} from '../../domain/workspaceAiScopeHandoff';
 export function useAIState() {
   // ── Provider Config ──
   const [providers, setProvidersRaw] = useState<ProviderConfig[]>(() =>
@@ -620,7 +626,7 @@ export function useAIState() {
   }, [defaultAgentId, persistSessions, setActiveSessionId]);
 
   const deleteSession = useCallback((sessionId: string, scopeKey?: string) => {
-    cleanupSdkAgentSessions([sessionId]);
+    cleanupDeletedAIChatSessions([sessionId]);
     if (persistTimerRef.current) {
       clearTimeout(persistTimerRef.current);
       persistTimerRef.current = null;
@@ -662,7 +668,7 @@ export function useAIState() {
     const removedSessionIds = sessionsRef.current
       .filter(s => s.scope.type === scopeType && s.scope.targetId === targetId)
       .map(s => s.id);
-    cleanupSdkAgentSessions(removedSessionIds);
+    cleanupDeletedAIChatSessions(removedSessionIds);
     if (persistTimerRef.current) {
       clearTimeout(persistTimerRef.current);
       persistTimerRef.current = null;
@@ -764,13 +770,14 @@ export function useAIState() {
     });
   }, [debouncedPersistSessions]);
 
-  const clearSessionMessages = useCallback((sessionId: string) => {
-    if (persistTimerRef.current) {
-      clearTimeout(persistTimerRef.current);
-      persistTimerRef.current = null;
-    }
+  const persistContextCompaction = useCallback((
+    sessionId: string,
+    contextCompaction: AISessionContextCompaction,
+  ) => {
     setSessionsRaw(prev => {
-      const next = prev.map(s => s.id === sessionId ? { ...s, messages: [], updatedAt: Date.now() } : s);
+      const next = prev.map(s => s.id === sessionId
+        ? { ...s, contextCompaction, updatedAt: Date.now() }
+        : s);
       setLatestAISessionsSnapshot(next);
       persistSessions(next);
       return next;
@@ -966,6 +973,119 @@ export function useAIState() {
     setPanelViewByScopeRaw(latestAIPanelViewByScopeSnapshot ?? {});
   }, []);
 
+  const seedWorkspaceActiveSessionFromMembers = useCallback((input: {
+    workspaceId: string;
+    memberTerminalIds: readonly string[];
+    preferredTerminalId?: string | null;
+  }) => {
+    const currentMap =
+      latestAIActiveSessionMapSnapshot
+      ?? localStorageAdapter.read<Record<string, string | null>>(STORAGE_KEY_AI_ACTIVE_SESSION_MAP)
+      ?? {};
+    const currentPanelViewByScope = latestAIPanelViewByScopeSnapshot ?? {};
+    const seeded = seedWorkspaceAIActiveSessionFromMembers({
+      activeSessionIdMap: currentMap,
+      panelViewByScope: currentPanelViewByScope,
+      workspaceId: input.workspaceId,
+      memberTerminalIds: input.memberTerminalIds,
+      preferredTerminalId: input.preferredTerminalId,
+    });
+    if (!seeded) return;
+    setLatestAIActiveSessionMapSnapshot(seeded.activeSessionIdMap);
+    localStorageAdapter.write(STORAGE_KEY_AI_ACTIVE_SESSION_MAP, seeded.activeSessionIdMap);
+    emitAIStateChanged(STORAGE_KEY_AI_ACTIVE_SESSION_MAP);
+    setActiveSessionIdMapRaw(seeded.activeSessionIdMap);
+    if (seeded.panelViewChanged) {
+      setLatestAIPanelViewByScopeSnapshot(seeded.panelViewByScope);
+      emitAIStateChanged(AI_STATE_CHANGED_PANEL_VIEW_BY_SCOPE);
+      setPanelViewByScopeRaw(seeded.panelViewByScope);
+    }
+  }, []);
+
+  const handoffDissolvedWorkspaceScope = useCallback((input: {
+    workspaceId: string;
+    terminalIds: readonly string[];
+    preferredTerminalId?: string | null;
+  }) => {
+    const currentMap =
+      latestAIActiveSessionMapSnapshot
+      ?? localStorageAdapter.read<Record<string, string | null>>(STORAGE_KEY_AI_ACTIVE_SESSION_MAP)
+      ?? {};
+    const currentSessions =
+      latestAISessionsSnapshot
+      ?? localStorageAdapter.read<AISession[]>(STORAGE_KEY_AI_SESSIONS)
+      ?? [];
+    const currentPanelViewByScope = latestAIPanelViewByScopeSnapshot ?? {};
+    const result = handoffDissolvedWorkspaceAIScope({
+      activeSessionIdMap: currentMap,
+      sessions: currentSessions,
+      workspaceId: input.workspaceId,
+      terminalIds: input.terminalIds,
+      preferredTerminalId: input.preferredTerminalId,
+      panelViewByScope: currentPanelViewByScope,
+    });
+    if (!result.changed) return;
+
+    if (result.activeSessionIdMap !== currentMap) {
+      setLatestAIActiveSessionMapSnapshot(result.activeSessionIdMap);
+      localStorageAdapter.write(STORAGE_KEY_AI_ACTIVE_SESSION_MAP, result.activeSessionIdMap);
+      emitAIStateChanged(STORAGE_KEY_AI_ACTIVE_SESSION_MAP);
+      setActiveSessionIdMapRaw(result.activeSessionIdMap);
+    }
+
+    if (result.sessions !== currentSessions) {
+      sessionsRef.current = result.sessions;
+      setLatestAISessionsSnapshot(result.sessions);
+      persistSessions(result.sessions);
+      setSessionsRaw(result.sessions);
+    }
+
+    if (result.panelViewByScope !== currentPanelViewByScope) {
+      setLatestAIPanelViewByScopeSnapshot(result.panelViewByScope);
+      emitAIStateChanged(AI_STATE_CHANGED_PANEL_VIEW_BY_SCOPE);
+      setPanelViewByScopeRaw(result.panelViewByScope);
+    }
+  }, [persistSessions]);
+
+  const retargetWorkspaceActiveChatForMemberLoss = useCallback((input: {
+    workspaceId: string;
+    previousMemberTerminalIds: readonly string[];
+    currentMemberTerminalIds: readonly string[];
+    preferredTerminalId?: string | null;
+  }) => {
+    const currentMap =
+      latestAIActiveSessionMapSnapshot
+      ?? localStorageAdapter.read<Record<string, string | null>>(STORAGE_KEY_AI_ACTIVE_SESSION_MAP)
+      ?? {};
+    const currentSessions =
+      latestAISessionsSnapshot
+      ?? localStorageAdapter.read<AISession[]>(STORAGE_KEY_AI_SESSIONS)
+      ?? [];
+    const result = retargetWorkspaceActiveChatAfterMemberLoss({
+      activeSessionIdMap: currentMap,
+      sessions: currentSessions,
+      workspaceId: input.workspaceId,
+      previousMemberTerminalIds: input.previousMemberTerminalIds,
+      currentMemberTerminalIds: input.currentMemberTerminalIds,
+      preferredTerminalId: input.preferredTerminalId,
+    });
+    if (!result.changed) return;
+
+    if (result.activeSessionIdMap !== currentMap) {
+      setLatestAIActiveSessionMapSnapshot(result.activeSessionIdMap);
+      localStorageAdapter.write(STORAGE_KEY_AI_ACTIVE_SESSION_MAP, result.activeSessionIdMap);
+      emitAIStateChanged(STORAGE_KEY_AI_ACTIVE_SESSION_MAP);
+      setActiveSessionIdMapRaw(result.activeSessionIdMap);
+    }
+
+    if (result.sessions !== currentSessions) {
+      sessionsRef.current = result.sessions;
+      setLatestAISessionsSnapshot(result.sessions);
+      persistSessions(result.sessions);
+      setSessionsRaw(result.sessions);
+    }
+  }, [persistSessions]);
+
   // ── Provider CRUD helpers ──
   const addProvider = useCallback((provider: ProviderConfig) => {
     setProviders(prev => [...prev, provider]);
@@ -1003,6 +1123,17 @@ export function useAIState() {
   // ── Computed ──
   const activeProvider = providers.find(p => p.id === activeProviderId) ?? null;
 
+  // Stream/message updates publish here so AIConfig Context consumers do not
+  // re-render on every token. AIChatPanelsHost reads aiSessionsStore instead.
+  useLayoutEffect(() => {
+    publishAISessionsSnapshot({
+      sessions,
+      activeSessionIdMap,
+      draftsByScope,
+      panelViewByScope,
+    });
+  }, [sessions, activeSessionIdMap, draftsByScope, panelViewByScope]);
+
   return useMemo(() => ({
     providers,
     setProviders,
@@ -1038,10 +1169,8 @@ export function useAIState() {
     setWebSearchConfig,
     quickMessages,
     setQuickMessages,
-    sessions,
-    activeSessionIdMap,
-    draftsByScope,
-    panelViewByScope,
+    // sessions / activeSessionIdMap / draftsByScope / panelViewByScope live in
+    // aiSessionsStore so streaming updates do not rebuild this config object.
     setActiveSessionId,
     ensureDraftForScope,
     updateDraft,
@@ -1058,8 +1187,11 @@ export function useAIState() {
     addMessageToSession,
     updateLastMessage,
     updateMessageById,
-    clearSessionMessages,
+    persistContextCompaction,
     cleanupOrphanedSessions,
+    seedWorkspaceActiveSessionFromMembers,
+    handoffDissolvedWorkspaceScope,
+    retargetWorkspaceActiveChatForMemberLoss,
   }), [
     providers,
     setProviders,
@@ -1095,10 +1227,6 @@ export function useAIState() {
     setWebSearchConfig,
     quickMessages,
     setQuickMessages,
-    sessions,
-    activeSessionIdMap,
-    draftsByScope,
-    panelViewByScope,
     setActiveSessionId,
     ensureDraftForScope,
     updateDraft,
@@ -1115,7 +1243,10 @@ export function useAIState() {
     addMessageToSession,
     updateLastMessage,
     updateMessageById,
-    clearSessionMessages,
+    persistContextCompaction,
     cleanupOrphanedSessions,
+    seedWorkspaceActiveSessionFromMembers,
+    handoffDissolvedWorkspaceScope,
+    retargetWorkspaceActiveChatForMemberLoss,
   ]);
 }

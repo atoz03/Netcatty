@@ -1,6 +1,13 @@
 /* eslint-disable no-undef */
+const { StringDecoder } = require("node:string_decoder");
+
+const DEFAULT_CODEX_CLI_TIMEOUT_MS = 10_000;
+const CODEX_AUTH_VALIDATION_TIMEOUT_MS = 10_000;
+const MAX_AGENT_CLI_BUFFER_CHARS = 10 * 1024 * 1024;
+
 function createAgentCliHelpers(ctx) {
   with (ctx) {
+  const codexAuthValidationInFlight = new Map();
   async function runCommand(command, args, options) {
     return await new Promise((resolve, reject) => {
       let settled = false;
@@ -28,19 +35,30 @@ function createAgentCliHelpers(ctx) {
 
       let stdout = "";
       let stderr = "";
-      const MAX_BUFFER = 10 * 1024 * 1024; // 10MB
+      let stdoutBytes = 0;
+      let stderrBytes = 0;
+      let stdoutTruncated = false;
+      let stderrTruncated = false;
+      const stdoutDecoder = new StringDecoder("utf8");
+      const stderrDecoder = new StringDecoder("utf8");
       const timeoutMs = Number.isFinite(options?.timeoutMs) ? Number(options.timeoutMs) : 0;
 
       child.stdout.on("data", (chunk) => {
-        if (stdout.length < MAX_BUFFER) {
-          stdout += chunk.toString("utf8");
-        }
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+        const remaining = Math.max(0, MAX_AGENT_CLI_BUFFER_CHARS - stdoutBytes);
+        const accepted = buffer.length <= remaining ? buffer : buffer.subarray(0, remaining);
+        if (accepted.length > 0) stdout += stdoutDecoder.write(accepted);
+        stdoutBytes += accepted.length;
+        if (accepted.length < buffer.length) stdoutTruncated = true;
       });
 
       child.stderr.on("data", (chunk) => {
-        if (stderr.length < MAX_BUFFER) {
-          stderr += chunk.toString("utf8");
-        }
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+        const remaining = Math.max(0, MAX_AGENT_CLI_BUFFER_CHARS - stderrBytes);
+        const accepted = buffer.length <= remaining ? buffer : buffer.subarray(0, remaining);
+        if (accepted.length > 0) stderr += stderrDecoder.write(accepted);
+        stderrBytes += accepted.length;
+        if (accepted.length < buffer.length) stderrTruncated = true;
       });
 
       child.once("error", (error) => {
@@ -56,6 +74,8 @@ function createAgentCliHelpers(ctx) {
         clearTimers();
         if (settled) return;
         settled = true;
+        if (!stdoutTruncated || stdoutDecoder.lastNeed === 0) stdout += stdoutDecoder.end();
+        if (!stderrTruncated || stderrDecoder.lastNeed === 0) stderr += stderrDecoder.end();
         resolve({
           stdout: stripAnsi(stdout),
           stderr: stripAnsi(stderr),
@@ -126,6 +146,9 @@ function createAgentCliHelpers(ctx) {
     return await runCommand(codexCliPath, args, {
       cwd: options?.cwd?.trim() || undefined,
       env: shellEnv,
+      timeoutMs: Number.isFinite(options?.timeoutMs)
+        ? Number(options.timeoutMs)
+        : DEFAULT_CODEX_CLI_TIMEOUT_MS,
     });
   }
 
@@ -160,44 +183,88 @@ function createAgentCliHelpers(ctx) {
     }
     const cached = getCodexValidationCache();
     if (cached && now - cached.checkedAt < maxAgeMs && (cached.codexPath || null) === requestedCodexPath) return cached;
+    const inFlightKey = requestedCodexPath || "__auto__";
+    const existingValidation = codexAuthValidationInFlight.get(inFlightKey);
+    if (existingValidation) return existingValidation;
 
-    const shellEnv = await getShellEnv();
-    const rawCodexPath = requestedCodexPath || await resolveSdkBinPathAsync("codex", shellEnv);
-    const codexPath = rawCodexPath && typeof resolveCodexExecutableForSdk === "function"
-      ? resolveCodexExecutableForSdk(rawCodexPath) || null
-      : rawCodexPath;
-    if (!codexPath) {
-      const result = { ok: false, checkedAt: now, codexPath: requestedCodexPath, error: "codex binary not found", code: "ENOENT" };
-      setCodexValidationCache(result);
-      return result;
-    }
-    try {
-      // Minimal read-only probe turn through the SDK to confirm auth works.
-      const { Codex } = await import("@openai/codex-sdk");
-      const codexOptions = { env: addCodexExecutableEnvForSdk(shellEnv, codexPath) };
-      if (codexPath) codexOptions.codexPathOverride = codexPath;
-      const codex = new Codex(codexOptions);
-      const thread = codex.startThread({ skipGitRepoCheck: true });
-      const { events } = await thread.runStreamed("ping", { sandbox: "read-only" });
-      let failed = null;
-      for await (const event of events) {
-        if (event?.type === "turn.failed") { failed = event.error; break; }
-        if (event?.type === "turn.completed") break;
-        if (event?.type === "item.completed") break; // got a response, auth fine
-      }
-      if (failed) {
-        const result = { ok: false, checkedAt: now, codexPath, error: failed.message || "Codex auth failed", code: undefined };
+    const validationPromise = (async () => {
+      const shellEnv = await getShellEnv();
+      const rawCodexPath = requestedCodexPath || await resolveSdkBinPathAsync("codex", shellEnv);
+      const codexPath = rawCodexPath && typeof resolveCodexExecutableForSdk === "function"
+        ? resolveCodexExecutableForSdk(rawCodexPath) || null
+        : rawCodexPath;
+      if (!codexPath) {
+        const result = { ok: false, checkedAt: now, codexPath: requestedCodexPath, error: "codex binary not found", code: "ENOENT" };
         setCodexValidationCache(result);
         return result;
       }
-      const result = { ok: true, checkedAt: now, codexPath, error: null };
-      setCodexValidationCache(result);
-      return result;
-    } catch (error) {
-      const normalized = extractCodexError(error);
-      const result = { ok: false, checkedAt: now, codexPath, error: normalized.message, code: normalized.code };
-      setCodexValidationCache(result);
-      return result;
+
+      const abortController = new AbortController();
+      let timeoutId = null;
+      let iterator = null;
+      try {
+        const timeoutPromise = new Promise((_, reject) => {
+          timeoutId = setTimeout(() => {
+            const error = new Error(
+              `Codex ChatGPT auth validation timed out after ${CODEX_AUTH_VALIDATION_TIMEOUT_MS}ms`,
+            );
+            error.code = "ETIMEDOUT";
+            try { abortController.abort(error); } catch {}
+            reject(error);
+          }, CODEX_AUTH_VALIDATION_TIMEOUT_MS);
+          if (typeof timeoutId?.unref === "function") timeoutId.unref();
+        });
+
+        const probePromise = (async () => {
+          // Minimal read-only probe turn through the SDK to confirm auth works.
+          const { Codex } = await (typeof loadCodexSdk === "function"
+            ? loadCodexSdk()
+            : import("@openai/codex-sdk"));
+          const codexOptions = { env: addCodexExecutableEnvForSdk(shellEnv, codexPath) };
+          if (codexPath) codexOptions.codexPathOverride = codexPath;
+          const codex = new Codex(codexOptions);
+          const thread = codex.startThread({ skipGitRepoCheck: true });
+          const { events } = await thread.runStreamed("ping", {
+            sandbox: "read-only",
+            signal: abortController.signal,
+          });
+          iterator = events?.[Symbol.asyncIterator]?.();
+          if (!iterator) throw new Error("Codex auth validation returned no event stream");
+          let failed = null;
+          while (true) {
+            const next = await iterator.next();
+            if (next.done) break;
+            const event = next.value;
+            if (event?.type === "turn.failed") { failed = event.error; break; }
+            if (event?.type === "turn.completed") break;
+            if (event?.type === "item.completed") break;
+          }
+          if (failed) throw failed;
+        })();
+
+        await Promise.race([probePromise, timeoutPromise]);
+        const result = { ok: true, checkedAt: now, codexPath, error: null };
+        setCodexValidationCache(result);
+        return result;
+      } catch (error) {
+        const normalized = extractCodexError(error);
+        const result = { ok: false, checkedAt: now, codexPath, error: normalized.message, code: normalized.code };
+        setCodexValidationCache(result);
+        return result;
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+        try { abortController.abort(); } catch {}
+        try { void Promise.resolve(iterator?.return?.()).catch(() => {}); } catch {}
+      }
+    })();
+
+    codexAuthValidationInFlight.set(inFlightKey, validationPromise);
+    try {
+      return await validationPromise;
+    } finally {
+      if (codexAuthValidationInFlight.get(inFlightKey) === validationPromise) {
+        codexAuthValidationInFlight.delete(inFlightKey);
+      }
     }
   }
 
@@ -341,4 +408,9 @@ function createAgentCliHelpers(ctx) {
   }
 }
 
-module.exports = { createAgentCliHelpers };
+module.exports = {
+  createAgentCliHelpers,
+  CODEX_AUTH_VALIDATION_TIMEOUT_MS,
+  DEFAULT_CODEX_CLI_TIMEOUT_MS,
+  MAX_AGENT_CLI_BUFFER_CHARS,
+};

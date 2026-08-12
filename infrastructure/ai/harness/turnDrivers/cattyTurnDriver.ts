@@ -2,7 +2,9 @@ import type { ModelMessage } from 'ai';
 import type { OpenAIChatAssistantFields } from '../../providerContinuation';
 import {
   DEFAULT_CONTEXT_WINDOW_TOKENS,
+  DEFAULT_PROTECT_RECENT_MESSAGES,
   estimateUnknownTokens,
+  findSafeChatMessageCompactionSplitIndex,
   resolveContextWindow,
 } from '../../contextCompaction';
 import { buildSystemPrompt } from '../../cattyAgent/systemPrompt';
@@ -15,18 +17,21 @@ import {
   compactCattyMessages,
   prepareCattyMessagesForStream,
 } from '../cattyRuntime';
-import { DEFAULT_MAX_OUTPUT_TOKENS } from '../contextBudget';
+import { computeTotalInputTokens, DEFAULT_MAX_OUTPUT_TOKENS } from '../contextBudget';
 import { clearChatSessionCancelled } from '../agentStop';
 import { isRequestTooLargeError } from '../../errorClassifier';
-import { getNetcattyBridge, generateId, resolveUserSkillsContext } from '../../../../components/ai/hooks/aiChatStreamingSupport';
+import { getNetcattyBridge, generateId, resolveUserSkillsContext } from '../../aiChatStreamingSupport';
 import {
   buildCattySdkMessages,
   collectOpenAIChatAssistantFieldsForMessages,
+  collectPreservedTerminalWriteFingerprints,
   collectToolResultsAfterMessage,
   createContinuationContext,
 } from './cattyMessageBuilder';
 import { hadToolProgressBeforeRequestTooLarge, processCattyStream } from './cattyStreamProcessor';
 import type { CattyTurnInput, TurnDriver, TurnDriverContext } from './types';
+import { fitLargeUserInputForModel } from '../largeUserInput';
+import { buildPromptContextSnapshot } from '../promptContextSnapshot';
 
 export class CattyTurnDriver implements TurnDriver {
   readonly backend = 'catty' as const;
@@ -57,7 +62,72 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
     ui,
   } = input;
 
-  const netcattyBridge = bridge ?? getNetcattyBridge();
+  const netcattyBridge = (bridge ?? getNetcattyBridge()) as NonNullable<ReturnType<typeof getNetcattyBridge>>;
+  const toolOutputTempBridge = netcattyBridge as typeof netcattyBridge & {
+    getToolOutputPersistenceStatus?: () => Promise<{ durable: boolean; reason?: string }>;
+    writeToolOutputTemp?: (
+      record: import('../toolOutputStore').PersistedToolOutputRecord,
+      content: string,
+    ) => Promise<{ ok: boolean; path?: string; error?: string }>;
+    restoreToolOutputTemp?: (
+      handleId: string,
+      chatSessionId: string,
+    ) => Promise<{ path: string; record: import('../toolOutputStore').PersistedToolOutputRecord } | null>;
+    readToolOutputTemp?: (
+      path: string,
+      request: import('../toolOutputStore').ReadToolOutputInput,
+    ) => Promise<Omit<import('../toolOutputStore').ToolOutputReadResult, 'handleId' | 'storedChars' | 'sourceTruncated'> | null>;
+    deleteToolOutputTemp?: (path: string) => Promise<{ ok: boolean }>;
+    deleteChatToolOutputsTemp?: (chatSessionId: string) => Promise<{ deletedCount: number }>;
+    deleteTerminalToolOutputsTemp?: (
+      chatSessionId: string,
+      terminalSessionId: string,
+    ) => Promise<{ deletedCount: number }>;
+  };
+  const persistenceStatus = await toolOutputTempBridge.getToolOutputPersistenceStatus?.()
+    .catch(() => ({ durable: false }));
+  if (
+    toolOutputTempBridge.writeToolOutputTemp
+    && toolOutputTempBridge.readToolOutputTemp
+    && toolOutputTempBridge.deleteToolOutputTemp
+  ) {
+    ctx.toolOutputStore.setPersistence?.({
+      write: async (record, content) => {
+        if (!persistenceStatus?.durable) {
+          throw new Error(persistenceStatus?.reason || 'Secure local storage is unavailable.');
+        }
+        const result = await toolOutputTempBridge.writeToolOutputTemp!(record, content);
+        if (!result.ok || !result.path) {
+          throw new Error(result.error || 'Unable to persist tool output.');
+        }
+        return result.path;
+      },
+      restore: persistenceStatus?.durable && toolOutputTempBridge.restoreToolOutputTemp
+        ? (handleId, chatSessionId) => toolOutputTempBridge.restoreToolOutputTemp!(handleId, chatSessionId)
+        : undefined,
+      read: (path, request) => toolOutputTempBridge.readToolOutputTemp!(path, request),
+      delete: async path => {
+        await toolOutputTempBridge.deleteToolOutputTemp!(path);
+      },
+      deleteSession: toolOutputTempBridge.deleteChatToolOutputsTemp
+        ? async chatSessionId => {
+          await toolOutputTempBridge.deleteChatToolOutputsTemp!(chatSessionId);
+        }
+        : undefined,
+      deleteTerminalSession: toolOutputTempBridge.deleteTerminalToolOutputsTemp
+        ? async (chatSessionId, terminalSessionId) => {
+          await toolOutputTempBridge.deleteTerminalToolOutputsTemp!(chatSessionId, terminalSessionId);
+        }
+        : undefined,
+      deleteTerminalEverywhere: toolOutputTempBridge.deleteTerminalToolOutputsEverywhereTemp
+        ? async terminalSessionId => {
+          await toolOutputTempBridge.deleteTerminalToolOutputsEverywhereTemp!(terminalSessionId);
+        }
+        : undefined,
+    });
+  } else {
+    ctx.toolOutputStore.setPersistence?.(undefined);
+  }
   await clearChatSessionCancelled(sessionId, netcattyBridge);
   if (netcattyBridge.aiMcpUpdateSessions) {
     await netcattyBridge.aiMcpUpdateSessions(context.terminalSessions, sessionId);
@@ -70,6 +140,7 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
     trimmed,
     context.selectedUserSkillSlugs,
   );
+  const modelUserText = fitLargeUserInputForModel(trimmed, sessionId, ctx.toolOutputStore);
   const getExecutorContext = context.getExecutorContext ?? (() => ({
     sessions: context.terminalSessions,
     workspaceId: context.scopeType === 'workspace' ? context.scopeTargetId : undefined,
@@ -102,6 +173,23 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
   }
 
   const activeModelId = context.activeModelId || context.activeProvider.defaultModel || '';
+  const promptContext = buildPromptContextSnapshot({
+    providerId: context.activeProvider.providerId,
+    modelId: activeModelId,
+    permissionMode: context.permissionMode ?? context.globalPermissionMode,
+    scopeType: context.scopeType,
+    scopeLabel: context.scopeLabel,
+    toolNames: Object.keys(tools),
+    selectedSkillSlugs: context.selectedUserSkillSlugs,
+    systemPrompt,
+    webSearchEnabled: isWebSearchReady(context.webSearchConfig),
+    hostSessionIds: context.terminalSessions.map(session => session.sessionId),
+  });
+  ctx.emit({
+    id: `context-snapshot-${ctx.turnId}`,
+    type: 'context_snapshot',
+    snapshot: promptContext,
+  } as import('../types').AgentEvent);
   const continuationContext = createContinuationContext(
     context.activeProvider.id,
     context.activeProvider.providerId,
@@ -117,13 +205,17 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
       allMessages: import('../../types').ChatMessage[],
       includeCurrentUserMessage: boolean,
       options: { preserveTerminalToolResults?: ReadonlySet<import('../../types').ToolResult> } = {},
+      sessionContextCompaction = currentSession?.contextCompaction,
     ) => buildCattySdkMessages({
       allMessages,
+      contextCompaction: sessionContextCompaction,
       includeCurrentUserMessage,
-      trimmed,
+      trimmed: modelUserText,
       attachments: includeCurrentUserMessage ? attachments : undefined,
       continuationContext,
       preserveTerminalToolResults: options.preserveTerminalToolResults,
+      chatSessionId: sessionId,
+      toolOutputStore: ctx.toolOutputStore,
       fieldsByMessage: openAIChatAssistantFieldsByMessage,
     });
 
@@ -172,8 +264,9 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
       options: {
         force?: boolean;
         compressForRequestTooLargeRetry?: boolean;
+        protectRecentMessages?: number;
       },
-    ): Promise<ModelMessage[]> => {
+    ) => {
       const pendingHandles = ctx.toolOutputStore.listPendingHandles(sessionId);
       const sessionStateText = ctx.sessionStateStore.toReinjectionText(sessionId);
       const result = await compactCattyMessages({
@@ -185,10 +278,12 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
         reservedTokens: getRequestReserveTokens,
         maxOutputTokens,
         model,
+        toolOutputStore: ctx.toolOutputStore,
         abortSignal: signal,
         trigger: options.force ? 'force' : options.compressForRequestTooLargeRetry ? '413-retry' : 'pre-turn',
         force: options.force,
         compressForRequestTooLargeRetry: options.compressForRequestTooLargeRetry,
+        protectRecentMessages: options.protectRecentMessages,
         onCompactionStart: (trigger) => {
           ctx.emit({
             id: `compaction-start-${Date.now()}`,
@@ -218,12 +313,70 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
             : undefined,
         },
       });
-      return result.messages;
+      return result;
     };
 
+    const emitContextSnapshot = (messages: ModelMessage[]) => {
+      ctx.emit({
+        id: `context-snapshot-${Date.now()}-${ctx.turnId}`,
+        type: 'context_snapshot',
+        snapshot: {
+          ...promptContext,
+          contextWindow,
+          estimatedInputTokens: computeTotalInputTokens({
+            messages,
+            providerId,
+            systemPrompt,
+            toolNames: Object.keys(tools),
+          }),
+        },
+      } as import('../types').AgentEvent);
+    };
+
+    if (context.forceCompaction) {
+      // Persist a tool-safe UI-message boundary and summarize only that head
+      // slice so the durable compact coordinate system matches buildCattySdkMessages.
+      const uiMessages = currentSession?.messages ?? [];
+      const compactedMessageCount = findSafeChatMessageCompactionSplitIndex(
+        uiMessages,
+        DEFAULT_PROTECT_RECENT_MESSAGES,
+      );
+      if (compactedMessageCount <= 0) {
+        emitContextSnapshot(prepareMessagesForStream(buildSdkMessages(uiMessages, false)));
+        return;
+      }
+
+      const headSdkMessages = buildSdkMessages(
+        uiMessages.slice(0, compactedMessageCount),
+        false,
+        {},
+        undefined,
+      );
+      const compacted = await compactMessages(headSdkMessages, {
+        force: true,
+        // Summarize the entire head; the protected tail lives in UI messages.
+        protectRecentMessages: 0,
+      });
+      if (compacted.summary) {
+        const nextCompaction = {
+          summary: compacted.summary,
+          compactedMessageCount,
+        };
+        ui.persistContextCompaction?.(sessionId, nextCompaction);
+        emitContextSnapshot(prepareMessagesForStream(
+          buildSdkMessages(uiMessages, false, {}, nextCompaction),
+        ));
+      } else {
+        // Non-durable outcome: keep the meter honest (full current context).
+        emitContextSnapshot(prepareMessagesForStream(buildSdkMessages(uiMessages, false)));
+      }
+      return;
+    }
+
     let messagesForStream = buildSdkMessages(currentSession?.messages ?? [], true);
-    messagesForStream = await compactMessages(messagesForStream, {});
+    messagesForStream = (await compactMessages(messagesForStream, {})).messages;
     messagesForStream = prepareMessagesForStream(messagesForStream);
+    emitContextSnapshot(messagesForStream);
 
     const runtimeContext = createInitialCattyRuntimeContext({
       chatSessionId: sessionId,
@@ -234,6 +387,7 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
       scopeType: context.scopeType,
       scopeLabel: context.scopeLabel,
       userGoal: extractLatestUserGoal(messagesForStream),
+      promptContext,
     });
     const commandTimeoutSeconds =
       Number.isFinite(context.commandTimeout) && context.commandTimeout > 0
@@ -275,6 +429,7 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
             runtimeContext: stepRuntimeContext,
             onEvent: (event) => ctx.emit(event),
           });
+          emitContextSnapshot(prepared.messages);
           return {
             messages: prepared.messages,
             runtimeContext: prepared.runtimeContext,
@@ -298,15 +453,21 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
       const hadToolProgress = hadToolProgressBeforeRequestTooLarge(streamErr);
       let retryBaseMessages = messagesForStream;
       let retryAssistantMsgId = assistantMsgId;
+      let preservedWriteFingerprints: string[] = [];
       if (hadToolProgress) {
         const latestSession = ui.getLatestSession?.(sessionId);
         if (latestSession) {
+          preservedWriteFingerprints = collectPreservedTerminalWriteFingerprints(
+            latestSession.messages,
+            assistantMsgId,
+            sessionId,
+          );
           retryBaseMessages = buildSdkMessages(latestSession.messages, false, {
             preserveTerminalToolResults: collectToolResultsAfterMessage(
               latestSession.messages,
               assistantMsgId,
             ),
-          });
+          }, latestSession.contextCompaction);
         }
         retryAssistantMsgId = generateId();
         ui.addMessageToSession(sessionId, {
@@ -330,10 +491,12 @@ async function runCattyTurn(input: CattyTurnInput, ctx: TurnDriverContext): Prom
           pendingApproval: undefined,
         }));
       }
-      const retryMessages = prepareMessagesForStream(await compactMessages(retryBaseMessages, {
+      ctx.toolResultDedup.enableWriteReplay(preservedWriteFingerprints);
+      const retryMessages = prepareMessagesForStream((await compactMessages(retryBaseMessages, {
         force: true,
         compressForRequestTooLargeRetry: true,
-      }));
+      })).messages);
+      emitContextSnapshot(retryMessages);
       await runStream(retryMessages, retryAssistantMsgId);
     }
   } catch (err) {

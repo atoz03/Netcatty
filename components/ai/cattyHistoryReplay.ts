@@ -1,8 +1,11 @@
 import type { ChatMessage, ChatMessageAttachment, ToolCall, ToolResult } from "../../infrastructure/ai/types";
 import { isTerminalSelectionAttachment } from "../../application/state/terminalSelectionAttachment";
+import { redactSecretsForModel } from "../../infrastructure/ai/harness/modelSecretRedaction";
 
 const MAX_ATTACHMENT_PLACEHOLDER_DETAIL_CHARS = 120;
 const MAX_TOOL_COMMAND_CHARS = 220;
+const MAX_HISTORICAL_TERMINAL_OUTPUT_CHARS = 4_000;
+const HISTORICAL_TERMINAL_OUTPUT_HEAD_CHARS = 2_800;
 
 function truncateInline(value: string, maxChars: number): string {
   const normalized = value.replace(/\s+/g, " ").trim();
@@ -65,6 +68,21 @@ function getToolCommand(toolCall?: ToolCall): string | undefined {
   return serialized && serialized !== "{}" ? serialized : undefined;
 }
 
+function fitHistoricalTerminalOutput(content: string): string {
+  const safeContent = redactSecretsForModel(content);
+  if (safeContent.length <= MAX_HISTORICAL_TERMINAL_OUTPUT_CHARS) return safeContent;
+  const marker = "\n\n[... historical terminal output shortened for replay ...]\n\n";
+  const tailChars = Math.max(
+    0,
+    MAX_HISTORICAL_TERMINAL_OUTPUT_CHARS - HISTORICAL_TERMINAL_OUTPUT_HEAD_CHARS - marker.length,
+  );
+  return `${safeContent.slice(0, HISTORICAL_TERMINAL_OUTPUT_HEAD_CHARS)}${marker}${safeContent.slice(-tailChars)}`;
+}
+
+function findOutputHandleId(content: string): string | undefined {
+  return content.match(/\bhandleId=(tool-output-[A-Za-z0-9-]+)/)?.[1];
+}
+
 export function buildHistoricalToolReplayMaps(messages: ChatMessage[]): {
   resolvedToolCallsByAssistant: Map<ChatMessage, Set<ToolCall>>;
   toolCallByToolResult: Map<ToolResult, ToolCall>;
@@ -125,14 +143,33 @@ export function buildHistoricalToolResultReplayText(
 
   const details = [
     `toolCallId=${result.toolCallId}`,
-    getToolCommand(toolCall) ? `command=${truncateInline(getToolCommand(toolCall) ?? "", MAX_TOOL_COMMAND_CHARS)}` : undefined,
+    getToolCommand(toolCall) ? `command=${truncateInline(redactSecretsForModel(getToolCommand(toolCall) ?? ""), MAX_TOOL_COMMAND_CHARS)}` : undefined,
     `outputChars=${result.content.length}`,
     result.isError ? "status=error" : "status=success",
   ].filter(Boolean).join(", ");
 
-  return `[Historical terminal output omitted from replay: ${details}. Re-run terminal_execute if exact output is needed.]`;
+  const fittedOutput = fitHistoricalTerminalOutput(result.content);
+  const handleId = findOutputHandleId(fittedOutput);
+  const jobId = typeof toolCall?.arguments?.jobId === "string"
+    ? toolCall.arguments.jobId
+    : undefined;
+  const recovery = handleId
+    ? `Use tool_output_read with handleId=${handleId} for omitted details.`
+    : jobId
+      ? `Poll the existing jobId=${jobId} if it is still running and more detail is needed.`
+      : "Only the bounded historical output below is available.";
+
+  return [
+    `[Historical terminal output omitted from replay beyond the bounded evidence below: ${details}. This tool call already completed; do not execute the command again. ${recovery}]`,
+    fittedOutput || "[No terminal output was returned.]",
+  ].join("\n");
 }
 
 function isTerminalToolName(toolName: string): boolean {
-  return toolName === "terminal" || toolName === "terminal_exec" || toolName === "terminal_execute";
+  return toolName === "terminal"
+    || toolName === "terminal_exec"
+    || toolName === "terminal_execute"
+    || toolName === "terminal_start"
+    || toolName === "terminal_poll"
+    || toolName === "terminal_read_context";
 }

@@ -38,13 +38,23 @@ test("convenience helpers emit the canonical event shapes", () => {
   e.text("abc");
   e.toolCall("terminal_execute", { command: "ls" }, "tc-1");
   e.toolResult("tc-1", "out", "terminal_execute");
+  e.fileChange("patch-1", [{ path: "src/app.ts", kind: "update" }], "completed");
+  e.webSearch("search-1", "Codex events", "running");
+  e.planUpdate("plan-1", [{ text: "Map events", completed: false }], "running");
+  e.warning("warning-1", "Search unavailable");
+  e.usage({ inputTokens: 10, outputTokens: 5, totalTokens: 15 });
   e.status("Working...");
   e.sessionId("sess-9");
   assert.deepEqual(calls.map((c) => c.payload.event.type),
-    ["text-delta", "tool-call", "tool-result", "status", "session-id"]);
+    [
+      "text-delta", "tool-call", "tool-result", "file-change", "web-search",
+      "plan-update", "warning", "usage", "status", "session-id",
+    ]);
   assert.equal(calls[1].payload.event.toolName, "terminal_execute");
   assert.equal(calls[1].payload.event.toolCallId, "tc-1");
   assert.deepEqual(calls[1].payload.event.args, { command: "ls" });
   assert.equal(calls[2].payload.event.output, "out");
-  assert.equal(calls[4].payload.event.sessionId, "sess-9");
+  assert.equal(calls[3].payload.event.itemId, "patch-1");
+  assert.equal(calls[7].payload.event.totalTokens, 15);
+  assert.equal(calls[9].payload.event.sessionId, "sess-9");
 });

@@ -1,87 +1,107 @@
 #!/usr/bin/env node
 /* global process, console */
 /**
- * Disable @xterm/addon-webgl's cross-terminal texture-atlas sharing.
+ * Verify @xterm/addon-webgl carries the upstream glyph-atlas safety fixes.
  *
- * xterm's WebGL addon shares ONE TextureAtlas across terminal instances whose
- * config (font / size / theme / device-pixel-ratio) is equal — see
- * `acquireTextureAtlas`, which does `if (configEquals) { ownedBy.push; return
- * atlas }`. In a split workspace two panes then share an atlas, so clearing or
- * rebuilding it for one pane (which netcatty does on resize / DPR change / font
- * change / tab show to recover from glyph corruption) corrupts the OTHER pane's
- * rendering — the persistent "花屏 / garbled" report in issue #1063, most
- * visible in split view where both panes stay on screen.
+ * Netcatty previously backported these as local string patches. With
+ * @xterm/addon-webgl >= 0.20.0-beta.291 they ship upstream:
  *
- * Fix: give every terminal its own atlas by removing the "reuse a matching
- * atlas" loop, so each terminal falls through to creating its own. The published
- * package is minified, so we string-replace the exact loop in both the CJS and
- * ESM builds. This runs from `postinstall` (after patch-package).
+ * - xtermjs/xterm.js#6055 — shared atlas: clearTexture bumps _pageLayoutVersion
+ * - xtermjs/xterm.js#5987 — no generateMipmap on atlas upload (LINEAR filters)
+ * - xtermjs/xterm.js#6043 — _evictAllPages / maxAtlasPages capacity handling
  *
- * Idempotent. If the upstream code changes (e.g. an @xterm/addon-webgl upgrade)
- * the loop won't be found; we warn loudly but do not fail the install, and the
- * strings below must then be refreshed for the new version.
+ * This script no longer mutates node_modules. It only fails closed when the
+ * pinned package is missing any of the above, so a silent downgrade cannot
+ * reintroduce garbled split-pane / mipmap / overflow bugs.
  */
 "use strict";
 const fs = require("node:fs");
 const path = require("node:path");
 
-const MARKER = "/*netcatty:#1063 atlas-isolation*/";
-
-// Exact (minified) "reuse a shared atlas" loops. Keep the previous stable
-// package strings so old release branches still get the #1063 protection.
-const TARGETS = [
-  {
-    file: "node_modules/@xterm/addon-webgl/lib/addon-webgl.mjs",
-    loops: [
-      // @xterm/addon-webgl@0.20.0-beta.219
-      "for(let u=0;u<J.length;u++){let p=J[u];if(Ee(p.config,h))return p.ownedBy.push(i),p.atlas}",
-      // @xterm/addon-webgl@0.19.0
-      "for(let h=0;h<le.length;h++){let f=le[h];if(Mi(f.config,u))return f.ownedBy.push(i),f.atlas}",
-    ],
-  },
-  {
-    file: "node_modules/@xterm/addon-webgl/lib/addon-webgl.js",
-    loops: [
-      // @xterm/addon-webgl@0.20.0-beta.219
-      "for(let e=0;e<a.length;e++){const i=a[e];if((0,r.configEquals)(i.config,c))return i.ownedBy.push(t),i.atlas}",
-      // @xterm/addon-webgl@0.19.0
-      "for(let t=0;t<r.length;t++){const i=r[t];if((0,n.configEquals)(i.config,d))return i.ownedBy.push(e),i.atlas}",
-    ],
-  },
+const TARGET_FILES = [
+  "node_modules/@xterm/addon-webgl/lib/addon-webgl.mjs",
+  "node_modules/@xterm/addon-webgl/lib/addon-webgl.js",
 ];
 
-let patched = 0;
-let already = 0;
-let missing = 0;
+/** Upstream #6055: clearTexture bumps page layout version so shared atlases rebuild. */
+function hasUpstreamSharedAtlasClearFix(source) {
+  return (
+    source.includes("_pageLayoutVersion") &&
+    /clearTexture\(\)\{[^}]*_pageLayoutVersion\+\+/.test(source)
+  );
+}
 
-for (const { file, loops } of TARGETS) {
+/** Upstream #5987: atlas texture upload must not call generateMipmap. */
+function hasUpstreamMipmapFix(source) {
+  return !source.includes(".generateMipmap(");
+}
+
+/** Upstream #6043: capacity eviction when atlas pages overflow texture slots. */
+function hasUpstreamCapacityFix(source) {
+  return source.includes("_evictAllPages()") && source.includes("maxAtlasPages");
+}
+
+let webglVersion = "";
+try {
+  const packageJson = path.resolve(
+    process.cwd(),
+    "node_modules/@xterm/addon-webgl/package.json",
+  );
+  webglVersion = JSON.parse(fs.readFileSync(packageJson, "utf8")).version || "";
+} catch {
+  // Handled below when files are missing.
+}
+
+const results = { ok: 0, missing: 0 };
+
+for (const file of TARGET_FILES) {
   const abs = path.resolve(process.cwd(), file);
-  let src;
+  let source;
   try {
-    src = fs.readFileSync(abs, "utf8");
+    source = fs.readFileSync(abs, "utf8");
   } catch {
-    console.warn(`[patch-xterm-webgl-atlas] skip (not found): ${file}`);
-    missing++;
+    console.warn(`[patch-xterm-webgl-atlas] ERROR: not found: ${file}`);
+    results.missing++;
     continue;
   }
-  if (src.includes(MARKER)) {
-    already++;
+
+  const checks = [
+    {
+      name: "shared-atlas clear (#6055)",
+      ok: hasUpstreamSharedAtlasClearFix(source),
+      hint: "need clearTexture() { ... _pageLayoutVersion++ }",
+    },
+    {
+      name: "no atlas mipmaps (#5987)",
+      ok: hasUpstreamMipmapFix(source),
+      hint: "must not call gl.generateMipmap on atlas upload",
+    },
+    {
+      name: "atlas capacity eviction (#6043)",
+      ok: hasUpstreamCapacityFix(source),
+      hint: "need _evictAllPages() and maxAtlasPages",
+    },
+  ];
+
+  const failed = checks.filter((check) => !check.ok);
+  if (failed.length === 0) {
+    results.ok++;
     continue;
   }
-  const loop = loops.find((candidate) => src.includes(candidate));
-  if (!loop) {
+
+  results.missing++;
+  for (const check of failed) {
     console.warn(
-      `[patch-xterm-webgl-atlas] WARNING: atlas-sharing loop not found in ${file}. ` +
-        "@xterm/addon-webgl likely changed — split-view WebGL may garble again (#1063). " +
-        "Refresh the minified target strings in scripts/patch-xterm-webgl-atlas.cjs.",
+      `[patch-xterm-webgl-atlas] ERROR: missing ${check.name} in ${file} ` +
+        `(${check.hint}). Upgrade @xterm/addon-webgl ` +
+        `(current: ${webglVersion || "unknown"}).`,
     );
-    missing++;
-    continue;
   }
-  fs.writeFileSync(abs, src.replace(loop, MARKER));
-  patched++;
 }
 
 console.log(
-  `[patch-xterm-webgl-atlas] atlas isolation: patched=${patched} already=${already} missing=${missing}`,
+  `[patch-xterm-webgl-atlas] verify version=${webglVersion || "unknown"} ` +
+    `ok=${results.ok} missing=${results.missing}`,
 );
+
+if (results.missing > 0) process.exitCode = 1;

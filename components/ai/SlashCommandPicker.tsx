@@ -1,6 +1,11 @@
-import { MessageSquare, Package } from 'lucide-react';
+import { Command, MessageSquare, Package } from 'lucide-react';
 import React from 'react';
-import type { AIQuickMessage, SlashCommandItem, UserSkillSlashOption } from '../../infrastructure/ai/quickMessages';
+import type {
+  AIQuickMessage,
+  SlashCommandItem,
+  SystemSlashCommand,
+  UserSkillSlashOption,
+} from '../../infrastructure/ai/quickMessages';
 import { getSlashCommandItemId } from '../../infrastructure/ai/quickMessages';
 import { ScrollArea } from '../ui/scroll-area';
 
@@ -8,11 +13,15 @@ export interface SlashCommandPickerProps {
   listboxId: string;
   ariaLabel: string;
   quickMessages: AIQuickMessage[];
+  systemCommands: SystemSlashCommand[];
   userSkills: UserSkillSlashOption[];
   slashCommandItems: SlashCommandItem[];
   activeMenuIndex: number;
   onActiveIndexChange: (index: number) => void;
   onSelectQuickMessage: (message: AIQuickMessage) => void;
+  onSelectSystemCommand: (command: SystemSlashCommand) => void;
+  systemCommandsSectionLabel: string;
+  systemCommandDescription: (command: SystemSlashCommand) => string;
   onSelectSkill: (skill: UserSkillSlashOption) => void;
   quickMessagesSectionLabel: string;
   userSkillsSectionLabel: string;
@@ -27,11 +36,15 @@ export const SlashCommandPicker: React.FC<SlashCommandPickerProps> = ({
   listboxId,
   ariaLabel,
   quickMessages,
+  systemCommands,
   userSkills,
   slashCommandItems,
   activeMenuIndex,
   onActiveIndexChange,
   onSelectQuickMessage,
+  onSelectSystemCommand,
+  systemCommandsSectionLabel,
+  systemCommandDescription,
   onSelectSkill,
   quickMessagesSectionLabel,
   userSkillsSectionLabel,
@@ -66,6 +79,39 @@ export const SlashCommandPicker: React.FC<SlashCommandPickerProps> = ({
             </div>
           ) : (
             <>
+              {systemCommands.length > 0 ? (
+                <>
+                  <div className="px-2 py-1 text-[10px] text-muted-foreground/40 tracking-wide">
+                    {systemCommandsSectionLabel}
+                  </div>
+                  {systemCommands.map((command) => {
+                    const idx = slashCommandItems.findIndex(
+                      (item) => item.kind === 'system' && item.command.slug === command.slug,
+                    );
+                    const isActive = idx === activeMenuIndex;
+                    return (
+                      <button
+                        id={`${listboxId}-${command.slug}`}
+                        key={command.slug}
+                        type="button"
+                        role="option"
+                        aria-selected={isActive}
+                        onMouseEnter={() => onActiveIndexChange(idx)}
+                        onClick={() => onSelectSystemCommand(command)}
+                        className={`w-full rounded-md px-2 py-1.5 text-left transition-colors cursor-pointer ${isActive ? 'bg-muted/40' : 'hover:bg-muted/30'}`}
+                      >
+                        <div className="flex items-center gap-2 text-[12px] min-w-0">
+                          <Command size={12} className="text-primary/60 shrink-0" />
+                          <span className="text-foreground/90">/{command.slug}</span>
+                        </div>
+                        <div className="pl-5 text-[10px] leading-4.5 text-muted-foreground/62">
+                          {systemCommandDescription(command)}
+                        </div>
+                      </button>
+                    );
+                  })}
+                </>
+              ) : null}
               {quickMessages.length > 0 ? (
                 <>
                   <div className="px-2 py-1 text-[10px] text-muted-foreground/40 tracking-wide">

@@ -1,4 +1,8 @@
 /* eslint-disable no-undef */
+const {
+  windowsFramelessContentChromeOptions,
+} = require("./windowsWindowChrome.cjs");
+
 function createSettingsWindowApi(ctx) {
   // The extracted window helpers intentionally share the parent window-manager state.
   with (ctx) {
@@ -125,6 +129,8 @@ function createSettingsWindowApi(ctx) {
         settingsHeight,
       });
     
+      const windowsChrome = !isMac ? windowsFramelessContentChromeOptions() : {};
+
       const win = new BrowserWindow({
         title: "netcatty Settings",
         width: settingsWidth,
@@ -144,11 +150,13 @@ function createSettingsWindowApi(ctx) {
         frame: isMac,
         titleBarStyle: isMac ? "hiddenInset" : undefined,
         trafficLightPosition: isMac ? { x: 12, y: 12 } : undefined,
+        ...windowsChrome,
         webPreferences: {
           preload,
           contextIsolation: true,
           nodeIntegration: false,
           sandbox: false,
+          spellcheck: false,
           v8CacheOptions: V8_CACHE_OPTIONS,
         },
       });

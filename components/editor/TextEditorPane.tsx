@@ -13,7 +13,7 @@ import {
 } from 'lucide-react';
 import Editor, { type OnMount, loader, useMonaco } from '@monaco-editor/react';
 import type * as Monaco from 'monaco-editor';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 
 // Configure Monaco to use local files instead of CDN
 const viteEnv = import.meta.env ?? { BASE_URL: "/" };
@@ -25,6 +25,8 @@ loader.config({ paths: { vs: monacoBasePath } });
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { useClipboardBackend } from '../../application/state/useClipboardBackend';
 import { HotkeyScheme, KeyBinding, matchesKeyBinding } from '../../domain/models';
+import { pasteForMonacoEditorCommand } from '../../infrastructure/monaco/monacoClipboardPaste';
+import { useNetcattyMonacoTheme } from '../../infrastructure/monaco/useNetcattyMonacoTheme';
 import { getLanguageName, getSupportedLanguages } from '../../lib/sftpFileUtils';
 import { Button } from '../ui/button';
 import { Combobox } from '../ui/combobox';
@@ -78,82 +80,6 @@ const languageIdToMonaco = (langId: string): string => {
     'diff': 'diff',
   };
   return mapping[langId] || 'plaintext';
-};
-
-// Convert HSL string "h s% l%" to hex color
-const hslToHex = (hslString: string): string => {
-  const parts = hslString.trim().split(/\s+/);
-  if (parts.length < 3) return '#1e1e1e';
-  const h = parseFloat(parts[0]) / 360;
-  const s = parseFloat(parts[1].replace('%', '')) / 100;
-  const l = parseFloat(parts[2].replace('%', '')) / 100;
-
-  const hue2rgb = (p: number, q: number, t: number) => {
-    if (t < 0) t += 1;
-    if (t > 1) t -= 1;
-    if (t < 1 / 6) return p + (q - p) * 6 * t;
-    if (t < 1 / 2) return q;
-    if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
-    return p;
-  };
-
-  let r: number, g: number, b: number;
-  if (s === 0) {
-    r = g = b = l;
-  } else {
-    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
-    const p = 2 * l - q;
-    r = hue2rgb(p, q, h + 1 / 3);
-    g = hue2rgb(p, q, h);
-    b = hue2rgb(p, q, h - 1 / 3);
-  }
-
-  const toHex = (x: number) => {
-    const hex = Math.round(x * 255).toString(16);
-    return hex.length === 1 ? '0' + hex : hex;
-  };
-
-  return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
-};
-
-// Read a CSS custom-property and convert from HSL to hex
-const getCssColor = (varName: string, fallback: string): string => {
-  if (typeof document === 'undefined' || typeof getComputedStyle === 'undefined') {
-    return fallback;
-  }
-  const value = getComputedStyle(document.documentElement)
-    .getPropertyValue(varName)
-    .trim();
-  return value ? hslToHex(value) : fallback;
-};
-
-interface EditorColors {
-  bg: string;
-  fg: string;
-  primary: string;
-  card: string;
-  mutedFg: string;
-  border: string;
-}
-
-/** Read all UI CSS variables that matter for the Monaco theme. */
-const getEditorColors = (isDark: boolean): EditorColors => ({
-  bg: getCssColor('--background', isDark ? '#1e1e1e' : '#ffffff'),
-  fg: getCssColor('--foreground', isDark ? '#d4d4d4' : '#1e1e1e'),
-  primary: getCssColor('--primary', isDark ? '#569cd6' : '#0078d4'),
-  card: getCssColor('--card', isDark ? '#252526' : '#f3f3f3'),
-  mutedFg: getCssColor('--muted-foreground', isDark ? '#858585' : '#858585'),
-  border: getCssColor('--border', isDark ? '#3c3c3c' : '#d4d4d4'),
-});
-
-/** Build a fingerprint string so we can detect UI theme color changes cheaply. */
-const getThemeSignal = (): string => {
-  if (typeof document === 'undefined' || typeof getComputedStyle === 'undefined') {
-    return '';
-  }
-  const root = document.documentElement;
-  return root.dataset.activeChromeTheme
-    ?? getComputedStyle(root).getPropertyValue('--background').trim();
 };
 
 export interface TextEditorPaneProps {
@@ -234,6 +160,7 @@ const TextEditorPaneInner: React.FC<TextEditorPaneProps> = ({
   const { t } = useI18n();
   const { readClipboardText: readClipboardTextFromBridge } = useClipboardBackend();
   const monaco = useMonaco();
+  const customThemeName = useNetcattyMonacoTheme(monaco);
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
 
   // Ref to store the latest save function to avoid stale closure in keyboard shortcut
@@ -241,73 +168,6 @@ const TextEditorPaneInner: React.FC<TextEditorPaneProps> = ({
   const handleCloseRef = useRef<(() => void) | null>(null);
   const handlePasteRef = useRef<() => Promise<void>>(() => Promise.resolve());
   const readClipboardTextRef = useRef<() => Promise<string | null>>(() => Promise.resolve(null));
-
-  // Track theme from document.documentElement class (syncs with app theme)
-  const [isDarkTheme, setIsDarkTheme] = useState(() =>
-    typeof document !== 'undefined' && document.documentElement.classList.contains('dark')
-  );
-
-  // Track a signal that changes whenever active chrome or base theme colors change
-  const [themeSignal, setThemeSignal] = useState(() => getThemeSignal());
-
-  // Custom theme name
-  const customThemeName = isDarkTheme ? 'netcatty-dark' : 'netcatty-light';
-
-  // Define and update custom Monaco themes from active chrome / base UI colors
-  useEffect(() => {
-    if (!monaco) return;
-
-    const colors = getEditorColors(isDarkTheme);
-
-    const themeColors: Record<string, string> = {
-      'editor.background': colors.bg,
-      'editor.foreground': colors.fg,
-      'editorCursor.foreground': colors.primary,
-      'editor.selectionBackground': colors.primary + '40',
-      'editor.inactiveSelectionBackground': colors.primary + '25',
-      'editorLineNumber.foreground': colors.mutedFg,
-      'editorLineNumber.activeForeground': colors.fg,
-      'editor.lineHighlightBackground': colors.fg + '08',
-      'editorWidget.background': colors.card,
-      'editorWidget.foreground': colors.fg,
-      'editorWidget.border': colors.border,
-      'input.background': colors.card,
-      'input.foreground': colors.fg,
-      'input.border': colors.border,
-    };
-
-    monaco.editor.defineTheme('netcatty-dark', {
-      base: 'vs-dark',
-      inherit: true,
-      rules: [],
-      colors: themeColors,
-    });
-
-    monaco.editor.defineTheme('netcatty-light', {
-      base: 'vs',
-      inherit: true,
-      rules: [],
-      colors: themeColors,
-    });
-
-    monaco.editor.setTheme(customThemeName);
-  }, [monaco, isDarkTheme, themeSignal, customThemeName]);
-
-  // Listen for theme changes via MutationObserver on <html> class, style, and active chrome attr
-  useEffect(() => {
-    if (typeof document === 'undefined' || typeof MutationObserver === 'undefined') return;
-    const root = document.documentElement;
-    const updateTheme = () => {
-      setIsDarkTheme(root.classList.contains('dark'));
-      setThemeSignal(getThemeSignal());
-    };
-    const observer = new MutationObserver(updateTheme);
-    observer.observe(root, {
-      attributes: true,
-      attributeFilter: ['class', 'style', 'data-active-chrome-theme'],
-    });
-    return () => observer.disconnect();
-  }, []);
 
   const closeTabBinding = useMemo(
     () => keyBindings.find((binding) => binding.action === 'closeTab'),
@@ -418,31 +278,13 @@ const TextEditorPaneInner: React.FC<TextEditorPaneProps> = ({
     });
 
     // Fallback paste path for Electron environments where Monaco paste can fail.
-    // Skip custom paste when focus is inside the find/replace widget so that
-    // its input fields receive the pasted text via default browser behavior.
+    // When focus is in the find/replace widget, paste into that input instead of the body.
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyV, () => {
-      const active = document.activeElement;
-      if (active?.closest('.find-widget')) {
-        // Read clipboard and insert into the find/replace input field.
-        void (async () => {
-          try {
-            const text = await readClipboardTextRef.current();
-            if (!text) return;
-            // Monaco find widget inputs are <textarea> elements inside .monaco-inputbox
-            if (active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement) {
-              const start = active.selectionStart ?? active.value.length;
-              const end = active.selectionEnd ?? active.value.length;
-              active.focus();
-              active.setSelectionRange(start, end);
-              document.execCommand('insertText', false, text);
-            }
-          } catch {
-            // Ignore – paste simply won't work
-          }
-        })();
-        return;
-      }
-      void handlePasteRef.current();
+      void pasteForMonacoEditorCommand({
+        activeElement: document.activeElement,
+        readClipboardText: () => readClipboardTextRef.current(),
+        pasteIntoEditor: () => handlePasteRef.current(),
+      });
     });
 
     editor.focus();
@@ -491,20 +333,20 @@ const TextEditorPaneInner: React.FC<TextEditorPaneProps> = ({
       <div className="h-9 px-3 py-1.5 border-b border-border/60 flex-shrink-0">
         <div className="flex h-full items-center justify-between gap-3">
           <div className="flex items-center gap-2 flex-1 min-w-0">
-            <span className="text-sm font-semibold leading-none truncate flex-shrink-0">
+            <span className="flex-shrink-0 truncate text-sm font-semibold leading-5">
               {fileName}
             </span>
             {subtitle && (
               <Tooltip>
                 <TooltipTrigger asChild>
-                  <span className="text-xs leading-none text-muted-foreground truncate cursor-default">
+                  <span className="cursor-default truncate text-xs leading-4 text-muted-foreground">
                     {subtitle}
                   </span>
                 </TooltipTrigger>
                 <TooltipContent>{subtitle}</TooltipContent>
               </Tooltip>
             )}
-            {saveError && <span className="text-xs leading-none text-destructive truncate">{saveError}</span>}
+            {saveError && <span className="truncate text-xs leading-4 text-destructive">{saveError}</span>}
           </div>
           <div className="flex h-6 items-center gap-2 min-w-0">
             {/* Search button */}

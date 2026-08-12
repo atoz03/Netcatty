@@ -3,26 +3,34 @@ import {
   ChevronDown,
   Eye,
   EyeOff,
-  Globe,
   Key,
   Lock,
+  Plug,
   Plus,
-  Terminal as TerminalIcon,
   User,
 } from "lucide-react";
 import React, { useMemo, useState } from "react";
 import { useI18n } from "../application/i18n/I18nProvider";
 import type { QuickConnectTarget } from "../domain/quickConnect";
 import { formatHostPort } from "../domain/host";
+import {
+  buildQuickConnectHost,
+  getQuickConnectDefaultPort,
+  isQuickConnectIdentityUsable,
+  type QuickConnectAuthMethod,
+  type QuickConnectProtocol,
+} from "../domain/quickConnectHost";
 import { cn } from "../lib/utils";
-import { Host, SSHKey } from "../types";
+import { Host, Identity, SSHKey } from "../types";
 import { Button } from "./ui/button";
+import { Combobox } from "./ui/combobox";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
+import { Dropdown, DropdownContent, DropdownTrigger } from "./ui/dropdown";
 import { ScrollArea } from "./ui/scroll-area";
+import { PROTOCOL_VISUAL_STYLES } from "./protocolVisuals";
 
-// Protocol types supported for quick connect
-type Protocol = "ssh" | "mosh" | "telnet";
+
 
 // Wizard steps
 type WizardStep = "protocol" | "username" | "knownhost" | "auth";
@@ -31,6 +39,7 @@ interface QuickConnectWizardProps {
   open: boolean;
   target: QuickConnectTarget;
   keys: SSHKey[];
+  identities: Identity[];
   warnings?: string[];
   onConnect: (host: Host) => void;
   onSaveHost?: (host: Host) => void;
@@ -42,6 +51,7 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
   open,
   target,
   keys,
+  identities,
   warnings,
   onConnect,
   onSaveHost,
@@ -51,11 +61,9 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
   const { t } = useI18n();
   // Wizard state
   const [step, setStep] = useState<WizardStep>("protocol");
-  const [protocol, setProtocol] = useState<Protocol>("ssh");
+  const [protocol, setProtocol] = useState<QuickConnectProtocol>("ssh");
   const [username, setUsername] = useState(target.username || "");
   const [port, setPort] = useState<number>(target.port || 22);
-  const [moshServerPath, setMoshServerPath] = useState("");
-  const [showLogs, setShowLogs] = useState(false);
 
   // Known host verification state
   const [knownHostInfo, setKnownHostInfo] = useState<{
@@ -64,11 +72,16 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
   } | null>(null);
 
   // Auth state
-  const [authMethod, setAuthMethod] = useState<"password" | "key">("password");
+  const [authMethod, setAuthMethod] = useState<QuickConnectAuthMethod>("password");
   const [password, setPassword] = useState("");
   const [selectedKeyId, setSelectedKeyId] = useState<string | null>(null);
+  const [selectedIdentityId, setSelectedIdentityId] = useState<string | null>(null);
+  const [saveOptionsOpen, setSaveOptionsOpen] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
-  const [saveCredentials] = useState(true);
+  const selectedIdentity = useMemo(
+    () => identities.find((identity) => identity.id === selectedIdentityId),
+    [identities, selectedIdentityId],
+  );
 
   // Reset state when target changes
   React.useEffect(() => {
@@ -79,38 +92,82 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
       setPort(target.port || 22);
       setPassword("");
       setSelectedKeyId(null);
+      setSelectedIdentityId(null);
+      setSaveOptionsOpen(false);
       setShowPassword(false);
       setKnownHostInfo(null);
     }
   }, [open, target]);
 
-  // Get default port for protocol
-  const getDefaultPort = (proto: Protocol) => {
-    switch (proto) {
-      case "ssh":
-        return 22;
-      case "mosh":
-        return 22;
-      case "telnet":
-        return 23;
-      default:
-        return 22;
+  const canUseSelectedIdentity = useMemo(
+    () => isQuickConnectIdentityUsable(selectedIdentity, keys, protocol),
+    [keys, protocol, selectedIdentity],
+  );
+  const identityOptions = useMemo(
+    () => identities.map((identity) => ({
+      value: identity.id,
+      label: identity.label,
+      sublabel: identity.username,
+      icon: <User size={14} />,
+    })),
+    [identities],
+  );
+
+  const detachSelectedIdentity = () => {
+    setSelectedIdentityId(null);
+    setAuthMethod("password");
+    setPassword("");
+    setSelectedKeyId(null);
+  };
+
+  const clearSelectedIdentity = () => {
+    detachSelectedIdentity();
+    setUsername(target.username || "");
+  };
+
+  const handleIdentitySelect = (identityId: string) => {
+    if (!identityId) {
+      clearSelectedIdentity();
+      return;
     }
+    const identity = identities.find((candidate) => candidate.id === identityId);
+    if (!identity) return;
+    setSelectedIdentityId(identity.id);
+    setUsername(identity.username);
+    setAuthMethod(identity.authMethod);
+    setPassword("");
+    setSelectedKeyId(identity.keyId || null);
   };
 
   // Handle protocol selection
-  const handleProtocolSelect = (proto: Protocol) => {
+  const handleProtocolSelect = (proto: QuickConnectProtocol) => {
     setProtocol(proto);
-    // Update port to default for protocol if unchanged
-    if (port === getDefaultPort(protocol)) {
-      setPort(getDefaultPort(proto));
+    if (proto === "telnet") {
+      if (selectedIdentityId) clearSelectedIdentity();
+      setAuthMethod("password");
     }
+    if (port === getQuickConnectDefaultPort(protocol)) {
+      setPort(getQuickConnectDefaultPort(proto));
+    }
+  };
+
+  const handleProtocolPortChange = (
+    proto: QuickConnectProtocol,
+    rawValue: string,
+    fallbackPort: number,
+  ) => {
+    handleProtocolSelect(proto);
+    setPort(parseInt(rawValue) || fallbackPort);
   };
 
   // Navigate to next step
   const handleContinue = () => {
     switch (step) {
       case "protocol":
+        if (canUseSelectedIdentity) {
+          handleConnect();
+          break;
+        }
         // Always go to username step to let user confirm/edit username
         setStep("username");
         break;
@@ -143,33 +200,25 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
   };
 
   // Create host and connect
-  const handleConnect = () => {
+  const handleConnect = (save = false) => {
     const effectiveUsername = username || target.username || "root";
-    const effectivePort = port || getDefaultPort(protocol);
-
-    const tempHost: Host = {
-      id: `quick-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
-      label: `${target.hostname}`,
-      hostname: target.hostname,
+    const effectivePort = port || getQuickConnectDefaultPort(protocol);
+    const now = Date.now();
+    const tempHost = buildQuickConnectHost({
+      id: `quick-${now}-${Math.random().toString(36).slice(2, 11)}`,
+      createdAt: now,
+      target,
+      protocol,
       port: effectivePort,
       username: effectiveUsername,
-      group: "",
-      tags: [],
-      os: "linux",
-      protocol: protocol === "mosh" ? "ssh" : protocol,
-      authMethod: authMethod,
-      password: authMethod === "password" ? password : undefined,
-      identityFileId:
-        authMethod === "key" ? selectedKeyId || undefined : undefined,
-      moshEnabled: protocol === "mosh",
-      // Set telnet-specific fields when using telnet protocol
-      telnetEnabled: protocol === "telnet",
-      telnetPort: protocol === "telnet" ? effectivePort : undefined,
-      createdAt: Date.now(),
-    };
+      authMethod,
+      password,
+      selectedKeyId,
+      selectedIdentityId: selectedIdentity?.id,
+      save,
+    });
 
-    // Save host if requested
-    if (saveCredentials && onSaveHost) {
+    if (save && onSaveHost) {
       onSaveHost(tempHost);
     }
 
@@ -187,18 +236,30 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
       case "knownhost":
         return true;
       case "auth":
+        if (selectedIdentity && protocol !== "telnet") return canUseSelectedIdentity;
         if (authMethod === "password") {
           // Whitespace-only passwords are valid SSH secrets (issue #2036).
           return password.length > 0;
         }
-        return !!selectedKeyId;
+        return Boolean(selectedKeyId && keys.some((key) => key.id === selectedKeyId));
     }
-  }, [step, username, authMethod, password, selectedKeyId]);
+  }, [
+    step,
+    username,
+    authMethod,
+    password,
+    selectedKeyId,
+    selectedIdentity,
+    canUseSelectedIdentity,
+    keys,
+    protocol,
+  ]);
 
   // Render protocol selection step
   const renderProtocolStep = () => (
-    <div className="space-y-4">
-      <h3 className="text-base font-semibold">{t("protocolSelect.chooseProtocol")}</h3>
+    <div className="space-y-6">
+      <div className="space-y-4">
+      <h3 className="text-sm font-medium">{t("protocolSelect.chooseProtocol")}</h3>
       <div className="space-y-3">
         {/* SSH */}
         <button
@@ -215,11 +276,11 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
               className={cn(
                 "h-10 w-10 rounded-lg flex items-center justify-center",
                 protocol === "ssh"
-                  ? "bg-primary/20 text-primary"
-                  : "bg-muted text-muted-foreground",
+                  ? PROTOCOL_VISUAL_STYLES.ssh.selected
+                  : PROTOCOL_VISUAL_STYLES.ssh.idle,
               )}
             >
-              <TerminalIcon size={18} />
+              {PROTOCOL_VISUAL_STYLES.ssh.icon}
             </div>
             <div>
               <div className="font-medium">SSH</div>
@@ -233,10 +294,7 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
             <Input
               type="number"
               value={protocol === "ssh" ? port : 22}
-              onChange={(e) => {
-                setPort(parseInt(e.target.value) || 22);
-                setProtocol("ssh");
-              }}
+              onChange={(e) => handleProtocolPortChange("ssh", e.target.value, 22)}
               onClick={(e) => e.stopPropagation()}
               className="w-16 h-7 text-xs text-center"
               min={1}
@@ -260,11 +318,11 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
               className={cn(
                 "h-10 w-10 rounded-lg flex items-center justify-center",
                 protocol === "mosh"
-                  ? "bg-primary/20 text-primary"
-                  : "bg-muted text-muted-foreground",
+                  ? PROTOCOL_VISUAL_STYLES.mosh.selected
+                  : PROTOCOL_VISUAL_STYLES.mosh.idle,
               )}
             >
-              <Globe size={18} />
+              {PROTOCOL_VISUAL_STYLES.mosh.icon}
             </div>
             <div>
               <div className="font-medium">Mosh</div>
@@ -278,22 +336,53 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
             <Input
               type="number"
               value={protocol === "mosh" ? port : 22}
-              onChange={(e) => {
-                setPort(parseInt(e.target.value) || 22);
-                setProtocol("mosh");
-              }}
+              onChange={(e) => handleProtocolPortChange("mosh", e.target.value, 22)}
               onClick={(e) => e.stopPropagation()}
               className="w-16 h-7 text-xs text-center"
               min={1}
               max={65535}
             />
+          </div>
+        </button>
+
+        {/* Eternal Terminal */}
+        <button
+          className={cn(
+            "w-full flex items-center justify-between px-4 py-3 rounded-xl border-2 transition-all text-left",
+            protocol === "et"
+              ? "border-primary bg-primary/5"
+              : "border-border/60 hover:border-border hover:bg-secondary/50",
+          )}
+          onClick={() => handleProtocolSelect("et")}
+        >
+          <div className="flex items-center gap-3">
+            <div
+              className={cn(
+                "h-10 w-10 rounded-lg flex items-center justify-center",
+                protocol === "et"
+                  ? PROTOCOL_VISUAL_STYLES.et.selected
+                  : PROTOCOL_VISUAL_STYLES.et.idle,
+              )}
+            >
+              {PROTOCOL_VISUAL_STYLES.et.icon}
+            </div>
+            <div>
+              <div className="font-medium">Eternal Terminal</div>
+              <div className="text-xs text-muted-foreground font-mono">
+                et {target.hostname}
+              </div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-muted-foreground">{t("protocolSelect.port")}</span>
             <Input
-              type="text"
-              value={moshServerPath}
-              onChange={(e) => setMoshServerPath(e.target.value)}
+              type="number"
+              value={protocol === "et" ? port : 22}
+              onChange={(e) => handleProtocolPortChange("et", e.target.value, 22)}
               onClick={(e) => e.stopPropagation()}
-              placeholder="mosh --server=/path/server host"
-              className="w-40 h-7 text-xs"
+              className="w-16 h-7 text-xs text-center"
+              min={1}
+              max={65535}
             />
           </div>
         </button>
@@ -313,11 +402,11 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
               className={cn(
                 "h-10 w-10 rounded-lg flex items-center justify-center",
                 protocol === "telnet"
-                  ? "bg-primary/20 text-primary"
-                  : "bg-muted text-muted-foreground",
+                  ? PROTOCOL_VISUAL_STYLES.telnet.selected
+                  : PROTOCOL_VISUAL_STYLES.telnet.idle,
               )}
             >
-              <TerminalIcon size={18} />
+              {PROTOCOL_VISUAL_STYLES.telnet.icon}
             </div>
             <div>
               <div className="font-medium">Telnet</div>
@@ -331,10 +420,7 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
             <Input
               type="number"
               value={protocol === "telnet" ? port : 23}
-              onChange={(e) => {
-                setPort(parseInt(e.target.value) || 23);
-                setProtocol("telnet");
-              }}
+              onChange={(e) => handleProtocolPortChange("telnet", e.target.value, 23)}
               onClick={(e) => e.stopPropagation()}
               className="w-16 h-7 text-xs text-center"
               min={1}
@@ -343,6 +429,28 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
           </div>
         </button>
       </div>
+      </div>
+
+      {protocol !== "telnet" && identities.length > 0 && (
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-col gap-3">
+            <Label className="text-sm font-medium">{t("quickConnect.identity.label")}</Label>
+            <Combobox
+              options={identityOptions}
+              value={selectedIdentityId || undefined}
+              onValueChange={handleIdentitySelect}
+              placeholder={t("quickConnect.identity.placeholder")}
+              emptyText={t("quickConnect.identity.empty")}
+              icon={<User size={14} />}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {selectedIdentity
+              ? t("quickConnect.identity.selectedHint", { username: selectedIdentity.username })
+              : t("quickConnect.identity.hint")}
+          </p>
+        </div>
+      )}
     </div>
   );
 
@@ -354,7 +462,10 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
         <Input
           id="quick-username"
           value={username}
-          onChange={(e) => setUsername(e.target.value)}
+          onChange={(e) => {
+            if (selectedIdentityId) detachSelectedIdentity();
+            setUsername(e.target.value);
+          }}
           placeholder={t("terminal.auth.username.placeholder")}
           autoFocus
           onKeyDown={(e) => {
@@ -393,6 +504,30 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
   // Render auth step
   const renderAuthStep = () => (
     <div className="space-y-4">
+      {selectedIdentity ? (
+        <div className="rounded-xl border border-primary/40 bg-primary/5 p-4 space-y-3">
+          <div className="flex items-center gap-3">
+            <div className="h-9 w-9 rounded-lg bg-primary/15 text-primary flex items-center justify-center">
+              <User size={16} />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="font-medium truncate">{selectedIdentity.label}</div>
+              <div className="text-xs text-muted-foreground truncate">
+                {selectedIdentity.username} · {t(`quickConnect.identity.method.${selectedIdentity.authMethod}`)}
+              </div>
+            </div>
+          </div>
+          {!canUseSelectedIdentity && (
+            <p className="text-xs text-destructive">
+              {t("quickConnect.identity.unavailable")}
+            </p>
+          )}
+          <Button variant="outline" size="sm" className="w-full" onClick={detachSelectedIdentity}>
+            {t("quickConnect.identity.useCustom")}
+          </Button>
+        </div>
+      ) : (
+        <>
       {/* Auth method tabs */}
       <div className="flex gap-1 p-1 bg-secondary/80 rounded-lg border border-border/60">
         <button
@@ -402,7 +537,10 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
               ? "bg-primary text-primary-foreground shadow-sm"
               : "text-muted-foreground hover:text-foreground hover:bg-secondary",
           )}
-          onClick={() => setAuthMethod("password")}
+          onClick={() => {
+            setSelectedIdentityId(null);
+            setAuthMethod("password");
+          }}
         >
           <Lock size={14} />
           {t("terminal.auth.password")}
@@ -410,11 +548,14 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
         <button
           className={cn(
             "flex-1 flex items-center justify-center gap-2 py-2 text-sm font-medium rounded-md transition-all",
-            authMethod === "key"
+            authMethod !== "password"
               ? "bg-primary text-primary-foreground shadow-sm"
               : "text-muted-foreground hover:text-foreground hover:bg-secondary",
           )}
-          onClick={() => setAuthMethod("key")}
+          onClick={() => {
+            setSelectedIdentityId(null);
+            setAuthMethod("key");
+          }}
         >
           <Key size={14} />
           {t("terminal.auth.sshKey")}
@@ -472,7 +613,10 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
                           ? "border-primary bg-primary/5"
                           : "border-border/50 hover:bg-secondary/50",
                       )}
-                      onClick={() => setSelectedKeyId(key.id)}
+                      onClick={() => {
+                        setSelectedIdentityId(null);
+                        setSelectedKeyId(key.id);
+                      }}
                     >
                       <div
                         className={cn(
@@ -509,90 +653,22 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
           )}
         </div>
       )}
+        </>
+      )}
     </div>
   );
 
-  // Get step title
-  const getStepTitle = () => {
-    switch (step) {
-      case "protocol":
-        return target.hostname;
-      case "username":
-        return target.hostname;
-      case "knownhost":
-        return target.hostname;
-      case "auth":
-        return target.hostname;
-    }
-  };
-
-  // Get step subtitle
-  const getStepSubtitle = () => {
-    const effectiveUsername = username || target.username || "";
-    switch (step) {
-      case "protocol":
-        return target.hostname;
-      case "username":
-        return `${protocol.toUpperCase()} ${formatHostPort(target.hostname, port)}`;
-      case "knownhost":
-        return `${protocol.toUpperCase()} ${effectiveUsername}@${formatHostPort(target.hostname, port)}`;
-      case "auth":
-        return `${protocol.toUpperCase()} ${formatHostPort(target.hostname, port)}`;
-    }
-  };
-
-  // Render progress indicator
-  const renderProgressIndicator = () => {
-    const steps: WizardStep[] = target.username
-      ? ["protocol", "auth"]
-      : ["protocol", "username", "auth"];
-    const currentIndex = steps.indexOf(step);
-
-    return (
-      <div className="flex items-center gap-3 py-3">
-        <div
-          className={cn(
-            "h-8 w-8 rounded-full flex items-center justify-center flex-shrink-0",
-            currentIndex >= 0
-              ? "bg-primary/20 text-primary"
-              : "bg-muted text-muted-foreground",
-          )}
-        >
-          <TerminalIcon size={14} />
-        </div>
-        <div className="flex-1 h-0.5 bg-muted" />
-        {!target.username && (
-          <>
-            <div
-              className={cn(
-                "h-8 w-8 rounded-full flex items-center justify-center flex-shrink-0",
-                currentIndex >= 1
-                  ? "bg-primary/20 text-primary"
-                  : "bg-muted text-muted-foreground",
-              )}
-            >
-              <User size={14} />
-            </div>
-            <div className="flex-1 h-0.5 bg-muted" />
-          </>
-        )}
-        <div
-          className={cn(
-            "h-8 w-8 rounded-full flex items-center justify-center flex-shrink-0",
-            step === "auth"
-              ? "bg-primary/20 text-primary"
-              : "bg-muted text-muted-foreground",
-          )}
-        >
-          {authMethod === "password" ? <Lock size={14} /> : <Key size={14} />}
-        </div>
-        <div className="flex-1 h-0.5 bg-muted" />
-        <div className="h-8 w-8 rounded-full bg-muted text-muted-foreground flex items-center justify-center text-xs font-mono">
-          {">_"}
-        </div>
-      </div>
+  const hostEndpoint = formatHostPort(target.hostname, port || getQuickConnectDefaultPort(protocol));
+  const connectTitle = t("quickConnect.connectTitle", { host: hostEndpoint });
+  const protocolLabel = protocol === "et" ? "ET" : protocol.toUpperCase();
+  const effectiveUsername = username || target.username || "";
+  const connectSubtitle = step === "protocol"
+    ? null
+    : (
+      effectiveUsername
+        ? `${protocolLabel} ${effectiveUsername}@${hostEndpoint}`
+        : `${protocolLabel} ${hostEndpoint}`
     );
-  };
 
   return (
     <div
@@ -608,34 +684,18 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="px-6 py-5 border-b border-border/50">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="h-12 w-12 rounded-xl bg-primary/15 text-primary flex items-center justify-center">
-                <TerminalIcon size={22} />
-              </div>
-              <div>
-                <h2 className="text-base font-semibold">{getStepTitle()}</h2>
-                <p className="text-xs text-muted-foreground font-mono">
-                  {getStepSubtitle()}
-                </p>
-              </div>
+        <div className="px-6 py-4 border-b border-border/50">
+          <div className="flex items-center gap-2 min-w-0">
+            <Plug size={18} className="shrink-0 text-foreground" />
+            <div className="min-w-0">
+              <h2 className="text-base font-semibold truncate">{connectTitle}</h2>
+              {connectSubtitle ? (
+                <p className="text-xs text-muted-foreground font-mono truncate">{connectSubtitle}</p>
+              ) : null}
             </div>
-            {(step === "auth" || (step === "knownhost" && !knownHostInfo)) && (
-              <Button
-                size="sm"
-                variant="outline"
-                className="h-8 text-xs"
-                onClick={() => setShowLogs(!showLogs)}
-              >
-                {showLogs ? "Hide logs" : "Show logs"}
-              </Button>
-            )}
           </div>
         </div>
 
-        {/* Progress indicator */}
-        <div className="px-6">{renderProgressIndicator()}</div>
 
         {warnings && warnings.length > 0 && (
           <div className="px-6 pb-2">
@@ -694,14 +754,43 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
                     {t("quickConnect.addKey")}
                   </Button>
                 )}
-              <Button disabled={!canProceed} onClick={handleConnect}>
-                {t("terminal.auth.continueSave")}
-                <ChevronDown size={14} className="ml-2" />
-              </Button>
+              <Dropdown open={saveOptionsOpen} onOpenChange={setSaveOptionsOpen}>
+                <div className="flex items-center rounded-md bg-primary text-primary-foreground">
+                  <Button
+                    disabled={!canProceed}
+                    onClick={() => handleConnect(false)}
+                    className="rounded-r-none bg-transparent hover:bg-white/10 shadow-none"
+                  >
+                    {t("common.continue")}
+                  </Button>
+                  <DropdownTrigger asChild>
+                    <Button
+                      disabled={!canProceed}
+                      aria-label={t("terminal.auth.continueSave")}
+                      aria-haspopup="menu"
+                      aria-expanded={saveOptionsOpen}
+                      className="px-2 rounded-l-none bg-transparent hover:bg-white/10 border-l border-primary-foreground/20 shadow-none"
+                    >
+                      <ChevronDown size={14} />
+                    </Button>
+                  </DropdownTrigger>
+                </div>
+                <DropdownContent className="w-44 p-1 z-50" align="end">
+                  <button
+                    className="w-full px-3 py-2 text-sm text-left hover:bg-secondary rounded-md"
+                    onClick={() => handleConnect(true)}
+                    disabled={!canProceed}
+                  >
+                    {t("terminal.auth.continueSave")}
+                  </button>
+                </DropdownContent>
+              </Dropdown>
             </div>
           ) : (
             <Button onClick={handleContinue} disabled={!canProceed}>
-              {t("common.continue")}
+              {step === "protocol" && canUseSelectedIdentity
+                ? t("quickConnect.identity.connect")
+                : t("common.continue")}
             </Button>
           )}
         </div>

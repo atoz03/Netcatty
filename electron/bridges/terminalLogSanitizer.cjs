@@ -5,6 +5,10 @@
  * erase operations, not plain text with decoration. The renderer below keeps a
  * small virtual text buffer so plain-text and HTML logs reflect what common
  * line-editing output actually leaves on screen.
+ *
+ * Full-screen TUIs (vim/less/htop) use the alternate screen buffer
+ * (DECSET 47/1047/1049). While that mode is active, paint is omitted so session
+ * logs keep shell history instead of tilde rows and status lines.
  */
 
 const CSI_FINAL_RE = /[@-~]/;
@@ -32,7 +36,7 @@ const BRIGHT_COLORS = [
 ];
 
 class TerminalTextRenderer {
-  constructor() {
+  constructor(options = {}) {
     this.lines = [[]];
     this.row = 0;
     this.col = 0;
@@ -44,6 +48,8 @@ class TerminalTextRenderer {
     this.justStartedLogScreen = false;
     this.hasPreservedScreenHistory = false;
     this.pendingClearedScreen = null;
+    // Seed when a session log starts while vim/less is already on the alternate buffer.
+    this.alternateScreenActive = options.alternateScreenActive === true;
   }
 
   feed(input) {
@@ -112,23 +118,34 @@ class TerminalTextRenderer {
         this.state = "esc";
         this.escapeBuffer = "";
         break;
+      case "\x9b":
+        // 8-bit C1 CSI (single-byte form of ESC [). Same private modes as the
+        // 7-bit sequence, including alternate-screen enter/leave.
+        this.state = "csi";
+        this.escapeBuffer = "";
+        break;
       case "\b":
+        if (this.alternateScreenActive) break;
         this.col = Math.max(0, this.col - 1);
         break;
       case "\r":
+        if (this.alternateScreenActive) break;
         this.col = 0;
         this.cursorMovedHomeByCsi = false;
         break;
       case "\n":
+        if (this.alternateScreenActive) break;
         this.row += 1;
         this.col = 0;
         this.cursorMovedHomeByCsi = false;
         this.#ensureLine();
         break;
       case "\t":
+        if (this.alternateScreenActive) break;
         this.#writeText(" ".repeat(8 - (this.col % 8)));
         break;
       default:
+        if (this.alternateScreenActive) break;
         if (this.#isPrintable(ch)) this.#writeText(ch);
         break;
     }
@@ -145,15 +162,51 @@ class TerminalTextRenderer {
       this.escapeBuffer = "";
       return;
     }
+    // RIS (ESC c) fully resets the terminal: leave the alternate buffer, clear
+    // SGR, and rebase the log screen so post-reset cursor homes cannot overwrite
+    // preserved history. Prior lines stay in the log (not a live ED2 wipe).
+    if (ch === "c") {
+      this.#applyRisReset();
+    }
     // Single-character ESC sequences are terminal controls. Ignore them for
     // logs, but consume them so they never leak into txt/html output.
     this.state = "normal";
     this.escapeBuffer = "";
   }
 
+  #applyRisReset() {
+    this.alternateScreenActive = false;
+    this.style = createDefaultStyle();
+    this.pendingClearedScreen = null;
+
+    // Drop trailing blank rows so "before\\n" + RIS does not leave an empty
+    // separator before the new screen, then base cursor-home on a fresh row.
+    while (this.lines.length > 0 && getTrimmedLineLength(this.lines[this.lines.length - 1]) === 0) {
+      this.lines.pop();
+    }
+
+    if (this.lines.length === 0) {
+      this.lines = [[]];
+      this.row = 0;
+      this.col = 0;
+      this.screenBaseRow = 0;
+      this.hasPreservedScreenHistory = false;
+    } else {
+      this.lines.push([]);
+      this.screenBaseRow = this.lines.length - 1;
+      this.row = this.screenBaseRow;
+      this.col = 0;
+      this.hasPreservedScreenHistory = true;
+    }
+
+    this.cursorMovedHomeByCsi = false;
+    this.justStartedLogScreen = true;
+  }
+
   #applyCsi(sequence) {
     const final = sequence.at(-1);
     const params = sequence.slice(0, -1);
+    const isPrivateMode = params.includes("?");
     const values = params
       .replace(/[?><=]/g, "")
       .split(";")
@@ -163,6 +216,18 @@ class TerminalTextRenderer {
         return Number.isFinite(n) ? n : undefined;
       });
     const n = values[0] || 1;
+
+    if ((final === "h" || final === "l") && isPrivateMode) {
+      const alternateModes = values.filter((value) => value === 47 || value === 1047 || value === 1049);
+      if (alternateModes.length > 0) {
+        this.alternateScreenActive = final === "h";
+        return;
+      }
+    }
+
+    if (this.alternateScreenActive) {
+      return;
+    }
 
     switch (final) {
       case "A":
@@ -438,8 +503,8 @@ function terminalDataToHtmlContent(terminalData) {
   return renderer.toHtmlContent();
 }
 
-function createTerminalTextRenderer() {
-  return new TerminalTextRenderer();
+function createTerminalTextRenderer(options = {}) {
+  return new TerminalTextRenderer(options);
 }
 
 module.exports = {

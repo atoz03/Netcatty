@@ -178,7 +178,7 @@ test("ProxyPanel warns when a saved proxy profile has an unreadable identity pas
       },
     }],
     selectedProxyProfileId: proxyProfile.id,
-    identities: [{ ...proxyIdentity, password: "enc:v1:djEwAAAA" }],
+    identities: [{ ...proxyIdentity, password: "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==" }],
   });
 
   assert.match(markup, /Proxy identity password cannot be read/);

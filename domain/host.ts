@@ -2,6 +2,12 @@ import { Host, Snippet, TerminalSettings } from './models';
 import { sanitizeHostIconFields } from './hostIcon';
 import { migrateHostConnectScriptIds } from './hostConnectScripts.ts';
 import { migrateDeprecatedFontOverride } from '../infrastructure/config/fonts';
+import { sanitizeOptionalSshTimeoutSeconds } from './sshConnectionTimeouts.ts';
+import {
+  isPluginHostProtocol,
+  sanitizePluginConnection,
+  stripBuiltInConnectionFieldsForPluginHost,
+} from './pluginConnection.ts';
 
 export type HostLabelRenameResult =
   | { ok: true; changed: true; hosts: Host[] }
@@ -54,6 +60,13 @@ export const LINUX_DISTRO_OPTIONS = [
 
 export const POSIX_PLATFORM_OPTIONS = [
   'macos',
+  'freebsd',
+] as const;
+
+// Only platforms backed by the current stats and system-management commands
+// belong here. Other POSIX platforms may still be valid icon choices.
+const LINUX_LIKE_RUNTIME_PLATFORM_OPTIONS = [
+  'macos',
 ] as const;
 
 /**
@@ -92,6 +105,7 @@ export const normalizeDistroId = (value?: string) => {
   ) {
     return 'macos';
   }
+  if (v.includes('freebsd')) return 'freebsd';
   if (v.includes('ubuntu')) return 'ubuntu';
   if (v.includes('debian')) return 'debian';
   if (v.includes('centos')) return 'centos';
@@ -197,8 +211,37 @@ export const classifyDistroId = (distroId?: string): DeviceClass => {
   if (!v) return 'other';
   if ((NETWORK_DEVICE_OPTIONS as readonly string[]).includes(v)) return 'network-device';
   if ((LINUX_DISTRO_OPTIONS as readonly string[]).includes(v)) return 'linux-like';
-  if ((POSIX_PLATFORM_OPTIONS as readonly string[]).includes(v)) return 'linux-like';
+  if ((LINUX_LIKE_RUNTIME_PLATFORM_OPTIONS as readonly string[]).includes(v)) return 'linux-like';
   return 'other';
+};
+
+/**
+ * Decide whether to offer the "enable Network Device Mode" suggestion after
+ * distro/vendor detection. We only nag once per host, and never when the user
+ * has already turned the mode on. The detected value must classify as a
+ * network-device vendor (exact match — see `classifyDistroId`), so a normal
+ * Linux distro whose name merely embeds a vendor keyword never triggers it.
+ */
+export const shouldSuggestNetworkDeviceMode = (opts: {
+  host?: Pick<Host, 'deviceType'> | null;
+  detectedDistro?: string;
+  alreadyHandled?: boolean;
+  /**
+   * Effective session protocol (mosh/et folded in). The suggestion — and its
+   * host-level `deviceType: 'network'` write — must match the Host Details
+   * "Network Device Mode" toggle, which is only exposed for plain SSH sessions
+   * (not Mosh/ET/serial/telnet/local). Offering it elsewhere would let the user
+   * persist a hidden host-level mode that surprises later SSH reconnects (#2367).
+   */
+  effectiveProtocol?: string;
+}): boolean => {
+  if (!opts.host) return false;
+  if (opts.host.deviceType === 'network') return false;
+  if (opts.alreadyHandled) return false;
+  if (opts.effectiveProtocol !== undefined && opts.effectiveProtocol !== 'ssh') {
+    return false;
+  }
+  return classifyDistroId(opts.detectedDistro) === 'network-device';
 };
 
 /**
@@ -236,6 +279,15 @@ export const formatHostPort = (hostname: string, port?: number | null): string =
   const isIPv6 = hostname.includes(':') && !hostname.startsWith('[');
   const display = isIPv6 ? `[${hostname}]` : hostname;
   return `${display}:${port}`;
+};
+
+/** Hostname/IP text for one-click clipboard copy from the vault host list. */
+export const getHostAddressForClipboard = (
+  host: Pick<Host, 'hostname' | 'protocol'>,
+): string => {
+  // Plugin endpoints live in pluginConnection.configuration; hostname may be a label/provider id.
+  if (isPluginHostProtocol(host.protocol)) return '';
+  return String(host.hostname ?? '').trim();
 };
 
 export const resolveTelnetUsername = (
@@ -349,6 +401,24 @@ export const resolveHostKeepalive = (
   };
 };
 
+/**
+ * True when two host records are interchangeable for React identity reuse.
+ * Uses shallow key comparison (nested objects compared by reference).
+ */
+export const hostsEqualForIdentityReuse = (a: Host, b: Host): boolean => {
+  if (a === b) return true;
+  const aKeys = Object.keys(a) as (keyof Host)[];
+  const bKeys = Object.keys(b) as (keyof Host)[];
+  if (aKeys.length !== bKeys.length) return false;
+  for (const key of aKeys) {
+    if (a[key] !== b[key]) return false;
+  }
+  for (const key of bKeys) {
+    if (a[key] !== b[key]) return false;
+  }
+  return true;
+};
+
 export const sanitizeHost = (host: Host, snippets: Snippet[] = []): Host => {
   const cleanHostname = (host.hostname || '').trim().split(/\s+/)[0];
   const cleanDistro = normalizeDistroId(host.distro);
@@ -361,6 +431,27 @@ export const sanitizeHost = (host: Host, snippets: Snippet[] = []): Host => {
         : undefined;
   const cleanHostIcon = sanitizeHostIconFields(host);
   const migrated = migrateDeprecatedFontOverride(host);
+  // Before explicit per-host authentication modes existed, new hosts were
+  // persisted with authMethod="password" even though an empty password still
+  // allowed the ambient agent and local keys. Preserve that behavior once on
+  // load; versioned records represent a deliberate Password-only selection.
+  const isLegacyPasswordDefault = migrated.authPolicyVersion !== 1
+    && migrated.authMethod === 'password'
+    && (
+      migrated.useSshAgent === true
+      || Boolean(migrated.identityFileId)
+      || Boolean(migrated.identityFilePaths?.length)
+      || (migrated.savePassword !== false && !migrated.password?.length)
+    );
+  const inferredLegacyAuthMethod = migrated.authPolicyVersion !== 1
+    && migrated.authMethod === undefined
+    && migrated.useSshAgent !== true
+    ? migrated.identityFilePaths?.length
+      ? 'key'
+      : !migrated.identityFileId && migrated.password?.length
+        ? 'password'
+        : undefined
+    : undefined;
   const cleanNotes = host.notes?.trim() || undefined;
   const connectScriptIds = host.connectScriptIds ?? (
     snippets.length > 0
@@ -369,8 +460,13 @@ export const sanitizeHost = (host: Host, snippets: Snippet[] = []): Host => {
         ? [host.loginScriptId]
         : undefined
   );
-  return {
+  const pluginConnection = sanitizePluginConnection(host.pluginConnection, host.protocol);
+  const sanitized: Host = {
     ...migrated,
+    authMethod: isLegacyPasswordDefault
+      ? undefined
+      : migrated.authMethod ?? inferredLegacyAuthMethod,
+    authPolicyVersion: 1,
     hostname: cleanHostname,
     distro: cleanDistro,
     distroMode: cleanDistroMode,
@@ -382,6 +478,14 @@ export const sanitizeHost = (host: Host, snippets: Snippet[] = []): Host => {
     iconColorCustom: undefined,
     ...cleanHostIcon,
     notes: cleanNotes,
+    sshTcpConnectTimeoutSeconds: sanitizeOptionalSshTimeoutSeconds(
+      host.sshTcpConnectTimeoutSeconds,
+    ),
+    sshAuthReadyTimeoutSeconds: sanitizeOptionalSshTimeoutSeconds(
+      host.sshAuthReadyTimeoutSeconds,
+    ),
     connectScriptIds: connectScriptIds && connectScriptIds.length > 0 ? connectScriptIds : undefined,
+    pluginConnection,
   };
+  return stripBuiltInConnectionFieldsForPluginHost(sanitized);
 };

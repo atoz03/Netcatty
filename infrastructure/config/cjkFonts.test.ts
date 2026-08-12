@@ -63,6 +63,65 @@ describe('composeFontFamilyStack', () => {
     assert.match(stack, /"Source Han Mono SC"/);
   });
 
+  it('keeps an unquoted user fallback containing a comma as one font family', () => {
+    const stack = composeFontFamilyStack({
+      primaryFamily: 'Menlo, monospace',
+      userFallback: 'Foo, Inc. Mono',
+      latinFontId: 'menlo',
+      platform: 'darwin',
+    });
+
+    assert.ok(stack.includes('"Foo, Inc. Mono"'));
+    assert.ok(splitFontFamilyList(stack).includes('"Foo, Inc. Mono"'));
+  });
+
+  it('escapes quotes inside a manually entered font family', () => {
+    const stack = composeFontFamilyStack({
+      primaryFamily: 'Menlo, monospace',
+      userFallback: 'Foo"Bar',
+      latinFontId: 'menlo',
+      platform: 'darwin',
+    });
+
+    assert.ok(stack.includes('"Foo\\"Bar"'));
+    assert.ok(splitFontFamilyList(stack).includes('"Foo\\"Bar"'));
+  });
+
+  it('quotes a manually entered font family containing an apostrophe', () => {
+    const stack = composeFontFamilyStack({
+      primaryFamily: 'Menlo, monospace',
+      userFallback: "Rock'nRoll",
+      latinFontId: 'menlo',
+      platform: 'darwin',
+    });
+
+    assert.ok(stack.includes('"Rock\'nRoll"'));
+    assert.ok(splitFontFamilyList(stack).includes('"Rock\'nRoll"'));
+  });
+
+  it('quotes a manually entered font family that starts with a digit', () => {
+    const stack = composeFontFamilyStack({
+      primaryFamily: 'Menlo, monospace',
+      userFallback: '3270font',
+      latinFontId: 'menlo',
+      platform: 'darwin',
+    });
+
+    assert.ok(stack.includes('"3270font"'));
+    assert.ok(splitFontFamilyList(stack).includes('"3270font"'));
+  });
+
+  it('keeps CSS generic font families unquoted', () => {
+    const stack = composeFontFamilyStack({
+      primaryFamily: 'Menlo, monospace',
+      userFallback: 'ui-monospace',
+      latinFontId: 'menlo',
+      platform: 'darwin',
+    });
+
+    assert.ok(splitFontFamilyList(stack).includes('ui-monospace'));
+  });
+
   it('does not duplicate identical fallback entries', () => {
     // User explicitly picks the same font the per-font pairing would,
     // and that font also lives in the system stack — should appear once.
@@ -223,6 +282,13 @@ describe('splitFontFamilyList', () => {
     assert.deepEqual(
       splitFontFamilyList("'Foo, Inc.', serif"),
       ["'Foo, Inc.'", 'serif'],
+    );
+  });
+
+  it('keeps escaped quotes inside a quoted family name', () => {
+    assert.deepEqual(
+      splitFontFamilyList('"Foo\\"Bar", monospace'),
+      ['"Foo\\"Bar"', 'monospace'],
     );
   });
 

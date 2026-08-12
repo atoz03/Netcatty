@@ -15,6 +15,28 @@ This project follows the [Contributor Covenant Code of Conduct](./CODE_OF_CONDUC
 - Fix bugs or implement features listed in Issues
 - Improve documentation
 
+## Reporting Issues
+
+Issues that do not follow the required format are closed automatically by the
+issue-format bot.
+
+- **Title prefix (required):** start with `[Bug]`, `[Feature]`, or `[Other]`,
+  then a short summary of at least 4 characters.
+  Example: `[Bug] SFTP upload fails on Windows`
+- **Template (required):** open from
+  [New Issue](https://github.com/binaricat/Netcatty/issues/new/choose) and pick
+  **Bug Report** or **Feature Request**. Fill every required field. Blank
+  issues are disabled (`blank_issues_enabled: false`).
+- **Templates live in**
+  [`.github/ISSUE_TEMPLATE/`](https://github.com/binaricat/Netcatty/tree/main/.github/ISSUE_TEMPLATE).
+- Questions and open-ended discussion belong in
+  [GitHub Discussions](https://github.com/binaricat/Netcatty/discussions), not Issues.
+
+If you open an issue via the API or `gh`, you must still use a valid title
+prefix and a body that matches the Bug Report or Feature Request template
+structure (required headings such as "Steps to reproduce" or
+"Problem / pain point").
+
 ## Development Setup
 
 **Prerequisites:** Node.js 22+ and npm.
@@ -60,7 +82,8 @@ npm test               # Run the test suite
    ```bash
    git commit -m 'feat: add amazing feature'
    ```
-5. Push the branch and open a Pull Request against `main`.
+5. Push the branch and open a Pull Request against `main`. Use the checklist in
+   [`.github/PULL_REQUEST_TEMPLATE.md`](https://github.com/binaricat/Netcatty/blob/main/.github/PULL_REQUEST_TEMPLATE.md).
 6. Run `npm run lint` and `npm test` before requesting review.
 7. If you changed the capability catalog, run `npm run generate:capability-tools`
    and commit any generated updates.

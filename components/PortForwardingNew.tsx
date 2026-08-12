@@ -11,6 +11,7 @@ import {
 import React, { useCallback, useMemo, useRef, useState } from "react";
 import { useI18n } from "../application/i18n/I18nProvider";
 import { usePortForwardingState } from "../application/state/usePortForwardingState";
+import { STORAGE_KEY_PORT_FORWARDING_PANEL_WIDTH } from "../infrastructure/config/storageKeys";
 import {
   GroupConfig,
   Host,
@@ -31,14 +32,6 @@ import {
   AsidePanelFooter,
 } from "./ui/aside-panel";
 import { Button } from "./ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "./ui/dialog";
 import { Dropdown, DropdownContent, DropdownTrigger } from "./ui/dropdown";
 import { SortDropdown } from "./ui/sort-dropdown";
 import { toast } from "./ui/toast";
@@ -59,6 +52,7 @@ import {
   getTypeMenuLabel,
   NewFormPanel,
   RuleCard,
+  stopRuntimeTunnelBeforeDelete,
   WizardContent,
 } from "./port-forwarding";
 
@@ -101,6 +95,11 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
   terminalSettings,
 }) => {
   const { t } = useI18n();
+  const portForwardingPanelResizeProps = {
+    resizable: true as const,
+    persistWidthStorageKey: STORAGE_KEY_PORT_FORWARDING_PANEL_WIDTH,
+    resizeAriaLabel: t("vault.panel.resizeWidth"),
+  };
   const {
     rules: _rules,
     selectedRuleId,
@@ -119,6 +118,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
     setRuleStatus,
     startTunnel,
     stopTunnel,
+    hasRuntimeTunnel,
     filteredRules,
     selectedRule: _selectedRule,
     preferFormMode,
@@ -129,8 +129,6 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
   const [pendingOperations, setPendingOperations] = useState<Set<string>>(
     new Set(),
   );
-  const [remoteReleaseConfirmRule, setRemoteReleaseConfirmRule] = useState<PortForwardingRule | null>(null);
-  const [isRemoteReleasePending, setIsRemoteReleasePending] = useState(false);
   const proxyProfileIdSet = useMemo(
     () => new Set(proxyProfiles.map((profile) => profile.id)),
     [proxyProfiles],
@@ -162,7 +160,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
 
   // Start a port forwarding tunnel
   const handleStartTunnel = useCallback(
-    async (rule: PortForwardingRule, options: { releaseStaleRemoteSshd?: boolean } = {}) => {
+    async (rule: PortForwardingRule) => {
       const _rawHost = hostById.get(rule.hostId);
       if (!_rawHost) {
         setRuleStatus(rule.id, "error", t("pf.error.hostNotFound"));
@@ -199,7 +197,6 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
           rule.autoStart, // Enable reconnect for auto-start rules
           terminalSettings,
           knownHosts,
-          options,
         );
         // Show error from result only if not already shown
         if (!result.success && result.error && !errorShown) {
@@ -226,7 +223,13 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
       setPendingOperations((prev) => new Set([...prev, rule.id]));
 
       try {
-        await stopTunnel(rule.id);
+        const result = await stopTunnel(rule.id);
+        if (!result.success && result.error) {
+          toast.error(
+            result.error,
+            t("pf.toast.titleWithLabel", { label: rule.label }),
+          );
+        }
       } finally {
         setPendingOperations((prev) => {
           const next = new Set(prev);
@@ -235,15 +238,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
         });
       }
     },
-    [stopTunnel],
-  );
-
-  const handleReleaseRemotePortAndStart = useCallback(
-    async (rule: PortForwardingRule) => {
-      if (rule.type !== "remote") return;
-      await handleStartTunnel(rule, { releaseStaleRemoteSshd: true });
-    },
-    [handleStartTunnel],
+    [stopTunnel, t],
   );
 
   // Wizard state
@@ -323,6 +318,12 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
   // Start new rule - wizard or form based on user preference
   const startNewRule = (type: PortForwardingType) => {
     setShowNewMenu(false);
+    // The new-rule flow replaces an open editor; never leave both side panels mounted.
+    setShowEditPanel(false);
+    setEditingRule(null);
+    setEditDraft({});
+    setSelectedRuleId(null);
+    setShowHostSelector(false);
 
     if (preferFormMode) {
       // Form mode: show all-in-one form
@@ -462,9 +463,11 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
 
     setIsDeleting(true);
     try {
-      if (ruleToDelete.status === "active" || ruleToDelete.status === "connecting") {
-        await stopTunnel(ruleToDelete.id);
-      }
+      const stopped = await stopRuntimeTunnelBeforeDelete(
+        ruleToDelete.id,
+        stopTunnel,
+      );
+      if (!stopped) return;
       if (editingRule?.id === ruleToDelete.id) {
         closeEditPanel();
       }
@@ -476,7 +479,9 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
     }
   }, [ruleToDelete, stopTunnel, deleteRule, editingRule, closeEditPanel]);
 
-  const deleteTargetIsActive = ruleToDelete?.status === "active" || ruleToDelete?.status === "connecting";
+  const deleteTargetIsActive = Boolean(
+    ruleToDelete && hasRuntimeTunnel(ruleToDelete.id),
+  );
 
   // Handle wizard navigation
   // Flow for local: type -> local-config -> destination -> host-selection
@@ -611,8 +616,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
       {/* Main Content */}
       <div
         className={cn(
-          "flex-1 flex flex-col min-h-0",
-          showWizard || showEditPanel || showNewForm ? "mr-[360px]" : "",
+          "flex-1 min-w-0 flex flex-col min-h-0",
         )}
       >
         <VaultPageHeader className="z-20">
@@ -760,6 +764,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
                     viewMode={viewMode}
                     isSelected={selectedRuleId === rule.id}
                     isPending={pendingOperations.has(rule.id)}
+                    canStop={hasRuntimeTunnel(rule.id)}
                     reorderProps={ruleReorder.getItemReorderProps(rule.id, `rule:${rule.id}`)}
                     onSelect={() => {
                       setSelectedRuleId(rule.id);
@@ -770,7 +775,6 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
                     onDelete={() => handleDeleteRule(rule)}
                     onStart={() => handleStartTunnel(rule)}
                     onStop={() => handleStopTunnel(rule)}
-                    onReleaseRemotePort={() => setRemoteReleaseConfirmRule(rule)}
                   />
                 ))}
               </div>
@@ -779,53 +783,8 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
         </div>
       </div>
 
-      <Dialog
-        open={!!remoteReleaseConfirmRule}
-        onOpenChange={(open) => {
-          if (!open && !isRemoteReleasePending) setRemoteReleaseConfirmRule(null);
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>{t("pf.release.remoteConfirmTitle")}</DialogTitle>
-            <DialogDescription>
-              {t("pf.release.remoteConfirmDesc", {
-                port: remoteReleaseConfirmRule?.localPort ?? "",
-                label: remoteReleaseConfirmRule?.label ?? "",
-              })}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => setRemoteReleaseConfirmRule(null)}
-              disabled={isRemoteReleasePending}
-            >
-              {t("pf.wizard.cancel")}
-            </Button>
-            <Button
-              variant="destructive"
-              disabled={!remoteReleaseConfirmRule || isRemoteReleasePending}
-              onClick={async () => {
-                const rule = remoteReleaseConfirmRule;
-                if (!rule) return;
-                setIsRemoteReleasePending(true);
-                try {
-                  await handleReleaseRemotePortAndStart(rule);
-                  setRemoteReleaseConfirmRule(null);
-                } finally {
-                  setIsRemoteReleasePending(false);
-                }
-              }}
-            >
-              {t("pf.release.remoteConfirmAction")}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
-
       {/* Edit Panel - shown when a rule is selected */}
-      {showEditPanel && editingRule && (
+      {showEditPanel && editingRule && !showHostSelector && (
         <EditPanel
           rule={editingRule}
           draft={editDraft}
@@ -841,11 +800,12 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
           }}
           onDelete={() => handleDeleteRule(editingRule)}
           onOpenHostSelector={() => setShowHostSelector(true)}
+          {...portForwardingPanelResizeProps}
         />
       )}
 
       {/* Wizard Panel */}
-      {showWizard && (
+      {showWizard && !showHostSelector && (
         <AsidePanel
           open={true}
           onClose={() => {
@@ -854,6 +814,8 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
           }}
           title={isEditing ? t("pf.wizard.editTitle") : t("pf.wizard.newTitle")}
           width="w-[360px]"
+          layout="inline"
+          {...portForwardingPanelResizeProps}
           showBackButton={!!getPrevStep()}
           onBack={
             getPrevStep()
@@ -954,11 +916,14 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
           managedSources={managedSources}
           onSaveHost={onSaveHost}
           onCreateGroup={_onCreateGroup}
+          width="w-[360px]"
+          layout="inline"
+          {...portForwardingPanelResizeProps}
         />
       )}
 
       {/* New Form Panel (skip wizard mode) */}
-      {showNewForm && (
+      {showNewForm && !showHostSelector && (
         <NewFormPanel
           draft={newFormDraft}
           hosts={hosts}
@@ -970,6 +935,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
           onOpenHostSelector={() => setShowHostSelector(true)}
           onOpenWizard={openWizardFromForm}
           isValid={isNewFormValid()}
+          {...portForwardingPanelResizeProps}
         />
       )}
 

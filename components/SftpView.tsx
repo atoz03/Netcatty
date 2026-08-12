@@ -20,7 +20,8 @@ import { useIsSftpActive } from "../application/state/activeTabStore";
 import { useSftpState } from "../application/state/useSftpState";
 import { useSftpBackend } from "../application/state/useSftpBackend";
 import { getParentPath, isConcreteTransferTargetPath } from "../application/state/sftp/utils";
-import { HotkeyScheme, KeyBinding } from "../domain/models";
+import { HotkeyScheme, KeyBinding, TerminalSession } from "../domain/models";
+import { listSftpConnectedHosts, resolveSftpTransferSourceSessionId, sftpPickerSessionsEqual } from "../domain/sftpConnectedHosts";
 import { logger } from "../lib/logger";
 import { useRenderTracker } from "../lib/useRenderTracker";
 import { cn } from "../lib/utils";
@@ -42,7 +43,7 @@ import { SftpContextProvider, activeTabStore } from "./sftp";
 import { useSftpViewPaneCallbacks } from "./sftp/hooks/useSftpViewPaneCallbacks";
 import { useSftpViewTabs } from "./sftp/hooks/useSftpViewTabs";
 import { useSftpKeyboardShortcuts } from "./sftp/hooks/useSftpKeyboardShortcuts";
-import { sftpFocusStore, SftpFocusedSide, useSftpFocusedSide } from "./sftp/hooks/useSftpFocusedPane";
+import { sftpFocusStore, SftpFocusedSide, useSftpFocusedSide } from "../application/state/sftp/sftpFocusStore";
 import { keepOnlyActivePaneSelections, keepOnlyPaneSelections } from "./sftp/hooks/selectionScope";
 
 
@@ -52,6 +53,9 @@ import { keepOnlyActivePaneSelections, keepOnlyPaneSelections } from "./sftp/hoo
 // Main SftpView component
 interface SftpViewProps {
   hosts: Host[];
+  /** Vault-persisted hosts only; used for writes so ephemeral deep-link hosts stay out of vault. */
+  writableHosts?: Host[];
+  sessions?: TerminalSession[];
   keys: SSHKey[];
   identities: Identity[];
   knownHosts?: KnownHost[];
@@ -73,6 +77,8 @@ interface SftpViewProps {
 
 const SftpViewInner: React.FC<SftpViewProps> = ({
   hosts,
+  writableHosts,
+  sessions = [],
   keys,
   identities,
   knownHosts = [],
@@ -109,14 +115,37 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
     },
   }), [t]);
 
+  const resolveTransferSourceSessionId = useCallback((hostId: string, host?: Host) => {
+    const hostsById = new Map<string, Host>(hosts.map((h) => [h.id, h]));
+    // Walk all sessions (not the picker one-per-hostId list) so multi-tab
+    // same hostId with different live endpoints can still match.
+    return resolveSftpTransferSourceSessionId(sessions, hostsById, hostId, host);
+  }, [hosts, sessions]);
+
   const sftpOptions = useMemo(() => ({
     ...fileWatchHandlers,
+    transferOwnerId: "main-sftp-view",
+    // Main SFTP page stays interactive while mounted so top-tab switches
+    // (e.g. Terminal ↔ SFTP) must not soft-close every tab's session.
+    // The terminal side panel parks only after the panel is closed (not when
+    // switching History/System while the chrome stays open).
+    // Bulk transfers use dedicated pool sessions regardless.
+    interactive: true,
     useCompressedUpload: sftpUseCompressedUpload,
     defaultShowHiddenFiles: sftpShowHiddenFiles,
     terminalSettings,
     knownHosts,
     onAddKnownHost,
-  }), [fileWatchHandlers, sftpUseCompressedUpload, sftpShowHiddenFiles, terminalSettings, knownHosts, onAddKnownHost]);
+    resolveTransferSourceSessionId,
+  }), [
+    fileWatchHandlers,
+    sftpUseCompressedUpload,
+    sftpShowHiddenFiles,
+    terminalSettings,
+    knownHosts,
+    onAddKnownHost,
+    resolveTransferSourceSessionId,
+  ]);
 
   // Pre-resolve group defaults so SFTP connections inherit group config
   const effectiveHosts = useMemo(() => {
@@ -129,13 +158,21 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
     });
   }, [hosts, groupConfigs, proxyProfiles]);
 
+  const hostWriteSource = writableHosts ?? hosts;
+
+  const connectedHosts = useMemo(() => {
+    const hostsById = new Map<string, Host>(
+      effectiveHosts.map((host) => [host.id, host]),
+    );
+    return listSftpConnectedHosts(sessions, hostsById);
+  }, [effectiveHosts, sessions]);
+
   const sftp = useSftpState(effectiveHosts, keys, identities, sftpOptions);
 
   // Get backend helpers for file downloads and local filesystem writes.
   const {
     showSaveDialog,
     selectDirectory,
-    startStreamTransfer,
     listSftp,
     mkdirLocal,
     deleteLocalFile,
@@ -161,8 +198,8 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
   // always reads the latest writeTextFileByConnection; that method is stable
   // across sftp re-renders (it's a methodsRef-backed dispatcher).
   useEffect(() => {
-    return registerEditorSftpWriterScoped((connectionId, expectedHostId, filePath, content, encoding) =>
-      sftpRef.current.writeTextFileByConnection(connectionId, expectedHostId, filePath, content, encoding),
+    return registerEditorSftpWriterScoped((connectionId, expectedHostId, filePath, content, encoding, sftpTabId) =>
+      sftpRef.current.writeTextFileByConnection(connectionId, expectedHostId, filePath, content, encoding, sftpTabId),
     );
   }, []);
 
@@ -265,7 +302,6 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
     deleteLocalFile,
     showSaveDialog,
     selectDirectory,
-    startStreamTransfer,
     getSftpIdForConnection: sftp.getSftpIdForConnection,
     listLocalFiles: listLocalDir,
     listDrives,
@@ -429,7 +465,8 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
   return (
     <SftpContextProvider
       hosts={effectiveHosts}
-      writableHosts={hosts}
+      connectedHosts={connectedHosts}
+      writableHosts={hostWriteSource}
       updateHosts={updateHosts}
       draggedFiles={draggedFiles}
       dragCallbacks={dragCallbacks}
@@ -439,7 +476,7 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
       <div
         ref={rootRef}
         className={cn(
-          "absolute inset-0 min-h-0 flex flex-col",
+          "absolute inset-0 min-h-0 flex flex-col bg-background",
           isActive ? "z-20" : "",
         )}
         style={containerStyle}
@@ -571,6 +608,7 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
 
         <SftpOverlays
           hosts={effectiveHosts}
+          connectedHosts={connectedHosts}
           sftp={sftp}
           visibleTransfers={visibleTransfers}
           canRevealTransferTarget={canRevealTransferTarget}
@@ -616,6 +654,8 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
 
 export const sftpViewAreEqual = (prev: SftpViewProps, next: SftpViewProps): boolean =>
   prev.hosts === next.hosts &&
+  prev.writableHosts === next.writableHosts &&
+  sftpPickerSessionsEqual(prev.sessions, next.sessions) &&
   prev.keys === next.keys &&
   prev.identities === next.identities &&
   prev.knownHosts === next.knownHosts &&

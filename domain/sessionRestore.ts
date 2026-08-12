@@ -1,4 +1,5 @@
-import type { SerialConfig, TerminalSession, Workspace, WorkspaceNode } from "./models";
+import type { PluginConnectionConfig, SerialConfig, TerminalSession, Workspace, WorkspaceNode } from "./models";
+import { isPluginHostProtocol, sanitizePluginConnection } from "./pluginConnection";
 
 export const SESSION_RESTORE_VERSION = 1 as const;
 
@@ -11,6 +12,7 @@ export type RestoredTerminalSession = {
   status: "disconnected";
   workspaceId?: string;
   protocol?: TerminalSession["protocol"];
+  pluginConnection?: PluginConnectionConfig;
   port?: number;
   moshEnabled?: boolean;
   etEnabled?: boolean;
@@ -86,9 +88,10 @@ const isOneOf = <T extends string | number>(
   allowed: readonly T[],
 ): value is T => allowed.includes(value as T);
 
-const sanitizeProtocol = (value: unknown): TerminalSession["protocol"] | undefined => (
-  isOneOf(value, ["ssh", "telnet", "local", "serial"] as const) ? value : undefined
-);
+const sanitizeProtocol = (value: unknown): TerminalSession["protocol"] | undefined => {
+  if (isOneOf(value, ["ssh", "telnet", "mosh", "et", "local", "serial"] as const)) return value;
+  return typeof value === "string" && isPluginHostProtocol(value) ? value : undefined;
+};
 
 const sanitizeShellType = (value: unknown): TerminalSession["shellType"] | undefined => (
   isOneOf(value, ["posix", "fish", "powershell", "cmd", "unknown"] as const) ? value : undefined
@@ -109,12 +112,20 @@ const sanitizeSerialConfig = (value: unknown): SerialConfig | undefined => {
     ...(isOneOf(value.flowControl, ["none", "xon/xoff", "rts/cts"] as const) ? { flowControl: value.flowControl } : {}),
     ...(readBoolean(value, "localEcho") !== undefined ? { localEcho: readBoolean(value, "localEcho") } : {}),
     ...(readBoolean(value, "lineMode") !== undefined ? { lineMode: readBoolean(value, "lineMode") } : {}),
+    // A missing value identifies a session saved before serial-specific
+    // Backspace snapshots existed. Keep it missing so a saved-host session can
+    // still pick up its legacy host or group Ctrl+H setting. New sessions
+    // always persist an explicit "default" or "ctrl-h" value.
+    ...(isOneOf(value.backspaceBehavior, ["default", "ctrl-h"] as const)
+      ? { backspaceBehavior: value.backspaceBehavior }
+      : {}),
   };
 };
 
 const restoreSession = (session: TerminalSession): RestoredTerminalSession => {
   const serialConfig = sanitizeSerialConfig(session.serialConfig);
   const protocol = sanitizeProtocol(session.protocol);
+  const pluginConnection = sanitizePluginConnection(session.pluginConnection, protocol);
   const shellType = sanitizeShellType(session.shellType);
   return {
     id: session.id,
@@ -124,6 +135,7 @@ const restoreSession = (session: TerminalSession): RestoredTerminalSession => {
     username: session.username,
     ...(session.workspaceId ? { workspaceId: session.workspaceId } : {}),
     ...(protocol ? { protocol } : {}),
+    ...(pluginConnection ? { pluginConnection } : {}),
     ...(session.port !== undefined ? { port: session.port } : {}),
     ...(session.moshEnabled !== undefined ? { moshEnabled: session.moshEnabled } : {}),
     ...(session.etEnabled !== undefined ? { etEnabled: session.etEnabled } : {}),
@@ -155,6 +167,7 @@ const restoreSessionFromUnknown = (value: unknown): RestoredTerminalSession | nu
 
   const serialConfig = sanitizeSerialConfig(value.serialConfig);
   const protocol = sanitizeProtocol(value.protocol);
+  const pluginConnection = sanitizePluginConnection(value.pluginConnection, protocol);
   const shellType = sanitizeShellType(value.shellType);
   return {
     id,
@@ -164,6 +177,7 @@ const restoreSessionFromUnknown = (value: unknown): RestoredTerminalSession | nu
     username,
     ...(readString(value, "workspaceId") ? { workspaceId: readString(value, "workspaceId") } : {}),
     ...(protocol ? { protocol } : {}),
+    ...(pluginConnection ? { pluginConnection } : {}),
     ...(readNumber(value, "port") !== undefined ? { port: readNumber(value, "port") } : {}),
     ...(readBoolean(value, "moshEnabled") !== undefined ? { moshEnabled: readBoolean(value, "moshEnabled") } : {}),
     ...(readBoolean(value, "etEnabled") !== undefined ? { etEnabled: readBoolean(value, "etEnabled") } : {}),
@@ -214,15 +228,9 @@ export function shouldAttemptRestoreCwd({
   session: RestoreCwdSession;
   isNetworkDevice: boolean;
 }): boolean {
-  if (!enabled || isNetworkDevice) return false;
+  if (!enabled) return false;
   if (!isRestoredDisconnectedSession(session)) return false;
-  if (!isRestoreCwdPathEligible(session.lastCwd)) return false;
-  if (session.moshEnabled || session.etEnabled) return false;
-  const protocol = session.protocol ?? "ssh";
-  if (protocol === "local" && (session.shellType === "powershell" || session.shellType === "cmd")) {
-    return false;
-  }
-  return protocol === "ssh" || protocol === "local" || protocol === undefined;
+  return isCwdInjectionEligible({ session: { ...session, cwd: session.lastCwd }, isNetworkDevice });
 }
 
 export function quoteRestoreCwdForShell(cwd: string): string {
@@ -238,6 +246,27 @@ function quoteRestoreCwdArgument(cwd: string): string {
   return quoteRestoreCwdForShell(cwd);
 }
 
+/** True when a path contains C0/DEL bytes that interactive readline would act on. */
+function pathHasInteractivePtyControlBytes(path: string): boolean {
+  for (let i = 0; i < path.length; i++) {
+    const code = path.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+/** Build a user-initiated `cd` for an absolute/home path (SFTP -> terminal). */
+export function resolveInteractiveTerminalCdIntent(
+  cwd: string | null | undefined,
+): { cwd: string; command: string } | null {
+  // Eligibility uses a normalized view; keep the exact path for quoting so
+  // trailing whitespace in POSIX names is preserved.
+  if (!isRestoreCwdPathEligible(cwd)) return null;
+  // Shell quoting does not protect tab/ESC/Ctrl-U while readline processes keystrokes.
+  if (pathHasInteractivePtyControlBytes(cwd)) return null;
+  return { cwd, command: `cd -- ${quoteRestoreCwdArgument(cwd)}` };
+}
+
 export function resolveRestoreCwdIntent(options: {
   enabled: boolean;
   session: RestoreCwdSession;
@@ -249,6 +278,44 @@ export function resolveRestoreCwdIntent(options: {
     cwd,
     command: `cd -- ${quoteRestoreCwdArgument(cwd)}`,
   };
+}
+
+export function isCwdInjectionEligible({
+  session,
+  isNetworkDevice,
+}: {
+  session: RestoreCwdSession & { cwd?: string };
+  isNetworkDevice: boolean;
+}): boolean {
+  if (isNetworkDevice) return false;
+  if (!isRestoreCwdPathEligible(session.cwd)) return false;
+  if (session.moshEnabled || session.etEnabled) return false;
+  const protocol = session.protocol ?? "ssh";
+  if (protocol === "local" && (session.shellType === "powershell" || session.shellType === "cmd")) {
+    return false;
+  }
+  return protocol === "ssh" || protocol === "local" || protocol === undefined;
+}
+
+export function resolveInheritedCwdIntent(options: {
+  session: Pick<TerminalSession, "protocol" | "shellType" | "moshEnabled" | "etEnabled"> & { cwd?: string };
+  isNetworkDevice: boolean;
+}): { cwd: string; command: string } | null {
+  if (!isCwdInjectionEligible({
+    session: {
+      status: "connecting",
+      protocol: options.session.protocol,
+      shellType: options.session.shellType,
+      moshEnabled: options.session.moshEnabled,
+      etEnabled: options.session.etEnabled,
+      cwd: options.session.cwd,
+    },
+    isNetworkDevice: options.isNetworkDevice,
+  })) {
+    return null;
+  }
+  const cwd = options.session.cwd!.trim();
+  return { cwd, command: `cd -- ${quoteRestoreCwdArgument(cwd)}` };
 }
 
 const pruneNode = (node: unknown, validSessionIds: ReadonlySet<string>): WorkspaceNode | null => {
@@ -309,6 +376,9 @@ const restoreWorkspace = (workspace: Workspace, root: WorkspaceNode, sessionIds:
       : sessionIds[0],
     focusSessionOrder: uniqueStrings(workspace.focusSessionOrder ?? []).filter((id) => sessionIdSet.has(id)),
     ...(workspace.snippetId ? { snippetId: workspace.snippetId } : {}),
+    // Preserve explicit-title state across restore; the boolean guard keeps a
+    // deliberate `autoTitle: false` (a user-named workspace) from being dropped.
+    ...(typeof workspace.autoTitle === "boolean" ? { autoTitle: workspace.autoTitle } : {}),
   };
 };
 
@@ -399,7 +469,9 @@ export function buildSessionRestorePayload(input: BuildSessionRestorePayloadInpu
     // Ephemeral-host sessions (password deep links) cannot be restored: their
     // in-memory credentials do not survive a relaunch, and persisting them
     // would leak the supposedly ephemeral host metadata into restore storage.
-    sessions: input.sessions.filter((session) => !session.ephemeralHost).map(restoreSession),
+    // Silent MCP sessions are likewise excluded — they exist for the duration
+    // of an AI task, not as a user-intended workspace to bring back on launch.
+    sessions: input.sessions.filter((session) => !session.ephemeralHost && !session.hiddenFromTabs).map(restoreSession),
     workspaces: input.workspaces,
   });
 }

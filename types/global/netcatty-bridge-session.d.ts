@@ -1,5 +1,13 @@
 
 declare global {
+  interface NetcattyKittyKeyboardModeState {
+    mainFlags: number;
+    alternateFlags: number;
+    mainStack: number[];
+    alternateStack: number[];
+    alternateScreenActive: boolean;
+  }
+
   interface NetcattyTerminalInterruptTrace {
     debug?: boolean;
     traceId?: string;
@@ -52,7 +60,15 @@ declare global {
       certificate?: string;
       keyId?: string;
       passphrase?: string;
+      authMethod?: import("../../domain/models").HostAuthMethod;
+      requiresMfa?: boolean;
       identityFilePaths?: string[];
+      useSshAgent?: boolean;
+      agentPublicKeys?: string[];
+      identityAgent?: string;
+      identitiesOnly?: boolean;
+      addKeysToAgent?: string;
+      useKeychain?: boolean;
       port?: number;
       moshServerPath?: string;
       moshClientPath?: string;
@@ -77,14 +93,22 @@ declare global {
     startEtSession?(options: {
       sessionId?: string;
       hostname: string;
+      hostId?: string;
       username?: string;
       password?: string;
       privateKey?: string;
       certificate?: string;
       keyId?: string;
       passphrase?: string;
-      authMethod?: 'password' | 'key' | 'certificate';
+      authMethod?: import("../../domain/models").HostAuthMethod;
+      requiresMfa?: boolean;
       identityFilePaths?: string[];
+      useSshAgent?: boolean;
+      agentPublicKeys?: string[];
+      identityAgent?: string;
+      identitiesOnly?: boolean;
+      addKeysToAgent?: string;
+      useKeychain?: boolean;
       port?: number;
       etPort?: number;
       legacyAlgorithms?: boolean;
@@ -101,7 +125,17 @@ declare global {
       env?: Record<string, string>;
       sessionLog?: { enabled: boolean; directory: string; format: string; timestampsEnabled?: boolean };
     }): Promise<string>;
-    startLocalSession?(options: { sessionId?: string; cols?: number; rows?: number; shell?: string; shellArgs?: string[]; cwd?: string; env?: Record<string, string>; sessionLog?: { enabled: boolean; directory: string; format: string; timestampsEnabled?: boolean } }): Promise<string>;
+    startLocalSession?(options: {
+      sessionId?: string;
+      cols?: number;
+      rows?: number;
+      shell?: string;
+      shellArgs?: string[];
+      cwd?: string;
+      env?: Record<string, string>;
+      sessionLog?: { enabled: boolean; directory: string; format: string; timestampsEnabled?: boolean };
+      bootEpoch?: number;
+    }): Promise<string>;
     startSerialSession?(options: {
       sessionId?: string;
       path: string;
@@ -153,12 +187,21 @@ declare global {
       bits?: number;
       comment?: string;
     }): Promise<{ success: boolean; privateKey?: string; publicKey?: string; error?: string }>;
-    checkSshAgent?(): Promise<{ running: boolean; startupType: string | null; error: string | null }>;
+    checkSshAgent?(options?: {
+      identityAgent?: string;
+      agentForwarding?: boolean;
+      hostname?: string;
+      port?: number;
+      username?: string;
+    }): Promise<{ running: boolean; startupType: string | null; error: string | null }>;
     getDefaultKeys?(): Promise<Array<{ name: string; path: string }>>;
     execCommand(options: {
       hostname: string;
+      hostId?: string;
       username: string;
       port?: number;
+      authMethod?: import("../../domain/models").HostAuthMethod;
+      requiresMfa?: boolean;
       password?: string;
       privateKey?: string;
       certificate?: string;
@@ -166,16 +209,31 @@ declare global {
       keyId?: string;
       keySource?: 'generated' | 'imported' | 'reference';
       identityFilePaths?: string[];
+      useSshAgent?: boolean;
+      agentPublicKeys?: string[];
+      identityAgent?: string;
+      identitiesOnly?: boolean;
+      addKeysToAgent?: string;
+      useKeychain?: boolean;
       passphrase?: string;
       command: string;
       timeout?: number;
+      sshTcpConnectTimeoutMs?: number;
+      sshAuthReadyTimeoutMs?: number;
       enableKeyboardInteractive?: boolean;
       sessionId?: string;
+      legacyAlgorithms?: boolean;
+      skipEcdsaHostKey?: boolean;
+      algorithmOverrides?: import("../../domain/models").HostAlgorithmOverrides;
     }): Promise<{ stdout: string; stderr: string; code: number | null }>;
     /** Get current working directory from an active SSH session */
     getSessionPwd?(
       sessionId: string,
-      options?: { allowHomeFallback?: boolean },
+      options?: {
+        allowHomeFallback?: boolean;
+        allowLoginShellFallback?: boolean;
+        timeoutMs?: number;
+      },
     ): Promise<{ success: boolean; cwd?: string; error?: string }>;
     /**
      * Get metadata about an already-connected SSH session — currently the
@@ -239,14 +297,16 @@ declare global {
         diskUsed: number | null;      // Disk used in GB
         diskTotal: number | null;     // Total disk in GB
         disks: Array<{                // All mounted disks
+          capacityKey?: string;       // Filesystem or shared-pool identity
           mountPoint: string;
           used: number;               // Used in GB
           total: number;              // Total in GB
           percent: number;            // Usage percentage
+          filesystemType?: string;    // Filesystem type reported by df
         }>;
         netRxSpeed: number;           // Total network receive speed (bytes/sec)
         netTxSpeed: number;           // Total network transmit speed (bytes/sec)
-        latencyMs: number | null;     // Approximate SSH stats round-trip latency
+        latencyMs: number | null;     // TCP connection establishment latency to the SSH endpoint
         netInterfaces: Array<{        // Per-interface network stats
           name: string;               // Interface name (e.g., eth0, ens33)
           rxBytes: number;            // Total received bytes
@@ -267,15 +327,120 @@ declare global {
       data: string,
       options?: {
         automated?: boolean;
+        /** Host-classified secret/no-echo input; always bypasses plugin observers and interceptors. */
+        sensitive?: boolean;
         lineDelayMs?: number;
         logRewrite?: { sentCommand: string; displayCommand: string };
       },
     ): void;
     interruptSession?(sessionId: string, trace?: NetcattyTerminalInterruptTrace): void;
     resizeSession(sessionId: string, cols: number, rows: number): void;
+    /**
+     * Sync Windows ConPTY after the renderer clears the xterm viewport.
+     * No-op for SSH and non-ConPTY sessions.
+     */
+    clearSessionPtyBuffer?(sessionId: string): void;
     setSessionFlowPaused(sessionId: string, paused: boolean): void;
+    setSessionFlowPausedAndWait?(sessionId: string, paused: boolean): Promise<{ success: boolean; error?: string }>;
+    acquireSessionFlowPauseLease?(sessionId: string): Promise<{
+      success: boolean;
+      leaseId?: string;
+      error?: string;
+    }>;
+    waitSessionFlowPauseLease?(sessionId: string, leaseId: string): Promise<{
+      success: boolean;
+      error?: string;
+    }>;
+    releaseSessionFlowPauseLease?(
+      sessionId: string,
+      leaseId: string,
+      options?: { keepPaused?: boolean },
+    ): Promise<{ success: boolean; error?: string }>;
+    onTerminalOutputDrainRequest?(
+      sessionId: string,
+      cb: (payload: { sessionId: string; requestId: string }) => void | Promise<void>,
+    ): () => void;
+    respondTerminalOutputDrain?(requestId: string): void;
+    notifyTerminalSessionDisplayReady?(sessionId: string): void;
     ackSessionFlow(sessionId: string, bytes: number): void;
-    closeSession(sessionId: string): void;
+    closeSession(sessionId: string, options?: { bootEpoch?: number }): void | Promise<void>;
+    /** Move a live session's output port to this renderer (same PTY). */
+    rebindTerminalSessionOutput?(sessionId: string, authorization: string): Promise<{
+      success: boolean;
+      previousWebContentsId?: number | null;
+      webContentsId?: number;
+      error?: string;
+    }>;
+    /** Restore output after an attach popup closes. */
+    restoreTerminalSessionOutput?(
+      sessionId: string,
+      webContentsId?: number | null,
+      authorization?: string,
+    ): Promise<{ success: boolean; restored?: boolean; webContentsId?: number; error?: string }>;
+    /** Ask the home renderer to serialize current terminal scrollback. */
+    requestTerminalSessionSnapshot?(sessionId: string, authorization: string): Promise<{
+      success: boolean;
+      snapshot?: string;
+      kittyKeyboardModeState?: NetcattyKittyKeyboardModeState;
+      kittyKeyboardProtocolEnabled?: boolean;
+      passwordPromptActive?: boolean;
+      cwd?: string | null;
+      title?: string | null;
+      error?: string;
+    }>;
+    /** Home renderer: listen for snapshot requests. */
+    onTerminalSessionSnapshotRequest?(
+      cb: (payload: { sessionId: string; requestId: string }) => void,
+    ): () => void;
+    /** Home renderer: reply with serialized scrollback. */
+    respondTerminalSessionSnapshot?(
+      requestId: string,
+      snapshot: string,
+      kittyKeyboardModeState?: NetcattyKittyKeyboardModeState,
+      kittyKeyboardProtocolEnabled?: boolean,
+      passwordPromptActive?: boolean,
+      cwd?: string | null,
+      title?: string | null,
+    ): void;
+    /** Observe popup: push current state back to the home renderer before restore. */
+    applyTerminalSessionSnapshot?(
+      sessionId: string,
+      snapshot: string,
+      context: {
+        contextSnapshot: string;
+        contextViewportSnapshot: string;
+        contextScrollbackSnapshot: string;
+        alternateScreen: boolean;
+        kittyKeyboardModeState?: NetcattyKittyKeyboardModeState;
+        kittyKeyboardProtocolEnabled?: boolean;
+        passwordPromptActive?: boolean;
+        cwd?: string | null;
+        title?: string | null;
+      },
+      authorization: string,
+    ): Promise<{
+      success: boolean;
+      error?: string;
+    }>;
+    markAttachPopupClosePrepared?(sessionId: string, authorization: string): Promise<{ success: boolean; error?: string }>;
+    onTerminalPopupPrepareClose?(cb: (payload: { sessionId: string; authorization: string }) => void): () => void;
+    /** Home renderer: apply a pushed snapshot from an observe popup. */
+    onTerminalSessionApplySnapshot?(
+      cb: (payload: {
+        sessionId: string;
+        snapshot: string;
+        contextSnapshot: string;
+        contextViewportSnapshot: string;
+        contextScrollbackSnapshot: string;
+        alternateScreen: boolean;
+        kittyKeyboardModeState?: NetcattyKittyKeyboardModeState;
+        kittyKeyboardProtocolEnabled?: boolean;
+        passwordPromptActive?: boolean;
+        cwd?: string | null;
+        title?: string | null;
+        requestId: string;
+      }) => boolean | Promise<boolean>,
+    ): () => void;
     // ZMODEM file transfer
     onZmodemEvent?(
       sessionId: string,
@@ -319,7 +484,17 @@ declare global {
         meta?: {
           droppedOutputMayAffectTerminalState?: boolean;
           droppedOutputAlternateScreenAction?: "enter" | "leave";
+          /** True while Mosh is still on the ephemeral SSH handshake PTY. */
+          moshHandshake?: boolean;
           terminalPerf?: NetcattyTerminalOutputPerfMeta;
+          /** Original host output units acknowledged even when an interceptor changes display length. */
+          pluginPipelineIngressBytes?: number;
+          /** Host-owned provenance marker for output already processed by an interceptor. */
+          pluginPipelineProcessed?: boolean;
+          /** Host-classified authentication prompt state for protecting subsequent input. */
+          pluginPipelineSensitiveInput?: boolean;
+          /** Host-owned marker that a Plugin connection Provider has explicitly reached connected status. */
+          pluginConnectionReady?: boolean;
         },
       ) => void,
       options?: { replayBacklog?: boolean },
@@ -330,16 +505,28 @@ declare global {
     ): () => void;
     onTelnetAutoLoginComplete?(
       sessionId: string,
-      cb: (evt: { sessionId: string }) => void
+      cb: (evt: { sessionId: string; bootEpoch?: number }) => void
     ): () => void;
     onTelnetAutoLoginCancelled?(
       sessionId: string,
-      cb: (evt: { sessionId: string }) => void
+      cb: (evt: { sessionId: string; bootEpoch?: number }) => void
+    ): () => void;
+    /** Fires after Mosh swaps from the SSH handshake PTY to mosh-client. */
+    onMoshSessionReady?(
+      sessionId: string,
+      cb: (evt: { sessionId: string; bootEpoch?: number }) => void
     ): () => void;
     onTelnetEchoMode?(
       sessionId: string,
       cb: (evt: { sessionId: string; remoteEcho: boolean; localEcho: boolean }) => void
     ): () => void;
+    getTelnetEchoMode?(sessionId: string): Promise<{
+      success: boolean;
+      sessionId?: string;
+      remoteEcho?: boolean;
+      localEcho?: boolean;
+      error?: string;
+    }>;
     onAuthFailed?(
       sessionId: string,
       cb: (evt: { sessionId: string; error: string; hostname: string }) => void
@@ -350,12 +537,23 @@ declare global {
       cb: (request: {
         requestId: string;
         sessionId: string;
+        hostId?: string;
         name: string;
         instructions: string;
         prompts: Array<{ prompt: string; echo: boolean }>;
         hostname: string;
         savedPassword?: string | null;
+        /** When false, UI must not offer saving the response as the host password. */
+        allowSavePassword?: boolean;
         scope?: "terminal" | "external";
+        bootEpoch?: number;
+      }) => void
+    ): () => void;
+    onKeyboardInteractiveCancelled?(
+      cb: (event: {
+        requestId: string;
+        sessionId?: string;
+        reason?: string;
       }) => void
     ): () => void;
     respondKeyboardInteractive?(
@@ -376,6 +574,7 @@ declare global {
         publicKey?: string;
         knownHostId?: string;
         knownFingerprint?: string;
+        bootEpoch?: number;
       }) => void
     ): () => void;
     respondHostKeyVerification?(
@@ -392,6 +591,8 @@ declare global {
         keyName: string;
         hostname?: string;
         passphraseInvalid?: boolean;
+        sessionId?: string;
+        bootEpoch?: number;
       }) => void
     ): () => void;
     respondPassphrase?(

@@ -716,7 +716,7 @@ export const ThemeCustomizeModal: React.FC<ThemeCustomizeModalProps> = ({
                                         <button
                                             onClick={() => handleFontSizeChange(-1)}
                                             disabled={fontSize <= MIN_FONT_SIZE}
-                                            className="w-8 h-8 rounded-md flex items-center justify-center bg-background hover:bg-accent text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors border border-border"
+                                            className="w-8 h-8 rounded-md flex items-center justify-center bg-background hover:bg-accent text-foreground hover:text-accent-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors border border-border"
                                         >
                                             <Minus size={14} />
                                         </button>
@@ -727,7 +727,7 @@ export const ThemeCustomizeModal: React.FC<ThemeCustomizeModalProps> = ({
                                         <button
                                             onClick={() => handleFontSizeChange(1)}
                                             disabled={fontSize >= MAX_FONT_SIZE}
-                                            className="w-8 h-8 rounded-md flex items-center justify-center bg-background hover:bg-accent text-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors border border-border"
+                                            className="w-8 h-8 rounded-md flex items-center justify-center bg-background hover:bg-accent text-foreground hover:text-accent-foreground disabled:opacity-30 disabled:cursor-not-allowed transition-colors border border-border"
                                         >
                                             <Plus size={14} />
                                         </button>

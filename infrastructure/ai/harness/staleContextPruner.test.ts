@@ -145,6 +145,37 @@ test('pruneStaleToolContext keeps sftp reads for same path on different sessions
   assert.doesNotMatch(serialized, /superseded read/);
 });
 
+test('pruneStaleToolContext supersedes repeated terminal polls and context reads', () => {
+  const pair = (callId: string, toolName: string, input: Record<string, unknown>, output: string): ModelMessage[] => [
+    {
+      role: 'assistant',
+      content: [{ type: 'tool-call', toolCallId: callId, toolName, input }],
+    },
+    {
+      role: 'tool',
+      content: [{
+        type: 'tool-result',
+        toolCallId: callId,
+        toolName,
+        output: { type: 'text', value: output },
+      }],
+    },
+  ];
+  const messages: ModelMessage[] = [
+    ...pair('p1', 'terminal_poll', { jobId: 'job-1', offset: 0 }, 'old poll'),
+    ...pair('p2', 'terminal_poll', { jobId: 'job-1', offset: 0 }, 'new poll'),
+    ...pair('r1', 'terminal_read_context', { sessionId: 's1', range: 'tail', maxLines: 20 }, 'old screen'),
+    ...pair('r2', 'terminal_read_context', { sessionId: 's1', range: 'tail', maxLines: 20 }, 'new screen'),
+  ];
+
+  const result = pruneStaleToolContext(messages, { underBudgetPressure: true });
+  const serialized = JSON.stringify(result.messages);
+  assert.equal(result.didAdjust, true);
+  assert.doesNotMatch(serialized, /old poll|old screen/);
+  assert.match(serialized, /new poll/);
+  assert.match(serialized, /new screen/);
+});
+
 function terminalExecutePair(
   callId: string,
   sessionId: string,
@@ -361,4 +392,75 @@ test('pruneStaleToolContext preserves terminal output without budget pressure fl
   assert.match(serialized, /uptime-1/);
   assert.match(serialized, /df-2/);
   assert.match(serialized, /free-3/);
+});
+
+test('pruneStaleToolContext tiers generic old tool results while protecting recent turns', () => {
+  const messages: ModelMessage[] = [];
+  for (let turn = 0; turn < 12; turn += 1) {
+    const callId = `call-${turn}`;
+    messages.push(
+      { role: 'user', content: `turn ${turn}` },
+      {
+        role: 'assistant',
+        content: [{ type: 'tool-call', toolCallId: callId, toolName: 'custom_read', input: { turn } }],
+      },
+      {
+        role: 'tool',
+        content: [{
+          type: 'tool-result',
+          toolCallId: callId,
+          toolName: 'custom_read',
+          output: { type: 'text', value: `result-${turn}-${'x'.repeat(5_000)}-tail-${turn}` },
+        }],
+      },
+    );
+  }
+
+  const result = pruneStaleToolContext(messages, { underBudgetPressure: true });
+  const serialized = JSON.stringify(result.messages);
+  assert.match(serialized, /older tool result omitted/);
+  assert.match(serialized, /tool result shortened/);
+  assert.match(serialized, /result-11-/);
+  assert.match(serialized, /tail-11/);
+});
+
+test('pruneStaleToolContext retains old successful write outcomes', () => {
+  const messages: ModelMessage[] = [
+    {
+      role: 'assistant',
+      content: [{
+        type: 'tool-call',
+        toolCallId: 'write-1',
+        toolName: 'sftp_write',
+        input: { sessionId: 'sess-1', path: '/etc/app.conf', content: 'enabled=true' },
+      }],
+    },
+    {
+      role: 'tool',
+      content: [{
+        type: 'tool-result',
+        toolCallId: 'write-1',
+        toolName: 'sftp_write',
+        output: { type: 'text', value: 'write succeeded: /etc/app.conf' },
+      }],
+    },
+    ...Array.from({ length: 11 }, (_, index) => ({ role: 'user' as const, content: `later ${index}` })),
+  ];
+
+  const result = pruneStaleToolContext(messages, { underBudgetPressure: true });
+  const serialized = JSON.stringify(result.messages);
+  assert.match(serialized, /write succeeded: \/etc\/app\.conf/);
+  assert.doesNotMatch(serialized, /older tool result omitted/);
+});
+
+test('pruneStaleToolContext redacts commands in old terminal placeholders', () => {
+  const messages: ModelMessage[] = [
+    ...terminalExecutePair('t1', 'sess-1', 'curl --password swordfish', 'old-output'),
+    ...terminalExecutePair('t2', 'sess-1', 'uptime', 'newer-output'),
+    ...terminalExecutePair('t3', 'sess-1', 'df -h', 'latest-output'),
+  ];
+  const result = pruneStaleToolContext(messages, { underBudgetPressure: true });
+  const serialized = JSON.stringify(result.messages);
+  assert.doesNotMatch(serialized, /swordfish/);
+  assert.match(serialized, /REDACTED/);
 });

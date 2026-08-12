@@ -23,7 +23,7 @@ function generateRequestId(prefix = 'ki') {
 /**
  * Store a keyboard-interactive request with TTL cleanup
  */
-function storeRequest(requestId, finishCallback, webContentsId, sessionId) {
+function storeRequest(requestId, finishCallback, webContentsId, sessionId, sender) {
   // Set up TTL timeout to clean up abandoned requests
   const timeoutId = setTimeout(() => {
     const pending = keyboardInteractiveRequests.get(requestId);
@@ -36,6 +36,7 @@ function storeRequest(requestId, finishCallback, webContentsId, sessionId) {
       } catch (err) {
         console.warn(`[KeyboardInteractive] Failed to call finishCallback for timed out request:`, err.message);
       }
+      notifyCancellation(pending, requestId, "timeout");
     }
   }, REQUEST_TTL_MS);
 
@@ -43,6 +44,7 @@ function storeRequest(requestId, finishCallback, webContentsId, sessionId) {
     finishCallback,
     webContentsId,
     sessionId,
+    sender,
     createdAt: Date.now(),
     timeoutId,
   });
@@ -52,7 +54,11 @@ function storeRequest(requestId, finishCallback, webContentsId, sessionId) {
  * Handle keyboard-interactive authentication response from renderer
  */
 function handleResponse(_event, payload) {
-  console.log(`[KeyboardInteractive] handleResponse called with payload:`, JSON.stringify(payload));
+  console.log(`[KeyboardInteractive] handleResponse called`, {
+    requestId: payload?.requestId,
+    cancelled: Boolean(payload?.cancelled),
+    responsesCount: Array.isArray(payload?.responses) ? payload.responses.length : 0,
+  });
 
   const { requestId, responses, cancelled } = payload;
   const pending = keyboardInteractiveRequests.get(requestId);
@@ -70,22 +76,60 @@ function handleResponse(_event, payload) {
     return { success: false, error: 'Wrong sender' };
   }
 
-  // Clear the TTL timeout since we received a response
-  if (pending.timeoutId) {
-    clearTimeout(pending.timeoutId);
-  }
-
+  if (pending.timeoutId) clearTimeout(pending.timeoutId);
   keyboardInteractiveRequests.delete(requestId);
 
-  if (cancelled) {
-    console.log(`[KeyboardInteractive] Auth cancelled for ${requestId}`);
-    pending.finishCallback([]); // Empty responses to cancel
-  } else {
-    console.log(`[KeyboardInteractive] Auth response received for ${requestId}, responses count:`, responses?.length);
-    pending.finishCallback(responses);
+  try {
+    if (cancelled) {
+      console.log(`[KeyboardInteractive] Auth cancelled for ${requestId}`);
+      pending.finishCallback([]); // Empty responses to cancel
+    } else {
+      console.log(`[KeyboardInteractive] Auth response received for ${requestId}, responses count:`, responses?.length);
+      pending.finishCallback(responses);
+    }
+  } catch (err) {
+    console.warn(`[KeyboardInteractive] Failed to deliver response for ${requestId}:`, err?.message);
+    notifyCancellation(pending, requestId, "delivery-failed");
+    return { success: false, error: "Failed to deliver response" };
   }
 
   return { success: true };
+}
+
+/**
+ * Cancel every pending request owned by a session or external operation.
+ */
+function notifyCancellation(pending, requestId, reason) {
+  try {
+    if (!pending.sender?.isDestroyed?.()) {
+      pending.sender?.send?.("netcatty:keyboard-interactive-cancelled", {
+        requestId,
+        sessionId: pending.sessionId,
+        reason,
+      });
+    }
+  } catch (err) {
+    console.warn(`[KeyboardInteractive] Failed to notify cancellation for ${requestId}:`, err.message);
+  }
+}
+
+function cancelRequestsForSession(sessionId, reason = "cancelled") {
+  let cancelled = 0;
+  for (const [requestId, pending] of keyboardInteractiveRequests) {
+    if (pending.sessionId !== sessionId) continue;
+    if (pending.timeoutId) {
+      clearTimeout(pending.timeoutId);
+    }
+    keyboardInteractiveRequests.delete(requestId);
+    try {
+      pending.finishCallback([]);
+    } catch (err) {
+      console.warn(`[KeyboardInteractive] Failed to cancel request ${requestId}:`, err.message);
+    }
+    notifyCancellation(pending, requestId, reason);
+    cancelled += 1;
+  }
+  return cancelled;
 }
 
 /**
@@ -106,6 +150,7 @@ module.exports = {
   generateRequestId,
   storeRequest,
   handleResponse,
+  cancelRequestsForSession,
   getRequests,
   registerHandler,
 };

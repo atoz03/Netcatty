@@ -30,6 +30,7 @@ export const SnippetsRightPanel: React.FC<SnippetsRightPanelProps> = ({
   targetSelection,
   setTargetSelection,
   handleTargetSelect,
+  handleTargetSelectionChange,
   handleTargetPickerBack,
   availableKeys,
   proxyProfiles,
@@ -119,6 +120,7 @@ export const SnippetsRightPanel: React.FC<SnippetsRightPanelProps> = ({
           selectedHostIds={targetSelection}
           multiSelect={true}
           onSelect={handleTargetSelect}
+          onSelectionChange={handleTargetSelectionChange}
           onBack={handleTargetPickerBack}
           onContinue={handleTargetPickerBack}
           availableKeys={availableKeys}
@@ -383,6 +385,7 @@ export const SnippetsRightPanel: React.FC<SnippetsRightPanelProps> = ({
               customGroups={customGroups}
               selectedHostIds={targetSelection}
               onSelectHost={handleTargetSelect}
+              onSelectionChange={handleTargetSelectionChange}
               targetsAllHosts={Boolean(editingSnippet.targetsAllHosts)}
               onTargetsAllHostsChange={handleTargetsAllHostsChange}
             />

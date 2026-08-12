@@ -1,5 +1,7 @@
 import type { DropEntry } from "./sftpFileUtils";
-import { getPathForFile } from "./sftpFileUtils";
+import { getDropEntryLocalPath } from "./sftpFileUtils";
+
+const getDropEntrySize = (entry: DropEntry): number => entry.file?.size ?? entry.size ?? 0;
 import type { UploadCallbacks, UploadResult } from "./uploadService.types";
 import type { UploadController } from "./uploadController";
 
@@ -23,15 +25,18 @@ export async function uploadFoldersCompressed(
       break;
     }
 
-    // Get the local folder path from the first file in the folder
-    const firstFile = entries.find(e => e.file);
-    if (!firstFile?.file) {
+    // Prefer any file-like entry with a resolvable local path (native tree scans
+    // set localPath without a browser File handle).
+    const firstFile = entries.find((entry) => (
+      !entry.isDirectory && (!!entry.file || !!getDropEntryLocalPath(entry))
+    ));
+    if (!firstFile) {
       // Empty folder - mark for fallback to regular upload which will create the directory
       results.push({ fileName: folderName, success: false, error: "Compressed upload not supported - fallback needed" });
       continue;
     }
-    
-    const localFilePath = getPathForFile(firstFile.file);
+
+    const localFilePath = getDropEntryLocalPath(firstFile);
     if (!localFilePath) {
       results.push({ fileName: folderName, success: false, error: "Could not get local file path" });
       continue;
@@ -41,7 +46,10 @@ export async function uploadFoldersCompressed(
     // Use DropEntry.relativePath which works for both file input and drag-drop scenarios
     // For file input: webkitRelativePath is set (e.g., "folder/subdir/file.txt")
     // For drag-drop: DropEntry.relativePath contains the correct path from extractDropEntries
-    const relativePath = firstFile.relativePath || (firstFile.file as File & { webkitRelativePath?: string }).webkitRelativePath || firstFile.file.name;
+    const relativePath = firstFile.relativePath
+      || (firstFile.file as (File & { webkitRelativePath?: string }) | null)?.webkitRelativePath
+      || firstFile.file?.name
+      || folderName;
     
     // Normalize path separators for cross-platform compatibility
     const normalizePathSeparators = (path: string) => path.replace(/\\/g, '/');
@@ -114,7 +122,9 @@ export async function uploadFoldersCompressed(
       controller?.addActiveCompression(compressionId);
       
       // Create a task for this folder compression
-      const totalBytes = entries.reduce((sum, entry) => sum + (entry.file?.size || 0), 0);
+      // Path-only drop entries (listLocalTree) carry size without a File handle.
+      const fileEntries = entries.filter((entry) => !entry.isDirectory);
+      const totalBytes = fileEntries.reduce((sum, entry) => sum + getDropEntrySize(entry), 0);
       taskId = compressionId;
       
       if (callbacks?.onTaskCreated) {
@@ -127,8 +137,10 @@ export async function uploadFoldersCompressed(
           totalBytes,
           transferredBytes: 0,
           speed: 0,
-          fileCount: entries.length,
+          fileCount: fileEntries.length,
           completedCount: 0,
+          sourcePath: folderPath,
+          controlKind: 'compressed-upload',
         });
       }
       
@@ -140,62 +152,16 @@ export async function uploadFoldersCompressed(
           targetPath,
           sftpId,
           folderName,
+          totalBytes,
         },
-        (phase, transferred, total) => {
-          // Check for cancellation during progress updates
-          if (controller?.isCancelled()) {
-            return;
-          }
-
-          if (callbacks?.onTaskProgress) {
-            // Map compression progress to actual file bytes
-            const progressPercent = total > 0 ? (transferred / total) * 100 : 0;
-            const mappedTransferred = Math.floor((progressPercent / 100) * totalBytes);
-
-            callbacks.onTaskProgress(taskId, {
-              transferred: mappedTransferred,
-              total: totalBytes,
-              speed: 0, // Speed is handled by the compression service
-              percent: progressPercent,
-            });
-          }
-
-          // Update task name based on phase
-          if (callbacks?.onTaskNameUpdate) {
-            // Pass phase identifier for UI layer to handle i18n
-            // Format: "folderName|phase" where phase is: compressing, extracting, uploading, or compressed
-            const phaseKey = phase === 'compressing' ? 'compressing'
-              : phase === 'extracting' ? 'extracting'
-              : phase === 'uploading' ? 'uploading'
-              : 'compressed';
-            callbacks.onTaskNameUpdate(taskId, `${folderName}|${phaseKey}`);
-          }
-        },
-        () => {
-          // Remove compression ID from controller
-          controller?.removeActiveCompression(compressionId);
-          // Mark task as completed immediately
-          if (callbacks?.onTaskCompleted) {
-            callbacks.onTaskCompleted(taskId, totalBytes);
-          }
-        },
-        (error) => {
-          // Remove compression ID from controller on error
-          controller?.removeActiveCompression(compressionId);
-          if (callbacks?.onTaskFailed) {
-            callbacks.onTaskFailed(taskId, error);
-          }
-        }
       );
+      controller?.removeActiveCompression(compressionId);
       
       if (result.success) {
         results.push({ fileName: folderName, success: true });
       } else if (result.error?.includes('cancelled') || controller?.isCancelled()) {
         // Handle cancellation
         results.push({ fileName: folderName, success: false, cancelled: true });
-        if (callbacks?.onTaskCancelled) {
-          callbacks.onTaskCancelled(taskId);
-        }
       } else {
         results.push({ fileName: folderName, success: false, error: result.error });
       }
@@ -211,15 +177,8 @@ export async function uploadFoldersCompressed(
       // Check if this was a cancellation
       if (controller?.isCancelled() || errorMessage.includes('cancelled')) {
         results.push({ fileName: folderName, success: false, cancelled: true });
-        if (callbacks?.onTaskCancelled && taskId) {
-          callbacks.onTaskCancelled(taskId);
-        }
       } else {
         results.push({ fileName: folderName, success: false, error: errorMessage });
-        // Only call onTaskFailed if we have a valid taskId (task was created) and it's not a cancellation
-        if (callbacks?.onTaskFailed && taskId) {
-          callbacks.onTaskFailed(taskId, errorMessage);
-        }
       }
     }
   }

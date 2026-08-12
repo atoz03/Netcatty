@@ -43,6 +43,127 @@ export type TerminalHibernateSnapshot = {
   alternateScreen: boolean;
 };
 
+type MutableValue<T> = { current: T };
+
+export function applyAuthoritativeHibernateSnapshot(
+  refs: {
+    snapshot: MutableValue<string>;
+    viewportSnapshot: MutableValue<string>;
+    scrollbackSnapshot: MutableValue<string>;
+    contextSnapshot: MutableValue<string>;
+    contextViewportSnapshot: MutableValue<string>;
+    contextScrollbackSnapshot: MutableValue<string>;
+    pendingBuffer: MutableValue<string>;
+    alternateScreen: MutableValue<boolean>;
+  },
+  snapshot: string,
+  context: TerminalHibernateContextSnapshot,
+): void {
+  refs.snapshot.current = snapshot;
+  refs.viewportSnapshot.current = snapshot;
+  refs.scrollbackSnapshot.current = "";
+  refs.contextSnapshot.current = context.contextSnapshot;
+  refs.contextViewportSnapshot.current = context.contextViewportSnapshot;
+  refs.contextScrollbackSnapshot.current = context.contextScrollbackSnapshot;
+  refs.pendingBuffer.current = "";
+  refs.alternateScreen.current = context.alternateScreen;
+}
+
+export type TerminalHibernateContextSnapshot = Required<Pick<
+  TerminalHibernateSnapshot,
+  "contextSnapshot" | "contextViewportSnapshot" | "contextScrollbackSnapshot" | "alternateScreen"
+>>;
+
+export function resolveTerminalSnapshotCapture(
+  serialized: unknown,
+  context: TerminalHibernateContextSnapshot,
+): { snapshot: string; context: TerminalHibernateContextSnapshot } {
+  if (typeof serialized === "string") return { snapshot: serialized, context };
+  const plainText = context.alternateScreen
+    ? context.contextViewportSnapshot
+    : context.contextSnapshot;
+  const replayText = plainText.replace(/\r?\n/g, "\r\n");
+  return {
+    snapshot: context.alternateScreen
+      ? `\x1b[?1049h\x1b[H${replayText}`
+      : replayText,
+    context,
+  };
+}
+
+function isEmptyTerminalContext(text: string): boolean {
+  return text.split("\n").every((line) => line.length === 0);
+}
+
+export function readTerminalHibernateContext(
+  term: XTerm,
+): TerminalHibernateContextSnapshot {
+  const rows = Math.max(1, term.rows);
+  const bufferLength = resolveActiveBufferLength(term);
+
+  if (isTerminalAlternateScreenActive(term)) {
+    const contextViewportSnapshot = readActiveTerminalBufferTextRange(term, {
+      startLine: 0,
+      endLine: Math.max(0, rows - 1),
+    });
+    const empty = isEmptyTerminalContext(contextViewportSnapshot);
+    return {
+      contextSnapshot: empty ? "" : contextViewportSnapshot,
+      contextViewportSnapshot: empty ? "" : contextViewportSnapshot,
+      contextScrollbackSnapshot: "",
+      alternateScreen: true,
+    };
+  }
+
+  const activeBuffer = term.buffer.active as typeof term.buffer.active & { viewportY?: number };
+  const bottomViewportStart = Math.max(0, bufferLength - rows);
+  const viewportStart = Math.min(
+    bottomViewportStart,
+    Math.max(0, activeBuffer.viewportY ?? bottomViewportStart),
+  );
+  const viewportEnd = bufferLength > 0
+    ? Math.min(bufferLength - 1, viewportStart + rows - 1)
+    : -1;
+  const contextViewportSnapshot = readActiveTerminalBufferTextRange(term, {
+    startLine: viewportStart,
+    endLine: viewportEnd,
+  });
+  const contextStart = Math.min(
+    viewportStart,
+    Math.max(0, bufferLength - TERMINAL_HIBERNATE_SNAPSHOT_MAX_LINES),
+  );
+  const contextEnd = bufferLength > 0
+    ? Math.min(
+      bufferLength - 1,
+      Math.max(viewportEnd, contextStart + TERMINAL_HIBERNATE_SNAPSHOT_MAX_LINES - 1),
+    )
+    : -1;
+  const contextScrollbackSnapshot = viewportStart > 0
+    ? readActiveTerminalBufferTextRange(term, {
+      startLine: contextStart,
+      endLine: viewportStart - 1,
+    })
+    : "";
+  const contextSnapshot = readActiveTerminalBufferTextRange(term, {
+    startLine: contextStart,
+    endLine: contextEnd,
+  });
+  if (isEmptyTerminalContext(contextSnapshot)) {
+    return {
+      contextSnapshot: "",
+      contextViewportSnapshot: "",
+      contextScrollbackSnapshot: "",
+      alternateScreen: false,
+    };
+  }
+  return {
+    contextSnapshot,
+    contextViewportSnapshot,
+    contextScrollbackSnapshot,
+    alternateScreen: false,
+  };
+}
+
 function resolveActiveBufferLength(term: XTerm): number {
   return term.buffer.active.length;
 }
@@ -74,6 +195,17 @@ export async function serializeTerminalForHibernate(
   const preferWasm = options.preferWasm === true;
   const rows = Math.max(1, term.rows);
   const bufferLength = resolveActiveBufferLength(term);
+  let context: TerminalHibernateContextSnapshot = {
+    contextSnapshot: "",
+    contextViewportSnapshot: "",
+    contextScrollbackSnapshot: "",
+    alternateScreen,
+  };
+  try {
+    context = readTerminalHibernateContext(term);
+  } catch {
+    // A transient buffer read failure must not prevent visual snapshot capture.
+  }
 
   try {
     if (alternateScreen) {
@@ -86,17 +218,11 @@ export async function serializeTerminalForHibernate(
         }, preferWasm),
         rows,
       );
-      const contextViewportSnapshot = readActiveTerminalBufferTextRange(term, {
-        startLine: 0,
-        endLine: endRow,
-      });
       return {
         snapshot: viewportSnapshot,
         viewportSnapshot,
         scrollbackSnapshot: "",
-        contextSnapshot: contextViewportSnapshot,
-        contextViewportSnapshot,
-        contextScrollbackSnapshot: "",
+        ...context,
         alternateScreen: true,
       };
     }
@@ -108,13 +234,7 @@ export async function serializeTerminalForHibernate(
       excludeModes,
       range: { start: viewportStart, end: viewportEnd },
     }, preferWasm);
-    const contextViewportSnapshot = readActiveTerminalBufferTextRange(term, {
-      startLine: viewportStart,
-      endLine: viewportEnd,
-    });
-
     let scrollbackSnapshot = "";
-    let contextScrollbackSnapshot = "";
     if (viewportStart > 0) {
       const scrollbackStart = Math.max(0, viewportStart - TERMINAL_HIBERNATE_SNAPSHOT_MAX_LINES);
       scrollbackSnapshot = capHibernateBufferByLines(
@@ -125,10 +245,6 @@ export async function serializeTerminalForHibernate(
         }, preferWasm),
         TERMINAL_HIBERNATE_SNAPSHOT_MAX_LINES,
       );
-      contextScrollbackSnapshot = readActiveTerminalBufferTextRange(term, {
-        startLine: scrollbackStart,
-        endLine: viewportStart - 1,
-      });
     }
 
     const snapshot = capHibernateBufferByLines(
@@ -143,9 +259,7 @@ export async function serializeTerminalForHibernate(
       snapshot,
       viewportSnapshot,
       scrollbackSnapshot,
-      contextSnapshot: [contextScrollbackSnapshot, contextViewportSnapshot].filter(Boolean).join("\n"),
-      contextViewportSnapshot,
-      contextScrollbackSnapshot,
+      ...context,
       alternateScreen: false,
     };
   } catch {
@@ -181,13 +295,23 @@ export type ApplyHibernateWakeOptions = {
   deferWebgl?: boolean;
 };
 
-const scheduleIdle = (callback: () => void): void => {
-  if (typeof requestIdleCallback === "function") {
-    requestIdleCallback(() => callback(), { timeout: 500 });
-    return;
-  }
-  setTimeout(callback, 0);
-};
+/**
+ * Resolve the pre-pending history bytes to replay on hibernate wake.
+ * Prefer the coherent full snapshot: SerializeAddon range slices omit a
+ * trailing newline at the boundary, so concatenating scrollback+viewport can
+ * merge the seam lines. Fall back to scrollback -> viewport when snapshot is
+ * empty (still never viewport-first -- that evicts newest rows under a finite
+ * scrollback cap; #2762).
+ */
+export function resolveHibernateWakeHistory(payload: TerminalHibernateWakePayload): string {
+  if (payload.snapshot) return payload.snapshot;
+  const viewport = payload.viewportSnapshot ?? "";
+  const scrollback = payload.scrollbackSnapshot ?? "";
+  if (!scrollback) return viewport;
+  if (!viewport) return scrollback;
+  if (/\r?\n$/.test(scrollback)) return `${scrollback}${viewport}`;
+  return `${scrollback}\r\n${viewport}`;
+}
 
 export async function applyHibernateWakeToTerminal(
   term: XTerm,
@@ -196,10 +320,16 @@ export async function applyHibernateWakeToTerminal(
   options: ApplyHibernateWakeOptions = {},
 ): Promise<void> {
   const replayOptions = options.replayOptions;
-  const viewport = payload.viewportSnapshot ?? payload.snapshot;
-  const scrollback = payload.scrollbackSnapshot ?? "";
+  const history = resolveHibernateWakeHistory(payload);
 
-  await writeTerminalReplaySequence(term, [viewport, payload.pendingBuffer], replayOptions);
+  // Chunked writes already yield to the event loop for large buffers. Do not
+  // idle-append older scrollback after the viewport: under a finite xterm
+  // scrollback cap that trims the just-restored newest rows (#2762).
+  await writeTerminalReplaySequence(
+    term,
+    [history, payload.pendingBuffer],
+    replayOptions,
+  );
 
   if (!options.deferWebgl) {
     runtime.ensureWebglRenderer();
@@ -209,23 +339,14 @@ export async function applyHibernateWakeToTerminal(
   if (payload.alternateScreen) {
     refreshTerminalViewport(term);
   }
-
-  if (scrollback) {
-    scheduleIdle(() => {
-      void writeTerminalPayloadChunked(term, scrollback, replayOptions);
-    });
-  }
 }
 
 export function nudgeAlternateScreenRedraw(term: XTerm): void {
+  // A same-size resize does not notify the PTY, but xterm still synchronously
+  // drains its private parser buffer before returning. During a large TUI frame
+  // that can interrupt the normal write callback and strand renderer flow.
+  // Public refresh is sufficient to repaint the already-parsed viewport.
   refreshTerminalViewport(term);
-  const cols = term.cols;
-  const rows = term.rows;
-  if (cols > 0 && rows > 0) {
-    // Many full-screen TUIs (htop, vim) repaint on a size "change" even when dimensions match.
-    term.resize(cols, rows);
-    refreshTerminalViewport(term);
-  }
 }
 
 export function buildHibernateWakePayload(

@@ -1,7 +1,17 @@
 import { Circle, Columns2, Plus, Search, Server } from 'lucide-react';
 import React, { memo, useCallback, useMemo, useState, type DragEvent, type MouseEvent } from 'react';
 
+import {
+  applySessionPresentation,
+  useSessionPresentationVersion,
+} from '../../application/state/sessionPresentationStore';
 import { useStoredNumber } from '../../application/state/useStoredNumber';
+import { terminalReconnectRegistry } from '../../application/state/terminalReconnectRegistry';
+import {
+  appendHostFromWorkspaceDrop,
+  FOCUS_SIDEBAR_SESSION_DRAG_TYPE,
+  resolveFocusSidebarDragKind,
+} from '../../domain/focusSidebarHostDrop';
 import { resolveWorkspaceFocusSessionOrder } from '../../domain/workspace';
 import { resolveSessionTabTitle } from '../../domain/sessionTabTitle';
 import type { DynamicTabTitleMode } from '../../domain/models';
@@ -22,6 +32,7 @@ interface TerminalFocusSidebarProps {
   focusedSessionId: string | undefined;
   onReorderWorkspaceSessions?: (workspaceId: string, draggedSessionId: string, targetSessionId: string, position: 'before' | 'after') => void;
   onRequestAddToWorkspace?: (workspaceId: string) => void;
+  onAppendHostToWorkspace?: (workspaceId: string, hostId: string) => void;
   onCloseSession: (sessionId: string) => void;
   onCopySession?: (sessionId: string) => void;
   onCopySessionToNewWindow?: (sessionId: string) => void;
@@ -66,6 +77,7 @@ type WorkspaceFocusSessionRowProps = {
   onSelect: (sessionId: string) => void;
   onDragStart: (event: DragEvent, sessionId: string) => void;
   onDragOver: (event: DragEvent, sessionId: string) => void;
+  onHostDragLeave: (event: DragEvent<HTMLDivElement>) => void;
   onDrop: (event: DragEvent, sessionId: string) => void;
   onDragEnd: () => void;
   dynamicTabTitleMode?: DynamicTabTitleMode;
@@ -91,6 +103,7 @@ const WorkspaceFocusSessionRow = memo<WorkspaceFocusSessionRowProps>(({
   onSelect,
   onDragStart,
   onDragOver,
+  onHostDragLeave,
   onDrop,
   onDragEnd,
   dynamicTabTitleMode,
@@ -137,9 +150,7 @@ const WorkspaceFocusSessionRow = memo<WorkspaceFocusSessionRowProps>(({
           onContextMenu={() => onSelect(session.id)}
           onDragStart={(event) => onDragStart(event, session.id)}
           onDragOver={(event) => onDragOver(event, session.id)}
-          onDragLeave={(event) => {
-            event.stopPropagation();
-          }}
+          onDragLeave={onHostDragLeave}
           onDrop={(event) => onDrop(event, session.id)}
           onDragEnd={onDragEnd}
           onMouseEnter={(event) => {
@@ -171,18 +182,18 @@ const WorkspaceFocusSessionRow = memo<WorkspaceFocusSessionRowProps>(({
               className={cn('absolute bottom-0 right-0 fill-current', statusColor)}
             />
           </div>
-          <div className="flex h-6 flex-1 min-w-0 flex-col justify-center self-center text-left">
+          <div className="flex min-h-6 min-w-0 flex-1 flex-col justify-center self-center text-left">
             {isRenaming ? (
               <SessionInlineRenameInput
                 initialName={renameValue}
                 onCommit={onSubmitRename}
                 onCancel={onCancelRename}
-                className="h-5 text-xs leading-none"
+                className="h-5 text-xs leading-4"
               />
             ) : (
               <>
                 <div
-                  className={cn('truncate text-xs leading-none', isSelected ? 'font-semibold' : 'font-medium')}
+                  className={cn('truncate text-xs leading-4', isSelected ? 'font-semibold' : 'font-medium')}
                   onDoubleClick={(e) => {
                     e.stopPropagation();
                     onStartRename(session.id);
@@ -190,7 +201,7 @@ const WorkspaceFocusSessionRow = memo<WorkspaceFocusSessionRowProps>(({
                 >
                   {resolveSessionTabTitle(session, dynamicTabTitleMode)}
                 </div>
-                <div className="mt-0.5 truncate text-[10px] leading-none" style={{ color: mutedFg }}>
+                <div className="mt-0.5 truncate text-[10px] leading-4" style={{ color: mutedFg }}>
                   {session.username}@{session.hostname}
                 </div>
               </>
@@ -204,6 +215,8 @@ const WorkspaceFocusSessionRow = memo<WorkspaceFocusSessionRowProps>(({
         onCopySession={onCopySession}
         onCopySessionToNewWindow={onCopySessionToNewWindow}
         onDetachSession={onDetachSessionFromWorkspace}
+        onReconnectSession={terminalReconnectRegistry.request}
+        sessionStatus={session.status}
         onRenameSession={onStartRename}
         t={t}
       />
@@ -240,6 +253,7 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
   focusedSessionId,
   onReorderWorkspaceSessions,
   onRequestAddToWorkspace,
+  onAppendHostToWorkspace,
   onCloseSession,
   onCopySession,
   onCopySessionToNewWindow,
@@ -255,6 +269,7 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
 }) => {
   const [focusSidebarSearch, setFocusSidebarSearch] = useState('');
   const [focusSidebarDragSessionId, setFocusSidebarDragSessionId] = useState<string | null>(null);
+  const [focusSidebarHostDropActive, setFocusSidebarHostDropActive] = useState(false);
   const [focusSidebarDropIndicator, setFocusSidebarDropIndicator] = useState<{
     sessionId: string;
     position: 'before' | 'after';
@@ -281,12 +296,18 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
     };
   }, [resolvedPreviewTheme]);
 
+  // Live OSC / coding-CLI titles live in sessionPresentationStore (not sessions).
+  const presentationVersion = useSessionPresentationVersion();
   const workspaceSessions = useMemo(() => {
+    void presentationVersion;
     const sessionMap = new Map(sessions.map((session) => [session.id, session]));
     return resolveWorkspaceFocusSessionOrder(activeWorkspace.root, activeWorkspace.focusSessionOrder)
-      .map((sessionId) => sessionMap.get(sessionId))
+      .map((sessionId) => {
+        const session = sessionMap.get(sessionId);
+        return session ? applySessionPresentation(session) : undefined;
+      })
       .filter((session): session is TerminalSession => Boolean(session));
-  }, [activeWorkspace, sessions]);
+  }, [activeWorkspace, sessions, presentationVersion]);
 
   const visibleSessions = useMemo(() => {
     const term = focusSidebarSearch.trim().toLowerCase();
@@ -330,9 +351,22 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
   const handleFocusSidebarDragStart = useCallback((event: DragEvent, sessionId: string) => {
     event.stopPropagation();
     event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('workspace-focus-session-id', sessionId);
+    event.dataTransfer.setData(FOCUS_SIDEBAR_SESSION_DRAG_TYPE, sessionId);
     setFocusSidebarDragSessionId(sessionId);
+    setFocusSidebarHostDropActive(false);
   }, []);
+
+  const clearFocusSidebarHostDrop = useCallback(() => {
+    setFocusSidebarHostDropActive(false);
+  }, []);
+
+  const handleFocusSidebarHostDragLeave = useCallback((event: DragEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+    const dropZone = event.currentTarget.closest<HTMLElement>('[data-focus-sidebar-drop-zone]');
+    const next = event.relatedTarget;
+    if (next instanceof Node && dropZone?.contains(next)) return;
+    clearFocusSidebarHostDrop();
+  }, [clearFocusSidebarHostDrop]);
 
   const getFocusSidebarContainerDropTarget = useCallback((
     container: HTMLElement,
@@ -366,21 +400,45 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
     return lastSessionId ? { sessionId: lastSessionId, position: 'after' } : null;
   }, []);
 
+  const acceptFocusSidebarHostDrag = useCallback((event: DragEvent) => {
+    if (!onAppendHostToWorkspace) return false;
+    if (resolveFocusSidebarDragKind({
+      types: event.dataTransfer.types,
+      activeSessionDragId: focusSidebarDragSessionId,
+    }) !== 'host-append') {
+      return false;
+    }
+    event.preventDefault();
+    event.dataTransfer.dropEffect = 'copy';
+    setFocusSidebarDropIndicator(null);
+    setFocusSidebarHostDropActive(true);
+    return true;
+  }, [focusSidebarDragSessionId, onAppendHostToWorkspace]);
+
+  const handleFocusSidebarHostDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
+    acceptFocusSidebarHostDrag(event);
+  }, [acceptFocusSidebarHostDrag]);
+
   const handleFocusSidebarDragOver = useCallback((event: DragEvent, targetSessionId: string) => {
-    const draggedSessionId = event.dataTransfer.getData('workspace-focus-session-id') || focusSidebarDragSessionId;
+    if (acceptFocusSidebarHostDrag(event)) return;
+
+    const draggedSessionId = event.dataTransfer.getData(FOCUS_SIDEBAR_SESSION_DRAG_TYPE) || focusSidebarDragSessionId;
     if (!draggedSessionId || draggedSessionId === targetSessionId) return;
 
     event.preventDefault();
     event.stopPropagation();
     event.dataTransfer.dropEffect = 'move';
+    setFocusSidebarHostDropActive(false);
 
     const rect = event.currentTarget.getBoundingClientRect();
     const position = event.clientY < rect.top + rect.height / 2 ? 'before' : 'after';
     setFocusSidebarDropIndicator({ sessionId: targetSessionId, position });
-  }, [focusSidebarDragSessionId]);
+  }, [acceptFocusSidebarHostDrag, focusSidebarDragSessionId]);
 
   const handleFocusSidebarContainerDragOver = useCallback((event: DragEvent<HTMLDivElement>) => {
-    const draggedSessionId = event.dataTransfer.getData('workspace-focus-session-id') || focusSidebarDragSessionId;
+    if (acceptFocusSidebarHostDrag(event)) return;
+
+    const draggedSessionId = event.dataTransfer.getData(FOCUS_SIDEBAR_SESSION_DRAG_TYPE) || focusSidebarDragSessionId;
     if (!draggedSessionId) return;
 
     const target = getFocusSidebarContainerDropTarget(event.currentTarget, event.clientY, draggedSessionId);
@@ -388,11 +446,36 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
 
     event.preventDefault();
     event.dataTransfer.dropEffect = 'move';
+    setFocusSidebarHostDropActive(false);
     setFocusSidebarDropIndicator(target);
-  }, [focusSidebarDragSessionId, getFocusSidebarContainerDropTarget]);
+  }, [acceptFocusSidebarHostDrag, focusSidebarDragSessionId, getFocusSidebarContainerDropTarget]);
+
+  const appendHostFromFocusSidebarDrop = useCallback((event: DragEvent) => {
+    if (!onAppendHostToWorkspace) return false;
+    const handled = appendHostFromWorkspaceDrop({
+      types: event.dataTransfer.types,
+      getData: (type) => event.dataTransfer.getData(type),
+      activeSessionDragId: focusSidebarDragSessionId,
+      workspaceId: activeWorkspace.id,
+      onAppendHostToWorkspace,
+    });
+    if (!handled) return false;
+
+    event.preventDefault();
+    event.stopPropagation();
+    setFocusSidebarHostDropActive(false);
+    setFocusSidebarDropIndicator(null);
+    return true;
+  }, [activeWorkspace.id, focusSidebarDragSessionId, onAppendHostToWorkspace]);
+
+  const handleFocusSidebarHostDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
+    appendHostFromFocusSidebarDrop(event);
+  }, [appendHostFromFocusSidebarDrop]);
 
   const handleFocusSidebarContainerDrop = useCallback((event: DragEvent<HTMLDivElement>) => {
-    const draggedSessionId = event.dataTransfer.getData('workspace-focus-session-id') || focusSidebarDragSessionId;
+    if (appendHostFromFocusSidebarDrop(event)) return;
+
+    const draggedSessionId = event.dataTransfer.getData(FOCUS_SIDEBAR_SESSION_DRAG_TYPE) || focusSidebarDragSessionId;
     if (!draggedSessionId) return;
 
     const target = focusSidebarDropIndicator
@@ -403,8 +486,10 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
     onReorderWorkspaceSessions?.(activeWorkspace.id, draggedSessionId, target.sessionId, target.position);
     setFocusSidebarDragSessionId(null);
     setFocusSidebarDropIndicator(null);
+    setFocusSidebarHostDropActive(false);
   }, [
     activeWorkspace.id,
+    appendHostFromFocusSidebarDrop,
     focusSidebarDragSessionId,
     focusSidebarDropIndicator,
     getFocusSidebarContainerDropTarget,
@@ -412,7 +497,9 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
   ]);
 
   const handleFocusSidebarDrop = useCallback((event: DragEvent, targetSessionId: string) => {
-    const draggedSessionId = event.dataTransfer.getData('workspace-focus-session-id') || focusSidebarDragSessionId;
+    if (appendHostFromFocusSidebarDrop(event)) return;
+
+    const draggedSessionId = event.dataTransfer.getData(FOCUS_SIDEBAR_SESSION_DRAG_TYPE) || focusSidebarDragSessionId;
     if (!draggedSessionId || draggedSessionId === targetSessionId) return;
 
     event.preventDefault();
@@ -424,11 +511,19 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
     onReorderWorkspaceSessions?.(activeWorkspace.id, draggedSessionId, targetSessionId, position);
     setFocusSidebarDragSessionId(null);
     setFocusSidebarDropIndicator(null);
-  }, [activeWorkspace.id, focusSidebarDragSessionId, focusSidebarDropIndicator, onReorderWorkspaceSessions]);
+    setFocusSidebarHostDropActive(false);
+  }, [
+    activeWorkspace.id,
+    appendHostFromFocusSidebarDrop,
+    focusSidebarDragSessionId,
+    focusSidebarDropIndicator,
+    onReorderWorkspaceSessions,
+  ]);
 
   const handleFocusSidebarDragEnd = useCallback(() => {
     setFocusSidebarDragSessionId(null);
     setFocusSidebarDropIndicator(null);
+    setFocusSidebarHostDropActive(false);
   }, []);
 
   const handleSelectSession = useCallback((sessionId: string) => {
@@ -456,14 +551,27 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
 
   return (
     <div
-      className="flex-shrink-0 flex flex-col relative"
+      className={cn(
+        'flex-shrink-0 flex flex-col relative transition-[box-shadow,background-color]',
+        focusSidebarHostDropActive && 'ring-1 ring-inset',
+      )}
       style={{
         width: focusSidebarWidth,
-        backgroundColor: theme.termBg,
+        backgroundColor: focusSidebarHostDropActive
+          ? `color-mix(in srgb, ${theme.termFg} 8%, ${theme.termBg})`
+          : theme.termBg,
         color: theme.termFg,
+        boxShadow: focusSidebarHostDropActive
+          ? `inset 0 0 0 1px color-mix(in srgb, ${theme.termFg} 28%, transparent)`
+          : undefined,
         ['--terminal-workspace-sidebar-border' as string]: `1px solid ${theme.separator}`,
       }}
       data-section="terminal-workspace-sidebar"
+      data-focus-sidebar-drop-zone
+      data-host-drop-active={focusSidebarHostDropActive ? 'true' : 'false'}
+      onDragOver={handleFocusSidebarHostDragOver}
+      onDragLeave={handleFocusSidebarHostDragLeave}
+      onDrop={handleFocusSidebarHostDrop}
     >
       <div
         className="absolute top-0 right-[-3px] h-full w-2 cursor-ew-resize z-30"
@@ -521,7 +629,7 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
 
       <ScrollArea className="flex-1">
         <div
-          className="p-2 space-y-1"
+          className="p-2 space-y-1 min-h-full rounded-md"
           onDragOver={handleFocusSidebarContainerDragOver}
           onDrop={handleFocusSidebarContainerDrop}
         >
@@ -550,6 +658,7 @@ const TerminalFocusSidebarInner: React.FC<TerminalFocusSidebarProps> = ({
               onSelect={handleSelectSession}
               onDragStart={handleFocusSidebarDragStart}
               onDragOver={handleFocusSidebarDragOver}
+              onHostDragLeave={handleFocusSidebarHostDragLeave}
               onDrop={handleFocusSidebarDrop}
               onDragEnd={handleFocusSidebarDragEnd}
               dynamicTabTitleMode={dynamicTabTitleMode}
@@ -579,6 +688,7 @@ function terminalFocusSidebarPropsEqual(
   if (prev.t !== next.t) return false;
   if (prev.onReorderWorkspaceSessions !== next.onReorderWorkspaceSessions) return false;
   if (prev.onRequestAddToWorkspace !== next.onRequestAddToWorkspace) return false;
+  if (prev.onAppendHostToWorkspace !== next.onAppendHostToWorkspace) return false;
   if (prev.onSetWorkspaceFocusedSession !== next.onSetWorkspaceFocusedSession) return false;
   if (prev.onToggleWorkspaceViewMode !== next.onToggleWorkspaceViewMode) return false;
   const prevWs = prev.activeWorkspace;

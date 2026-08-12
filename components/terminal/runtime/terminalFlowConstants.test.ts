@@ -70,24 +70,40 @@ test("renderer flow constants match shared terminalFlowConstants.json", () => {
 test("terminal flood limits keep interactive acks responsive", () => {
   assert.ok(FLOW_LOW_WATER_MARK <= 8 * 1024);
   assert.ok(FLOW_CHAR_COUNT_ACK_SIZE <= 4 * 1024);
-  assert.ok(MAX_PENDING_WRITE_COALESCE_BYTES_FLOOD <= 8 * 1024);
+  // Flood coalesce must stay below bulk so TUI frames can interleave, but stay
+  // large enough that plain-text dumps (#1961) do not collapse into 8KB shards.
+  assert.ok(MAX_PENDING_WRITE_COALESCE_BYTES_FLOOD <= 256 * 1024);
+  assert.ok(MAX_PENDING_WRITE_COALESCE_BYTES_FLOOD >= 64 * 1024);
   assert.ok(MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES <= FLOW_HIGH_WATER_MARK);
-  assert.ok(MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES <= 4 * 1024);
+  // Unbroken-line shards should stay near Tabby's ~100KB PTY chunk size so
+  // long dumps stream smoothly instead of 4KB + setTimeout(0) stuttering.
+  assert.ok(MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES >= 64 * 1024);
+  assert.ok(MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES <= 256 * 1024);
   assert.ok(MAX_TERMINAL_WRITE_QUEUE_DRAIN_BYTES <= FLOW_HIGH_WATER_MARK);
-  assert.ok(TERMINAL_LONG_LINE_PRESSURE_BYTES >= MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES);
+  // Drain enough per event-loop turn that a 1MB high-water backlog does not
+  // require dozens of setTimeout(0) yields before SSH can resume.
+  assert.ok(MAX_TERMINAL_WRITE_QUEUE_DRAIN_BYTES >= 256 * 1024);
+  assert.ok(MAX_TERMINAL_WRITE_QUEUE_DRAIN_BYTES >= MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES);
+  // Long-line pressure can trip earlier than the write shard size so highlight
+  // / gutter work throttles before bulk parse cost peaks.
+  assert.ok(TERMINAL_LONG_LINE_PRESSURE_BYTES >= 32 * 1024);
   assert.ok(TERMINAL_AUX_LONG_LINE_SCAN_LIMIT_CHARS >= TERMINAL_LONG_LINE_PRESSURE_BYTES);
   assert.ok(XTERM_WRITE_CALLBACK_BATCH_BYTES <= FLOW_HIGH_WATER_MARK);
 });
 
-test("terminal bulk output limits preserve large renderer write batches", () => {
-  const bulkWriteFloorBytes = 1024 * 1024;
+test("terminal bulk output keeps large IPC coalesce but Tabby-sized xterm shards", () => {
+  const bulkCoalesceFloorBytes = 1024 * 1024;
   assert.ok(
-    MAX_PENDING_WRITE_COALESCE_BYTES >= bulkWriteFloorBytes,
-    `MAX_PENDING_WRITE_COALESCE_BYTES (${MAX_PENDING_WRITE_COALESCE_BYTES}) should keep multi-MB tail output in large batches`,
+    MAX_PENDING_WRITE_COALESCE_BYTES >= bulkCoalesceFloorBytes,
+    `MAX_PENDING_WRITE_COALESCE_BYTES (${MAX_PENDING_WRITE_COALESCE_BYTES}) should still batch multi-MB IPC into large flushes`,
   );
-  assert.ok(
-    MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES >= bulkWriteFloorBytes,
-    `MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES (${MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES}) should not split bulk plain output into small writes`,
+  // xterm write shards stay near Tabby's ~128KB FlowControl threshold so
+  // multi-line floods (seq/logs) leave the event loop between slices.
+  assert.ok(MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES >= 64 * 1024);
+  assert.ok(MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES <= 256 * 1024);
+  assert.equal(
+    MAX_TERMINAL_PLAIN_WRITE_CHUNK_BYTES,
+    MAX_TERMINAL_UNBROKEN_WRITE_CHUNK_BYTES,
   );
 });
 

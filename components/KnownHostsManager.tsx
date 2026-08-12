@@ -20,10 +20,18 @@ import React, {
 } from "react";
 import { useI18n } from "../application/i18n/I18nProvider";
 import { useKnownHostsBackend } from "../application/state/useKnownHostsBackend";
+import { useStoredBoolean } from "../application/state/useStoredBoolean";
 import { useStoredViewMode, ViewMode } from "../application/state/useStoredViewMode";
 import { fingerprintFromPublicKey } from "../domain/knownHosts";
+import {
+  DEFAULT_AUTO_IMPORT_SYSTEM_KNOWN_HOSTS,
+  shouldAutoScanSystemKnownHosts,
+} from "../domain/systemKnownHostsAutoImport";
 import { reorderVaultItems, sortByVaultOrder } from "../domain/vaultOrder";
-import { STORAGE_KEY_VAULT_KNOWN_HOSTS_VIEW_MODE } from "../infrastructure/config/storageKeys";
+import {
+  STORAGE_KEY_AUTO_IMPORT_SYSTEM_KNOWN_HOSTS,
+  STORAGE_KEY_VAULT_KNOWN_HOSTS_VIEW_MODE,
+} from "../infrastructure/config/storageKeys";
 import { logger } from "../lib/logger";
 import { cn } from "../lib/utils";
 import { Host, KnownHost } from "../types";
@@ -114,7 +122,20 @@ const parseKnownHostsFile = (content: string): KnownHost[] => {
   return parsed;
 };
 
+
+ // Well-known public service hostnames that should not be imported as managed hosts.
+ const PUBLIC_SERVICE_HOSTNAMES = new Set([
+   'github.com',
+   'gitlab.com',
+   'bitbucket.org',
+   'ssh.dev.azure.com',
+   'vs-ssh.visualstudio.com',
+ ]);
+
+ const isPublicServiceHost = (hostname: string): boolean =>
+   PUBLIC_SERVICE_HOSTNAMES.has(hostname);
 // Memoized Grid Item Component
+
 interface HostItemProps {
   knownHost: KnownHost;
   converted: boolean;
@@ -300,6 +321,10 @@ const KnownHostsManager: React.FC<KnownHostsManagerProps> = ({
     STORAGE_KEY_VAULT_KNOWN_HOSTS_VIEW_MODE,
     "grid",
   );
+  const [autoImportSystemKnownHosts] = useStoredBoolean(
+    STORAGE_KEY_AUTO_IMPORT_SYSTEM_KNOWN_HOSTS,
+    DEFAULT_AUTO_IMPORT_SYSTEM_KNOWN_HOSTS,
+  );
   const [sortMode, setSortMode] = useState<SortMode>("manual");
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const hasScannedRef = React.useRef(false);
@@ -336,8 +361,9 @@ const KnownHostsManager: React.FC<KnownHostsManagerProps> = ({
         knownHosts.map((h) => `${h.hostname}:${h.port}`),
       );
       const newHosts = parsed.filter(
-        (h) => !existingHostnames.has(`${h.hostname}:${h.port}`),
+        (h) => !existingHostnames.has(`${h.hostname}:${h.port}`) && !isPublicServiceHost(h.hostname),
       );
+      const publicFiltered = parsed.filter((h) => isPublicServiceHost(h.hostname)).length;
 
       if (newHosts.length > 0) {
         onImportFromFile(newHosts);
@@ -347,6 +373,13 @@ const KnownHostsManager: React.FC<KnownHostsManagerProps> = ({
         );
       } else {
         if (!silent) toast.info(t("knownHosts.toast.scanNoNew"), t("vault.nav.knownHosts"));
+      }
+
+      if (!silent && publicFiltered > 0) {
+        toast.info(
+          t("knownHosts.toast.scanFiltered", { count: publicFiltered }),
+          t("vault.nav.knownHosts"),
+        );
       }
     } catch (err) {
       logger.error("Failed to scan system known_hosts:", err);
@@ -360,16 +393,22 @@ const KnownHostsManager: React.FC<KnownHostsManagerProps> = ({
     }
   }, [knownHosts, onRefresh, onImportFromFile, readKnownHosts, t]);
 
-  // Auto-scan on first mount (silent — don't show toasts for missing known_hosts)
+  // Auto-scan on first mount when enabled (silent — no toasts for missing known_hosts)
   useEffect(() => {
-    if (!hasScannedRef.current) {
-      hasScannedRef.current = true;
-      const timer = setTimeout(() => {
-        handleScanSystem(true);
-      }, 100);
-      return () => clearTimeout(timer);
+    if (
+      !shouldAutoScanSystemKnownHosts({
+        autoImportEnabled: autoImportSystemKnownHosts,
+        alreadyScanned: hasScannedRef.current,
+      })
+    ) {
+      return;
     }
-  }, [handleScanSystem]);
+    hasScannedRef.current = true;
+    const timer = setTimeout(() => {
+      handleScanSystem(true);
+    }, 100);
+    return () => clearTimeout(timer);
+  }, [autoImportSystemKnownHosts, handleScanSystem]);
 
   // Sort and filter hosts with deduplication by hostname
   const filteredHosts = useMemo(() => {
@@ -437,7 +476,7 @@ const KnownHostsManager: React.FC<KnownHostsManagerProps> = ({
           knownHosts.map((h) => `${h.hostname}:${h.port}`),
         );
         const newHosts = parsed.filter(
-          (h) => !existingHostnames.has(`${h.hostname}:${h.port}`),
+          (h) => !existingHostnames.has(`${h.hostname}:${h.port}`) && !isPublicServiceHost(h.hostname),
         );
 
         if (newHosts.length > 0) {

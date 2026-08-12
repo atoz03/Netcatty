@@ -1,20 +1,21 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useReducer, useRef, useState } from 'react';
 import { AlertCircle, Loader2, RefreshCw } from 'lucide-react';
 import { Button } from '../ui/button';
-import { ContextMenu, ContextMenuTrigger } from '../ui/context-menu';
-import { type NodeDescriptor } from './SftpPaneTreeNode';
+import { ContextMenu, ContextMenuContent, ContextMenuTrigger } from '../ui/context-menu';
+import { TREE_ROW_HEIGHT, type NodeDescriptor } from './SftpPaneTreeNode';
 import { INITIAL_TREE_PATHS_STATE, treePathsReducer } from './sftpTreePathsReducer';
 import { useSftpPaneTreeContextMenu } from './useSftpPaneTreeContextMenu';
 import { useSftpPaneTreeRows } from './useSftpPaneTreeRows';
 import { SftpMoveToDialog } from './SftpMoveToDialog';
 import type { SftpFileEntry } from '../../types';
-import { getParentPath, joinPath } from '../../application/state/sftp/utils';
-import { buildSftpColumnTemplate, filterHiddenFiles, isNavigableDirectory, sortSftpEntries } from './utils';
+import { getParentPath, isWindowsRoot, joinPath, resolveSftpWindowsPathOptions } from '../../application/state/sftp/utils';
+import { buildSftpColumnTemplate, filterHiddenFiles, filterSftpTreeEntriesByName, isNavigableDirectory, isSftpColumnMenuKey, sortSftpEntries } from './utils';
 import type { SftpTransferSource } from './SftpContext';
 import type { SftpPaneTreeViewProps } from './SftpPaneTreeView.types';
-import { sftpTreeSelectionStore, useSftpTreeSelectionState } from './hooks/useSftpTreeSelectionStore';
+import { sftpTreeSelectionStore, useSftpTreeSelectionState } from '../../application/state/sftp/sftpTreeSelectionStore';
 import { sftpKeyboardSelectionStore, sftpTreeEnterStore } from './hooks/useSftpKeyboardShortcuts';
 import { useI18n } from '../../application/i18n/I18nProvider';
+import { SftpColumnMenuItems } from './SftpColumnMenuItems';
 import {
   shouldShowSftpUploadFolderMenu,
   shouldShowSftpUploadFilesMenu,
@@ -50,15 +51,22 @@ export const SftpPaneTreeView = React.memo<SftpPaneTreeViewProps>(({
   onUploadExternalFiles,
   onUploadExternalFileList,
   onUploadExternalFolder,
-  columnWidths,
-  handleSort,
-  handleResizeStart,
-  sortField,
-  sortOrder,
+  sorting,
   reloadRequest,
 }) => {
+  const {
+    columnWidths,
+    visibleColumns,
+    directoriesFirst,
+    handleSort,
+    handleResizeStart,
+    toggleColumnVisibility,
+    toggleDirectoriesFirst,
+    sortField,
+    sortOrder,
+  } = sorting;
   const { t } = useI18n();
-  const columnTemplate = buildSftpColumnTemplate(columnWidths);
+  const columnTemplate = buildSftpColumnTemplate(columnWidths, visibleColumns);
   const tRef = useRef(t);
   tRef.current = t;
   const [dragOverNodePath, setDragOverNodePath] = useState<string | null>(null);
@@ -217,10 +225,27 @@ export const SftpPaneTreeView = React.memo<SftpPaneTreeViewProps>(({
     childrenCacheRef.current.delete(targetPath);
     sortedChildrenCacheRef.current.delete(targetPath);
   }, []);
-  const prevSortKeyRef = useRef(`${sortField}:${sortOrder}:${pane.showHiddenFiles}`);
-  const sortKey = `${sortField}:${sortOrder}:${pane.showHiddenFiles}`;
+  const prevSortKeyRef = useRef(`${sortField}:${sortOrder}:${directoriesFirst}:${pane.showHiddenFiles}:${pane.filter}`);
+  const sortKey = `${sortField}:${sortOrder}:${directoriesFirst}:${pane.showHiddenFiles}:${pane.filter}`;
   if (prevSortKeyRef.current !== sortKey) {
     prevSortKeyRef.current = sortKey;
+    sortedChildrenCacheRef.current.clear();
+  }
+  // Ancestor keep decisions follow expand/load/error visibility; invalidate
+  // sorted snapshots when those states change which descendants the filter may use.
+  const prevExpandedPathsRef = useRef(expandedPaths);
+  if (prevExpandedPathsRef.current !== expandedPaths) {
+    prevExpandedPathsRef.current = expandedPaths;
+    sortedChildrenCacheRef.current.clear();
+  }
+  const prevLoadingPathsRef = useRef(loadingPaths);
+  if (prevLoadingPathsRef.current !== loadingPaths) {
+    prevLoadingPathsRef.current = loadingPaths;
+    sortedChildrenCacheRef.current.clear();
+  }
+  const prevErrorPathsRef = useRef(errorPaths);
+  if (prevErrorPathsRef.current !== errorPaths) {
+    prevErrorPathsRef.current = errorPaths;
     sortedChildrenCacheRef.current.clear();
   }
   useEffect(() => {
@@ -245,6 +270,9 @@ export const SftpPaneTreeView = React.memo<SftpPaneTreeViewProps>(({
         return false;
       }
       childrenCacheRef.current.set(entryPath, children);
+      // Ancestor visibility depends on loaded descendants, so drop every
+      // sorted/filtered snapshot (not only this path) before the next row build.
+      sortedChildrenCacheRef.current.clear();
       dispatchTreePaths({ type: 'FINISH_LOADING', path: entryPath });
       return true;
     } catch {
@@ -439,7 +467,11 @@ export const SftpPaneTreeView = React.memo<SftpPaneTreeViewProps>(({
     const descriptors: NodeDescriptor[] = [];
     const pathMap = new Map<string, SftpFileEntry>();
     const currentPath = resolvedRootPath;
-    const isRootPath = currentPath === '/' || /^[A-Za-z]:[\\/]?$/.test(currentPath);
+    const windowsOpts = resolveSftpWindowsPathOptions(
+      currentPath,
+      pane.connection?.homeDir,
+    );
+    const isRootPath = currentPath === '/' || isWindowsRoot(currentPath, windowsOpts);
     if (!isRootPath && currentPath) {
       const files = rootEntries;
       let parentEntry = files.find(f => f.name === '..');
@@ -453,7 +485,7 @@ export const SftpPaneTreeView = React.memo<SftpPaneTreeViewProps>(({
           lastModifiedFormatted: '--',
         };
       }
-      const parentPath = getParentPath(currentPath);
+      const parentPath = getParentPath(currentPath, windowsOpts);
       flat.push({ entry: parentEntry, entryPath: parentPath });
       pathMap.set(parentPath, parentEntry);
       descriptors.push({
@@ -468,7 +500,35 @@ export const SftpPaneTreeView = React.memo<SftpPaneTreeViewProps>(({
     const getSortedEntries = (entries: SftpFileEntry[], parentPath: string): SftpFileEntry[] => {
       const cached = sortedChildrenCacheRef.current.get(parentPath);
       if (cached) return cached;
-      const sorted = sortSftpEntries(filterHiddenFiles(entries, pane.showHiddenFiles), sortField, sortOrder);
+      const sorted = sortSftpEntries(
+        filterSftpTreeEntriesByName(
+          filterHiddenFiles(entries, pane.showHiddenFiles),
+          pane.filter,
+          {
+            parentPath,
+            joinPath,
+            isDirectory: isNavigableDirectory,
+            getChildren: (entryPath) => {
+              // Match buildTree visibility: collapsed, loading, and error paths
+              // do not render children, so cached descendants must not keep
+              // ancestors either (reload/failure would otherwise leave a
+              // nonmatching parent with only a spinner/error row).
+              if (!expandedPaths.has(entryPath)) return undefined;
+              if (loadingPaths.has(entryPath) || errorPaths.has(entryPath)) {
+                return undefined;
+              }
+              const children = childrenCacheRef.current.get(entryPath);
+              if (!children) return undefined;
+              // Match visible-row hidden policy so ancestor keep decisions
+              // cannot latch onto descendants the user cannot see.
+              return filterHiddenFiles(children, pane.showHiddenFiles);
+            },
+          },
+        ),
+        sortField,
+        sortOrder,
+        directoriesFirst,
+      );
       sortedChildrenCacheRef.current.set(parentPath, sorted);
       return sorted;
     };
@@ -502,15 +562,36 @@ export const SftpPaneTreeView = React.memo<SftpPaneTreeViewProps>(({
   }, [
     rootEntries,
     resolvedRootPath,
+    pane.connection?.homeDir,
     pane.showHiddenFiles,
+    pane.filter,
     sortField,
     sortOrder,
+    directoriesFirst,
     expandedPaths,
     loadingPaths,
     errorPaths,
   ]);
   const entryByPathRef = useRef(entryByPath);
   entryByPathRef.current = entryByPath;
+  useEffect(() => {
+    if (selectedPaths.size !== 1) return;
+    const selectedPath = selectedPaths.values().next().value;
+    if (!selectedPath) return;
+    const selectedIndex = nodeDescriptors.findIndex(
+      (descriptor) => descriptor.type === 'node' && descriptor.entryPath === selectedPath,
+    );
+    const container = scrollContainerRef.current;
+    if (selectedIndex < 0 || !container) return;
+
+    const rowTop = selectedIndex * TREE_ROW_HEIGHT;
+    const rowBottom = rowTop + TREE_ROW_HEIGHT;
+    if (rowTop < container.scrollTop) {
+      container.scrollTop = rowTop;
+    } else if (rowBottom > container.scrollTop + container.clientHeight) {
+      container.scrollTop = rowBottom - container.clientHeight;
+    }
+  }, [nodeDescriptors, selectedPaths]);
   const prevVisiblePathsRef = useRef<string[]>([]);
   useEffect(() => {
     const currentPaths = flatVisibleNodes
@@ -625,7 +706,6 @@ export const SftpPaneTreeView = React.memo<SftpPaneTreeViewProps>(({
         sourceParent,
         cached.filter((entry) => !movedNameSet.has(entry.name)),
       );
-      sortedChildrenCacheRef.current.delete(sourceParent);
     }
     if (targetPath !== currentPath) {
       const targetCache = childrenCacheRef.current.get(targetPath);
@@ -637,9 +717,12 @@ export const SftpPaneTreeView = React.memo<SftpPaneTreeViewProps>(({
           }
         }
         childrenCacheRef.current.set(targetPath, next);
-        sortedChildrenCacheRef.current.delete(targetPath);
       }
     }
+    // Ancestor filter keep decisions depend on cached descendants; drop every
+    // sorted/filtered snapshot (not only source/target) so Move To / drag-move
+    // cannot leave stale parents visible or hide the new parent under search.
+    sortedChildrenCacheRef.current.clear();
   }, [pane.connection?.currentPath]);
   const executeMoveAction = useCallback(async (sourcePaths: string[], targetPath: string) => {
     try {
@@ -794,6 +877,7 @@ export const SftpPaneTreeView = React.memo<SftpPaneTreeViewProps>(({
     viewportHeight,
     tRef,
     columnTemplate,
+    visibleColumns,
     selectedPaths,
     dragOverNodePath,
     toggleExpand,
@@ -841,67 +925,99 @@ export const SftpPaneTreeView = React.memo<SftpPaneTreeViewProps>(({
   });
   return (
     <div className="relative flex-1 min-h-0 flex flex-col text-sm">
-      <div
-        className="text-[11px] uppercase tracking-wide text-muted-foreground px-4 py-2 border-b border-border/40 bg-secondary/10 select-none shrink-0"
-        style={{ display: 'grid', gridTemplateColumns: columnTemplate }}
-      >
-        <div
-          className="flex items-center gap-1 cursor-pointer hover:text-foreground relative pr-2 min-w-0 overflow-hidden"
-          onClick={() => handleSort('name')}
-        >
-          <span className="truncate whitespace-nowrap">{t('sftp.columns.name')}</span>
-          {sortField === 'name' && (
-            <span className="shrink-0 text-primary">
-              {sortOrder === 'asc' ? '↑' : '↓'}
-            </span>
-          )}
+      <ContextMenu>
+        <ContextMenuTrigger asChild>
           <div
-            className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/50 transition-colors"
-            onMouseDown={(e) => handleResizeStart('name', e)}
+            className="text-[11px] uppercase tracking-wide text-muted-foreground px-4 py-2 border-b border-border/40 bg-secondary/10 select-none shrink-0"
+            data-section="terminal-sftp-tree-header"
+            tabIndex={0}
+            aria-label={t('sftp.columns.configure')}
+            onKeyDown={(e) => {
+              if (!isSftpColumnMenuKey(e.key, e.shiftKey)) return;
+              e.preventDefault();
+              const rect = e.currentTarget.getBoundingClientRect();
+              e.currentTarget.dispatchEvent(new MouseEvent('contextmenu', {
+                bubbles: true,
+                cancelable: true,
+                clientX: rect.left + 16,
+                clientY: rect.top + rect.height / 2,
+              }));
+            }}
+            style={{ display: 'grid', gridTemplateColumns: columnTemplate }}
+          >
+            <div
+              className="flex items-center gap-1 cursor-pointer hover:text-foreground relative pr-2 min-w-0 overflow-hidden"
+              onClick={() => handleSort('name')}
+            >
+              <span className="truncate whitespace-nowrap">{t('sftp.columns.name')}</span>
+              {sortField === 'name' && (
+                <span className="shrink-0 text-primary">
+                  {sortOrder === 'asc' ? '↑' : '↓'}
+                </span>
+              )}
+              <div
+                className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/50 transition-colors"
+                onMouseDown={(e) => handleResizeStart('name', e)}
+              />
+            </div>
+            {visibleColumns.modified && (
+              <div
+                className="flex items-center gap-1 cursor-pointer hover:text-foreground relative pr-2 min-w-0 overflow-hidden"
+                onClick={() => handleSort('modified')}
+              >
+                <span className="truncate whitespace-nowrap">{t('sftp.columns.modified')}</span>
+                {sortField === 'modified' && (
+                  <span className="shrink-0 text-primary">
+                    {sortOrder === 'asc' ? '↑' : '↓'}
+                  </span>
+                )}
+                <div
+                  className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/50 transition-colors"
+                  onMouseDown={(e) => handleResizeStart('modified', e)}
+                />
+              </div>
+            )}
+            {visibleColumns.size && (
+              <div
+                className="flex items-center justify-end gap-1 cursor-pointer hover:text-foreground relative pr-2 min-w-0 overflow-hidden"
+                onClick={() => handleSort('size')}
+              >
+                {sortField === 'size' && (
+                  <span className="shrink-0 text-primary">
+                    {sortOrder === 'asc' ? '↑' : '↓'}
+                  </span>
+                )}
+                <span className="truncate whitespace-nowrap">{t('sftp.columns.size')}</span>
+                <div
+                  className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/50 transition-colors"
+                  onMouseDown={(e) => handleResizeStart('size', e)}
+                />
+              </div>
+            )}
+            {visibleColumns.type && (
+              <div
+                className="flex items-center justify-end gap-1 cursor-pointer hover:text-foreground min-w-0 overflow-hidden"
+                onClick={() => handleSort('type')}
+              >
+                {sortField === 'type' && (
+                  <span className="shrink-0 text-primary">
+                    {sortOrder === 'asc' ? '↑' : '↓'}
+                  </span>
+                )}
+                <span className="truncate whitespace-nowrap">{t('sftp.columns.kind')}</span>
+              </div>
+            )}
+          </div>
+        </ContextMenuTrigger>
+        <ContextMenuContent>
+          <SftpColumnMenuItems
+            visibleColumns={visibleColumns}
+            directoriesFirst={directoriesFirst}
+            toggleColumnVisibility={toggleColumnVisibility}
+            toggleDirectoriesFirst={toggleDirectoriesFirst}
           />
-        </div>
-        <div
-          className="flex items-center gap-1 cursor-pointer hover:text-foreground relative pr-2 min-w-0 overflow-hidden"
-          onClick={() => handleSort('modified')}
-        >
-          <span className="truncate whitespace-nowrap">{t('sftp.columns.modified')}</span>
-          {sortField === 'modified' && (
-            <span className="shrink-0 text-primary">
-              {sortOrder === 'asc' ? '↑' : '↓'}
-            </span>
-          )}
-          <div
-            className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/50 transition-colors"
-            onMouseDown={(e) => handleResizeStart('modified', e)}
-          />
-        </div>
-        <div
-          className="flex items-center justify-end gap-1 cursor-pointer hover:text-foreground relative pr-2 min-w-0 overflow-hidden"
-          onClick={() => handleSort('size')}
-        >
-          {sortField === 'size' && (
-            <span className="shrink-0 text-primary">
-              {sortOrder === 'asc' ? '↑' : '↓'}
-            </span>
-          )}
-          <span className="truncate whitespace-nowrap">{t('sftp.columns.size')}</span>
-          <div
-            className="absolute right-0 top-0 bottom-0 w-1 cursor-col-resize hover:bg-primary/50 transition-colors"
-            onMouseDown={(e) => handleResizeStart('size', e)}
-          />
-        </div>
-        <div
-          className="flex items-center justify-end gap-1 cursor-pointer hover:text-foreground min-w-0 overflow-hidden"
-          onClick={() => handleSort('type')}
-        >
-          {sortField === 'type' && (
-            <span className="shrink-0 text-primary">
-              {sortOrder === 'asc' ? '↑' : '↓'}
-            </span>
-          )}
-          <span className="truncate whitespace-nowrap">{t('sftp.columns.kind')}</span>
-        </div>
-      </div>
+        </ContextMenuContent>
+      </ContextMenu>
       <ContextMenu>
         <ContextMenuTrigger asChild>
           <div

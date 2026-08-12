@@ -7,7 +7,7 @@ type SftpPaneTreeRowsProps = Record<string, any>;
 
 export function useSftpPaneTreeRows(props: SftpPaneTreeRowsProps) {
   const {
-    nodeDescriptors, scrollTop, viewportHeight, tRef, columnTemplate, selectedPaths, dragOverNodePath,
+    nodeDescriptors, scrollTop, viewportHeight, tRef, columnTemplate, visibleColumns, selectedPaths, dragOverNodePath,
     toggleExpand, handleNodeClick, stableOnOpenEntry, stableOnDragStart, stableOnDragEnd,
     handleNodeDragOver, handleNodeDrop, handleNodeDragLeave, handleNodeContextMenu,
   } = props;
@@ -62,6 +62,7 @@ export function useSftpPaneTreeRows(props: SftpPaneTreeRowsProps) {
             entryPath={descriptor.entryPath}
             depth={descriptor.depth}
             columnTemplate={columnTemplate}
+            visibleColumns={visibleColumns}
             isSelected={selectedPaths.has(descriptor.entryPath)}
             isExpanded={descriptor.isExpanded}
             isLoading={descriptor.isLoading}
@@ -100,6 +101,7 @@ export function useSftpPaneTreeRows(props: SftpPaneTreeRowsProps) {
     visibleRange,
     nodeDescriptors,
     columnTemplate,
+    visibleColumns,
     selectedPaths,
     dragOverNodePath,
     toggleExpand,

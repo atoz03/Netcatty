@@ -2,7 +2,7 @@
  * Port Forwarding Rule Card
  * Displays a single port forwarding rule in grid or list view
  */
-import { Copy,Loader2,Pencil,Play,Square,Trash2,Unplug } from 'lucide-react';
+import { Copy,Loader2,Pencil,Play,Square,Trash2 } from 'lucide-react';
 import React from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { Host, PortForwardingRule } from '../../domain/models';
@@ -21,6 +21,7 @@ export interface RuleCardProps {
     viewMode: ViewMode;
     isSelected: boolean;
     isPending: boolean;
+    canStop: boolean;
     reorderProps?: React.HTMLAttributes<HTMLDivElement>;
     onSelect: () => void;
     onEdit: () => void;
@@ -28,7 +29,6 @@ export interface RuleCardProps {
     onDelete: () => void;
     onStart: () => void;
     onStop: () => void;
-    onReleaseRemotePort?: () => void;
 }
 
 export const RuleCard: React.FC<RuleCardProps> = ({
@@ -37,6 +37,7 @@ export const RuleCard: React.FC<RuleCardProps> = ({
     viewMode,
     isSelected,
     isPending,
+    canStop,
     reorderProps,
     onSelect,
     onEdit,
@@ -44,11 +45,13 @@ export const RuleCard: React.FC<RuleCardProps> = ({
     onDelete,
     onStart,
     onStop,
-    onReleaseRemotePort,
 }) => {
     const { t } = useI18n();
     const isActive = rule.status === 'active';
-    const isInactive = rule.status === 'inactive' || rule.status === 'error';
+    const isStoppable = canStop || rule.status === 'active' || rule.status === 'connecting';
+    // unknown/stale means we cannot trust inactive — do not offer Start until
+    // an authoritative snapshot confirms there is no runtime.
+    const isStartable = !isStoppable && (rule.status === 'inactive' || rule.status === 'error');
 
     return (
         <ContextMenu>
@@ -141,7 +144,7 @@ export const RuleCard: React.FC<RuleCardProps> = ({
                                 >
                                     <Loader2 size={12} className="animate-spin" />
                                 </Button>
-                            ) : isInactive ? (
+                            ) : isStartable ? (
                                 <Button
                                     size="icon"
                                     variant="ghost"
@@ -153,7 +156,7 @@ export const RuleCard: React.FC<RuleCardProps> = ({
                                 >
                                     <Play size={12} />
                                 </Button>
-                            ) : (rule.status === 'active' || rule.status === 'connecting') ? (
+                            ) : isStoppable ? (
                                 <Button
                                     size="icon"
                                     variant="ghost"
@@ -178,19 +181,14 @@ export const RuleCard: React.FC<RuleCardProps> = ({
                     <Copy className="mr-2 h-4 w-4" /> {t('action.duplicate')}
                 </ContextMenuItem>
                 <ContextMenuSeparator />
-                {isInactive && (
+                {isStartable && (
                     <ContextMenuItem onClick={onStart}>
                         <Play className="mr-2 h-4 w-4" /> {t('action.start')}
                     </ContextMenuItem>
                 )}
-                {(rule.status === 'active' || rule.status === 'connecting') && (
+                {isStoppable && (
                     <ContextMenuItem onClick={onStop}>
                         <Square className="mr-2 h-4 w-4" /> {t('action.stop')}
-                    </ContextMenuItem>
-                )}
-                {onReleaseRemotePort && rule.type === 'remote' && (
-                    <ContextMenuItem onClick={onReleaseRemotePort}>
-                        <Unplug className="mr-2 h-4 w-4" /> {t('pf.action.releaseRemotePort')}
                     </ContextMenuItem>
                 )}
                 <ContextMenuSeparator />

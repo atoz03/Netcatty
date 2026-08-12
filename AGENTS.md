@@ -5,6 +5,7 @@ This project is wired around three layers: domain (pure logic), application stat
 ## Current Agents (Roles)
 - **Domain** (`domain/`): Models and pure helpers. Examples:
   - `models.ts` defines Host/SSHKey/Snippet/Workspace entities.
+  - `agentActivity.ts` defines persisted agent activity and token usage records.
   - `host.ts` handles distro normalization and host sanitization.
   - `workspace.ts` contains workspace tree operations (split/insert/prune/sizing).
 - **Application State** (`application/state/`): Hooks that own state and persistence boundaries.
@@ -34,7 +35,28 @@ Turn orchestration is centralized in **AgentRuntime**; the React hook `useAIChat
 | Tools | `capabilityTools.ts`, `toolOutputStore.ts`, `toolResultDedup.ts` | Catalog tools, truncated output handles (`tool_output_read`), duplicate-read notices |
 | Trace | `traceStore.ts`, `agentEventAdapter.ts` | Session event log incl. `usage`, `performance`, and `CompactionTrace` |
 
+External SDK turns normalize file changes, web searches, plan updates, recoverable warnings, and token usage into the shared event protocol. These activity and usage records are stored on assistant messages so the compact activity view is restored with chat history.
+
 **Stop** always goes through `stopAgentTurn()` (UI, `/stop`, MCP). Do not add parallel abort paths in hooks.
+
+### Codex App Server (experimental)
+
+Codex can opt into a persistent `codex app-server --stdio` runtime under
+`electron/bridges/aiBridge/codexAppServer/`; the existing TypeScript SDK remains
+the default. The main process owns JSONL RPC correlation, thread/turn routing,
+native approvals, `request_user_input`, model discovery, and process cleanup.
+
+- Session identities include the Codex runtime; SDK and App Server threads must
+  never resume across runtimes.
+- Observer maps to `read-only + never`, Confirm to `read-only + on-request`, and
+  Auto to `danger-full-access + never`.
+- App Server native “allow for session” decisions are session-scoped Codex
+  grants and must not become persistent Netcatty permission grants.
+- `turn/completed` is the terminal lifecycle event. Retryable `error`
+  notifications are warnings; process exit is fatal.
+- Regenerate the committed protocol contract with
+  `npm run generate:codex-app-server-schema` after upgrading Codex, and verify it
+  with `npm run check:codex-app-server-schema`.
 
 ### AI SDK v7 (Catty path)
 
@@ -84,6 +106,31 @@ Placement rules (`resolveAgentKinds` in `toolSurfaces.cjs`):
 
 **Harness domain (`catalog/harness.cjs`):** Catty-only surface (`surfaces.catty.toolName`). Registered in the capability catalog but executed locally in `capabilityTools.executeLocalCattyCapability` (not MCP/CLI). `harness.web.search` is omitted when web search is not configured.
 
+## Plugin host runtime (internal preview)
+
+The phase-2 plugin host lives under `electron/plugins/` and is disabled unless
+`NETCATTY_PLUGIN_DEV=1` is present at application launch. Public wire and package
+types still come only from `packages/plugin-contract/schema/`; do not add a
+second private RPC shape when extending the host.
+
+- `PackageStore` validates an immutable `.ncpkg` snapshot, extracts only into
+  private staging, and atomically publishes an installed version.
+- `PluginManager` serializes install, enable/disable, restart and uninstall
+  mutations. Do not bypass it from renderer IPC.
+- Ordinary plugins run in a sandboxed, offline `BrowserWindow` session and can
+  reach only their runtime-scoped `netcatty-plugin://` authority.
+- Node-only plugins run in a dedicated `utilityProcess`; they remain an advanced
+  development-only path until permission and distribution phases land.
+- `PluginRpcRouter` owns correlation, cancellation, deadlines, stream credit and
+  protocol-failure containment. Runtime identity is assigned by the host and is
+  never accepted from request parameters.
+- App quit goes through `runPluginShutdown()` after the dirty-editor guard; do
+  not add another independent quit interception path.
+
+Run `npm run test:plugin-runtime` for main-process boundaries and
+`npm run test:plugin-runtime:electron` for real BrowserWindow/utilityProcess
+smoke coverage. Packaged-resource changes must also pass `npm run pack:dir`.
+
 ## Extending the System
 1) **New domain logic**: Add pure functions/types under `domain/`; avoid side effects.  
 2) **New stateful behavior**: Wrap it in a hook under `application/state/`; keep external I/O behind adapters.  
@@ -95,6 +142,14 @@ Placement rules (`resolveAgentKinds` in `toolSurfaces.cjs`):
 - Seed data: `config/defaultData.ts`; terminal themes: `config/terminalThemes.ts`.
 - **Temporary files**: All temporary files (e.g., SFTP downloaded files for external editing) must be written to Netcatty's dedicated temp directory via `tempDirBridge.getTempFilePath(fileName)`. Do not write directly to `os.tmpdir()`. This ensures proper cleanup and user visibility in Settings > System.
 
+## Terminal Side Panel Splits
+
+- `domain/sidePanelLayout.ts` owns the pure pane/split tree operations, including focus, unique tools, close collapse, resize, and the pane limit.
+- `application/state/useTerminalSidePanelLayoutState.ts` owns per-terminal layouts and keeps the legacy focused-tool map compatible with external open paths.
+- `TerminalLayerSidePanelSection.tsx` renders one shared toolbar plus the nested pane chrome. Each pane content host must remain `overflow-hidden` and layout-contained.
+- Mounted tool panels use a stable portal node that moves between their pane host and the hidden parking host. Never fall back to an `absolute inset-0` side-panel root when a pane host is not ready.
+- Closing the whole side panel clears that terminal's split tree. Switching terminal tabs must not reuse another tab's layout.
+
 ## Testing & Safety
 - Favor unit tests for domain helpers (e.g., `workspace.ts`, `host.ts`) and hook-level tests for application state.
 - When changing storage keys or schema, provide migration or backward-compat handling.
@@ -105,6 +160,16 @@ Placement rules (`resolveAgentKinds` in `toolSurfaces.cjs`):
 - Prefer composition over deep prop drilling; lift shared state into hooks.
 - Avoid direct network/fetch in components; add a service/adaptor first.
 - Maintain ASCII-only unless required by existing file content.
+
+## Reporting Issues & PRs
+
+Issues opened without the required format are **auto-closed** by the issue-format bot. Agents that file issues via `gh` or the API must still follow these rules:
+
+- **Title:** start with `[Bug]`, `[Feature]`, or `[Other]`, then a short summary (≥ 4 characters after the prefix). Example: `[Bug] SFTP upload fails on Windows`.
+- **Body:** use the templates under [`.github/ISSUE_TEMPLATE/`](.github/ISSUE_TEMPLATE/) (Bug Report or Feature Request) and fill every required field. Blank issues are disabled.
+- **PRs:** follow [`.github/PULL_REQUEST_TEMPLATE.md`](.github/PULL_REQUEST_TEMPLATE.md).
+
+Full contributor guidance (setup, commits, PR process): [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Review Boundaries
 - Treat `electron/cli/*`, `netcatty-tool-cli`, the CLI discovery file, and the local TCP bridge as internal Netcatty integration surfaces unless a task explicitly says otherwise.

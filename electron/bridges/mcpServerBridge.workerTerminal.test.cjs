@@ -10,13 +10,18 @@ function loadFreshBridge() {
 }
 
 test("MCP/Catty capability context uses scoped metadata when terminal sessions live in worker", async () => {
+  const requests = [];
   const bridge = loadFreshBridge();
   bridge.init({
     sessions: new Map(),
     electronModule: null,
     terminalWorkerManager: {
-      request() {
-        throw new Error("getContext should not need a worker round trip");
+      request(channel, payload, options) {
+        requests.push({ channel, payload, options });
+        if (channel === "netcatty:portforward:list") {
+          return Promise.resolve([{ tunnelId: "worker-pf-1", status: "active" }]);
+        }
+        throw new Error(`unexpected worker request: ${channel}`);
       },
     },
   });
@@ -41,6 +46,14 @@ test("MCP/Catty capability context uses scoped metadata when terminal sessions l
   assert.equal(result.tools.terminal.execute, "terminal_execute");
   assert.equal(result.tools.terminal.start, "terminal_start");
   assert.match(result.description, /terminal_execute/);
+  assert.deepEqual(result.activePortForwardTunnels, [
+    { tunnelId: "worker-pf-1", status: "active" },
+  ]);
+  assert.deepEqual(requests, [{
+    channel: "netcatty:portforward:list",
+    payload: {},
+    options: {},
+  }]);
   assert.deepEqual(result.hosts[0], {
     sessionId: "ssh-1",
     hostname: "host.example",
@@ -115,6 +128,52 @@ test("MCP/Catty terminal_execute proxies to worker when terminal sessions live i
       options: {},
     },
   ]);
+});
+
+test("approved worker command is rejected when its session scope disappeared while waiting", async () => {
+  let approvalId = null;
+  let workerRequestCount = 0;
+  const bridge = loadFreshBridge();
+  bridge.init({
+    sessions: new Map(),
+    electronModule: null,
+    terminalWorkerManager: {
+      request() {
+        workerRequestCount += 1;
+        return Promise.resolve({ ok: true, stdout: "unexpected" });
+      },
+    },
+  });
+  bridge.setMainWindowGetter(() => ({
+    isDestroyed: () => false,
+    webContents: {
+      id: 1,
+      send(channel, payload) {
+        if (channel === "netcatty:ai:mcp:approval-request") approvalId = payload.approvalId;
+      },
+    },
+  }));
+  bridge.setPermissionMode("confirm");
+  bridge.setCommandBlocklist([]);
+  bridge.updateSessionMetadata([
+    { sessionId: "ssh-approval", protocol: "ssh", connected: true },
+  ], "chat-approval");
+
+  const pending = bridge.dispatchBuiltinRpc("netcatty/exec", {
+    sessionId: "ssh-approval",
+    command: "pwd",
+    chatSessionId: "chat-approval",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(approvalId);
+
+  bridge.updateSessionMetadata([], "chat-approval");
+  bridge.resolveApprovalFromRenderer(approvalId, true);
+  const result = await pending;
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /scope/);
+  assert.equal(workerRequestCount, 0);
 });
 
 test("MCP/Catty SFTP tools proxy to worker when terminal sessions live in worker", async () => {
@@ -192,6 +251,82 @@ test("MCP/Catty SFTP tools proxy to worker when terminal sessions live in worker
       options: {},
     },
   ]);
+});
+
+test("worker SFTP cancellation waits for a pending open and closes its late handle", async () => {
+  let resolveOpen;
+  const openPromise = new Promise((resolve) => {
+    resolveOpen = resolve;
+  });
+  const requests = [];
+  const bridge = loadFreshBridge();
+  bridge.init({
+    sessions: new Map(),
+    electronModule: null,
+    terminalWorkerManager: {
+      request(channel, payload, options) {
+        requests.push({ channel, payload, options });
+        if (channel === "netcatty:sftp:openForSession") return openPromise;
+        if (channel === "netcatty:sftp:close") return Promise.resolve({ ok: true });
+        return Promise.reject(new Error(`unexpected worker request: ${channel}`));
+      },
+    },
+  });
+  bridge.setPermissionMode("auto");
+  bridge.setCommandTimeout(23);
+  bridge.updateSessionMetadata([
+    { sessionId: "ssh-pending", hostname: "host.example", protocol: "ssh", connected: true },
+  ], "chat-pending");
+
+  const operation = bridge.dispatchBuiltinRpc("netcatty/sftp/list", {
+    sessionId: "ssh-pending",
+    path: "/var/log",
+    chatSessionId: "chat-pending",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const cancellation = bridge.cancelSftpOpsForSession("chat-pending");
+
+  resolveOpen({ ok: true, sftpId: "worker-sftp-late" });
+  await cancellation;
+  await assert.rejects(operation, /Cancelled/);
+
+  assert.deepEqual(requests.map((entry) => entry.channel), [
+    "netcatty:sftp:openForSession",
+    "netcatty:sftp:close",
+  ]);
+  assert.equal(requests[1].payload.sftpId, "worker-sftp-late");
+});
+
+test("worker SFTP cancellation stays bounded when open never responds", async () => {
+  const bridge = loadFreshBridge();
+  bridge.init({
+    sessions: new Map(),
+    electronModule: null,
+    terminalWorkerManager: {
+      request(channel) {
+        if (channel === "netcatty:sftp:openForSession") return new Promise(() => {});
+        return Promise.reject(new Error(`unexpected worker request: ${channel}`));
+      },
+    },
+  });
+  bridge.setPermissionMode("auto");
+  bridge.setCommandTimeout(0.01);
+  bridge.updateSessionMetadata([
+    { sessionId: "ssh-stalled", hostname: "host.example", protocol: "ssh", connected: true },
+  ], "chat-stalled");
+
+  const operation = bridge.dispatchBuiltinRpc("netcatty/sftp/list", {
+    sessionId: "ssh-stalled",
+    path: "/var/log",
+    chatSessionId: "chat-stalled",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const startedAt = Date.now();
+  const cancellation = bridge.cancelSftpOpsForSession("chat-stalled");
+
+  await assert.rejects(operation, /timed out/);
+  await cancellation;
+  assert.ok(Date.now() - startedAt < 2000, "cancellation should honor the bounded open timeout");
 });
 
 test("MCP/Catty terminal_start, poll, and stop proxy worker background jobs", async () => {
@@ -301,6 +436,63 @@ test("MCP/Catty terminal_start, poll, and stop proxy worker background jobs", as
   });
 });
 
+test("idle cleanup drops completed worker jobs even when the agent never polled them", async () => {
+  const requests = [];
+  const bridge = loadFreshBridge();
+  bridge.init({
+    sessions: new Map(),
+    electronModule: null,
+    terminalWorkerManager: {
+      request(channel, payload) {
+        requests.push({ channel, payload });
+        if (channel === "netcatty:ai:jobStart") {
+          return Promise.resolve({
+            ok: true,
+            jobId: "worker-job-unpolled",
+            sessionId: payload.sessionId,
+            status: "running",
+          });
+        }
+        if (channel === "netcatty:ai:jobPoll") {
+          return Promise.resolve({
+            ok: true,
+            jobId: payload.jobId,
+            sessionId: payload.sessionId,
+            status: "completed",
+            completed: true,
+          });
+        }
+        return Promise.reject(new Error(`unexpected worker request: ${channel}`));
+      },
+    },
+  });
+  bridge.setPermissionMode("auto");
+  bridge.setCommandBlocklist([]);
+  bridge.updateSessionMetadata([
+    { sessionId: "ssh-unpolled", protocol: "ssh", connected: true },
+  ], "chat-unpolled");
+
+  const started = await bridge.dispatchBuiltinRpc("netcatty/jobStart", {
+    sessionId: "ssh-unpolled",
+    command: "sleep 1",
+    chatSessionId: "chat-unpolled",
+  });
+  assert.equal(started.ok, true);
+
+  assert.equal(await bridge.hasActiveWorkerJobForTerminalSession("ssh-unpolled"), false);
+  assert.deepEqual(requests.map((entry) => entry.channel), [
+    "netcatty:ai:jobStart",
+    "netcatty:ai:jobPoll",
+  ]);
+
+  const stalePoll = await bridge.dispatchBuiltinRpc("netcatty/jobPoll", {
+    jobId: "worker-job-unpolled",
+    chatSessionId: "chat-unpolled",
+  });
+  assert.equal(stalePoll.ok, false);
+  assert.match(stalePoll.error, /not found/i);
+});
+
 test("MCP/Catty chat cancellation forwards to worker background jobs", async () => {
   const requests = [];
   const sends = [];
@@ -367,4 +559,130 @@ test("MCP/Catty chat cancellation forwards to worker background jobs", async () 
     ok: false,
     error: "Background job not found",
   });
+});
+
+test("terminal close stops and forgets worker background jobs for that terminal", async () => {
+  const requests = [];
+  const bridge = loadFreshBridge();
+  bridge.init({
+    sessions: new Map(),
+    electronModule: null,
+    terminalWorkerManager: {
+      request(channel, payload, options) {
+        requests.push({ channel, payload, options });
+        if (channel === "netcatty:ai:jobStart") {
+          return Promise.resolve({ ok: true, jobId: "worker-job-close", status: "running" });
+        }
+        if (channel === "netcatty:ai:jobStop") {
+          return Promise.resolve({ ok: true, jobId: payload.jobId, completed: true });
+        }
+        return Promise.reject(new Error(`unexpected worker request: ${channel}`));
+      },
+    },
+  });
+  bridge.setPermissionMode("auto");
+  bridge.setCommandBlocklist([]);
+  bridge.updateSessionMetadata([{ sessionId: "ssh-close", protocol: "ssh", connected: true }], "chat-close");
+
+  const started = await bridge.dispatchBuiltinRpc("netcatty/jobStart", {
+    sessionId: "ssh-close",
+    command: "sleep 30",
+    chatSessionId: "chat-close",
+  });
+  assert.equal(started.ok, true);
+
+  await bridge.cancelWorkerBackgroundJobsForTerminalSession("ssh-close");
+
+  assert.equal(requests.at(-1).channel, "netcatty:ai:jobStop");
+  assert.equal(requests.at(-1).payload.jobId, "worker-job-close");
+  const polled = await bridge.dispatchBuiltinRpc("netcatty/jobPoll", {
+    jobId: "worker-job-close",
+    chatSessionId: "chat-close",
+  });
+  assert.deepEqual(polled, { ok: false, error: "Background job not found" });
+});
+
+test("terminal close stays bounded when worker job stop never responds", async () => {
+  const bridge = loadFreshBridge();
+  bridge.init({
+    sessions: new Map(),
+    electronModule: null,
+    terminalWorkerManager: {
+      request(channel) {
+        if (channel === "netcatty:ai:jobStart") {
+          return Promise.resolve({ ok: true, jobId: "worker-job-stalled", status: "running" });
+        }
+        if (channel === "netcatty:ai:jobStop") return new Promise(() => {});
+        return Promise.reject(new Error(`unexpected worker request: ${channel}`));
+      },
+    },
+  });
+  bridge.setPermissionMode("auto");
+  bridge.setCommandBlocklist([]);
+  bridge.setCommandTimeout(0.01);
+  bridge.updateSessionMetadata([
+    { sessionId: "ssh-stalled-job", protocol: "ssh", connected: true },
+  ], "chat-stalled-job");
+
+  const started = await bridge.dispatchBuiltinRpc("netcatty/jobStart", {
+    sessionId: "ssh-stalled-job",
+    command: "sleep 30",
+    chatSessionId: "chat-stalled-job",
+  });
+  assert.equal(started.ok, true);
+
+  const startedAt = Date.now();
+  await bridge.cancelWorkerBackgroundJobsForTerminalSession("ssh-stalled-job");
+  assert.ok(Date.now() - startedAt < 2000, "job cleanup should honor the bounded stop timeout");
+
+  const polled = await bridge.dispatchBuiltinRpc("netcatty/jobPoll", {
+    jobId: "worker-job-stalled",
+    chatSessionId: "chat-stalled-job",
+  });
+  assert.deepEqual(polled, { ok: false, error: "Background job not found" });
+});
+
+test("terminal close cancels a worker job start that finishes late", async () => {
+  let resolveStart;
+  const pendingStart = new Promise((resolve) => {
+    resolveStart = resolve;
+  });
+  const requests = [];
+  const bridge = loadFreshBridge();
+  bridge.init({
+    sessions: new Map(),
+    electronModule: null,
+    terminalWorkerManager: {
+      request(channel, payload) {
+        requests.push({ channel, payload });
+        if (channel === "netcatty:ai:jobStart") return pendingStart;
+        if (channel === "netcatty:ai:jobStop") {
+          return Promise.resolve({ ok: true, jobId: payload.jobId, completed: true });
+        }
+        return Promise.reject(new Error(`unexpected worker request: ${channel}`));
+      },
+    },
+  });
+  bridge.setPermissionMode("auto");
+  bridge.setCommandBlocklist([]);
+  bridge.updateSessionMetadata([
+    { sessionId: "ssh-late-job", protocol: "ssh", connected: true },
+  ], "chat-late-job");
+
+  const starting = bridge.dispatchBuiltinRpc("netcatty/jobStart", {
+    sessionId: "ssh-late-job",
+    command: "sleep 30",
+    chatSessionId: "chat-late-job",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  await bridge.cancelWorkerBackgroundJobsForTerminalSession("ssh-late-job");
+  resolveStart({ ok: true, jobId: "worker-job-late", status: "running" });
+
+  const result = await starting;
+  assert.equal(result.ok, false);
+  assert.match(result.error, /closing/i);
+  assert.deepEqual(requests.map((entry) => entry.channel), [
+    "netcatty:ai:jobStart",
+    "netcatty:ai:jobStop",
+  ]);
 });

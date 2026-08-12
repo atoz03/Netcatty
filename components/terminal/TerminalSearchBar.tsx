@@ -23,6 +23,16 @@ export interface TerminalSearchBarProps {
     matchCount?: { current: number; total: number } | null;
 }
 
+export const notifyTerminalSearchTermChange = (
+    searchTerm: string,
+    previousSearchTerm: string,
+    onSearch: (term: string) => boolean,
+): string => {
+    if (searchTerm === previousSearchTerm) return previousSearchTerm;
+    onSearch(searchTerm);
+    return searchTerm;
+};
+
 export const TerminalSearchBar: React.FC<TerminalSearchBarProps> = ({
     isOpen,
     focusToken,
@@ -46,14 +56,15 @@ export const TerminalSearchBar: React.FC<TerminalSearchBarProps> = ({
         }
     }, [isOpen, focusToken]);
 
-    // Trigger search when term changes
+    // Trigger search when term changes. When the term is cleared we still call
+    // onSearch('') so the underlying search addon clears its highlights;
+    // otherwise the last match decorations linger after emptying the input.
     useEffect(() => {
-        if (searchTerm !== prevSearchTermRef.current) {
-            prevSearchTermRef.current = searchTerm;
-            if (searchTerm.length > 0) {
-                onSearch(searchTerm);
-            }
-        }
+        prevSearchTermRef.current = notifyTerminalSearchTermChange(
+            searchTerm,
+            prevSearchTermRef.current,
+            onSearch,
+        );
     }, [searchTerm, onSearch]);
 
     const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
@@ -103,6 +114,7 @@ export const TerminalSearchBar: React.FC<TerminalSearchBarProps> = ({
                     onKeyDown={handleKeyDown}
                     onClick={(e) => e.stopPropagation()}
                     onMouseDown={(e) => e.stopPropagation()}
+                    data-terminal-search-input=""
                     placeholder={t("terminal.search.placeholder")}
                     className="w-full h-6 pl-7 pr-2 text-[11px] border-none rounded placeholder:opacity-40 focus:outline-none"
                     style={{

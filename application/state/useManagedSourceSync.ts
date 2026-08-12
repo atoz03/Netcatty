@@ -3,8 +3,13 @@ import { Host, ManagedSource } from "../../domain/models";
 import {
   serializeHostsToSshConfig,
   mergeWithExistingSshConfig,
+  toSafeSshHostAlias,
+  isSafeSshHostMatchLiteral,
 } from "../../domain/sshConfigSerializer";
 import { netcattyBridge } from "../../infrastructure/services/netcattyBridge";
+import { STORAGE_KEY_MANAGED_SOURCES } from "../../infrastructure/config/storageKeys";
+import { localStorageAdapter } from "../../infrastructure/persistence/localStorageAdapter";
+import { withVaultImportLock } from "./vaultManagedImportLock";
 
 const MANAGED_BLOCK_BEGIN = "# BEGIN NETCATTY MANAGED - DO NOT EDIT THIS BLOCK";
 const MANAGED_BLOCK_END = "# END NETCATTY MANAGED";
@@ -13,14 +18,30 @@ export interface UseManagedSourceSyncOptions {
   hosts: Host[];
   managedSources: ManagedSource[];
   onUpdateManagedSources: (sources: ManagedSource[]) => void;
+  onReadPersistedHosts: () => Promise<Host[]>;
 }
+
+export const haveSameManagedSshAgentFields = (previous: Host, current: Host): boolean => (
+  previous.useSshAgent === current.useSshAgent
+  && previous.identityAgent === current.identityAgent
+  && previous.identitiesOnly === current.identitiesOnly
+  && previous.addKeysToAgent === current.addKeysToAgent
+  && previous.useKeychain === current.useKeychain
+  && (previous.identityFilePaths?.length ?? 0) === (current.identityFilePaths?.length ?? 0)
+  && (previous.identityFilePaths ?? []).every(
+    (path, index) => path === current.identityFilePaths?.[index],
+  )
+);
 
 export const useManagedSourceSync = ({
   hosts,
   managedSources,
   onUpdateManagedSources,
+  onReadPersistedHosts,
 }: UseManagedSourceSyncOptions) => {
   const previousHostsRef = useRef<Host[]>([]);
+  const hostsRef = useRef(hosts);
+  hostsRef.current = hosts;
   const syncInProgressRef = useRef(false);
   // Keep a ref to the latest managedSources to avoid stale closure issues
   const managedSourcesRef = useRef(managedSources);
@@ -28,9 +49,9 @@ export const useManagedSourceSync = ({
 
   const getManagedHostsForSource = useCallback(
     (sourceId: string) => {
-      return hosts.filter((h) => h.managedSourceId === sourceId);
+      return hostsRef.current.filter((h) => h.managedSourceId === sourceId);
     },
-    [hosts],
+    [],
   );
 
   const readExistingFileContent = useCallback(
@@ -75,9 +96,11 @@ export const useManagedSourceSync = ({
         for (const host of managedHosts) {
           if (!host.protocol || host.protocol === "ssh") {
             // Add both hostname and sanitized label (alias) for matching
-            managedHostnameSet.add(host.hostname.toLowerCase());
+            if (isSafeSshHostMatchLiteral(host.hostname)) {
+              managedHostnameSet.add(host.hostname.toLowerCase());
+            }
             if (host.label) {
-              managedHostnameSet.add(host.label.replace(/\s/g, "").toLowerCase());
+              managedHostnameSet.add(toSafeSshHostAlias(host.label, host.hostname).toLowerCase());
             }
           }
         }
@@ -102,7 +125,7 @@ export const useManagedSourceSync = ({
   );
 
   const writeSshConfigToFile = useCallback(
-    async (source: ManagedSource, managedHosts: Host[]) => {
+    async (source: ManagedSource, managedHosts: Host[], allHosts = hostsRef.current) => {
       const bridge = netcattyBridge.get();
       if (!bridge?.writeLocalFile) {
         console.warn("[ManagedSourceSync] writeLocalFile not available");
@@ -117,7 +140,7 @@ export const useManagedSourceSync = ({
         const finalContent = mergeWithExistingContent(
           existingContent,
           managedHosts,
-          hosts,
+          allHosts,
         );
         const encoder = new TextEncoder();
         const buffer = encoder.encode(finalContent);
@@ -128,16 +151,25 @@ export const useManagedSourceSync = ({
         return false;
       }
     },
-    [readExistingFileContent, mergeWithExistingContent, hosts],
+    [readExistingFileContent, mergeWithExistingContent],
   );
 
   const syncManagedSource = useCallback(
     async (source: ManagedSource): Promise<{ sourceId: string; success: boolean }> => {
-      const managedHosts = getManagedHostsForSource(source.id);
-      const success = await writeSshConfigToFile(source, managedHosts);
-      return { sourceId: source.id, success };
+      return withVaultImportLock("vault", async () => {
+        const persistedSources = localStorageAdapter.read<ManagedSource[]>(
+          STORAGE_KEY_MANAGED_SOURCES,
+        ) ?? managedSourcesRef.current;
+        if (!persistedSources.some((candidate) => candidate.id === source.id)) {
+          return { sourceId: source.id, success: false };
+        }
+        const latestHosts = await onReadPersistedHosts();
+        const managedHosts = latestHosts.filter((host) => host.managedSourceId === source.id);
+        const success = await writeSshConfigToFile(source, managedHosts, latestHosts);
+        return { sourceId: source.id, success };
+      });
     },
-    [getManagedHostsForSource, writeSshConfigToFile],
+    [onReadPersistedHosts, writeSshConfigToFile],
   );
 
   const unmanageSource = useCallback(
@@ -148,42 +180,60 @@ export const useManagedSourceSync = ({
     [onUpdateManagedSources],
   );
 
-  // Clear the managed block in the SSH config file and then remove the source
-  // This should be called before deleting a managed group to avoid stale entries
+  // Clear the managed block before the caller atomically removes the Vault
+  // source and hosts. Keeping state unchanged here lets a failed clear abort
+  // the deletion without leaving a half-removed source record.
   const clearAndRemoveSource = useCallback(
     async (source: ManagedSource) => {
-      // Write empty hosts list to clear the managed block
       const success = await writeSshConfigToFile(source, []);
-      // Remove the source regardless of write success
-      const updatedSources = managedSourcesRef.current.filter((s) => s.id !== source.id);
-      onUpdateManagedSources(updatedSources);
-      return success;
+      if (!success) throw new Error("Could not clear managed SSH config source");
+      return async () => {
+        const latestHosts = await onReadPersistedHosts();
+        const restored = await writeSshConfigToFile(
+          source,
+          latestHosts.filter((host) => host.managedSourceId === source.id),
+          latestHosts,
+        );
+        if (!restored) throw new Error("Could not restore managed SSH config source");
+      };
     },
-    [onUpdateManagedSources, writeSshConfigToFile],
+    [onReadPersistedHosts, writeSshConfigToFile],
   );
 
   // Clear and remove multiple sources atomically to avoid race conditions
   // when multiple sources are removed concurrently
   const clearAndRemoveSources = useCallback(
     async (sources: ManagedSource[]) => {
-      if (sources.length === 0) return;
-
-      // Clear all files in parallel
-      await Promise.all(
-        sources.map(async (source) => {
-          const success = await writeSshConfigToFile(source, []);
-          return { sourceId: source.id, success };
-        })
-      );
-
-      // Remove all sources atomically in a single update
-      const sourceIdsToRemove = new Set(sources.map(s => s.id));
-      const updatedSources = managedSourcesRef.current.filter(
-        (s) => !sourceIdsToRemove.has(s.id)
-      );
-      onUpdateManagedSources(updatedSources);
+      const clearedSources: ManagedSource[] = [];
+      for (const source of sources) {
+        const success = await writeSshConfigToFile(source, []);
+        if (!success) {
+          const latestHosts = await onReadPersistedHosts();
+          const restored = await Promise.all(clearedSources.map((clearedSource) => writeSshConfigToFile(
+            clearedSource,
+            latestHosts.filter((host) => host.managedSourceId === clearedSource.id),
+            latestHosts,
+          )));
+          if (restored.some((result) => !result)) {
+            throw new Error("Could not clear or restore every managed SSH config source");
+          }
+          throw new Error("Could not clear every managed SSH config source");
+        }
+        clearedSources.push(source);
+      }
+      return async () => {
+        const latestHosts = await onReadPersistedHosts();
+        const results = await Promise.all(clearedSources.map((source) => writeSshConfigToFile(
+          source,
+          latestHosts.filter((host) => host.managedSourceId === source.id),
+          latestHosts,
+        )));
+        if (results.some((success) => !success)) {
+          throw new Error("Could not restore every managed SSH config source");
+        }
+      };
     },
-    [onUpdateManagedSources, writeSshConfigToFile],
+    [onReadPersistedHosts, writeSshConfigToFile],
   );
 
   const pendingSyncRef = useRef(false);
@@ -285,6 +335,7 @@ export const useManagedSourceSync = ({
             prev.label !== curr.label ||
             prev.group !== curr.group ||
             prev.protocol !== curr.protocol ||
+            !haveSameManagedSshAgentFields(prev, curr) ||
             chainChanged;
           if (hasChanged) {
             sourceChanged = true;
@@ -315,20 +366,24 @@ export const useManagedSourceSync = ({
       Promise.all(
         managedSources
           .filter((s) => changedSourceIds.has(s.id))
-          .map(syncManagedSource),
-      ).then((results) => {
+          .map((source) => syncManagedSource(source)),
+      ).then(async (results) => {
         // Batch update lastSyncedAt for all successful syncs to avoid race conditions
         const successfulSourceIds = new Set(
           results.filter(r => r.success).map(r => r.sourceId)
         );
 
         if (successfulSourceIds.size > 0) {
-          const currentSources = managedSourcesRef.current;
-          const now = Date.now();
-          const updatedSources = currentSources.map((s) =>
-            successfulSourceIds.has(s.id) ? { ...s, lastSyncedAt: now } : s,
-          );
-          onUpdateManagedSources(updatedSources);
+          await withVaultImportLock("vault", async () => {
+            const currentSources = localStorageAdapter.read<ManagedSource[]>(
+              STORAGE_KEY_MANAGED_SOURCES,
+            ) ?? managedSourcesRef.current;
+            const now = Date.now();
+            const updatedSources = currentSources.map((s) =>
+              successfulSourceIds.has(s.id) ? { ...s, lastSyncedAt: now } : s,
+            );
+            onUpdateManagedSources(updatedSources);
+          });
         }
       }).finally(() => {
         syncInProgressRef.current = false;

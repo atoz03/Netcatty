@@ -1,17 +1,163 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const { spawnSync } = require("node:child_process");
+const { EventEmitter } = require("node:events");
 const { mkdtempSync, rmSync, realpathSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const { join } = require("node:path");
 
 const {
+  execViaPty,
+  startPtyJob,
+  DEFAULT_FOREGROUND_PTY_CAPTURE_CHARS,
   resolveEffectiveShellKind,
   execViaChannel,
 } = require("./ptyExec.cjs");
 const {
   buildWrappedCommand,
 } = require("./ptyExecHelpers.cjs");
+
+class ShellBackedPty extends EventEmitter {
+  write(data) {
+    if (data === "\x03") return;
+    const result = spawnSync("sh", ["-c", String(data)], { encoding: "utf8" });
+    queueMicrotask(() => {
+      this.emit("data", Buffer.from(result.stdout));
+    });
+  }
+}
+
+function markerFromWrite(data) {
+  return String(data).match(/(__NCMCP_[a-z0-9]+_[0-9a-f]+__)/i)?.[1] || null;
+}
+
+test("execViaPty completes when command output has no trailing newline", async () => {
+  const result = await execViaPty(new ShellBackedPty(), "printf 'abc'", {
+    shellKind: "posix",
+    timeoutMs: 1000,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.stdout, "abc");
+  assert.equal(result.exitCode, 0);
+});
+
+test("foreground PTY capture bounds a single 20 MiB output chunk and keeps its tail", async () => {
+  class LargeOutputPty extends EventEmitter {
+    write(data) {
+      const marker = markerFromWrite(data);
+      if (!marker) return;
+      queueMicrotask(() => {
+        this.emit("data", Buffer.from(
+          `${marker}_S\n${"x".repeat(20 * 1024 * 1024)}TAIL\n${marker}_E:0\n`,
+        ));
+      });
+    }
+  }
+
+  const result = await execViaPty(new LargeOutputPty(), "large-output", {
+    shellKind: "posix",
+    timeoutMs: 1_000,
+  });
+  assert.equal(result.ok, true);
+  assert.ok(result.stdout.length <= DEFAULT_FOREGROUND_PTY_CAPTURE_CHARS);
+  assert.match(result.stdout, /TAIL$/u);
+  assert.equal(result.outputTruncated, true);
+  assert.ok(result.outputBaseOffset > 0);
+});
+
+test("foreground PTY capture preserves UTF-8 and markers split across chunks", async () => {
+  class SplitOutputPty extends EventEmitter {
+    write(data) {
+      const marker = markerFromWrite(data);
+      if (!marker) return;
+      queueMicrotask(() => {
+        const start = Buffer.from(`${marker}_S\n`);
+        const content = Buffer.from("中文回复", "utf8");
+        const end = Buffer.from(`\n${marker}_E:0\n`);
+        this.emit("data", start.subarray(0, 7));
+        this.emit("data", start.subarray(7));
+        this.emit("data", content.subarray(0, 2));
+        this.emit("data", content.subarray(2));
+        this.emit("data", end.subarray(0, 9));
+        this.emit("data", end.subarray(9));
+      });
+    }
+  }
+
+  const result = await execViaPty(new SplitOutputPty(), "split-output", {
+    shellKind: "posix",
+    timeoutMs: 1_000,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.stdout, "中文回复");
+});
+
+test("foreground PTY timeout returns only a bounded tail", async () => {
+  class TimedOutPty extends EventEmitter {
+    signal() {}
+    write(data) {
+      const marker = markerFromWrite(data);
+      if (!marker || this.started) return;
+      this.started = true;
+      queueMicrotask(() => {
+        this.emit("data", Buffer.from(`${marker}_S\n${"y".repeat(20 * 1024 * 1024)}`));
+      });
+    }
+  }
+
+  const result = await execViaPty(new TimedOutPty(), "timeout-output", {
+    shellKind: "posix",
+    timeoutMs: 5,
+    enforceWallTimeout: true,
+  });
+  assert.equal(result.ok, false);
+  assert.match(result.error, /timed out/i);
+  assert.ok(result.stdout.length <= DEFAULT_FOREGROUND_PTY_CAPTURE_CHARS);
+  assert.equal(result.outputTruncated, true);
+});
+
+test("foreground PTY cancellation returns only a bounded tail", async () => {
+  class CancelledPty extends EventEmitter {
+    signal() {}
+    write(data) {
+      const marker = markerFromWrite(data);
+      if (!marker || this.started) return;
+      this.started = true;
+      queueMicrotask(() => {
+        this.emit("data", Buffer.from(`${marker}_S\n${"z".repeat(20 * 1024 * 1024)}`));
+      });
+    }
+  }
+
+  const pty = new CancelledPty();
+  const job = startPtyJob(pty, "cancel-output", {
+    shellKind: "posix",
+    timeoutMs: 1_000,
+    expectedPrompt: "$ ",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  job.cancel();
+  pty.emit("data", Buffer.from("$ "));
+  const result = await job.resultPromise;
+  assert.equal(result.ok, false);
+  assert.match(result.error, /cancelled/i);
+  assert.ok(result.stdout.length <= DEFAULT_FOREGROUND_PTY_CAPTURE_CHARS);
+  assert.equal(result.outputTruncated, true);
+});
+
+test("background PTY jobs preserve output that has no trailing newline", async () => {
+  const job = startPtyJob(new ShellBackedPty(), "printf 'abc'", {
+    shellKind: "posix",
+    timeoutMs: 1000,
+    maxBufferedChars: 1024,
+  });
+  const result = await job.resultPromise;
+
+  assert.equal(result.ok, true);
+  assert.equal(result.stdout, "abc");
+  assert.equal(result.exitCode, 0);
+});
 
 test("uses PowerShell wrapping when a session with no confirmed shell sees a PowerShell prompt", () => {
   // SSH sessions don't set shellKind (sshBridge never assigns one), which
@@ -102,7 +248,7 @@ test("treats a CR-redrawn last line as the effective prompt, not the doubled str
   );
 });
 
-test("rejects spoofed `PS >` (literal space then `>`) � default PowerShell never emits this", () => {
+test("rejects spoofed `PS >` (literal space then `>`) — default PowerShell never emits this", () => {
   assert.equal(resolveEffectiveShellKind(undefined, "PS >"), "posix");
 });
 
@@ -114,6 +260,31 @@ test("falls back to posix when neither shell kind nor prompt is informative", ()
 test("does not misclassify command output that happens to contain 'PS'", () => {
   assert.equal(resolveEffectiveShellKind(undefined, "PSO>"), "posix");
   assert.equal(resolveEffectiveShellKind(undefined, "ZIPS>"), "posix");
+});
+
+test("loginShellHint selects fish/posix without pinning confirmed shellKind", () => {
+  assert.equal(
+    resolveEffectiveShellKind(undefined, "user@host:~$", { loginShellHint: "fish" }),
+    "fish",
+  );
+  assert.equal(
+    resolveEffectiveShellKind(undefined, "user@host:~$", { loginShellHint: "posix" }),
+    "posix",
+  );
+  // Live PowerShell prompt still wins over a posix/fish login hint.
+  assert.equal(
+    resolveEffectiveShellKind(undefined, "PS C:\\Users\\alice>", { loginShellHint: "posix" }),
+    "powershell",
+  );
+  assert.equal(
+    resolveEffectiveShellKind(undefined, "PS C:\\Users\\alice>", { loginShellHint: "fish" }),
+    "powershell",
+  );
+  // Confirmed shellKind is never overridden by a login hint.
+  assert.equal(
+    resolveEffectiveShellKind("posix", "user@host:~$", { loginShellHint: "fish" }),
+    "posix",
+  );
 });
 
 test("cmd wrapper uses interactive cmd variable expansion", () => {
@@ -209,7 +380,7 @@ test("execViaChannel registers a pending-cancel marker before the SSH channel op
   let execCallback;
   const fakeClient = {
     exec(_command, callback) {
-      // Capture but do not invoke yet � simulates the channel-open
+      // Capture but do not invoke yet � simulates the channel-open
       // delay where the race window lives.
       execCallback = callback;
     },
@@ -246,10 +417,12 @@ test("execViaChannel drops the pending marker and resolves cleanly when sshClien
 test("execViaChannel short-circuits when cancel fires before the SSH channel opens", async () => {
   const track = new Map();
   let execCallback;
+  let invalidations = 0;
   const fakeClient = {
     exec(_command, callback) {
       execCallback = callback;
     },
+    destroy() { invalidations += 1; },
   };
   const resultPromise = execViaChannel(fakeClient, "sleep 5", {
     trackForCancellation: track,
@@ -263,7 +436,16 @@ test("execViaChannel short-circuits when cancel fires before the SSH channel ope
     if (entry.chatSessionId === "chat-2") entry.cancel();
   }
 
-  // Now the channel "opens" � even though `sshClient.exec` would
+  const result = await Promise.race([
+    resultPromise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error("pending cancel did not settle")), 25)),
+  ]);
+  assert.equal(result.ok, false);
+  assert.equal(result.error, "Cancelled");
+  assert.equal(track.size, 0, "pending marker should be removed as soon as cancel settles");
+  assert.equal(invalidations, 1, "pending cancel must invalidate the uncancellable channel-open request");
+
+  // Now the channel "opens" � even though `sshClient.exec` would
   // hand us a working stream, we must short-circuit because the user
   // already cancelled.
   const fakeExecStream = {
@@ -273,9 +455,201 @@ test("execViaChannel short-circuits when cancel fires before the SSH channel ope
     on() {},
   };
   execCallback(null, fakeExecStream);
+  assert.equal(fakeExecStream.closed, true, "should close the now-unwanted stream");
+});
+
+test("execViaChannel times out while SSH never opens the exec channel", async () => {
+  const track = new Map();
+  let execCallback;
+  let invalidations = 0;
+  const fakeClient = {
+    exec(_command, callback) {
+      execCallback = callback;
+    },
+    destroy() { invalidations += 1; },
+  };
+  const result = await Promise.race([
+    execViaChannel(fakeClient, "echo hi", {
+      trackForCancellation: track,
+      chatSessionId: "chat-opening-timeout",
+      timeoutMs: 5,
+    }),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("opening timeout did not settle")), 50)),
+  ]);
+
+  assert.equal(result.ok, false);
+  assert.match(result.error, /timed out/);
+  assert.equal(track.size, 0);
+  assert.equal(invalidations, 1);
+
+  const lateStream = {
+    closed: false,
+    close() { this.closed = true; },
+    stderr: { on() {} },
+    on() {},
+  };
+  execCallback(null, lateStream);
+  assert.equal(lateStream.closed, true, "late exec channels must be closed after opening timeout");
+});
+
+test("execViaChannel terminates the command when combined output exceeds its hard limit", async () => {
+  const track = new Map();
+  const execStream = new EventEmitter();
+  execStream.stderr = new EventEmitter();
+  execStream.closed = false;
+  execStream.close = () => { execStream.closed = true; };
+  execStream.destroy = () => { execStream.closed = true; };
+  const fakeClient = {
+    exec(_command, callback) {
+      callback(null, execStream);
+    },
+  };
+
+  const resultPromise = execViaChannel(fakeClient, "yes", {
+    trackForCancellation: track,
+    chatSessionId: "chat-output-limit",
+    timeoutMs: 5_000,
+    maxOutputBytes: 5,
+  });
+  execStream.emit("data", Buffer.from("abc"));
+  execStream.stderr.emit("data", Buffer.from("de"));
+  execStream.emit("data", Buffer.from("f"));
+
   const result = await resultPromise;
   assert.equal(result.ok, false);
+  assert.equal(result.stdout, "abc");
+  assert.equal(result.stderr, "de");
+  assert.equal(result.exitCode, -1);
+  assert.match(result.error, /output exceeded.*5 byte/i);
+  assert.equal(execStream.closed, true, "the noisy remote process must be terminated");
+  assert.equal(track.size, 0, "the cancelled exec channel must not remain tracked");
+  assert.equal(execStream.listenerCount("data"), 0);
+  assert.equal(execStream.stderr.listenerCount("data"), 0);
+  assert.equal(execStream.listenerCount("close"), 0);
+});
+
+test("execViaChannel settles and releases listeners when the SSH channel errors", async () => {
+  const track = new Map();
+  const execStream = new EventEmitter();
+  execStream.stderr = new EventEmitter();
+  execStream.closed = false;
+  execStream.close = () => { execStream.closed = true; };
+  execStream.destroy = () => { execStream.closed = true; };
+  const fakeClient = {
+    exec(_command, callback) {
+      callback(null, execStream);
+    },
+  };
+
+  const resultPromise = execViaChannel(fakeClient, "echo hi", {
+    trackForCancellation: track,
+    chatSessionId: "chat-channel-error",
+    timeoutMs: 5_000,
+  });
+  execStream.emit("data", Buffer.from("partial"));
+  execStream.emit("error", new Error("channel fault"));
+
+  const result = await resultPromise;
+  assert.equal(result.ok, false);
+  assert.equal(result.stdout, "partial");
+  assert.equal(result.stderr, "");
+  assert.equal(result.exitCode, -1);
+  assert.match(result.error, /channel fault/i);
+  assert.equal(execStream.closed, true);
+  assert.equal(track.size, 0);
+  assert.equal(execStream.listenerCount("data"), 0);
+  assert.equal(execStream.stderr.listenerCount("data"), 0);
+  assert.equal(execStream.stderr.listenerCount("error"), 0);
+  assert.equal(execStream.listenerCount("close"), 0);
+  assert.equal(execStream.listenerCount("error"), 0);
+});
+
+function createExecChannelHarness() {
+  const execStream = new EventEmitter();
+  execStream.stderr = new EventEmitter();
+  execStream.closed = false;
+  execStream.close = () => { execStream.closed = true; };
+  execStream.destroy = () => { execStream.closed = true; };
+  return {
+    execStream,
+    fakeClient: {
+      exec(_command, callback) {
+        callback(null, execStream);
+      },
+    },
+  };
+}
+
+test("execViaChannel preserves UTF-8 split across stdout chunks", async () => {
+  const { execStream, fakeClient } = createExecChannelHarness();
+  const resultPromise = execViaChannel(fakeClient, "printf unicode", { timeoutMs: 5_000 });
+  const bytes = Buffer.from("中文", "utf8");
+  execStream.emit("data", bytes.subarray(0, 2));
+  execStream.emit("data", bytes.subarray(2, 4));
+  execStream.emit("data", bytes.subarray(4));
+  execStream.emit("close", 0);
+
+  assert.deepEqual(await resultPromise, {
+    ok: true,
+    stdout: "中文",
+    stderr: "",
+    exitCode: 0,
+  });
+});
+
+test("execViaChannel decodes interleaved stdout and stderr independently", async () => {
+  const { execStream, fakeClient } = createExecChannelHarness();
+  const resultPromise = execViaChannel(fakeClient, "printf unicode", { timeoutMs: 5_000 });
+  const stdoutBytes = Buffer.from("中", "utf8");
+  const stderrBytes = Buffer.from("文", "utf8");
+  execStream.emit("data", stdoutBytes.subarray(0, 2));
+  execStream.stderr.emit("data", stderrBytes.subarray(0, 1));
+  execStream.emit("data", stdoutBytes.subarray(2));
+  execStream.stderr.emit("data", stderrBytes.subarray(1));
+  execStream.emit("close", 0);
+
+  assert.deepEqual(await resultPromise, {
+    ok: true,
+    stdout: "中",
+    stderr: "文",
+    exitCode: 0,
+  });
+});
+
+test("execViaChannel omits an incomplete UTF-8 character at the output limit", async () => {
+  const { execStream, fakeClient } = createExecChannelHarness();
+  const resultPromise = execViaChannel(fakeClient, "printf unicode", {
+    timeoutMs: 5_000,
+    maxOutputBytes: 2,
+  });
+  execStream.emit("data", Buffer.from("中", "utf8"));
+
+  const result = await resultPromise;
+  assert.equal(result.ok, false);
+  assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "");
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, /�/u);
+  assert.match(result.error, /output exceeded.*2 byte/i);
+  assert.equal(execStream.closed, true);
+});
+
+test("execViaChannel cancellation never exposes an incomplete UTF-8 character", async () => {
+  const track = new Map();
+  const { execStream, fakeClient } = createExecChannelHarness();
+  const resultPromise = execViaChannel(fakeClient, "printf unicode", {
+    timeoutMs: 5_000,
+    trackForCancellation: track,
+    chatSessionId: "chat-unicode-cancel",
+  });
+  execStream.emit("data", Buffer.from("中", "utf8").subarray(0, 2));
+  const entry = [...track.values()].find((candidate) => (
+    candidate.chatSessionId === "chat-unicode-cancel"
+  ));
+  entry.cancel();
+
+  const result = await resultPromise;
+  assert.equal(result.ok, false);
+  assert.equal(result.stdout, "");
+  assert.doesNotMatch(result.stdout, /�/u);
   assert.equal(result.error, "Cancelled");
-  assert.equal(fakeExecStream.closed, true, "should close the now-unwanted stream");
-  assert.equal(track.size, 0, "pending marker should be removed after callback runs");
 });

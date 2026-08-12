@@ -347,13 +347,40 @@ test("createHostVerifier prompts for unknown host keys and waits for user respon
   assert.equal(sent[0].payload.hostname, "switch.local");
   assert.equal(sent[0].payload.status, "unknown");
 
-  handleResponse(null, {
+  handleResponse({ sender: { id: sender.id } }, {
     requestId: sent[0].payload.requestId,
     accept: true,
     addToKnownHosts: true,
   });
 
   assert.equal(await acceptedPromise, true);
+});
+
+test("createHostVerifier forwards bootEpoch on host-key prompts", async () => {
+  const rawKey = Buffer.from("new server key");
+  const sent = [];
+  const sender = {
+    id: 1,
+    isDestroyed: () => false,
+    send: (channel, payload) => sent.push({ channel, payload }),
+  };
+  const verifier = createHostVerifier({
+    sender,
+    sessionId: "session-1",
+    hostname: "switch.local",
+    port: 22,
+    knownHosts: [],
+    bootEpoch: 7,
+  });
+
+  const acceptedPromise = new Promise((resolve) => verifier(rawKey, resolve));
+  assert.equal(sent[0].payload.bootEpoch, 7);
+
+  handleResponse({ sender: { id: sender.id } }, {
+    requestId: sent[0].payload.requestId,
+    accept: false,
+  });
+  assert.equal(await acceptedPromise, false);
 });
 
 test("createHostVerifier includes existing known host details when a key changes", async () => {
@@ -391,7 +418,7 @@ test("createHostVerifier includes existing known host details when a key changes
   assert.equal(sent[0].payload.knownHostId, "kh-1");
   assert.equal(sent[0].payload.knownFingerprint, "old-key");
 
-  handleResponse(null, {
+  handleResponse({ sender: { id: sender.id } }, {
     requestId: sent[0].payload.requestId,
     accept: true,
     addToKnownHosts: true,

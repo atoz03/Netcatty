@@ -1,7 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 
@@ -271,6 +283,9 @@ test("buildOsc7SetupCommand configures bash once and prompt loading stays idempo
     const bashrc = readFileSync(bashrcPath, "utf8");
     assert.equal(markerCount(bashrc), 2);
     assert.match(bashrc, /PROMPT_COMMAND/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+    assert.match(bashrc, /netcatty-osc7-version: 2/);
+    assert.match(bashrc, /declare -\[A-Za-z\]\*a|declare -p PROMPT_COMMAND/);
 
     const output = execFileSync(
       "/bin/bash",
@@ -281,7 +296,438 @@ test("buildOsc7SetupCommand configures bash once and prompt loading stays idempo
       { env: { ...process.env, HOME: home } },
     ).toString("utf8");
 
-    assert.equal(output.split("osc7_cwd").length - 1, 1);
+    assert.match(output, /existing/);
+    // Guarded hook installed once even after double-source.
+    assert.equal(output.split("declare -F __netcatty_osc7_prompt").length - 1, 1);
+    // Bare v1 hook must not remain in PROMPT_COMMAND (only the function body may mention osc7_cwd).
+    assert.doesNotMatch(output, /(^|\n)osc7_cwd(\n|$)/);
+  });
+});
+
+test("buildOsc7SetupCommand upgrades legacy bash snippet in place", () => {
+  withTempHome("netcatty-osc7-bash-upgrade-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    writeFileSync(
+      bashrcPath,
+      [
+        "# user preamble",
+        "",
+        "# >>> Netcatty OSC 7 cwd tracking >>>",
+        "osc7_cwd() {",
+        "  printf 'legacy'\\n",
+        "}",
+        'PROMPT_COMMAND="osc7_cwd"',
+        "# <<< Netcatty OSC 7 cwd tracking <<<",
+        "",
+        "# user epilogue",
+        "",
+      ].join("\n"),
+    );
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    assert.equal(markerCount(bashrc), 2);
+    assert.match(bashrc, /netcatty-osc7-version: 2/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+    assert.match(bashrc, /# user preamble/);
+    assert.match(bashrc, /# user epilogue/);
+    assert.doesNotMatch(bashrc, /printf 'legacy'/);
+    assert.equal(bashrc.split("PROMPT_COMMAND=\"osc7_cwd\"").length - 1, 0);
+
+    // Second run is a no-op once version 2 is present.
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    assert.equal(markerCount(readFileSync(bashrcPath, "utf8")), 2);
+  });
+});
+
+test("buildOsc7SetupCommand does not truncate bashrc when start marker lacks end", () => {
+  withTempHome("netcatty-osc7-bash-incomplete-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    writeFileSync(
+      bashrcPath,
+      [
+        "# keep-me-before",
+        "# >>> Netcatty OSC 7 cwd tracking >>>",
+        "osc7_cwd() { :; }",
+        "# important-user-config-after-open-marker",
+        "alias ll='ls -la'",
+        "",
+      ].join("\n"),
+    );
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    assert.match(bashrc, /# keep-me-before/);
+    assert.match(bashrc, /# important-user-config-after-open-marker/);
+    assert.match(bashrc, /alias ll=/);
+    assert.match(bashrc, /netcatty-osc7-version: 2/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+    // Open region kept + complete v2 appended (no truncation of user lines).
+    assert.equal((bashrc.match(/# >>> Netcatty OSC 7 cwd tracking >>>/g) || []).length, 2);
+    assert.equal((bashrc.match(/# <<< Netcatty OSC 7 cwd tracking <<</g) || []).length, 1);
+  });
+});
+
+test("buildOsc7SetupCommand appends when markers are present but unbalanced", () => {
+  withTempHome("netcatty-osc7-bash-unbalanced-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    writeFileSync(
+      bashrcPath,
+      [
+        "# orphan end first",
+        "# <<< Netcatty OSC 7 cwd tracking <<<",
+        "# user config",
+        "# >>> Netcatty OSC 7 cwd tracking >>>",
+        "alias ll='ls -la'",
+        "",
+      ].join("\n"),
+    );
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    assert.match(bashrc, /# orphan end first/);
+    assert.match(bashrc, /# user config/);
+    assert.match(bashrc, /alias ll=/);
+    assert.match(bashrc, /netcatty-osc7-version: 2/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+    // Original markers kept; complete v2 appended.
+    assert.equal((bashrc.match(/# >>> Netcatty OSC 7 cwd tracking >>>/g) || []).length, 2);
+    assert.equal((bashrc.match(/# <<< Netcatty OSC 7 cwd tracking <<</g) || []).length, 2);
+  });
+});
+
+test("buildOsc7SetupCommand recovers from partial v2 write missing end marker", () => {
+  withTempHome("netcatty-osc7-bash-partial-v2-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    writeFileSync(
+      bashrcPath,
+      [
+        "# keep-me",
+        "# >>> Netcatty OSC 7 cwd tracking >>>",
+        "# netcatty-osc7-version: 2",
+        "osc7_cwd() { :; }",
+        "# interrupted before end marker",
+        "",
+      ].join("\n"),
+    );
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    assert.match(bashrc, /# keep-me/);
+    assert.match(bashrc, /# interrupted before end marker/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+    assert.match(bashrc, /declare -F __netcatty_osc7_prompt/);
+    // Partial open kept + one recovered complete block; second setup is a no-op.
+    assert.equal((bashrc.match(/# <<< Netcatty OSC 7 cwd tracking <<</g) || []).length, 1);
+    assert.equal((bashrc.match(/# netcatty-osc7-version: 2/g) || []).length, 2);
+  });
+});
+
+test("buildOsc7SetupCommand preserves user lines after mid-construct interruption", () => {
+  withTempHome("netcatty-osc7-bash-mid-construct-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    writeFileSync(
+      bashrcPath,
+      [
+        "# keep-me",
+        "# >>> Netcatty OSC 7 cwd tracking >>>",
+        "# netcatty-osc7-version: 2",
+        "osc7_cwd() {",
+        "alias keep_user_alias='yes'",
+        "",
+      ].join("\n"),
+    );
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    // Do not rewrite/truncate even if the partial body is already unusable.
+    assert.match(bashrc, /# keep-me/);
+    assert.match(bashrc, /alias keep_user_alias=/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+  });
+});
+
+test("buildOsc7SetupCommand recovers when version line exists with unbalanced markers", () => {
+  withTempHome("netcatty-osc7-bash-version-unbalanced-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    // Orphan end + open start with version: grepping version+end alone would
+    // falsely treat this as complete; balanced/complete-v2 checks must force append.
+    writeFileSync(
+      bashrcPath,
+      [
+        "# <<< Netcatty OSC 7 cwd tracking <<<",
+        "# >>> Netcatty OSC 7 cwd tracking >>>",
+        "# netcatty-osc7-version: 2",
+        "osc7_cwd() { :; }",
+        "# interrupted before end marker",
+        "",
+      ].join("\n"),
+    );
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    assert.match(bashrc, /# interrupted before end marker/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+    assert.match(bashrc, /declare -F __netcatty_osc7_prompt/);
+    // Orphan end + one recovered complete block; second run no-ops.
+    assert.equal((bashrc.match(/# <<< Netcatty OSC 7 cwd tracking <<</g) || []).length, 2);
+    assert.equal((bashrc.match(/# netcatty-osc7-version: 2/g) || []).length, 2);
+  });
+});
+
+test("buildOsc7SetupCommand ignores marker text embedded in echo commands", () => {
+  withTempHome("netcatty-osc7-bash-echo-marker-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    writeFileSync(
+      bashrcPath,
+      [
+        'echo "# >>> Netcatty OSC 7 cwd tracking >>>"',
+        "alias keep_me='yes'",
+        'echo "# <<< Netcatty OSC 7 cwd tracking <<<"',
+        "",
+      ].join("\n"),
+    );
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    assert.match(bashrc, /alias keep_me=/);
+    assert.match(bashrc, /echo "# >>> Netcatty OSC 7 cwd tracking >>>"/);
+    assert.match(bashrc, /echo "# <<< Netcatty OSC 7 cwd tracking <<<"/);
+    assert.match(bashrc, /netcatty-osc7-version: 2/);
+  });
+});
+
+test("buildOsc7SetupCommand upgrades a legacy block wrapped in control flow in place", () => {
+  withTempHome("netcatty-osc7-bash-if-wrap-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    writeFileSync(
+      bashrcPath,
+      [
+        "if true; then",
+        "# >>> Netcatty OSC 7 cwd tracking >>>",
+        "osc7_cwd() { :; }",
+        'PROMPT_COMMAND="osc7_cwd"',
+        "# <<< Netcatty OSC 7 cwd tracking <<<",
+        "fi",
+        "echo after",
+        "",
+      ].join("\n"),
+    );
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    assert.match(bashrc, /if true; then/);
+    assert.match(bashrc, /netcatty-osc7-version: 2/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+    assert.match(bashrc, /^fi$/m);
+    assert.match(bashrc, /echo after/);
+    // v2 stays inside the if/fi, not only after it.
+    const ifIdx = bashrc.indexOf("if true; then");
+    const fiIdx = bashrc.indexOf("\nfi\n");
+    const v2Idx = bashrc.indexOf("netcatty-osc7-version: 2");
+    assert.ok(ifIdx >= 0 && fiIdx > ifIdx && v2Idx > ifIdx && v2Idx < fiIdx);
+    execFileSync("/bin/bash", ["-n", bashrcPath], { stdio: "pipe" });
+  });
+});
+
+test("buildOsc7SetupCommand upgrades a read-only legacy bashrc in one atomic write", () => {
+  withTempHome("netcatty-osc7-bash-readonly-", (home) => {
+    const bashrcPath = join(home, ".bashrc");
+    writeFileSync(
+      bashrcPath,
+      [
+        "# before",
+        "# >>> Netcatty OSC 7 cwd tracking >>>",
+        "legacy",
+        "# <<< Netcatty OSC 7 cwd tracking <<<",
+        "# after",
+        "",
+      ].join("\n"),
+    );
+    chmodSync(bashrcPath, 0o444);
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    assert.equal(lstatSync(bashrcPath).mode & 0o777, 0o444);
+    const bashrc = readFileSync(bashrcPath, "utf8");
+    assert.match(bashrc, /# before/);
+    assert.match(bashrc, /# after/);
+    assert.match(bashrc, /netcatty-osc7-version: 2/);
+    assert.match(bashrc, /__netcatty_osc7_prompt/);
+    assert.doesNotMatch(bashrc, /^legacy$/m);
+  });
+});
+
+test("buildOsc7SetupCommand upgrades through a symlinked bashrc without replacing the link", () => {
+  withTempHome("netcatty-osc7-bash-symlink-", (home) => {
+    const realPath = join(home, "dotfiles", "bashrc.real");
+    const midLink = join(home, "dotfiles", "bashrc.link");
+    const bashrcPath = join(home, ".bashrc");
+    mkdirSync(join(home, "dotfiles"), { recursive: true });
+    writeFileSync(
+      realPath,
+      [
+        "# managed-preamble",
+        "# >>> Netcatty OSC 7 cwd tracking >>>",
+        "osc7_cwd() {",
+        "  printf 'legacy'\\n",
+        "}",
+        'PROMPT_COMMAND="osc7_cwd"',
+        "# <<< Netcatty OSC 7 cwd tracking <<<",
+        "# managed-epilogue",
+        "",
+      ].join("\n"),
+    );
+    chmodSync(realPath, 0o644);
+    // Chain: ~/.bashrc -> dotfiles/bashrc.link -> bashrc.real
+    symlinkSync("bashrc.real", midLink);
+    symlinkSync(join("dotfiles", "bashrc.link"), bashrcPath);
+    assert.ok(lstatSync(bashrcPath).isSymbolicLink());
+    assert.ok(lstatSync(midLink).isSymbolicLink());
+
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+
+    assert.ok(lstatSync(bashrcPath).isSymbolicLink(), "bashrc must remain a symlink");
+    assert.ok(lstatSync(midLink).isSymbolicLink(), "intermediate link must remain a symlink");
+    assert.equal(readlinkSync(bashrcPath), join("dotfiles", "bashrc.link"));
+    assert.equal(readlinkSync(midLink), "bashrc.real");
+    assert.equal(lstatSync(realPath).mode & 0o777, 0o644, "target mode should be preserved");
+    const content = readFileSync(realPath, "utf8");
+    assert.match(content, /# managed-preamble/);
+    assert.match(content, /# managed-epilogue/);
+    assert.match(content, /netcatty-osc7-version: 2/);
+    assert.match(content, /__netcatty_osc7_prompt/);
+    assert.doesNotMatch(content, /printf 'legacy'/);
+  });
+});
+
+test("bash snippet does not error when PROMPT_COMMAND is inherited without osc7_cwd", () => {
+  withTempHome("netcatty-osc7-bash-su-inherit-", (home) => {
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    const bashrcPath = join(home, ".bashrc");
+
+    // Simulate non-login su: child gets exported PROMPT_COMMAND but no function defs.
+    const result = spawnSync(
+      "/bin/bash",
+      [
+        "--noprofile",
+        "--norc",
+        "-c",
+        [
+          `source ${JSON.stringify(bashrcPath)}`,
+          "export PROMPT_COMMAND",
+          // Child env has PROMPT_COMMAND but not the function (fresh bash -c without rc).
+          `env PROMPT_COMMAND="$PROMPT_COMMAND" /bin/bash --noprofile --norc -c 'eval "$PROMPT_COMMAND"; echo OK'`,
+        ].join("; "),
+      ],
+      {
+        env: { ...process.env, HOME: home },
+        encoding: "utf8",
+      },
+    );
+
+    assert.equal(result.status, 0, result.stderr || result.stdout);
+    assert.match(result.stdout, /OK/);
+    assert.doesNotMatch(result.stderr + result.stdout, /command not found/);
+  });
+});
+
+test("bash snippet still emits OSC 7 when functions are defined", () => {
+  withTempHome("netcatty-osc7-bash-emit-", (home) => {
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    const bashrcPath = join(home, ".bashrc");
+    const output = execFileSync(
+      "/bin/bash",
+      ["-lc", `source ${JSON.stringify(bashrcPath)}; __netcatty_osc7_prompt; true`],
+      { env: { ...process.env, HOME: home, PWD: home }, cwd: home },
+    ).toString("utf8");
+
+    assert.ok(output.includes("\u001b]7;file://"), "expected OSC 7 output");
+    assert.equal(realpathSync(extractOsc7Path(output)), realpathSync(home));
+  });
+});
+
+test("bash snippet preserves an intentional PROMPT_COMMAND export", () => {
+  withTempHome("netcatty-osc7-bash-export-", (home) => {
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    const bashrcPath = join(home, ".bashrc");
+    const output = execFileSync(
+      "/bin/bash",
+      [
+        "-lc",
+        [
+          "export PROMPT_COMMAND=preexisting",
+          `source ${JSON.stringify(bashrcPath)}`,
+          'if declare -p PROMPT_COMMAND 2>/dev/null | grep -q "declare -x"; then echo EXPORTED; else echo LOCAL; fi',
+        ].join("; "),
+      ],
+      { env: { ...process.env, HOME: home } },
+    ).toString("utf8");
+
+    assert.match(output, /EXPORTED/);
+  });
+});
+
+test("bash snippet dedupes hooks across array PROMPT_COMMAND elements", () => {
+  withTempHome("netcatty-osc7-bash-array-pc-", (home) => {
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    const bashrcPath = join(home, ".bashrc");
+    const output = execFileSync(
+      "/bin/bash",
+      [
+        "--noprofile",
+        "--norc",
+        "-c",
+        [
+          'PROMPT_COMMAND=("first" "osc7_cwd" "echo KEEP")',
+          `source ${JSON.stringify(bashrcPath)}`,
+          `source ${JSON.stringify(bashrcPath)}`,
+          'declare -p PROMPT_COMMAND',
+        ].join("; "),
+      ],
+      { env: { ...process.env, HOME: home } },
+    ).toString("utf8");
+
+    assert.match(output, /first/);
+    assert.match(output, /echo KEEP/);
+    assert.equal(output.split("declare -F __netcatty_osc7_prompt").length - 1, 1);
+    assert.doesNotMatch(output, /\[1\]="osc7_cwd"/);
+  });
+});
+
+test("bash snippet handles exported array PROMPT_COMMAND", () => {
+  withTempHome("netcatty-osc7-bash-ax-pc-", (home) => {
+    runSetup({ HOME: home, SHELL: "/bin/bash" });
+    const bashrcPath = join(home, ".bashrc");
+    const output = execFileSync(
+      "/bin/bash",
+      [
+        "--noprofile",
+        "--norc",
+        "-c",
+        [
+          'declare -ax PROMPT_COMMAND=("echo one" "osc7_cwd")',
+          `source ${JSON.stringify(bashrcPath)}`,
+          `source ${JSON.stringify(bashrcPath)}`,
+          'declare -p PROMPT_COMMAND',
+        ].join("; "),
+      ],
+      { env: { ...process.env, HOME: home } },
+    ).toString("utf8");
+
+    assert.match(output, /echo one/);
+    assert.equal(output.split("declare -F __netcatty_osc7_prompt").length - 1, 1);
+    assert.doesNotMatch(output, /osc7_cwd"/);
   });
 });
 
@@ -513,12 +959,21 @@ test("buildOsc7SetupCommand honors zsh ZDOTDIR captured from the current shell",
     const zshrc = readFileSync(zshrcPath, "utf8");
     assert.equal(markerCount(zshrc), 2);
     assert.match(zshrc, /precmd_functions/);
+    assert.match(zshrc, /netcatty-osc7-version: 2/);
+    assert.match(zshrc, /__netcatty_osc7_prompt/);
     assert.equal(existsSync(join(home, ".zshrc")), false);
 
-    execFileSync(zshPath, ["-uc", `source ${JSON.stringify(zshrcPath)}; print -r -- "\${precmd_functions[*]}"`], {
-      env: { ...process.env, HOME: home, ZDOTDIR: zdotdir },
-      stdio: "pipe",
-    });
+    const precmd = execFileSync(
+      zshPath,
+      ["-uc", `source ${JSON.stringify(zshrcPath)}; source ${JSON.stringify(zshrcPath)}; print -r -- "\${precmd_functions[*]}"`],
+      {
+        env: { ...process.env, HOME: home, ZDOTDIR: zdotdir },
+        stdio: "pipe",
+      },
+    ).toString("utf8");
+    assert.match(precmd, /__netcatty_osc7_prompt/);
+    assert.equal(precmd.trim().split(/\s+/).filter((name) => name === "__netcatty_osc7_prompt").length, 1);
+    assert.doesNotMatch(precmd, /(?:^|\s)osc7_cwd(?:\s|$)/);
   });
 });
 

@@ -295,7 +295,7 @@ export function ScriptDialogFormFields({
           aria-describedby={describedBy}
           aria-invalid={fieldError ? true : undefined}
         >
-          <legend className="text-sm font-medium leading-none">{field.label}</legend>
+          <legend className="text-sm font-medium leading-5">{field.label}</legend>
           {fieldDescription}
           <div className="space-y-2">
             {field.options.map((option, index) => {
@@ -384,7 +384,7 @@ export function ScriptDialogFormFields({
             className="mt-0.5 h-4 w-4 accent-primary"
           />
           <span className="min-w-0">
-            <span className="block font-medium leading-none">{field.label}</span>
+            <span className="block font-medium leading-5">{field.label}</span>
             {inlineDescription}
             {inlineErrorMessage}
           </span>
@@ -494,6 +494,7 @@ export function ScriptDialogHost() {
         </DialogHeader>
         {request.type === 'prompt' ? (
           <Input
+            type={request.sensitive ? 'password' : 'text'}
             value={promptValue}
             onChange={(event) => setPromptValue(event.target.value)}
             autoFocus

@@ -128,6 +128,37 @@ test("build.files trims release-only dependency payloads", () => {
   }
 });
 
+test("build.files excludes Vite-bundled renderer-only packages", () => {
+  const files = config.files;
+  for (const glob of [
+    "!node_modules/react/**/*",
+    "!node_modules/react-dom/**/*",
+    "!node_modules/@radix-ui/**/*",
+    "!node_modules/ai/**/*",
+    "!node_modules/@ai-sdk/**/*",
+    "!node_modules/@mdxeditor/**/*",
+    "!node_modules/streamdown/**/*",
+    "!node_modules/@streamdown/**/*",
+    "!node_modules/@tanstack/react-virtual/**/*",
+    "!node_modules/pinyin-pro/**/*",
+    "!node_modules/re2js/**/*",
+    "!node_modules/@eslint-community/regexpp/**/*",
+    "!node_modules/clsx/**/*",
+    "!node_modules/tailwind-merge/**/*",
+    "!node_modules/use-stick-to-bottom/**/*",
+    "!node_modules/lexical/**/*",
+    "!node_modules/@lexical/**/*",
+    "!node_modules/@codemirror/**/*",
+    "!node_modules/shiki/**/*",
+    "!node_modules/@shiki/**/*",
+  ]) {
+    assert.ok(
+      files.includes(glob),
+      `build.files must exclude Vite-bundled renderer package: ${glob}`,
+    );
+  }
+});
+
 test("linux packaging uses multi-size build/icons instead of a single 1024px override", async () => {
   assert.equal(
     config.linux.icon,
@@ -173,17 +204,70 @@ test("linux packaging includes an Arch Linux pacman package target", () => {
 test("rpm packaging disables generated build-id symlinks", () => {
   assert.deepEqual(
     config.rpm?.fpm,
-    ["--rpm-rpmbuild-define", "_build_id_links none"],
-    "RPM packages must not own /usr/lib/.build-id links that can conflict with other RPMs",
+    [
+      "--rpm-rpmbuild-define",
+      "_build_id_links none",
+      "--rpm-rpmbuild-define",
+      "__os_install_post %{nil}",
+    ],
+    "RPM packages must skip build-id links and host brp post scripts on RHEL builders",
+  );
+});
+
+test("rpm packaging uses gzip compression for RHEL-family package hosts", () => {
+  // Default electron-builder/fpm RPM compression is xzmt. AlmaLinux/RHEL 8 CI
+  // images provide `xz` but not the `xzmt` shim, which makes rpmbuild exit 127.
+  assert.equal(
+    config.rpm?.compression,
+    "gzip",
+    "RPM compression must avoid xzmt on RHEL 8 / AlmaLinux 8 package builders",
+  );
+});
+
+test("Windows package arch is controlled by pack script CLI flags", () => {
+  assert.deepEqual(
+    config.win.target,
+    ["nsis", "portable", "zip"],
+    "win.target must not hard-code x64 and arm64 or pack:win-x64 will still emit broken arm64 installers",
   );
 });
 
 test("windows packaging includes a zip archive target", () => {
-  const winTargets = config.win.target.map((entry) => entry.target);
+  const winTargets = config.win.target.map((entry) => (
+    typeof entry === "string" ? entry : entry.target
+  ));
   assert.ok(
     winTargets.includes("zip"),
     "windows package builds must publish a zip archive for no-install environments",
   );
+});
+
+test("windows installer registers and removes Explorer folder context menu entries", () => {
+  const fs = require("node:fs");
+  const path = require("node:path");
+
+  assert.equal(
+    config.nsis.include,
+    "build/installer.nsh",
+    "NSIS packaging must include the Explorer context-menu installer hooks",
+  );
+
+  const installerScript = fs.readFileSync(
+    path.join(__dirname, "..", config.nsis.include),
+    "utf8",
+  );
+  const folderKey = String.raw`Software\Classes\Directory\shell\Netcatty`;
+  const backgroundKey = String.raw`Software\Classes\Directory\Background\shell\Netcatty`;
+
+  assert.match(installerScript, /!macro customInstall\b/);
+  assert.match(installerScript, new RegExp(`WriteRegStr SHCTX "${folderKey.replaceAll("\\", "\\\\")}"`));
+  assert.match(installerScript, new RegExp(`WriteRegStr SHCTX "${backgroundKey.replaceAll("\\", "\\\\")}"`));
+  assert.match(installerScript, /-- --open-terminal-path="%1\."/);
+  assert.match(installerScript, /-- --open-terminal-path="%V\."/);
+
+  assert.match(installerScript, /!macro customUnInstall\b/);
+  assert.match(installerScript, new RegExp(`DeleteRegKey SHCTX "${folderKey.replaceAll("\\", "\\\\")}"`));
+  assert.match(installerScript, new RegExp(`DeleteRegKey SHCTX "${backgroundKey.replaceAll("\\", "\\\\")}"`));
 });
 
 test("windows zip follows the requested build architecture", () => {
@@ -201,32 +285,40 @@ test("windows zip follows the requested build architecture", () => {
     Platform.WINDOWS,
   );
 
-  assert.ok(
-    targetsByArch.get(Arch.x64)?.includes("zip"),
-    "pack:win-x64 must publish an x64 zip archive",
+  assert.deepEqual(
+    targetsByArch.get(Arch.x64)?.slice().sort(),
+    ["nsis", "portable", "zip"].sort(),
+    "pack:win-x64 must publish x64 nsis, portable, and zip",
   );
-  assert.ok(
-    !targetsByArch.get(Arch.arm64)?.includes("zip"),
-    "pack:win-x64 must not publish an arm64 zip archive without arm64 bundled binaries",
+  assert.equal(
+    targetsByArch.has(Arch.arm64),
+    false,
+    "pack:win-x64 must not publish arm64 nsis/portable/zip without a dedicated arm64 job",
   );
 });
 
-test("linux FPM packages refresh the hicolor icon cache after install and remove", () => {
+test("linux FPM packages use the custom post-install template", () => {
   const fs = require("node:fs");
   const path = require("node:path");
 
-  assert.equal(
-    config.pacman.afterInstall,
-    "scripts/linux/after-install.tpl",
-    "pacman.afterInstall must point at the custom FPM post-install template",
-  );
+  for (const [target, afterInstall] of Object.entries({
+    deb: config.deb.afterInstall,
+    rpm: config.rpm.afterInstall,
+    pacman: config.pacman.afterInstall,
+  })) {
+    assert.equal(
+      afterInstall,
+      "scripts/linux/after-install.tpl",
+      `${target}.afterInstall must point at the custom FPM post-install template`,
+    );
+  }
   assert.equal(
     config.pacman.afterRemove,
     "scripts/linux/after-remove.tpl",
     "pacman.afterRemove must point at the custom FPM post-remove template",
   );
 
-  for (const relPath of [config.pacman.afterInstall, config.pacman.afterRemove]) {
+  for (const relPath of [config.deb.afterInstall, config.pacman.afterRemove]) {
     const file = path.join(__dirname, "..", relPath);
     const contents = fs.readFileSync(file, "utf8");
     assert.match(

@@ -6,8 +6,19 @@
  * and a bottom toolbar with muted controls + subtle send button.
  */
 
-import { AtSign, Check, ChevronDown, ChevronRight, Cpu, Expand, Eye, FileText, ImageIcon, MessageSquare, Package, Plus, ShieldCheck, SquareTerminal, X, Zap } from 'lucide-react';
-import { filterQuickMessages, buildSlashCommandItems, filterUserSkillsForSlash, getSlashCommandItemKey, isSystemStopSlashCommand, type AIQuickMessage, type SlashCommandItem, type UserSkillSlashOption } from '../../infrastructure/ai/quickMessages';
+import { ArrowUp, AtSign, Check, ChevronDown, ChevronRight, Cpu, Eye, FileText, ImageIcon, Loader2, MessageSquare, Package, Plus, ShieldCheck, SquareTerminal, X, Zap } from 'lucide-react';
+import {
+  buildSlashCommandItems,
+  filterQuickMessages,
+  filterSystemSlashCommands,
+  filterUserSkillsForSlash,
+  getSlashCommandItemKey,
+  getSystemSlashCommand,
+  SYSTEM_BUILTIN_SLASH_COMMANDS,
+  type AIQuickMessage,
+  type SlashCommandItem,
+  type UserSkillSlashOption,
+} from '../../infrastructure/ai/quickMessages';
 import { SlashCommandPicker } from './SlashCommandPicker';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
@@ -24,14 +35,36 @@ import type { PromptInputStatus } from '../ai-elements/prompt-input';
 import { formatThinkingLabel } from '../../infrastructure/ai/types';
 import type { AgentModelPreset, AIPermissionMode, ProviderConfig, UploadedFile } from '../../infrastructure/ai/types';
 import { ProviderIconBadge } from '../settings/tabs/ai/ProviderIconBadge';
-import { ScrollArea } from '../ui/scroll-area';
+import { VariableSizeVirtualList, type VariableSizeVirtualListHandle } from '../ui/VariableSizeVirtualList';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
+import type { AgentContextUsage } from '../../application/state/useAgentCompactionUi';
+import {
+  CHAT_INPUT_DEFAULT_HEIGHT,
+  CHAT_INPUT_MAX_HEIGHT,
+  CHAT_INPUT_MIN_HEIGHT,
+  CHAT_INPUT_PANEL_RESERVE,
+  resolveChatInputAriaHeight,
+  resolveChatInputMaxHeight,
+  resolveChatInputResizeHeight,
+  resolveVisibleChatInputHeight,
+  resolveVisibleChatInputMaxHeight,
+} from './chatInputResize';
 
 // Keep in sync with the popover's Tailwind max-width below.
 const MODEL_PICKER_MAX_WIDTH = 360;
 // Slightly wider for the provider picker so the per-row default-model
 // caption doesn't truncate.
 const PROVIDER_PICKER_MAX_WIDTH = 320;
+const PERMISSION_PICKER_WIDTH = 250;
+const MENU_VIEWPORT_GUTTER = 8;
+const CONTEXT_USAGE_RING_RADIUS = 10;
+const CONTEXT_USAGE_RING_CIRCUMFERENCE = 2 * Math.PI * CONTEXT_USAGE_RING_RADIUS;
+
+function formatContextTokens(tokens: number): string {
+  if (tokens >= 1_000_000) return `${(tokens / 1_000_000).toFixed(1)}M`;
+  if (tokens >= 1_000) return `${(tokens / 1_000).toFixed(tokens >= 100_000 ? 0 : 1)}K`;
+  return String(Math.max(0, Math.round(tokens)));
+}
 
 /**
  * Provider picker payload used by Catty Agent. When set, the model chip
@@ -58,8 +91,16 @@ interface ChatInputProps {
   value: string;
   onChange: (value: string) => void;
   onSend: () => void;
+  onCompact?: () => void;
+  /** When false, hide/ignore `/compact` so the composer is not cleared as a silent no-op. */
+  canCompact?: boolean;
+  contextUsage?: AgentContextUsage | null;
+  onSteer?: () => void;
   onStop?: () => void;
   isStreaming?: boolean;
+  canSteer?: boolean;
+  isSteering?: boolean;
+  lockTurnConfiguration?: boolean;
   disabled?: boolean;
   providerName?: string;
   modelName?: string;
@@ -106,8 +147,15 @@ const ChatInput: React.FC<ChatInputProps> = ({
   value,
   onChange,
   onSend,
+  onCompact,
+  canCompact = false,
+  contextUsage,
+  onSteer,
   onStop,
   isStreaming = false,
+  canSteer = false,
+  isSteering = false,
+  lockTurnConfiguration = false,
   disabled = false,
   providerName,
   modelName,
@@ -131,7 +179,10 @@ const ChatInput: React.FC<ChatInputProps> = ({
 }) => {
   const { t } = useI18n();
   const hasTerminalSelectionAttachment = files.some((file) => file.terminalSelection);
-  const [expanded, setExpanded] = useState(false);
+  const composerDisabled = disabled || isSteering;
+  const [composerHeight, setComposerHeight] = useState<number | null>(null);
+  const [composerMaxHeight, setComposerMaxHeight] = useState(CHAT_INPUT_MAX_HEIGHT);
+  const composerDesiredHeightRef = useRef<number | null>(null);
   // Consolidate menu state into a single discriminated union to prevent multiple menus open simultaneously
   type ActiveMenu = 'model' | 'attach' | 'atMention' | 'slashCommand' | 'perm' | null;
   const [activeMenu, setActiveMenu] = useState<ActiveMenu>(null);
@@ -160,11 +211,131 @@ const ChatInput: React.FC<ChatInputProps> = ({
   }, []);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const inputShellRef = useRef<HTMLDivElement>(null);
+  const resizeStartRef = useRef<{
+    pointerId: number;
+    startY: number;
+    startHeight: number;
+    maxHeight: number;
+    previousUserSelect: string;
+    pendingY: number | null;
+    frame: number | null;
+  } | null>(null);
   const modelBtnRef = useRef<HTMLButtonElement>(null);
   const permBtnRef = useRef<HTMLButtonElement>(null);
   const attachBtnRef = useRef<HTMLButtonElement>(null);
   const slashPickerListRef = useRef<HTMLDivElement>(null);
+  const atMentionListRef = useRef<VariableSizeVirtualListHandle>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  const getComposerMaxHeight = useCallback(() => {
+    const panel = inputShellRef.current?.closest<HTMLElement>('[data-section="ai-chat-panel"]');
+    return resolveChatInputMaxHeight(
+      panel?.clientHeight ?? CHAT_INPUT_MAX_HEIGHT + CHAT_INPUT_PANEL_RESERVE,
+    );
+  }, []);
+
+  const applyPendingComposerResize = useCallback(() => {
+    const resizeStart = resizeStartRef.current;
+    if (!resizeStart) return;
+    resizeStart.frame = null;
+    if (resizeStart.pendingY == null) return;
+    const nextHeight = resolveChatInputResizeHeight(
+      resizeStart.startHeight,
+      resizeStart.startY,
+      resizeStart.pendingY,
+      resizeStart.maxHeight,
+    );
+    resizeStart.pendingY = null;
+    composerDesiredHeightRef.current = nextHeight;
+    setComposerHeight(nextHeight);
+  }, []);
+
+  const finishComposerResize = useCallback((target?: HTMLDivElement, pointerId?: number) => {
+    const resizeStart = resizeStartRef.current;
+    if (!resizeStart) return;
+    if (resizeStart.frame !== null) {
+      cancelAnimationFrame(resizeStart.frame);
+      applyPendingComposerResize();
+    }
+    resizeStartRef.current = null;
+    document.body.style.userSelect = resizeStart.previousUserSelect;
+    if (target && pointerId != null && target.hasPointerCapture(pointerId)) {
+      target.releasePointerCapture(pointerId);
+    }
+  }, [applyPendingComposerResize]);
+
+  const handleComposerResizeStart = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !inputShellRef.current) return;
+    event.preventDefault();
+    closeAllMenus();
+    const maxHeight = getComposerMaxHeight();
+    resizeStartRef.current = {
+      pointerId: event.pointerId,
+      startY: event.clientY,
+      startHeight: inputShellRef.current.getBoundingClientRect().height,
+      maxHeight,
+      previousUserSelect: document.body.style.userSelect,
+      pendingY: null,
+      frame: null,
+    };
+    setComposerMaxHeight(maxHeight);
+    document.body.style.userSelect = 'none';
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }, [closeAllMenus, getComposerMaxHeight]);
+
+  const handleComposerResizeMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const resizeStart = resizeStartRef.current;
+    if (!resizeStart || resizeStart.pointerId !== event.pointerId) return;
+    resizeStart.pendingY = event.clientY;
+    if (resizeStart.frame === null) {
+      resizeStart.frame = requestAnimationFrame(applyPendingComposerResize);
+    }
+  }, [applyPendingComposerResize]);
+
+  const handleComposerResizeEnd = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    finishComposerResize(event.currentTarget, event.pointerId);
+  }, [finishComposerResize]);
+
+  const handleComposerResizeKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') return;
+    event.preventDefault();
+    const maxHeight = getComposerMaxHeight();
+    const currentHeight = inputShellRef.current?.getBoundingClientRect().height
+      ?? composerHeight
+      ?? CHAT_INPUT_DEFAULT_HEIGHT;
+    const nextHeight = resolveChatInputResizeHeight(
+      currentHeight,
+      0,
+      event.key === 'ArrowUp' ? -16 : 16,
+      maxHeight,
+    );
+    setComposerMaxHeight(maxHeight);
+    composerDesiredHeightRef.current = nextHeight;
+    setComposerHeight(nextHeight);
+  }, [composerHeight, getComposerMaxHeight]);
+
+  useEffect(() => {
+    const panel = inputShellRef.current?.closest<HTMLElement>('[data-section="ai-chat-panel"]');
+    if (!panel || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(() => {
+      const maxHeight = resolveVisibleChatInputMaxHeight(panel.clientHeight);
+      if (maxHeight == null) return;
+      setComposerMaxHeight(maxHeight);
+      setComposerHeight(resolveVisibleChatInputHeight(
+        composerDesiredHeightRef.current,
+        maxHeight,
+      ));
+    });
+    observer.observe(panel);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => () => {
+    const resizeStart = resizeStartRef.current;
+    if (!resizeStart) return;
+    if (resizeStart.frame !== null) cancelAnimationFrame(resizeStart.frame);
+    document.body.style.userSelect = resizeStart.previousUserSelect;
+  }, []);
 
   const findSlashTrigger = useCallback((text: string, caretPosition: number) => {
     const beforeCaret = text.slice(0, caretPosition);
@@ -258,37 +429,62 @@ const ChatInput: React.FC<ChatInputProps> = ({
   }, [findSlashTrigger, getInputPanelMenuPos, value]);
 
   const userSkillOptions = useMemo<UserSkillSlashOption[]>(
-    () => userSkills.map((skill) => ({
+    () => (lockTurnConfiguration ? [] : userSkills).map((skill) => ({
       id: skill.id,
       slug: skill.slug,
       name: skill.name,
       description: skill.description,
     })),
-    [userSkills],
+    [lockTurnConfiguration, userSkills],
   );
+
+  useEffect(() => {
+    if (lockTurnConfiguration && (showModelPicker || showPermPicker)) closeAllMenus();
+  }, [closeAllMenus, lockTurnConfiguration, showModelPicker, showPermPicker]);
 
   const quickMessageSlugSet = useMemo(
     () => new Set(quickMessages.map((message) => message.slug)),
     [quickMessages],
   );
+  const systemCommandSlugSet = useMemo(
+    () => new Set<string>(SYSTEM_BUILTIN_SLASH_COMMANDS.map((command) => command.slug)),
+    [],
+  );
 
   const filteredQuickMessages = useMemo(
-    () => filterQuickMessages(quickMessages, slashQuery),
-    [quickMessages, slashQuery],
+    () => filterQuickMessages(quickMessages, slashQuery)
+      .filter((message) => !systemCommandSlugSet.has(message.slug)),
+    [quickMessages, slashQuery, systemCommandSlugSet],
+  );
+
+  const availableSystemCommands = useMemo(
+    () => SYSTEM_BUILTIN_SLASH_COMMANDS.filter((command) => (
+      command.slug !== 'compact' || canCompact
+    )),
+    [canCompact],
+  );
+
+  const filteredSystemCommands = useMemo(
+    () => filterSystemSlashCommands(availableSystemCommands, slashQuery),
+    [availableSystemCommands, slashQuery],
   );
 
   const filteredUserSkills = useMemo(
     () => filterUserSkillsForSlash(userSkillOptions, slashQuery)
-      .filter((skill) => !quickMessageSlugSet.has(skill.slug)),
-    [userSkillOptions, slashQuery, quickMessageSlugSet],
+      .filter((skill) => (
+        !quickMessageSlugSet.has(skill.slug)
+        && !systemCommandSlugSet.has(skill.slug)
+      )),
+    [userSkillOptions, slashQuery, quickMessageSlugSet, systemCommandSlugSet],
   );
 
   const slashCommandItems = useMemo(
-    () => buildSlashCommandItems(quickMessages, userSkillOptions, slashQuery),
-    [quickMessages, userSkillOptions, slashQuery],
+    () => buildSlashCommandItems(quickMessages, userSkillOptions, slashQuery, true)
+      .filter((item) => item.kind !== 'system' || item.command.slug !== 'compact' || canCompact),
+    [quickMessages, userSkillOptions, slashQuery, canCompact],
   );
 
-  const isSlashCatalogEmpty = quickMessages.length === 0 && userSkills.length === 0;
+  const isSlashCatalogEmpty = quickMessages.length === 0 && userSkills.length === 0 && filteredSystemCommands.length === 0;
   const slashPickerNoResultsLabel = isSlashCatalogEmpty
     ? t('ai.chat.slashEmptyHint')
     : t('ai.chat.slashNoResults');
@@ -306,12 +502,13 @@ const ChatInput: React.FC<ChatInputProps> = ({
   }, [slashRange, value]);
 
   const insertUserSkillToken = useCallback((skill: { slug: string }) => {
+    if (lockTurnConfiguration) return;
     onAddUserSkill?.(skill.slug);
     if (slashRange) {
       onChange(removeSlashQueryFromInput());
     }
     closeAllMenus();
-  }, [closeAllMenus, onAddUserSkill, onChange, removeSlashQueryFromInput, slashRange]);
+  }, [closeAllMenus, lockTurnConfiguration, onAddUserSkill, onChange, removeSlashQueryFromInput, slashRange]);
 
   const insertQuickMessage = useCallback((message: AIQuickMessage) => {
     if (slashRange) {
@@ -328,12 +525,26 @@ const ChatInput: React.FC<ChatInputProps> = ({
   }, [closeAllMenus, onChange, slashRange, value]);
 
   const handleSelectSlashCommandItem = useCallback((item: SlashCommandItem) => {
+    if (item.kind === 'system') {
+      const command = item.command.slug;
+      if (command === 'compact') {
+        if (!canCompact) {
+          closeAllMenus();
+          return;
+        }
+        onCompact?.();
+      }
+      if (command === 'stop') onStop?.();
+      onChange('');
+      closeAllMenus();
+      return;
+    }
     if (item.kind === 'quickMessage') {
       insertQuickMessage(item.message);
       return;
     }
     insertUserSkillToken(item.skill);
-  }, [insertQuickMessage, insertUserSkillToken]);
+  }, [canCompact, closeAllMenus, insertQuickMessage, insertUserSkillToken, onChange, onCompact, onStop]);
 
   // Reset active highlight when a menu opens or when the *identity* of the
   // visible items changes. Watching only `.length` misses cases where the
@@ -351,6 +562,10 @@ const ChatInput: React.FC<ChatInputProps> = ({
   useEffect(() => {
     if (showAtMention) setActiveMenuIndex(0);
   }, [showAtMention, atMentionKey]);
+  useEffect(() => {
+    if (!showAtMention || hosts.length === 0) return;
+    atMentionListRef.current?.scrollToIndex(activeMenuIndex);
+  }, [activeMenuIndex, atMentionKey, hosts.length, showAtMention]);
   useEffect(() => {
     if (showSlashCommandPicker) setActiveMenuIndex(0);
   }, [showSlashCommandPicker, slashCommandKey]);
@@ -437,6 +652,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
   }, [showAtMention, hosts, showSlashCommandPicker, menuPos, activeMenuIndex, handleSelectAtMention, handleSlashCommandKeyDown, closeAllMenus]);
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
+    if (composerDisabled) return;
     const pastedFiles = Array.from(e.clipboardData.items)
       .map((item: DataTransferItem) => item.getAsFile())
       .filter((f): f is File => !!f);
@@ -444,15 +660,16 @@ const ChatInput: React.FC<ChatInputProps> = ({
       e.preventDefault();
       onAddFiles?.(pastedFiles);
     }
-  }, [onAddFiles]);
+  }, [composerDisabled, onAddFiles]);
 
   const handleDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
+    if (composerDisabled) return;
     const droppedFiles = Array.from(e.dataTransfer.files);
     if (droppedFiles.length > 0) {
       onAddFiles?.(droppedFiles);
     }
-  }, [onAddFiles]);
+  }, [composerDisabled, onAddFiles]);
 
   const defaultPlaceholder = agentName
     ? t('ai.chat.placeholder').replace('{agent}', agentName)
@@ -460,14 +677,28 @@ const ChatInput: React.FC<ChatInputProps> = ({
 
   const handleSubmit = useCallback(
     (_text: string, _event: FormEvent<HTMLFormElement>) => {
-      if (isSystemStopSlashCommand(value)) {
-        onStop?.();
-        onChange('');
+      const systemCommand = getSystemSlashCommand(value);
+      if (systemCommand) {
+        if (systemCommand === 'compact') {
+          if (!canCompact) return;
+          onCompact?.();
+          onChange('');
+          return;
+        }
+        if (systemCommand === 'stop') {
+          onStop?.();
+          onChange('');
+          return;
+        }
+        return;
+      }
+      if (isStreaming && canSteer) {
+        onSteer?.();
         return;
       }
       onSend();
     },
-    [onSend, onStop, onChange, value],
+    [canCompact, canSteer, isStreaming, onCompact, onSend, onSteer, onStop, onChange, value],
   );
 
   const status: PromptInputStatus = isStreaming ? 'streaming' : 'idle';
@@ -521,6 +752,21 @@ const ChatInput: React.FC<ChatInputProps> = ({
     ? 'max-w-[180px]'
     : (selectedThinking ? 'max-w-[148px]' : 'max-w-[82px]');
   const hasModelPicker = hasProviderSwitcher || (modelPresets.length > 0 && !!onModelSelect);
+  const contextUsagePercent = contextUsage
+    ? Math.min(100, Math.max(0, (contextUsage.inputTokens / contextUsage.contextWindow) * 100))
+    : 0;
+  const contextUsageRingColor = contextUsagePercent >= 80
+    ? 'stroke-red-400'
+    : contextUsagePercent >= 50
+      ? 'stroke-amber-400'
+      : 'stroke-emerald-400';
+  const contextUsageRingOffset = CONTEXT_USAGE_RING_CIRCUMFERENCE
+    * (1 - contextUsagePercent / 100);
+  const contextUsageLabel = contextUsage
+    ? `${contextUsage.estimated ? '~' : ''}${t('ai.chat.contextUsage')}`
+      .replace('{used}', formatContextTokens(contextUsage.inputTokens))
+      .replace('{max}', formatContextTokens(contextUsage.contextWindow))
+    : '';
   const popoverMaxWidth = hasProviderSwitcher ? PROVIDER_PICKER_MAX_WIDTH : MODEL_PICKER_MAX_WIDTH;
   const chipClassName =
     'inline-flex h-6 items-center gap-1 rounded-full px-1.5 text-[10.5px] text-foreground/72';
@@ -531,8 +777,43 @@ const ChatInput: React.FC<ChatInputProps> = ({
 
   return (
     <div className="shrink-0 px-4 pb-4">
-      <div ref={inputShellRef} className="relative">
-      <PromptInput onSubmit={handleSubmit}>
+      <div
+        ref={inputShellRef}
+        className="relative"
+        style={composerHeight == null ? undefined : { height: composerHeight }}
+      >
+      <div
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label={t('ai.chat.resizeInput')}
+        aria-valuemin={CHAT_INPUT_MIN_HEIGHT}
+        aria-valuemax={composerMaxHeight}
+        aria-valuenow={Math.round(resolveChatInputAriaHeight(
+          composerHeight,
+          composerMaxHeight,
+        ))}
+        tabIndex={0}
+        title={t('ai.chat.resizeInput')}
+        onPointerDown={handleComposerResizeStart}
+        onPointerMove={handleComposerResizeMove}
+        onPointerUp={handleComposerResizeEnd}
+        onPointerCancel={handleComposerResizeEnd}
+        onLostPointerCapture={handleComposerResizeEnd}
+        onKeyDown={handleComposerResizeKeyDown}
+        onDoubleClick={() => {
+          composerDesiredHeightRef.current = null;
+          setComposerHeight(null);
+        }}
+        className="group/resize absolute inset-x-2 -top-1 z-20 flex h-2 cursor-ns-resize touch-none items-start justify-center outline-none"
+      >
+        <span className="mt-[3px] h-0.5 w-10 rounded-full bg-border opacity-0 transition-opacity group-hover/resize:opacity-80 group-focus-visible/resize:opacity-80" />
+      </div>
+      <PromptInput
+        onSubmit={handleSubmit}
+        allowEmptySubmit={hasTerminalSelectionAttachment}
+        className={composerHeight == null ? undefined : 'h-full'}
+        inputGroupClassName={composerHeight == null ? undefined : 'h-full'}
+      >
         {/* File attachment chips */}
         {files.length > 0 && (
           <div className="flex gap-1.5 px-3 pt-2 pb-0.5 flex-wrap">
@@ -564,6 +845,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
                 <button
                   type="button"
                   onClick={() => onRemoveFile?.(file.id)}
+                  disabled={composerDisabled}
                   className="h-3.5 w-3.5 rounded-sm flex items-center justify-center opacity-50 hover:opacity-100 hover:bg-muted/50 transition-opacity cursor-pointer shrink-0"
                 >
                   <X size={8} />
@@ -587,8 +869,17 @@ const ChatInput: React.FC<ChatInputProps> = ({
           }}
         />
 
-        {/* Textarea with expand toggle */}
-        <div className="relative" onPaste={handlePaste} onDrop={handleDrop} onDragOver={(e) => e.preventDefault()}>
+        {/* Resizable textarea */}
+        <div
+          data-section="ai-chat-input-body"
+          className={[
+            'relative',
+            composerHeight != null ? 'flex min-h-0 flex-1 flex-col' : undefined,
+          ].filter(Boolean).join(' ')}
+          onPaste={handlePaste}
+          onDrop={handleDrop}
+          onDragOver={(e) => e.preventDefault()}
+        >
           {selectedUserSkills.length > 0 && (
             <div className="px-3 pt-3 pb-1.5">
               <div className="flex flex-wrap gap-2">
@@ -605,6 +896,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
                         <button
                           type="button"
                           onClick={() => onRemoveUserSkill?.(skill.slug)}
+                          disabled={lockTurnConfiguration}
                           className="inline-flex h-4.5 w-4.5 items-center justify-center rounded-full text-foreground/42 hover:bg-primary/10 hover:text-foreground/72 transition-colors cursor-pointer"
                           aria-label={`Remove skill ${skill.name || skill.slug}`}
                         >
@@ -623,26 +915,14 @@ const ChatInput: React.FC<ChatInputProps> = ({
             value={value}
             onChange={(e) => handleInputChange(e.target.value)}
             onKeyDown={handleTextareaKeyDown}
-            placeholder={placeholder || defaultPlaceholder}
-            disabled={disabled}
+            placeholder={placeholder || (isStreaming && canSteer ? t('ai.codex.steer.placeholder') : defaultPlaceholder)}
+            disabled={composerDisabled}
             className={[
               selectedUserSkills.length > 0 ? 'pt-1.5' : undefined,
-              expanded ? 'max-h-[220px]' : undefined,
+              composerHeight != null ? 'min-h-0 max-h-none flex-1' : undefined,
             ].filter(Boolean).join(' ')}
             maxLength={100000}
           />
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                onClick={() => setExpanded((e) => !e)}
-                className="absolute top-3.5 right-3 rounded-md p-1 text-muted-foreground/38 hover:text-muted-foreground/72 hover:bg-muted/25 transition-colors cursor-pointer"
-              >
-                <Expand size={12} />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent>{expanded ? t('ai.chat.collapse') : t('ai.chat.expand')}</TooltipContent>
-          </Tooltip>
         </div>
 
         {/* @ mention popover */}
@@ -656,38 +936,47 @@ const ChatInput: React.FC<ChatInputProps> = ({
               className="fixed z-[1000] overflow-hidden rounded-lg border border-border/50 bg-popover shadow-lg"
               style={{ left: inputPanelPos.left, bottom: inputPanelPos.bottom, width: 'auto', minWidth: Math.min(200, inputPanelPos.width), maxWidth: inputPanelPos.width }}
             >
-              <ScrollArea className="max-h-[280px]">
-                <div className="p-1">
-                  {hosts.map((host, idx) => {
-                    const isActive = idx === activeMenuIndex;
-                    const showHostnameLine = host.label
-                      && host.hostname !== host.label
-                      && !host.label.includes(host.hostname);
-                    return (
-                      <button
-                        id={`at-mention-${host.sessionId}`}
-                        key={host.sessionId}
-                        type="button"
-                        role="option"
-                        aria-selected={isActive}
-                        onMouseEnter={() => setActiveMenuIndex(idx)}
-                        onClick={() => handleSelectAtMention(host)}
-                        className={`w-full rounded-md px-2 py-1 text-left transition-colors cursor-pointer ${isActive ? 'bg-muted/40' : 'hover:bg-muted/30'}`}
-                      >
-                        <div className="flex items-center gap-2 text-[12px] text-foreground/90">
-                          <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${host.connected ? 'bg-green-500' : 'bg-muted-foreground/30'}`} />
-                          <span className="truncate">{host.label || host.hostname}</span>
+              <div className="max-h-[280px]" style={{ height: Math.min(280, 8 + hosts.reduce((total, host) => total + (host.label
+                && host.hostname !== host.label
+                && !host.label.includes(host.hostname) ? 52 : 36), 0)) }}>
+                <VariableSizeVirtualList
+                  ref={atMentionListRef}
+                  items={hosts}
+                  getItemHeight={(host) => host.label
+                    && host.hostname !== host.label
+                    && !host.label.includes(host.hostname) ? 52 : 36}
+                  getItemKey={(host) => host.sessionId}
+                  className="h-full"
+                  contentClassName="p-1"
+                  renderItem={(host, idx) => {
+                  const isActive = idx === activeMenuIndex;
+                  const showHostnameLine = host.label
+                    && host.hostname !== host.label
+                    && !host.label.includes(host.hostname);
+                  return (
+                    <button
+                      id={`at-mention-${host.sessionId}`}
+                      type="button"
+                      role="option"
+                      aria-selected={isActive}
+                      onMouseEnter={() => setActiveMenuIndex(idx)}
+                      onClick={() => handleSelectAtMention(host)}
+                      className={`h-full w-full rounded-md px-2 py-1 text-left transition-colors cursor-pointer ${isActive ? 'bg-muted/40' : 'hover:bg-muted/30'}`}
+                    >
+                      <div className="flex items-center gap-2 text-[12px] text-foreground/90">
+                        <span className={`h-1.5 w-1.5 rounded-full shrink-0 ${host.connected ? 'bg-green-500' : 'bg-muted-foreground/30'}`} />
+                        <span className="truncate">{host.label || host.hostname}</span>
+                      </div>
+                      {showHostnameLine ? (
+                        <div className="pl-3.5 text-[10px] text-muted-foreground/60 truncate">
+                          {host.hostname}
                         </div>
-                        {showHostnameLine ? (
-                          <div className="pl-3.5 text-[10px] text-muted-foreground/60 truncate">
-                            {host.hostname}
-                          </div>
-                        ) : null}
-                      </button>
-                    );
-                  })}
-                </div>
-              </ScrollArea>
+                      ) : null}
+                    </button>
+                  );
+                  }}
+                />
+              </div>
             </div>
           </>,
           document.body,
@@ -701,13 +990,17 @@ const ChatInput: React.FC<ChatInputProps> = ({
               listRef={slashPickerListRef}
               listboxId={slashPickerListboxId}
               ariaLabel={t('ai.chat.slashCommands')}
+              systemCommands={filteredSystemCommands}
               quickMessages={filteredQuickMessages}
               userSkills={filteredUserSkills}
               slashCommandItems={slashCommandItems}
               activeMenuIndex={activeMenuIndex}
               onActiveIndexChange={setActiveMenuIndex}
               onSelectQuickMessage={insertQuickMessage}
+              onSelectSystemCommand={(command) => handleSelectSlashCommandItem({ kind: 'system', command })}
               onSelectSkill={insertUserSkillToken}
+              systemCommandsSectionLabel={t('ai.chat.slashSystemCommands')}
+              systemCommandDescription={(command) => t(command.descriptionKey)}
               quickMessagesSectionLabel={t('ai.chat.slashQuickMessages')}
               userSkillsSectionLabel={t('ai.chat.slashUserSkills')}
               noResultsLabel={slashPickerNoResultsLabel}
@@ -734,13 +1027,17 @@ const ChatInput: React.FC<ChatInputProps> = ({
         )}
 
         {/* Footer toolbar */}
-        <PromptInputFooter className="gap-1.5 border-t-0 bg-transparent px-3 pb-2 pt-0">
+        <PromptInputFooter
+          data-section="ai-chat-input-footer"
+          className="shrink-0 gap-1.5 border-t-0 bg-transparent px-3 pb-2 pt-0"
+        >
           <PromptInputTools className="gap-1 min-w-0">
             <Tooltip>
               <TooltipTrigger asChild>
                 <button
                   ref={attachBtnRef}
                   type="button"
+                  disabled={composerDisabled}
                   onClick={() => {
                     if (!showAttachMenu) {
                       const rect = attachBtnRef.current?.getBoundingClientRect();
@@ -817,7 +1114,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
               ref={modelBtnRef}
               type="button"
               onClick={() => {
-                if (!hasModelPicker) return;
+                if (!hasModelPicker || lockTurnConfiguration) return;
                 if (!showModelPicker) {
                   const rect = modelBtnRef.current?.getBoundingClientRect();
                   if (rect) {
@@ -835,7 +1132,8 @@ const ChatInput: React.FC<ChatInputProps> = ({
                   closeAllMenus();
                 }
               }}
-              className={`${chipClassName} min-w-0 ${hasModelPicker ? 'cursor-pointer hover:bg-muted/24 transition-colors' : ''}`}
+              disabled={lockTurnConfiguration}
+              className={`${chipClassName} min-w-0 ${hasModelPicker && !lockTurnConfiguration ? 'cursor-pointer hover:bg-muted/24 transition-colors' : 'opacity-60'}`}
               aria-label={hasProviderSwitcher ? 'Select provider and model' : 'Select model'}
               aria-expanded={showModelPicker}
             >
@@ -847,6 +1145,48 @@ const ChatInput: React.FC<ChatInputProps> = ({
               <span className={`truncate min-w-0 ${modelChipMaxWidth}`}>{modelLabel}</span>
               {hasModelPicker && <ChevronDown size={9} className="text-muted-foreground/50" />}
             </button>
+            {contextUsage && (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div
+                    role="progressbar"
+                    aria-label={contextUsageLabel}
+                    aria-valuemin={0}
+                    aria-valuemax={100}
+                    aria-valuenow={Math.round(contextUsagePercent)}
+                    className="relative flex h-4 w-4 shrink-0 items-center justify-center"
+                  >
+                    <svg
+                      aria-hidden="true"
+                      className="h-4 w-4"
+                      viewBox="0 0 28 28"
+                    >
+                      <circle
+                        className="stroke-muted/40"
+                        cx="14"
+                        cy="14"
+                        fill="none"
+                        r={CONTEXT_USAGE_RING_RADIUS}
+                        strokeWidth="3.5"
+                      />
+                      <circle
+                        className={`${contextUsageRingColor} transition-[stroke-dashoffset] duration-300`}
+                        cx="14"
+                        cy="14"
+                        fill="none"
+                        r={CONTEXT_USAGE_RING_RADIUS}
+                        strokeDasharray={CONTEXT_USAGE_RING_CIRCUMFERENCE}
+                        strokeDashoffset={contextUsageRingOffset}
+                        strokeLinecap="round"
+                        strokeWidth="3.5"
+                        transform="rotate(-90 14 14)"
+                      />
+                    </svg>
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent>{contextUsageLabel}</TooltipContent>
+              </Tooltip>
+            )}
             {showModelPicker && hasModelPicker && menuPos && createPortal(
 <>
             <div className="fixed inset-0 z-[999]" onClick={closeAllMenus} />
@@ -994,10 +1334,21 @@ const ChatInput: React.FC<ChatInputProps> = ({
                     <button
                       ref={permBtnRef}
                       type="button"
+                      disabled={lockTurnConfiguration}
                       onClick={() => {
+                        if (lockTurnConfiguration) return;
                         if (!showPermPicker) {
                           const rect = permBtnRef.current?.getBoundingClientRect();
-                          if (rect) setMenuPos({ left: rect.left, bottom: window.innerHeight - rect.top + 6 });
+                          if (rect) {
+                            const left = Math.max(
+                              MENU_VIEWPORT_GUTTER,
+                              Math.min(
+                                rect.left,
+                                window.innerWidth - PERMISSION_PICKER_WIDTH - MENU_VIEWPORT_GUTTER,
+                              ),
+                            );
+                            setMenuPos({ left, bottom: window.innerHeight - rect.top + 6 });
+                          }
                           setActiveMenu('perm');
                         } else {
                           closeAllMenus();
@@ -1027,7 +1378,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
                     <div
                       role="listbox"
                       aria-label="Permission mode"
-                      className="fixed z-[1000] min-w-[180px] rounded-lg border border-border/50 bg-popover shadow-lg py-1"
+                      className="fixed z-[1000] w-[250px] max-w-[calc(100vw-16px)] rounded-lg border border-border/50 bg-popover shadow-lg py-1"
                       style={{ left: menuPos.left, bottom: menuPos.bottom }}
                     >
                       {([
@@ -1038,6 +1389,7 @@ const ChatInput: React.FC<ChatInputProps> = ({
                         <button
                           key={mode}
                           type="button"
+                          disabled={lockTurnConfiguration}
                           role="option"
                           aria-selected={permissionMode === mode}
                           onClick={() => {
@@ -1068,11 +1420,30 @@ const ChatInput: React.FC<ChatInputProps> = ({
           <div className="flex-1 min-w-0" />
 
           <div className="flex items-center gap-1">
-            <PromptInputSubmit
-              status={status}
-              onStop={onStop}
-              disabled={(!value.trim() && !hasTerminalSelectionAttachment) || disabled}
-            />
+            {isStreaming && canSteer ? (
+              <>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type="submit"
+                      disabled={(!value.trim() && !hasTerminalSelectionAttachment) || composerDisabled}
+                      aria-label={isSteering ? t('ai.codex.steer.sending') : t('ai.codex.steer.addInstruction')}
+                      className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-foreground/20 bg-foreground text-background shadow-sm transition-colors hover:bg-foreground/90 disabled:border-border/80 disabled:bg-muted/52 disabled:text-foreground/72"
+                    >
+                      {isSteering ? <Loader2 size={14} className="animate-spin" /> : <ArrowUp size={14} />}
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent>{isSteering ? t('ai.codex.steer.sending') : t('ai.codex.steer.addInstruction')}</TooltipContent>
+                </Tooltip>
+                <PromptInputSubmit status="streaming" onStop={onStop} />
+              </>
+            ) : (
+              <PromptInputSubmit
+                status={status}
+                onStop={onStop}
+                disabled={(!value.trim() && !hasTerminalSelectionAttachment) || disabled}
+              />
+            )}
           </div>
         </PromptInputFooter>
       </PromptInput>

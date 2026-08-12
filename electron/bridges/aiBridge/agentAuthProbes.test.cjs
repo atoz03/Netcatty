@@ -1,7 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  probeClaudeAuth, probeCopilotAuth, probeCodexAuth, probeCodebuddyAuth,
+  probeClaudeAuth, probeCopilotAuth, probeCodexAuth, probeCodebuddyAuth, probeCursorCliAuth, probeGrokAuth,
 } = require("./agentAuthProbes.cjs");
 
 test("probeClaudeAuth: env ANTHROPIC_API_KEY -> authenticated env", () => {
@@ -156,4 +156,118 @@ test("probeCodebuddyAuth: CODEBUDDY_API_KEY takes precedence over settings.json"
   });
   assert.equal(r.authenticated, true);
   assert.equal(r.authSource, "api-key");
+});
+
+// ── Cursor CLI login ──
+test("probeCursorCliAuth: prefers cursor-agent and parses authenticated JSON", () => {
+  const calls = [];
+  const r = probeCursorCliAuth({
+    env: { CURSOR_API_KEY: "should-be-stripped" },
+    resolveBinary: (name) => {
+      calls.push(name);
+      return name === "cursor-agent" ? "/bin/cursor-agent" : null;
+    },
+    runStatus: (bin) => {
+      assert.equal(bin, "/bin/cursor-agent");
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          status: "authenticated",
+          isAuthenticated: true,
+          userInfo: { email: "user@example.com" },
+        }),
+      };
+    },
+  });
+  assert.deepEqual(calls, ["cursor-agent"]);
+  assert.equal(r.authenticated, true);
+  assert.equal(r.authSource, "cli-login");
+  assert.equal(r.email, "user@example.com");
+  assert.equal(r.binPath, "/bin/cursor-agent");
+});
+
+test("probeCursorCliAuth: does not fall back to bare agent binary", () => {
+  const statusCalls = [];
+  const resolveCalls = [];
+  const r = probeCursorCliAuth({
+    resolveBinary: (name) => {
+      resolveCalls.push(name);
+      return name === "agent" ? "/bin/agent" : null;
+    },
+    runStatus: (bin) => {
+      statusCalls.push(bin);
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({ isAuthenticated: true, userInfo: { email: "a@b.c" } }),
+      };
+    },
+  });
+  assert.deepEqual(resolveCalls, ["cursor-agent"]);
+  assert.deepEqual(statusCalls, []);
+  assert.equal(r.authenticated, false);
+  assert.equal(r.binPath, null);
+});
+
+// ── Grok Build ──
+test("probeGrokAuth: env XAI_API_KEY -> authenticated env", () => {
+  const r = probeGrokAuth({
+    env: { XAI_API_KEY: "xai-test" },
+    fileExists: () => false,
+    homeDir: "/home/user",
+  });
+  assert.equal(r.authenticated, true);
+  assert.equal(r.authSource, "env");
+});
+
+test("probeGrokAuth: auth.json fallback -> authenticated auth-file", () => {
+  const path = require("node:path");
+  const homeDir = path.join("home", "user");
+  const authPath = path.join(homeDir, ".grok", "auth.json");
+  const r = probeGrokAuth({
+    env: {},
+    homeDir,
+    fileExists: (p) => p === authPath,
+  });
+  assert.equal(r.authenticated, true);
+  assert.equal(r.authSource, "auth-file");
+});
+
+test("probeGrokAuth: nothing -> not authenticated", () => {
+  const r = probeGrokAuth({
+    env: {},
+    homeDir: "/home/user",
+    fileExists: () => false,
+  });
+  assert.equal(r.authenticated, false);
+  assert.equal(r.authSource, null);
+});
+
+test("probeCursorCliAuth: unauthenticated JSON -> not authenticated but keeps binPath", () => {
+  const r = probeCursorCliAuth({
+    resolveBinary: (name) => (name === "cursor-agent" ? "/bin/cursor-agent" : null),
+    runStatus: () => ({
+      exitCode: 0,
+      stdout: JSON.stringify({ isAuthenticated: false }),
+    }),
+  });
+  assert.equal(r.authenticated, false);
+  assert.equal(r.authSource, null);
+  assert.equal(r.binPath, "/bin/cursor-agent");
+});
+
+test("probeCursorCliAuth: missing binary -> not authenticated", () => {
+  const r = probeCursorCliAuth({
+    resolveBinary: () => null,
+    runStatus: () => { throw new Error("should not run"); },
+  });
+  assert.equal(r.authenticated, false);
+  assert.equal(r.binPath, null);
+});
+
+test("probeCursorCliAuth: status command failure -> not authenticated", () => {
+  const r = probeCursorCliAuth({
+    resolveBinary: () => "/bin/cursor-agent",
+    runStatus: () => ({ exitCode: 1, stdout: "", stderr: "boom" }),
+  });
+  assert.equal(r.authenticated, false);
 });

@@ -41,7 +41,10 @@ Use \`waitForText("请选择SSH资源")\` for literal prompts.
 Use \`waitForRegex(".*请选择SSH资源.*登录方式.*")\` for regex or output split across terminal lines.
 
 ### nct.session
-- \`nct.session.connected\`, \`hostname\`, \`username\`
+- \`nct.session.connected\` — whether the current terminal session is connected
+- \`nct.session.name\` — session display name, usually the saved host label
+- \`nct.session.hostname\` — hostname or address of the current session
+- \`nct.session.username\` — username of the current session
 - \`await nct.session.sleep(ms)\` — alias \`await nct.sleep(ms)\`
 - \`await nct.session.startLog(path)\` / \`stopLog()\`
 - \`await nct.session.disconnect()\`

@@ -103,6 +103,83 @@ test("dispatchCapabilityRpc denies public vault host notes set when approval rej
   assert.match(result.error, /denied/i);
 });
 
+test("dispatchCapabilityRpc closes an owned session through the renderer bridge", async () => {
+  const calls = [];
+  const closed = [];
+  const lifecycle = [];
+  const dispatch = createTestDispatcher({
+    validateSessionClose: (params) => {
+      assert.equal(params.chatSessionId, "chat-1");
+      assert.equal(params.sessionId, "session-1");
+      return { ok: true };
+    },
+    beforeSessionClose: async () => {
+      await Promise.resolve();
+      lifecycle.push("sftp-clean");
+    },
+    afterSessionClose: async () => {
+      lifecycle.push("close-finished");
+    },
+    onSessionClosed: async (sessionId) => {
+      await Promise.resolve();
+      lifecycle.push("session-jobs-settled");
+      closed.push(sessionId);
+    },
+    invokeVaultAgent: async (op, params) => {
+      lifecycle.push("session-close");
+      calls.push({ op, params });
+      return { ok: true, sessionId: params.sessionId, status: "closed" };
+    },
+  });
+
+  const result = await dispatch("public/session/close", {
+    chatSessionId: "chat-1",
+    sessionId: "session-1",
+  });
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(calls, [{ op: "session.close", params: { sessionId: "session-1" } }]);
+  assert.deepEqual(closed, ["session-1"]);
+  assert.deepEqual(lifecycle, ["sftp-clean", "session-close", "session-jobs-settled", "close-finished"]);
+});
+
+test("dispatchCapabilityRpc refuses to close a session outside ownership", async () => {
+  let invoked = false;
+  const dispatch = createTestDispatcher({
+    validateSessionClose: () => ({ ok: false, error: "not owned" }),
+    invokeVaultAgent: async () => {
+      invoked = true;
+      return { ok: true };
+    },
+  });
+
+  const result = await dispatch("public/session/close", {
+    chatSessionId: "chat-1",
+    sessionId: "session-2",
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(invoked, false);
+});
+
+test("dispatchCapabilityRpc preserves the host-open scope generation across the async bridge", async () => {
+  const registrations = [];
+  const dispatch = createTestDispatcher({
+    captureHostOpenScope: (chatSessionId) => {
+      assert.equal(chatSessionId, "chat-1");
+      return 7;
+    },
+    onHostOpened: (chatSessionId, sessionId, generation) => {
+      registrations.push({ chatSessionId, sessionId, generation });
+    },
+    invokeVaultAgent: async () => ({ ok: true, sessionId: "session-1" }),
+  });
+
+  await dispatch("public/vault/hosts/open", { chatSessionId: "chat-1", hostId: "host-1" });
+
+  assert.deepEqual(registrations, [{ chatSessionId: "chat-1", sessionId: "session-1", generation: 7 }]);
+});
+
 test("dispatchCapabilityRpc routes vault hosts create to vault service", async () => {
   let invokedOp = null;
   const dispatch = createTestDispatcher({
@@ -117,6 +194,40 @@ test("dispatchCapabilityRpc routes vault hosts create to vault service", async (
     dryRun: "true",
   });
   assert.equal(invokedOp, "hosts.create");
+  assert.equal(result.ok, true);
+});
+
+test("dispatchCapabilityRpc routes vault host update to vault service", async () => {
+  let invokedOp = null;
+  let invokedParams = null;
+  const dispatch = createTestDispatcher({
+    invokeVaultAgent: async (op, params) => {
+      invokedOp = op;
+      invokedParams = params;
+      return { ok: true, hostId: params.hostId };
+    },
+  });
+
+  const result = await dispatch("vault/hosts/update", {
+    hostId: "host-1",
+    label: "updated",
+  });
+  assert.equal(invokedOp, "host.update");
+  assert.equal(invokedParams.label, "updated");
+  assert.equal(result.ok, true);
+});
+
+test("dispatchCapabilityRpc routes vault host delete to vault service", async () => {
+  let invokedOp = null;
+  const dispatch = createTestDispatcher({
+    invokeVaultAgent: async (op, params) => {
+      invokedOp = op;
+      return { ok: true, hostId: params.hostId };
+    },
+  });
+
+  const result = await dispatch("vault/hosts/delete", { hostId: "host-1" });
+  assert.equal(invokedOp, "host.delete");
   assert.equal(result.ok, true);
 });
 
@@ -154,6 +265,23 @@ test("dispatchCapabilityRpc routes portforward start to portforward service", as
   assert.equal(invokedOp, "portforward.start");
   assert.equal(result.ok, true);
   assert.equal(result.ruleId, "rule-1");
+});
+
+test("dispatchCapabilityRpc lists port forwards from the configured runtime", async () => {
+  const calls = [];
+  const dispatch = createTestDispatcher({
+    listPortForwards: async () => {
+      calls.push("list");
+      return [{ tunnelId: "worker-pf", status: "active" }];
+    },
+  });
+
+  const result = await dispatch("portforward/tunnels/list", {});
+  assert.deepEqual(result, {
+    ok: true,
+    tunnels: [{ tunnelId: "worker-pf", status: "active" }],
+  });
+  assert.deepEqual(calls, ["list"]);
 });
 
 test("dispatchCapabilityRpc reads permissionMode from deps on each call", async () => {

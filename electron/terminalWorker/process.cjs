@@ -61,7 +61,7 @@ function createZmodemUploadFileSelector(parentPort, options = {}) {
     }
   });
 
-  return function selectZmodemUploadFiles(webContentsId) {
+  return function selectZmodemUploadFiles(webContentsId, sessionId) {
     const requestId = randomUUIDFn();
     const promise = new Promise((resolve, reject) => {
       pendingRequests.set(requestId, { resolve, reject });
@@ -70,6 +70,7 @@ function createZmodemUploadFileSelector(parentPort, options = {}) {
       kind: "zmodem-upload-dialog",
       requestId,
       webContentsId,
+      sessionId,
     });
     return promise;
   };
@@ -92,7 +93,7 @@ function createZmodemDownloadDirectorySelector(parentPort, options = {}) {
     }
   });
 
-  return function selectZmodemDownloadDirectory(webContentsId) {
+  return function selectZmodemDownloadDirectory(webContentsId, sessionId) {
     const requestId = randomUUIDFn();
     const promise = new Promise((resolve, reject) => {
       pendingRequests.set(requestId, { resolve, reject });
@@ -101,9 +102,125 @@ function createZmodemDownloadDirectorySelector(parentPort, options = {}) {
       kind: "zmodem-download-dialog",
       requestId,
       webContentsId,
+      sessionId,
     });
     return promise;
   };
+}
+
+function registerExternalSessionHandlers(ipcMain, options) {
+  const {
+    sessions,
+    parentPort,
+    sessionLogStreamManager,
+  } = options;
+
+  const stopSessionLog = async (sessionId, session) => {
+    const token = session?.sessionLogToken;
+    if (!token) return;
+    session.sessionLogToken = null;
+    await sessionLogStreamManager.stopStream(sessionId, token);
+  };
+
+  ipcMain.handle("netcatty:external:start", async (event, payload) => {
+    const sessionId = payload?.sessionId;
+    if (typeof sessionId !== "string" || sessionId.length < 1 || sessionId.length > 128) {
+      throw new TypeError("External terminal session ID is invalid");
+    }
+    if (sessions.has(sessionId)) throw new Error("Terminal session already exists");
+    const columns = Number(payload?.columns);
+    const rows = Number(payload?.rows);
+    if (!Number.isInteger(columns) || columns < 1 || columns > 16_384
+      || !Number.isInteger(rows) || rows < 1 || rows > 16_384) {
+      throw new TypeError("External terminal dimensions are invalid");
+    }
+    const postEvent = (message) => parentPort.postMessage({
+      kind: "external-session-event",
+      sessionId,
+      ...message,
+    });
+    let session;
+    const stream = {
+      write(data) {
+        postEvent({ event: "input", data });
+        return true;
+      },
+      setWindow(nextRows, nextColumns) {
+        postEvent({ event: "resize", columns: nextColumns, rows: nextRows });
+      },
+      pause() {
+        postEvent({ event: "flow", paused: true });
+      },
+      resume() {
+        postEvent({ event: "flow", paused: false });
+      },
+      close() {
+        void stopSessionLog(sessionId, session).catch(() => {});
+        postEvent({ event: "close", reason: "closed" });
+      },
+    };
+    let sessionLogToken = null;
+    if (payload?.sessionLog?.enabled && payload.sessionLog.directory) {
+      sessionLogToken = sessionLogStreamManager.startStream(sessionId, {
+        hostLabel: payload?.hostLabel || payload?.hostname || payload?.protocol || "Plugin",
+        hostname: payload?.hostname || payload?.protocol || "plugin",
+        directory: payload.sessionLog.directory,
+        format: payload.sessionLog.format || "txt",
+        timestampsEnabled: Boolean(payload.sessionLog.timestampsEnabled),
+        startTime: Date.now(),
+      });
+    }
+    session = {
+      type: "plugin",
+      protocol: typeof payload?.protocol === "string" ? payload.protocol : "plugin",
+      stream,
+      cols: columns,
+      rows,
+      webContentsId: event.sender.id,
+      closed: false,
+      sessionLogToken,
+    };
+    sessions.set(sessionId, session);
+    return { sessionId };
+  });
+
+  ipcMain.handle("netcatty:external:output", async (event, payload) => {
+    const session = sessions.get(payload?.sessionId);
+    if (!session || session.type !== "plugin" || session.closed) {
+      throw new Error("External terminal session is unavailable");
+    }
+    if (typeof payload?.data !== "string") {
+      throw new TypeError("External terminal output is invalid");
+    }
+    if (payload.data.length > 0) sessionLogStreamManager.appendData(payload.sessionId, payload.data);
+    await event.sender.send("netcatty:data", {
+      sessionId: payload.sessionId,
+      data: payload.data,
+      ...(payload.meta === undefined ? {} : { meta: payload.meta }),
+    });
+    return null;
+  });
+
+  ipcMain.handle("netcatty:external:finish", async (event, payload) => {
+    const session = sessions.get(payload?.sessionId);
+    if (!session || session.type !== "plugin") return null;
+    session.closed = true;
+    sessions.delete(payload.sessionId);
+    await stopSessionLog(payload.sessionId, session);
+    event.sender.send("netcatty:exit", {
+      sessionId: payload.sessionId,
+      exitCode: payload?.reason === "error" ? 1 : 0,
+      reason: payload?.reason || "closed",
+      ...(payload?.error ? { error: payload.error } : {}),
+      ...(Array.isArray(payload?.diagnostics) ? { diagnostics: payload.diagnostics } : {}),
+    });
+    return null;
+  });
+}
+
+function registerPortForwardingWorkerBridge(ipcMain) {
+  const portForwardingBridge = require("../bridges/portForwardingBridge.cjs");
+  portForwardingBridge.registerHandlers(ipcMain);
 }
 
 function main() {
@@ -114,6 +231,13 @@ function main() {
 
   const sessions = new Map();
   const sftpClients = new Map();
+  const { createTerminalDataPipeline } = require("./terminalDataPipeline.cjs");
+  const terminalDataPipeline = createTerminalDataPipeline({
+    onWarning: (warning) => parentPort.postMessage({
+      kind: "terminal-interceptor-warning",
+      warning,
+    }),
+  });
   let runtime = null;
   const electronModule = {
     webContents: {
@@ -134,6 +258,7 @@ function main() {
   const transferBridge = require("../bridges/transferBridge.cjs");
   const fileWatcherBridge = require("../bridges/fileWatcherBridge.cjs");
   const compressUploadBridge = require("../bridges/compressUploadBridge.cjs");
+  const sessionLogStreamManager = require("../bridges/sessionLogStreamManager.cjs");
   const { registerWorkerAiExecHandlers } = require("./aiExec.cjs");
   const deps = {
     sessions,
@@ -141,16 +266,21 @@ function main() {
     electronModule,
     selectZmodemUploadFiles,
     selectZmodemDownloadDirectory,
+    terminalDataPipeline,
   };
 
   runtime = createTerminalWorkerRuntime({
     parentPort,
+    terminalDataPipeline,
     registerBridges(ipcMain) {
       sshBridge.init(deps);
       terminalBridge.init(deps);
       sftpBridge.init(deps);
       transferBridge.init(deps);
-      fileWatcherBridge.init(deps);
+      fileWatcherBridge.init({
+        ...deps,
+        transferBridge,
+      });
       compressUploadBridge.init({
         ...deps,
         transferBridge,
@@ -158,10 +288,19 @@ function main() {
       sshBridge.registerHandlers(ipcMain);
       terminalBridge.registerHandlers(ipcMain);
       sftpBridge.registerHandlers(ipcMain);
+      registerPortForwardingWorkerBridge(ipcMain);
       transferBridge.registerHandlers(ipcMain);
       fileWatcherBridge.registerHandlers(ipcMain);
       compressUploadBridge.registerHandlers(ipcMain);
       registerWorkerAiExecHandlers(ipcMain, { sessions });
+      registerExternalSessionHandlers(ipcMain, {
+        sessions,
+        parentPort,
+        sessionLogStreamManager,
+      });
+      // Expose worker-owned active log paths so main-process clear-all can
+      // skip live auto-save streams (separate module instance from main).
+      require("../bridges/sessionLogsBridge.cjs").registerWorkerHandlers(ipcMain);
       const { createSystemManagerBridge } = require("../bridges/systemManagerBridge.cjs");
       createSystemManagerBridge({
         getSessions: () => sessions,
@@ -215,7 +354,7 @@ function main() {
           session.zmodemSentry.queueDragDropUpload({
             filePaths,
             remoteNames,
-            uploadCommand: uploadCommand || "rz\r",
+            uploadCommand: uploadCommand || "rz -y\r",
             tempPaths,
           });
           return { success: true };
@@ -240,5 +379,7 @@ module.exports = {
   createZmodemDownloadDirectorySelector,
   createZmodemUploadFileSelector,
   normalizeParentPortMessage,
+  registerExternalSessionHandlers,
+  registerPortForwardingWorkerBridge,
   main,
 };

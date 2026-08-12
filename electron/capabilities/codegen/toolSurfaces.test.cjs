@@ -39,12 +39,68 @@ test("listCattyToolSpecs includes vault host tools and SFTP transfer", () => {
   const capabilityIds = listCattyToolSpecs().map((spec) => spec.capabilityId);
   assert.ok(capabilityIds.includes("vault.host.get"));
   assert.ok(capabilityIds.includes("vault.host.list"));
+  // Sidebar Catty must not open hosts; that expands scope mid-turn.
+  assert.ok(!capabilityIds.includes("vault.host.open"));
   assert.ok(capabilityIds.includes("vault.hosts.create"));
+  assert.ok(capabilityIds.includes("vault.host.update"));
+  assert.ok(capabilityIds.includes("vault.host.delete"));
   assert.ok(capabilityIds.includes("vault.host.import"));
   assert.ok(capabilityIds.includes("vault.note.create"));
   assert.ok(capabilityIds.includes("vault.note.list"));
   assert.ok(capabilityIds.includes("sftp.download"));
   assert.ok(capabilityIds.includes("sftp.upload"));
+});
+
+test("host_open stays on MCP and global agent, not sidebar Catty", () => {
+  const { AGENT_KINDS, listAgentToolSpecs } = require("./toolSurfaces.cjs");
+  const sidebarIds = listAgentToolSpecs(AGENT_KINDS.SIDEBAR).map((spec) => spec.capabilityId);
+  const globalIds = listAgentToolSpecs(AGENT_KINDS.GLOBAL).map((spec) => spec.capabilityId);
+  const mcpHostOpen = listMcpTools().find((tool) => tool.mcpTool === "host_open");
+
+  assert.ok(!sidebarIds.includes("vault.host.open"));
+  assert.ok(globalIds.includes("vault.host.open"));
+  assert.ok(mcpHostOpen);
+  assert.equal(mcpHostOpen.capabilityId, "vault.host.open");
+});
+
+test("listMcpTools includes vault host update and delete for external MCP clients", () => {
+  const tools = listMcpTools();
+  const create = tools.find((tool) => tool.mcpTool === "vault_hosts_create");
+  const update = tools.find((tool) => tool.mcpTool === "vault_hosts_update");
+  const remove = tools.find((tool) => tool.mcpTool === "vault_hosts_delete");
+  assert.match(create?.inputShape.hosts?.description ?? "", /passphrase/i);
+  assert.equal(update?.capabilityId, "vault.host.update");
+  assert.equal(update?.publicRpcMethod, "public/vault/hosts/update");
+  assert.ok(update?.inputShape.keyPath);
+  assert.ok(update?.inputShape.keypath);
+  assert.ok(update?.inputShape.savePassword);
+  assert.ok(update?.inputShape.passphrase);
+  assert.equal(remove?.capabilityId, "vault.host.delete");
+  assert.equal(remove?.publicRpcMethod, "public/vault/hosts/delete");
+});
+
+test("listMcpTools includes host_open for external MCP clients", () => {
+  const tools = listMcpTools();
+  const hostOpen = tools.find((tool) => tool.mcpTool === "host_open");
+  assert.ok(hostOpen);
+  assert.equal(hostOpen.capabilityId, "vault.host.open");
+  assert.equal(hostOpen.publicRpcMethod, "public/vault/hosts/open");
+});
+
+test("session_close is exposed to agents and external MCP clients", () => {
+  const mcpTool = listMcpTools().find((tool) => tool.mcpTool === "session_close");
+  assert.ok(mcpTool);
+  assert.equal(mcpTool.capabilityId, "session.close");
+  assert.equal(mcpTool.publicRpcMethod, "public/session/close");
+
+  const cattyTool = listCattyToolSpecs().find((tool) => tool.toolName === "session_close");
+  assert.ok(cattyTool);
+  assert.equal(cattyTool.rpcMethod, "session/close");
+});
+
+test("host_open tells agents to close sessions after use", () => {
+  const hostOpen = listMcpTools().find((tool) => tool.mcpTool === "host_open");
+  assert.match(hostOpen?.description || "", /session_close/i);
 });
 
 test("vault host import tool description routes unknown attached host text to host creation", () => {
@@ -127,12 +183,17 @@ test("catty and mcp terminal tools share capability ids", () => {
   assert.equal(mcp?.capabilityId, "terminal.execute");
 });
 
-test("implemented catalog tools with inputs are catty-eligible unless denylisted", () => {
+test("implemented catalog tools with inputs are catty-eligible unless denylisted or agentKinds-restricted", () => {
   const implemented = ALL_CAPABILITIES.filter((cap) => cap.status === CAPABILITY_STATUS.IMPLEMENTED);
   for (const capability of implemented) {
     const hasInputs = Object.prototype.hasOwnProperty.call(TOOL_INPUT_FIELDS, capability.id);
     if (!hasInputs) continue;
     if (CATTY_CAPABILITY_DENYLIST.has(capability.id)) {
+      assert.equal(isCattyEligible(capability), false);
+      continue;
+    }
+    if (Array.isArray(capability.agentKinds) && capability.agentKinds.length > 0
+      && !capability.agentKinds.includes("sidebar")) {
       assert.equal(isCattyEligible(capability), false);
       continue;
     }
@@ -168,4 +229,153 @@ test("registerMcpTools registers one handler per catalog MCP tool", () => {
   });
   assert.equal(count, listMcpTools().length);
   assert.equal(registered.length, listMcpTools().length);
+});
+
+test("session_close remains available as a cleanup action in observer mode", async () => {
+  let handler = null;
+  let guardCalls = 0;
+  const fakeServer = {
+    tool(name, _description, _shape, candidate) {
+      if (name === "session_close") handler = candidate;
+    },
+  };
+  registerMcpTools(fakeServer, {
+    rpcCall: async (_method, params) => ({ ok: true, sessionId: params.sessionId, status: "closed" }),
+    scopeParams: { chatSessionId: "chat-1" },
+    guardWriteOperation: () => {
+      guardCalls += 1;
+      return "Observer mode";
+    },
+    catalogDescription: (_name, fallback) => fallback,
+  });
+
+  const result = await handler({ sessionId: "session-1" });
+  assert.equal(result.isError, undefined);
+  assert.equal(guardCalls, 0);
+});
+
+test("terminal_execute MCP response preserves stdout/exitCode on non-zero exit (#2718)", async () => {
+  let handler = null;
+  const fakeServer = {
+    tool(name, _description, _shape, candidate) {
+      if (name === "terminal_execute") handler = candidate;
+    },
+  };
+  registerMcpTools(fakeServer, {
+    rpcCall: async () => ({
+      ok: false,
+      stdout: "du: cannot access '/missing': No such file or directory",
+      stderr: "",
+      exitCode: 1,
+    }),
+    scopeParams: { chatSessionId: "chat-1" },
+    guardWriteOperation: () => null,
+    catalogDescription: (_name, fallback) => fallback,
+  });
+
+  assert.ok(handler, "terminal_execute handler registered");
+  const result = await handler({ sessionId: "sess-1", command: "du /missing" });
+  assert.equal(result.isError, undefined);
+  const text = result.content?.[0]?.text || "";
+  assert.match(text, /cannot access '\/missing'/);
+  assert.match(text, /\[exit code: 1\]/);
+  assert.doesNotMatch(text, /Operation failed/);
+});
+
+test("terminal_execute MCP response keeps operational failures as isError", async () => {
+  let handler = null;
+  const fakeServer = {
+    tool(name, _description, _shape, candidate) {
+      if (name === "terminal_execute") handler = candidate;
+    },
+  };
+  registerMcpTools(fakeServer, {
+    rpcCall: async () => ({ ok: false, error: "Session not found" }),
+    scopeParams: { chatSessionId: "chat-1" },
+    guardWriteOperation: () => null,
+    catalogDescription: (_name, fallback) => fallback,
+  });
+
+  const result = await handler({ sessionId: "gone", command: "uptime" });
+  assert.equal(result.isError, true);
+  assert.equal(result.content?.[0]?.text, "Error: Session not found");
+});
+
+test("terminal_execute MCP response includes partial output on timeout", async () => {
+  let handler = null;
+  const fakeServer = {
+    tool(name, _description, _shape, candidate) {
+      if (name === "terminal_execute") handler = candidate;
+    },
+  };
+  registerMcpTools(fakeServer, {
+    rpcCall: async () => ({
+      ok: false,
+      stdout: "partial lines",
+      stderr: "",
+      exitCode: -1,
+      error: "Command timed out (60s)",
+    }),
+    scopeParams: { chatSessionId: "chat-1" },
+    guardWriteOperation: () => null,
+    catalogDescription: (_name, fallback) => fallback,
+  });
+
+  const result = await handler({ sessionId: "sess-1", command: "sleep 999" });
+  assert.equal(result.isError, true);
+  const text = result.content?.[0]?.text || "";
+  assert.match(text, /partial lines/);
+  assert.match(text, /\[exit code: -1\]/);
+  assert.match(text, /\[error\] Command timed out \(60s\)/);
+});
+
+test("terminal_execute MCP response uses neutral text for successful empty output (#2724)", async () => {
+  let handler = null;
+  const fakeServer = {
+    tool(name, _description, _shape, candidate) {
+      if (name === "terminal_execute") handler = candidate;
+    },
+  };
+  // Serial/network-device raw PTY success: ok true, empty streams, exitCode null.
+  registerMcpTools(fakeServer, {
+    rpcCall: async () => ({
+      ok: true,
+      stdout: "",
+      stderr: "",
+      exitCode: null,
+    }),
+    scopeParams: { chatSessionId: "chat-1" },
+    guardWriteOperation: () => null,
+    catalogDescription: (_name, fallback) => fallback,
+  });
+
+  const result = await handler({ sessionId: "sess-1", command: "configure terminal" });
+  assert.equal(result.isError, undefined);
+  assert.equal(result.content?.[0]?.text, "Command completed (no output)");
+  assert.doesNotMatch(result.content?.[0]?.text || "", /Operation failed/);
+});
+
+test("terminal_execute MCP response keeps exit-only non-zero without isError", async () => {
+  let handler = null;
+  const fakeServer = {
+    tool(name, _description, _shape, candidate) {
+      if (name === "terminal_execute") handler = candidate;
+    },
+  };
+  registerMcpTools(fakeServer, {
+    rpcCall: async () => ({
+      ok: false,
+      stdout: "",
+      stderr: "",
+      exitCode: 1,
+    }),
+    scopeParams: { chatSessionId: "chat-1" },
+    guardWriteOperation: () => null,
+    catalogDescription: (_name, fallback) => fallback,
+  });
+
+  const result = await handler({ sessionId: "sess-1", command: "false" });
+  assert.equal(result.isError, undefined);
+  assert.equal(result.content?.[0]?.text, "[exit code: 1]");
+  assert.doesNotMatch(result.content?.[0]?.text || "", /Operation failed/);
 });

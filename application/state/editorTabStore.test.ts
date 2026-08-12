@@ -1,12 +1,20 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import React from "react";
+import { act, create, type ReactTestRenderer } from "react-test-renderer";
 
-import { EditorTabStore, type EditorTab } from "./editorTabStore.ts";
+import {
+  editorTabStore,
+  EditorTabStore,
+  useHasEditorTabForSessions,
+  type EditorTab,
+} from "./editorTabStore.ts";
 
 const makeTab = (overrides: Partial<EditorTab> = {}): EditorTab => ({
   id: "edt_1",
   kind: "editor",
   sessionId: "conn_1",
+  sftpTabId: "pane_1",
   hostId: "host_1",
   remotePath: "/etc/nginx/nginx.conf",
   fileName: "nginx.conf",
@@ -87,6 +95,7 @@ test("promoteFromModal creates a new tab and returns its id", () => {
   const store = new EditorTabStore();
   const id = store.promoteFromModal({
     sessionId: "conn_1",
+    sftpTabId: "pane_1",
     hostId: "host_1",
     remotePath: "/etc/nginx/nginx.conf",
     fileName: "nginx.conf",
@@ -102,10 +111,84 @@ test("promoteFromModal creates a new tab and returns its id", () => {
   assert.equal(tab.kind, "editor");
 });
 
+test("hasTabForSessions identifies the SFTP owner of a promoted editor", () => {
+  const store = new EditorTabStore();
+  store.promoteFromModal({
+    sessionId: "conn_owned",
+    sftpTabId: "pane_owned",
+    hostId: "host_1",
+    remotePath: "/tmp/script.sh",
+    fileName: "script.sh",
+    languageId: "shell",
+    content: "echo changed",
+    baselineContent: "echo original",
+    wordWrap: false,
+    viewState: null,
+  });
+
+  assert.equal(store.hasTabForSessions(new Set(["conn_owned"])), true);
+  assert.equal(store.hasTabForSessions(new Set(["conn_other"])), false);
+});
+
+test("useHasEditorTabForSessions updates when the owning editor opens and closes", async () => {
+  const actEnvironment = globalThis as typeof globalThis & {
+    IS_REACT_ACT_ENVIRONMENT?: boolean;
+  };
+  const previousActEnvironment = actEnvironment.IS_REACT_ACT_ENVIRONMENT;
+  actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
+
+  const ownedSessionIdsRef = { current: new Set(["conn_hook_test"]) };
+  const getOwnedSessionIds = () => ownedSessionIdsRef.current;
+  let hasOwnedEditorTab = false;
+  const Probe = () => {
+    hasOwnedEditorTab = useHasEditorTabForSessions(getOwnedSessionIds);
+    return null;
+  };
+  let renderer: ReactTestRenderer | null = null;
+  let tabId: string | null = null;
+
+  try {
+    await act(async () => {
+      renderer = create(React.createElement(Probe));
+    });
+    assert.equal(hasOwnedEditorTab, false);
+
+    await act(async () => {
+      tabId = editorTabStore.promoteFromModal({
+        sessionId: "conn_hook_test",
+        sftpTabId: "pane_hook_test",
+        hostId: "host_1",
+        remotePath: "/tmp/hook-test.sh",
+        fileName: "hook-test.sh",
+        languageId: "shell",
+        content: "echo changed",
+        baselineContent: "echo original",
+        wordWrap: false,
+        viewState: null,
+      });
+      await Promise.resolve();
+    });
+    assert.equal(hasOwnedEditorTab, true);
+
+    await act(async () => {
+      editorTabStore.close(tabId!);
+      await Promise.resolve();
+    });
+    assert.equal(hasOwnedEditorTab, false);
+  } finally {
+    if (tabId) editorTabStore.close(tabId);
+    await act(async () => {
+      renderer?.unmount();
+    });
+    actEnvironment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+  }
+});
+
 test("promoteFromModal focuses existing tab for same sessionId+normalized path and overrides content", () => {
   const store = new EditorTabStore();
   const first = store.promoteFromModal({
     sessionId: "conn_1",
+    sftpTabId: "pane_1",
     hostId: "host_1",
     remotePath: "/etc/nginx/./nginx.conf",
     fileName: "nginx.conf",
@@ -117,6 +200,7 @@ test("promoteFromModal focuses existing tab for same sessionId+normalized path a
   });
   const second = store.promoteFromModal({
     sessionId: "conn_1",
+    sftpTabId: "pane_1",
     hostId: "host_1",
     remotePath: "/etc/nginx/nginx.conf",
     fileName: "nginx.conf",
@@ -135,6 +219,7 @@ test("dedup scope is per-sessionId — same path on different sessions are disti
   const store = new EditorTabStore();
   const a = store.promoteFromModal({
     sessionId: "conn_A",
+    sftpTabId: "pane_a",
     hostId: "host_1",
     remotePath: "/etc/hosts",
     fileName: "hosts",
@@ -143,6 +228,7 @@ test("dedup scope is per-sessionId — same path on different sessions are disti
   });
   const b = store.promoteFromModal({
     sessionId: "conn_B",
+    sftpTabId: "pane_b",
     hostId: "host_2",
     remotePath: "/etc/hosts",
     fileName: "hosts",
@@ -216,4 +302,69 @@ test("confirmCloseBySession reports every closed editor tab to cleanup callback"
   assert.equal(ok, true);
   assert.deepEqual(closed, ["edt_clean", "edt_dirty"]);
   assert.equal(store.getTabs().length, 0);
+});
+
+test("remapSessionId updates editor ownership after browse reconnect", () => {
+  const store = new EditorTabStore();
+  store._debugInsert(makeTab({ sessionId: "conn_old" }));
+  assert.equal(store.hasTabForSessions(new Set(["conn_old"])), true);
+  assert.equal(store.hasTabForSessions(new Set(["conn_new"])), false);
+
+  const before = store.getPresenceRevision();
+  store.remapSessionId("conn_old", "conn_new");
+
+  assert.equal(store.getTab("edt_1")?.sessionId, "conn_new");
+  assert.equal(store.hasTabForSessions(new Set(["conn_new"])), true);
+  assert.equal(store.getPresenceRevision(), before + 1);
+});
+
+test("hasOwnedEditorForSftpOwner keeps ownership via pane tab id during reconnect gap", () => {
+  const store = new EditorTabStore();
+  store._debugInsert(makeTab({ sessionId: "conn_old", sftpTabId: "pane_1" }));
+
+  assert.equal(store.hasTabForSessions(new Set(["conn_new"])), false);
+  assert.equal(
+    store.hasOwnedEditorForSftpOwner({
+      sessionIds: new Set(["conn_new"]),
+      sftpTabIds: new Set(["pane_1"]),
+    }),
+    true,
+  );
+});
+
+test("confirmCloseByOwner matches editors by stable SFTP pane tab id", async () => {
+  const store = new EditorTabStore();
+  store._debugInsert(makeTab({
+    sessionId: "conn_old",
+    sftpTabId: "pane_1",
+    content: "dirty",
+    baselineContent: "clean",
+  }));
+  let prompted = false;
+  const ok = await store.confirmCloseByOwner(
+    { sessionId: "conn_new", sftpTabId: "pane_1" },
+    async () => {
+      prompted = true;
+      return "cancel";
+    },
+  );
+  assert.equal(prompted, true);
+  assert.equal(ok, false);
+  assert.equal(store.getTabs().length, 1);
+});
+
+test("forceCloseByOwners closes editors matched by SFTP pane tab id", () => {
+  const store = new EditorTabStore();
+  store._debugInsert(makeTab({ sessionId: "conn_old", sftpTabId: "pane_1" }));
+  const closed = store.forceCloseByOwners({ sftpTabIds: ["pane_1"] });
+  assert.deepEqual(closed, ["edt_1"]);
+  assert.equal(store.getTabs().length, 0);
+});
+
+test("updateContent does not bump editor presence revision", () => {
+  const store = new EditorTabStore();
+  store._debugInsert(makeTab());
+  const before = store.getPresenceRevision();
+  store.updateContent("edt_1", "changed", null);
+  assert.equal(store.getPresenceRevision(), before);
 });

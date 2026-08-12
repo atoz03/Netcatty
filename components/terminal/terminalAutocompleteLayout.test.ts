@@ -6,7 +6,9 @@ import {
   computeAutocompletePopupPlacement,
   resolveAutocompleteAnchorInViewport,
   resolveAutocompleteClampViewport,
+  resolveAutocompleteCursorCell,
   resolveAutocompleteCursorColumn,
+  resolvePreservedSuggestionIndex,
   type PopupPlacementInput,
 } from "./autocomplete/terminalAutocompleteLayout.ts";
 
@@ -274,6 +276,144 @@ test("resolveAutocompleteCursorColumn prefers prompt-aligned column when xterm l
   assert.equal(column, "root@host:~# ".length + 1);
 });
 
+test("resolveAutocompleteCursorColumn counts wide glyphs as two cells for pre-echo input", () => {
+  const term = {
+    cols: 80,
+    buffer: {
+      active: {
+        cursorX: 2,
+        cursorY: 0,
+        baseY: 0,
+        getLine: () => ({
+          isWrapped: false,
+          translateToString: () => "$ ",
+        }),
+      },
+    },
+  };
+
+  const column = resolveAutocompleteCursorColumn(term as never, {
+    promptText: "$ ",
+    userInput: "部署",
+  });
+  // "$ " = 2 cells, each CJK ideograph = 2 cells → column 6 (not char-length 4).
+  assert.equal(column, 6);
+});
+
+test("resolveAutocompleteCursorCell wraps synthetic pre-echo columns onto the next row", () => {
+  const term = {
+    cols: 10,
+    rows: 24,
+    buffer: {
+      active: {
+        cursorX: 8,
+        cursorY: 0,
+        baseY: 0,
+        getLine: () => ({
+          isWrapped: false,
+          translateToString: () => "$       ",
+        }),
+      },
+    },
+  };
+
+  const cell = resolveAutocompleteCursorCell(term as never, {
+    promptText: "$       ",
+    // Four wide cells after a prompt ending at column 8 → raw column 12.
+    userInput: "部署",
+  });
+  assert.equal(cell.column, 2);
+  assert.equal(cell.row, 1);
+});
+
+test("resolveAutocompleteCursorCell clamps a bottom-row wrap to the visible grid", () => {
+  // Pending wrap from the last visible row would predict row === term.rows,
+  // but xterm scrolls and keeps the cursor on term.rows - 1.
+  const term = {
+    cols: 10,
+    rows: 24,
+    buffer: {
+      active: {
+        cursorX: 8,
+        cursorY: 23,
+        baseY: 0,
+        getLine: () => ({
+          isWrapped: false,
+          translateToString: () => "$       ",
+        }),
+      },
+    },
+  };
+
+  const cell = resolveAutocompleteCursorCell(term as never, {
+    promptText: "$       ",
+    userInput: "部署",
+  });
+  assert.equal(cell.column, 2);
+  assert.equal(cell.row, 23);
+});
+
+test("resolveAutocompleteCursorCell advances past a partial wrap using unechoed userInput", () => {
+  // cols=10: "$ docker c" | "o|" — echo wrapped after a prefix while the
+  // buffered input is still the full "docker compose". Anchoring at the
+  // live wrapped cell (col 1) would leave the popup behind.
+  const lines: Record<number, { isWrapped?: boolean; text: string }> = {
+    0: { text: "$ docker c" },
+    1: { isWrapped: true, text: "o" },
+  };
+  const term = {
+    cols: 10,
+    rows: 24,
+    buffer: {
+      active: {
+        cursorX: 1,
+        cursorY: 1,
+        baseY: 0,
+        getLine: (y: number) => {
+          const row = lines[y];
+          if (!row) return undefined;
+          return {
+            isWrapped: row.isWrapped,
+            translateToString: () => row.text,
+          };
+        },
+      },
+    },
+  };
+
+  const cell = resolveAutocompleteCursorCell(term as never, {
+    promptText: "$ ",
+    userInput: "docker compose",
+  });
+  // "$ " + "docker compose" = 16 cells → col 6 on row 1.
+  assert.equal(cell.column, 6);
+  assert.equal(cell.row, 1);
+});
+
+test("resolveAutocompleteCursorColumn counts ZWJ emoji graphemes as one wide cluster", () => {
+  const term = {
+    buffer: {
+      active: {
+        cursorX: 2,
+        cursorY: 0,
+        baseY: 0,
+        getLine: () => ({
+          isWrapped: false,
+          translateToString: () => "$ ",
+        }),
+      },
+    },
+  };
+
+  const column = resolveAutocompleteCursorColumn(term as never, {
+    promptText: "$ ",
+    // Technologist emoji is one grapheme (👨 + ZWJ + 💻); xterm paints it
+    // as two cells, not five code-point widths.
+    userInput: "👨‍💻",
+  });
+  assert.equal(column, 4);
+});
+
 test("short popup flips upward when the cursor is at the bottom of the screen", () => {
   // Regression for issue #1710: a *short* suggestion list must flip up when
   // the anchor line is the last visible row, even if there is a tiny positive
@@ -500,4 +640,38 @@ test("resolveAutocompleteAnchorInViewport ignores the helper textarea horizontal
   );
   assert.equal(anchor.anchorLeft, 640 + cellWidth * cursorColumn);
   assert.notEqual(anchor.anchorLeft, textarea.getBoundingClientRect().left);
+});
+
+function suggestion(partial: {
+  text: string;
+  source: "history" | "path" | "snippet" | "fig";
+  score?: number;
+  displayText?: string;
+  fileType?: "file" | "directory" | "symlink";
+}) {
+  return {
+    displayText: partial.displayText ?? partial.text,
+    score: partial.score ?? 1,
+    ...partial,
+  };
+}
+
+test("resolvePreservedSuggestionIndex keeps highlight after late path reorder", () => {
+  const previous = [
+    suggestion({ text: "alpha", source: "history", score: 900 }),
+    suggestion({ text: "bravo/", source: "history", score: 800 }),
+  ];
+  const next = [
+    suggestion({ text: "bravo/", source: "path", score: 750, fileType: "directory" }),
+    suggestion({ text: "alpha", source: "history", score: 900 }),
+    suggestion({ text: "charlie", source: "path", score: 700, fileType: "file" }),
+  ];
+  assert.equal(resolvePreservedSuggestionIndex(previous, 1, next), 0);
+});
+
+test("resolvePreservedSuggestionIndex returns -1 when selection is absent or dropped", () => {
+  const previous = [suggestion({ text: "gone", source: "history" })];
+  const next = [suggestion({ text: "kept", source: "path", fileType: "file" })];
+  assert.equal(resolvePreservedSuggestionIndex(previous, -1, next), -1);
+  assert.equal(resolvePreservedSuggestionIndex(previous, 0, next), -1);
 });

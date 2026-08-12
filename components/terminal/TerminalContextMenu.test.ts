@@ -20,7 +20,9 @@ const shouldSuppressMouseTrackingContextMenu = (
   terminalContextMenu as {
     shouldSuppressMouseTrackingContextMenu?: (options: {
       isAlternateScreen?: boolean;
+      terminalMouseTrackingMode?: string;
       showReconnectAction?: boolean;
+      forceMenuInAlternateScreen?: boolean;
     }) => boolean;
   }
 ).shouldSuppressMouseTrackingContextMenu;
@@ -40,7 +42,9 @@ const shouldOpenTerminalContextMenu = (
       event: { shiftKey?: boolean; nativeEvent: MouseEvent };
       rightClickBehavior?: "context-menu" | "paste" | "select-word";
       isAlternateScreen?: boolean;
+      terminalMouseTrackingMode?: string;
       showReconnectAction?: boolean;
+      forceMenuInAlternateScreen?: boolean;
     }) => boolean;
   }
 ).shouldOpenTerminalContextMenu;
@@ -48,6 +52,7 @@ const shouldRenderTerminalContextMenuContent = (
   terminalContextMenu as {
     shouldRenderTerminalContextMenuContent?: (options: {
       isAlternateScreen?: boolean;
+      terminalMouseTrackingMode?: string;
       showReconnectAction?: boolean;
       allowSuppressedMenuContent?: boolean;
     }) => boolean;
@@ -58,6 +63,7 @@ const shouldAllowSuppressedTerminalContextMenuContent = (
     shouldAllowSuppressedTerminalContextMenuContent?: (options: {
       event: { shiftKey?: boolean; nativeEvent: MouseEvent };
       isAlternateScreen?: boolean;
+      terminalMouseTrackingMode?: string;
       showReconnectAction?: boolean;
     }) => boolean;
   }
@@ -195,6 +201,47 @@ test("allows reconnect menu while stale mouse tracking is still active", () => {
   );
 });
 
+test("forceMenuInAlternateScreen opts out of alternate-screen suppression", () => {
+  assert.equal(typeof shouldSuppressMouseTrackingContextMenu, "function");
+  assert.equal(typeof shouldOpenTerminalContextMenu, "function");
+  if (
+    typeof shouldSuppressMouseTrackingContextMenu !== "function" ||
+    typeof shouldOpenTerminalContextMenu !== "function"
+  ) {
+    return;
+  }
+
+  // Setting on: no suppression, right-click opens the app menu in tmux/vim.
+  assert.equal(
+    shouldSuppressMouseTrackingContextMenu({
+      isAlternateScreen: true,
+      showReconnectAction: false,
+      forceMenuInAlternateScreen: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldOpenTerminalContextMenu({
+      event: { shiftKey: false, nativeEvent: {} as MouseEvent },
+      rightClickBehavior: "context-menu",
+      isAlternateScreen: true,
+      showReconnectAction: false,
+      forceMenuInAlternateScreen: true,
+    }),
+    true,
+  );
+
+  // Setting off (default): alternate screen still suppresses the menu.
+  assert.equal(
+    shouldSuppressMouseTrackingContextMenu({
+      isAlternateScreen: true,
+      showReconnectAction: false,
+      forceMenuInAlternateScreen: false,
+    }),
+    true,
+  );
+});
+
 test("opens a middle-click menu even when right-click is configured to paste", () => {
   assert.equal(typeof shouldOpenTerminalContextMenu, "function");
   if (typeof shouldOpenTerminalContextMenu !== "function") return;
@@ -288,6 +335,65 @@ test("opens and renders middle-click menu while alternate-screen mouse tracking 
   assert.equal(
     shouldRenderTerminalContextMenuContent({
       isAlternateScreen: true,
+      showReconnectAction: false,
+      allowSuppressedMenuContent: false,
+    }),
+    false,
+  );
+});
+
+test("uses the current mouse tracking mode when the cached state is stale", () => {
+  assert.equal(typeof shouldOpenTerminalContextMenu, "function");
+  assert.equal(typeof shouldRenderTerminalContextMenuContent, "function");
+  if (
+    typeof shouldOpenTerminalContextMenu !== "function" ||
+    typeof shouldRenderTerminalContextMenuContent !== "function"
+  ) {
+    return;
+  }
+
+  const event = {
+    nativeEvent: {} as MouseEvent,
+  };
+
+  // xterm has already stopped reporting mouse events, but React still has
+  // the previous tracking state: paste/select-word must not be dropped.
+  assert.equal(
+    shouldOpenTerminalContextMenu({
+      event,
+      rightClickBehavior: "paste",
+      isAlternateScreen: true,
+      terminalMouseTrackingMode: "none",
+      showReconnectAction: false,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRenderTerminalContextMenuContent({
+      isAlternateScreen: true,
+      terminalMouseTrackingMode: "none",
+      showReconnectAction: false,
+      allowSuppressedMenuContent: false,
+    }),
+    true,
+  );
+
+  // Conversely, a newly active xterm mode must still suppress the app menu
+  // while the cached React state has not caught up.
+  assert.equal(
+    shouldOpenTerminalContextMenu({
+      event,
+      rightClickBehavior: "context-menu",
+      isAlternateScreen: false,
+      terminalMouseTrackingMode: "vt200",
+      showReconnectAction: false,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRenderTerminalContextMenuContent({
+      isAlternateScreen: false,
+      terminalMouseTrackingMode: "vt200",
       showReconnectAction: false,
       allowSuppressedMenuContent: false,
     }),

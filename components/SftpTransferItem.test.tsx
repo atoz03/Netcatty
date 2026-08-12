@@ -35,6 +35,8 @@ const renderTransferItem = (
       React.createElement(SftpTransferItem, {
         task,
         onCancel: () => {},
+        onPause: () => {},
+        onResume: () => {},
         onRetry: () => {},
         onDismiss: () => {},
         ...props,
@@ -59,6 +61,128 @@ test("renders active transfer cancel action with an item-specific label", () => 
   });
 
   assert.match(markup, /aria-label="Cancel: archive\.tar\.gz"/);
+  assert.match(markup, /aria-label="Pause: archive\.tar\.gz"/);
+});
+
+test("directory parents show transfer-center done/found progress instead of Waiting", () => {
+  const markup = renderTransferItem({
+    ...baseTask,
+    id: "folder-1",
+    fileName: "big-tree",
+    isDirectory: true,
+    progressMode: "files",
+    status: "pending",
+    phase: "transferring",
+    transferredBytes: 65,
+    totalBytes: 108202,
+    error: undefined,
+    speed: 0,
+  });
+
+  assert.match(markup, /65 done · 108202 found/);
+  assert.doesNotMatch(markup, />Waiting\.\.\.</);
+});
+
+test("scanning directory parents keep scanning label with live discovery counts", () => {
+  const markup = renderTransferItem({
+    ...baseTask,
+    id: "folder-scan",
+    fileName: "docs",
+    isDirectory: true,
+    progressMode: "files",
+    status: "pending",
+    phase: "scanning",
+    transferredBytes: 0,
+    totalBytes: 1284,
+    error: undefined,
+    speed: 0,
+  });
+
+  assert.match(markup, /Scanning/);
+  assert.match(markup, /0 done · 1284 found/);
+});
+
+test("child rows reserve an action column wide enough for pause and cancel", () => {
+  const markup = renderTransferItem(
+    {
+      ...baseTask,
+      id: "child-transfer-actions",
+      parentTaskId: "transfer-1",
+      status: "transferring",
+      error: undefined,
+      transferredBytes: 256,
+      totalBytes: 1024,
+      speed: 128,
+      resumable: true,
+    },
+    {
+      isChild: true,
+      childNameColumnWidth: 260,
+      onResizeNameColumn: () => {},
+      onSetNameColumnWidth: () => {},
+    },
+  );
+
+  assert.match(markup, /grid-template-columns:24px 260px 10px minmax\(0, 1fr\) 56px/);
+  assert.match(markup, /aria-label="Pause: archive\.tar\.gz"/);
+  assert.match(markup, /aria-label="Cancel: archive\.tar\.gz"/);
+});
+
+test("renders paused transfer resume action", () => {
+  const markup = renderTransferItem({
+    ...baseTask,
+    status: "paused",
+    error: undefined,
+    resumable: true,
+  });
+
+  assert.match(markup, /aria-label="Resume: archive\.tar\.gz"/);
+  // Paused rows keep the checkpoint progress bar (amber, no shimmer).
+  assert.match(markup, /bg-amber-500\/80/);
+  assert.doesNotMatch(markup, /progress-shimmer/);
+});
+
+test("renders resume spinner while reconnecting", () => {
+  const markup = renderTransferItem({
+    ...baseTask,
+    status: "pending",
+    error: undefined,
+    reconnectRequired: true,
+    resumable: true,
+  });
+
+  assert.match(markup, /aria-label="Reconnecting and resuming…: archive\.tar\.gz"/);
+  assert.match(markup, /aria-busy="true"/);
+  assert.doesNotMatch(markup, /aria-label="Resume: archive\.tar\.gz"/);
+  assert.match(markup, /animate-spin/);
+});
+
+test("renders pausing state feedback instead of a dead pause button", () => {
+  const markup = renderTransferItem({
+    ...baseTask,
+    status: "pausing",
+    error: undefined,
+    speed: 0,
+    resumable: true,
+  });
+
+  // Soft-drain is short; status copy is "Pausing" (not "finishing current step").
+  assert.match(markup, /aria-label="Pausing: archive\.tar\.gz"/);
+  assert.match(markup, /aria-busy="true"/);
+  assert.doesNotMatch(markup, /aria-label="Pause: archive\.tar\.gz"/);
+  assert.match(markup, />Pausing</);
+});
+
+test("surfaces pause unavailable reason on a transferring row", () => {
+  const markup = renderTransferItem({
+    ...baseTask,
+    status: "transferring",
+    error: undefined,
+    speed: 128,
+    pauseUnavailableReason: "This transfer cannot be paused yet",
+  });
+
+  assert.match(markup, /This transfer cannot be paused yet/);
 });
 
 test("renders child resize handle as a keyboard-reachable separator", () => {

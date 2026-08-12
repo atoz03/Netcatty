@@ -43,7 +43,9 @@ export function handleTerminalAutocompleteInput(
     clearState,
     fetchSuggestions,
   } = context;
-  if (!settingsRef.current.enabled) return;
+  if (!settingsRef.current.enabled) {
+    return;
+  }
 
   const now = Date.now();
   const timeSinceLastKeystroke = now - lastKeystrokeRef.current;
@@ -244,12 +246,12 @@ export function handleTerminalAutocompleteInput(
     // Still debounce, but with a longer delay to wait for typing to pause
     debounceTimerRef.current = setTimeout(() => {
       debounceTimerRef.current = null;
-      fetchSuggestions();
+      void fetchSuggestions();
     }, settingsRef.current.debounceMs * 3);
   } else {
     debounceTimerRef.current = setTimeout(() => {
       debounceTimerRef.current = null;
-      fetchSuggestions();
+      void fetchSuggestions();
     }, settingsRef.current.debounceMs);
   }
 }

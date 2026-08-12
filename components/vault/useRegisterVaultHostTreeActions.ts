@@ -10,6 +10,7 @@ import type { VaultOrderPosition } from '../../domain/vaultOrder';
 
 type RegisterVaultHostTreeActionsParams = {
   handleCopyCredentials: (host: Host) => void;
+  handleCopyHostname?: (host: Host) => void;
   handleDuplicateHost: (host: Host) => void;
   startInlineRenameHost: (host: Host) => void;
   onDeleteHost: (hostId: string) => void;
@@ -41,6 +42,7 @@ function withVaultFocus<T extends (...args: never[]) => void>(fn: T): T {
 
 export function useRegisterVaultHostTreeActions({
   handleCopyCredentials,
+  handleCopyHostname,
   handleDuplicateHost,
   startInlineRenameHost,
   onDeleteHost,
@@ -61,6 +63,7 @@ export function useRegisterVaultHostTreeActions({
   useEffect(() => {
     const actions: VaultHostTreeActions = {
       onCopyCredentials: handleCopyCredentials,
+      onCopyHostname: handleCopyHostname,
       onDuplicateHost: withVaultFocus(handleDuplicateHost),
       onRenameHost: startInlineRenameHost,
       onDeleteHost: (host) => onDeleteHost(host.id),
@@ -89,6 +92,7 @@ export function useRegisterVaultHostTreeActions({
     commitInlineGroupRename,
     commitInlineHostRename,
     handleCopyCredentials,
+    handleCopyHostname,
     handleDuplicateHost,
     handleUnmanageGroup,
     managedGroupPaths,

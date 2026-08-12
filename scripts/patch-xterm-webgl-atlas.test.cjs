@@ -9,12 +9,21 @@ const { promisify } = require("node:util");
 
 const execFileAsync = promisify(execFile);
 const script = path.resolve(__dirname, "patch-xterm-webgl-atlas.cjs");
-const marker = "/*netcatty:#1063 atlas-isolation*/";
 
-const webglBeta219MjsLoop =
-  "for(let u=0;u<J.length;u++){let p=J[u];if(Ee(p.config,h))return p.ownedBy.push(i),p.atlas}";
-const webglBeta219CjsLoop =
-  "for(let e=0;e<a.length;e++){const i=a[e];if((0,r.configEquals)(i.config,c))return i.ownedBy.push(t),i.atlas}";
+/** Minimal stand-in for upstream #6055 + #5987 + #6043 (beta.291+). */
+function upstreamAllFixedSource() {
+  return (
+    `for(let c=0;c<e0.length;c++){let u=e0[c];if(Ee(u.config,h))return u.ownedBy.push(i),u.atlas} ` +
+    `clearTexture(){if(!(this._pages[0].currentRow.x===0&&this._pages[0].currentRow.y===0)){` +
+    `for(let e of this._pages)e.clear();this._cacheMap.clear(),this._cacheMapCombined.clear(),` +
+    `this._didWarmUp=!1,this._pageLayoutVersion++} ` +
+    `_evictAllPages(){this._pages.length=0} maxAtlasPages ` +
+    `t.texParameteri(t.TEXTURE_2D,t.TEXTURE_MIN_FILTER,t.LINEAR),` +
+    `t.texParameteri(t.TEXTURE_2D,t.TEXTURE_MAG_FILTER,t.LINEAR),` +
+    `t.texImage2D(t.TEXTURE_2D,0,t.RGBA,t.RGBA,t.UNSIGNED_BYTE,r.pages[n].canvas),` +
+    `this._atlasTextures[n].version=r.pages[n].version`
+  );
+}
 
 function makeTmp(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "netcatty-xterm-webgl-patch-"));
@@ -22,23 +31,92 @@ function makeTmp(t) {
   return dir;
 }
 
-function writeWebglBuild(root, file, loop) {
-  const abs = path.join(root, file);
-  fs.mkdirSync(path.dirname(abs), { recursive: true });
-  fs.writeFileSync(abs, `prefix ${loop} suffix`);
+function writeWebglVersion(root, version) {
+  const packageJson = path.join(root, "node_modules/@xterm/addon-webgl/package.json");
+  fs.mkdirSync(path.dirname(packageJson), { recursive: true });
+  fs.writeFileSync(packageJson, JSON.stringify({ version }));
 }
 
-test("patches @xterm/addon-webgl 0.20 beta atlas sharing loops", async (t) => {
+function writeRawWebglBuild(root, file, source) {
+  const abs = path.join(root, file);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, source);
+}
+
+function writeBothBuilds(root, source) {
+  writeRawWebglBuild(root, "node_modules/@xterm/addon-webgl/lib/addon-webgl.mjs", source);
+  writeRawWebglBuild(root, "node_modules/@xterm/addon-webgl/lib/addon-webgl.js", source);
+}
+
+test("accepts packages that ship upstream #6055/#5987/#6043", async (t) => {
   const root = makeTmp(t);
-  const mjs = "node_modules/@xterm/addon-webgl/lib/addon-webgl.mjs";
-  const cjs = "node_modules/@xterm/addon-webgl/lib/addon-webgl.js";
-  writeWebglBuild(root, mjs, webglBeta219MjsLoop);
-  writeWebglBuild(root, cjs, webglBeta219CjsLoop);
+  writeWebglVersion(root, "0.20.0-beta.291");
+  writeBothBuilds(root, upstreamAllFixedSource());
 
   const { stdout, stderr } = await execFileAsync(process.execPath, [script], { cwd: root });
 
-  assert.match(stdout, /patched=2/);
+  assert.match(stdout, /verify version=0\.20\.0-beta\.291 ok=2 missing=0/);
   assert.equal(stderr, "");
-  assert.match(fs.readFileSync(path.join(root, mjs), "utf8"), new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-  assert.match(fs.readFileSync(path.join(root, cjs), "utf8"), new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  // Verify mode must not rewrite node_modules.
+  assert.equal(
+    fs.readFileSync(path.join(root, "node_modules/@xterm/addon-webgl/lib/addon-webgl.mjs"), "utf8"),
+    upstreamAllFixedSource(),
+  );
+});
+
+test("fails closed when shared-atlas clear fix is missing", async (t) => {
+  const root = makeTmp(t);
+  writeWebglVersion(root, "0.20.0-beta.219");
+  // Capacity + no mipmap, but no pageLayoutVersion on clearTexture.
+  writeBothBuilds(
+    root,
+    `clearTexture(){this._pages[0].clear()} _evictAllPages(){} maxAtlasPages LINEAR`,
+  );
+
+  await assert.rejects(execFileAsync(process.execPath, [script], { cwd: root }), (error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /shared-atlas clear \(#6055\)/);
+    assert.match(error.stdout, /ok=0 missing=2/);
+    return true;
+  });
+});
+
+test("fails closed when generateMipmap is still present", async (t) => {
+  const root = makeTmp(t);
+  writeWebglVersion(root, "0.20.0-beta.291");
+  writeBothBuilds(
+    root,
+    `clearTexture(){this._pageLayoutVersion++} _evictAllPages(){} maxAtlasPages ` +
+      `gl.generateMipmap(gl.TEXTURE_2D)`,
+  );
+
+  await assert.rejects(execFileAsync(process.execPath, [script], { cwd: root }), (error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /no atlas mipmaps \(#5987\)/);
+    return true;
+  });
+});
+
+test("fails closed when capacity eviction is missing", async (t) => {
+  const root = makeTmp(t);
+  writeWebglVersion(root, "0.20.0-beta.291");
+  writeBothBuilds(root, `clearTexture(){this._pageLayoutVersion++}`);
+
+  await assert.rejects(execFileAsync(process.execPath, [script], { cwd: root }), (error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /atlas capacity eviction \(#6043\)/);
+    return true;
+  });
+});
+
+test("fails closed when addon builds are missing", async (t) => {
+  const root = makeTmp(t);
+  writeWebglVersion(root, "0.20.0-beta.291");
+
+  await assert.rejects(execFileAsync(process.execPath, [script], { cwd: root }), (error) => {
+    assert.equal(error.code, 1);
+    assert.match(error.stderr, /not found/);
+    assert.match(error.stdout, /ok=0 missing=2/);
+    return true;
+  });
 });

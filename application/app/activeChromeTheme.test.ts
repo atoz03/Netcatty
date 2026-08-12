@@ -78,6 +78,30 @@ test("editor tabs use the followed terminal theme when follow-app terminal theme
   assert.equal(resolved?.id, currentTheme.id);
 });
 
+test("follow-app chrome applies custom accent onto the published base theme", () => {
+  const editorTab = {
+    id: "editor-1",
+    hostId: "host-1",
+    sessionId: "sftp-1",
+  };
+
+  const resolved = resolveActiveChromeTheme({
+    ...baseInput,
+    accentMode: "custom",
+    customAccent: "0 100% 50%",
+    activeTabId: toEditorTabId(editorTab.id),
+    editorTabs: [editorTab as unknown as EditorTab],
+    followAppTerminalTheme: true,
+    hostById: new Map([
+      ["host-1", { id: "host-1", theme: hostTheme.id } as unknown as Host],
+    ]),
+  });
+
+  assert.equal(resolved?.id, currentTheme.id);
+  assert.notEqual(resolved?.colors.cursor, currentTheme.colors.cursor);
+  assert.notEqual(resolved, currentTheme);
+});
+
 test("log tabs use the saved log theme when available", () => {
   const resolved = resolveActiveChromeTheme({
     ...baseInput,

@@ -16,6 +16,8 @@ test('matchCodingCliProviderFromCommand resolves known CLIs', () => {
   assert.equal(matchCodingCliProviderFromCommand('opencode')?.id, 'opencode');
   assert.equal(matchCodingCliProviderFromCommand('droid')?.id, 'droid');
   assert.equal(matchCodingCliProviderFromCommand('factory')?.id, 'droid');
+  assert.equal(matchCodingCliProviderFromCommand('grok')?.id, 'grok');
+  assert.equal(matchCodingCliProviderFromCommand('C:\\\\Tools\\\\grok.exe')?.id, 'grok');
 });
 
 test('matchCodingCliProviderFromTitle detects Claude Code and Codex titles', () => {

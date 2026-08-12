@@ -5,6 +5,8 @@ import type { Host } from "./models.ts";
 import {
   classifyDistroId,
   detectVendorFromSshVersion,
+  getHostAddressForClipboard,
+  hostsEqualForIdentityReuse,
   migrateHostsFromLegacyLineTimestamps,
   normalizeDistroId,
   normalizePrimaryTelnetState,
@@ -15,6 +17,7 @@ import {
   resolveTelnetUsername,
   sanitizeHost,
   shouldProbeSessionCwd,
+  shouldSuggestNetworkDeviceMode,
   upsertHostById,
 } from "./host.ts";
 
@@ -37,6 +40,72 @@ test("upsertHostById updates an existing host in place", () => {
   const updated = makeHost({ label: "Updated Host" });
 
   assert.deepEqual(upsertHostById([existing], updated), [updated]);
+});
+
+test("shouldSuggestNetworkDeviceMode offers the switch for an auto-detected vendor", () => {
+  assert.equal(
+    shouldSuggestNetworkDeviceMode({ host: makeHost(), detectedDistro: "huawei", alreadyHandled: false }),
+    true,
+  );
+});
+
+test("shouldSuggestNetworkDeviceMode stays silent once already enabled", () => {
+  assert.equal(
+    shouldSuggestNetworkDeviceMode({
+      host: makeHost({ deviceType: "network" }),
+      detectedDistro: "cisco",
+      alreadyHandled: false,
+    }),
+    false,
+  );
+});
+
+test("shouldSuggestNetworkDeviceMode stays silent after it was already handled", () => {
+  assert.equal(
+    shouldSuggestNetworkDeviceMode({ host: makeHost(), detectedDistro: "cisco", alreadyHandled: true }),
+    false,
+  );
+});
+
+test("shouldSuggestNetworkDeviceMode ignores ordinary linux distros", () => {
+  assert.equal(
+    shouldSuggestNetworkDeviceMode({ host: makeHost(), detectedDistro: "ubuntu", alreadyHandled: false }),
+    false,
+  );
+});
+
+test("shouldSuggestNetworkDeviceMode does not fire on a substring-only vendor keyword", () => {
+  assert.equal(
+    shouldSuggestNetworkDeviceMode({ host: makeHost(), detectedDistro: "cisco-lab-server", alreadyHandled: false }),
+    false,
+  );
+});
+
+test("shouldSuggestNetworkDeviceMode still fires for a plain SSH session", () => {
+  assert.equal(
+    shouldSuggestNetworkDeviceMode({
+      host: makeHost(),
+      detectedDistro: "cisco",
+      alreadyHandled: false,
+      effectiveProtocol: "ssh",
+    }),
+    true,
+  );
+});
+
+test("shouldSuggestNetworkDeviceMode stays silent for non-SSH sessions (mosh/et/serial/telnet)", () => {
+  for (const effectiveProtocol of ["mosh", "et", "serial", "telnet", "local"]) {
+    assert.equal(
+      shouldSuggestNetworkDeviceMode({
+        host: makeHost(),
+        detectedDistro: "cisco",
+        alreadyHandled: false,
+        effectiveProtocol,
+      }),
+      false,
+      `expected no suggestion for ${effectiveProtocol}`,
+    );
+  }
 });
 
 test("upsertHostById appends a duplicated host with a fresh id", () => {
@@ -151,6 +220,195 @@ test("sanitizeHost preserves valid custom host icon fields", () => {
   assert.equal(sanitized.iconColor, "blue");
 });
 
+test("sanitizeHost preserves valid unavailable plugin connection configuration", () => {
+  const providerId = "com.example.transport.connection";
+  const sanitized = sanitizeHost(makeHost({
+    protocol: `plugin:${providerId}`,
+    pluginConnection: {
+      providerId,
+      configuration: { endpoint: "example", options: [1, 2] },
+      credentialId: "credential-reference-1234",
+    },
+  }));
+  assert.deepEqual(sanitized.pluginConnection, {
+    providerId,
+    configuration: { endpoint: "example", options: [1, 2] },
+    credentialId: "credential-reference-1234",
+  });
+});
+
+test("sanitizeHost removes hidden built-in credentials and transport state from plugin hosts", () => {
+  const providerId = "com.example.transport.connection";
+  const sanitized = sanitizeHost(makeHost({
+    protocol: `plugin:${providerId}`,
+    pluginConnection: {
+      providerId,
+      configuration: { endpoint: "example" },
+      credentialId: "credential-reference-1234",
+    },
+    port: 22,
+    identityId: "identity-1",
+    identityFileId: "key-1",
+    identityFilePaths: ["~/.ssh/id_work"],
+    password: "saved-secret",
+    savePassword: true,
+    authMethod: "key",
+    authPolicyVersion: 1,
+    requiresMfa: true,
+    useSshAgent: true,
+    identityAgent: "~/.ssh/agent.sock",
+    identitiesOnly: true,
+    addKeysToAgent: "confirm",
+    useKeychain: true,
+    agentForwarding: true,
+    x11Forwarding: true,
+    proxyProfileId: "proxy-1",
+    proxyConfig: { type: "http", host: "proxy.example", port: 8080 },
+    hostChain: { type: "hosts", hostIds: ["jump-1"] },
+    moshEnabled: true,
+    moshServerPath: "/usr/bin/mosh-server",
+    etEnabled: true,
+    etPort: 2022,
+    telnetEnabled: true,
+    telnetPort: 23,
+    telnetIdentityId: "telnet-identity",
+    telnetUsername: "legacy-user",
+    telnetPassword: "legacy-secret",
+    sftpSudo: true,
+    legacyAlgorithms: true,
+    skipEcdsaHostKey: true,
+    algorithms: { kex: ["diffie-hellman-group14-sha1"] },
+    keepaliveOverride: true,
+    keepaliveInterval: 10,
+    keepaliveCountMax: 3,
+    sshTcpConnectTimeoutSeconds: 15,
+    sshAuthReadyTimeoutSeconds: 20,
+  }));
+
+  assert.deepEqual(sanitized.pluginConnection, {
+    providerId,
+    configuration: { endpoint: "example" },
+    credentialId: "credential-reference-1234",
+  });
+  for (const field of [
+    "port", "identityId", "identityFileId", "identityFilePaths", "password", "savePassword",
+    "authMethod", "authPolicyVersion", "requiresMfa", "useSshAgent", "identityAgent",
+    "identitiesOnly", "addKeysToAgent", "useKeychain", "agentForwarding", "x11Forwarding",
+    "proxyProfileId", "proxyConfig", "hostChain", "moshEnabled", "moshServerPath", "etEnabled",
+    "etPort", "telnetEnabled", "telnetPort", "telnetIdentityId", "telnetUsername",
+    "telnetPassword", "sftpSudo", "legacyAlgorithms", "skipEcdsaHostKey", "algorithms",
+    "keepaliveOverride", "keepaliveInterval", "keepaliveCountMax", "sshTcpConnectTimeoutSeconds",
+    "sshAuthReadyTimeoutSeconds",
+  ]) {
+    assert.equal(field in sanitized, false, `${field} should be removed`);
+  }
+});
+
+test("sanitizeHost keeps legacy empty-password hosts on automatic authentication", () => {
+  const sanitized = sanitizeHost(makeHost({
+    password: undefined,
+    authMethod: "password",
+    authPolicyVersion: undefined,
+  }));
+
+  assert.equal(sanitized.authMethod, undefined);
+  assert.equal(sanitized.authPolicyVersion, 1);
+});
+
+test("sanitizeHost keeps legacy agent and key hosts on their prior authentication path", () => {
+  for (const legacySettings of [
+    { useSshAgent: true, password: "saved-secret" },
+    { identityFilePaths: ["~/.ssh/id_work"], password: "saved-secret" },
+  ]) {
+    const sanitized = sanitizeHost(makeHost({
+      authMethod: "password",
+      authPolicyVersion: undefined,
+      ...legacySettings,
+    }));
+
+    assert.equal(sanitized.authMethod, undefined);
+    assert.equal(sanitized.authPolicyVersion, 1);
+  }
+});
+
+test("sanitizeHost preserves an explicit password-only choice", () => {
+  const sanitized = sanitizeHost(makeHost({
+    password: undefined,
+    authMethod: "password",
+    authPolicyVersion: 1,
+  }));
+
+  assert.equal(sanitized.authMethod, "password");
+  assert.equal(sanitized.authPolicyVersion, 1);
+});
+
+test("sanitizeHost preserves a legacy no-save password-only choice", () => {
+  const sanitized = sanitizeHost(makeHost({
+    password: undefined,
+    savePassword: false,
+    authMethod: "password",
+    authPolicyVersion: undefined,
+  }));
+
+  assert.equal(sanitized.authMethod, "password");
+  assert.equal(sanitized.savePassword, false);
+  assert.equal(sanitized.authPolicyVersion, 1);
+});
+
+test("sanitizeHost keeps legacy no-save agent and key hosts on their prior authentication path", () => {
+  for (const legacySettings of [
+    { useSshAgent: true },
+    { identityFileId: "selected-key" },
+    { identityFilePaths: ["~/.ssh/id_work"] },
+  ]) {
+    const sanitized = sanitizeHost(makeHost({
+      password: undefined,
+      savePassword: false,
+      authMethod: "password",
+      authPolicyVersion: undefined,
+      ...legacySettings,
+    }));
+
+    assert.equal(sanitized.authMethod, undefined);
+    assert.equal(sanitized.authPolicyVersion, 1);
+  }
+});
+
+test("sanitizeHost preserves a legacy whitespace-only password", () => {
+  const sanitized = sanitizeHost(makeHost({
+    password: "   ",
+    authMethod: "password",
+    authPolicyVersion: undefined,
+  }));
+
+  assert.equal(sanitized.authMethod, "password");
+  assert.equal(sanitized.password, "   ");
+  assert.equal(sanitized.authPolicyVersion, 1);
+});
+
+test("sanitizeHost preserves an inferred legacy saved password", () => {
+  const sanitized = sanitizeHost(makeHost({
+    password: "saved-secret",
+    authMethod: undefined,
+    authPolicyVersion: undefined,
+  }));
+
+  assert.equal(sanitized.authMethod, "password");
+  assert.equal(sanitized.authPolicyVersion, 1);
+});
+
+test("sanitizeHost preserves inferred legacy identity file paths", () => {
+  const sanitized = sanitizeHost(makeHost({
+    password: "fallback-secret",
+    authMethod: undefined,
+    authPolicyVersion: undefined,
+    identityFilePaths: ["~/.ssh/id_work"],
+  }));
+
+  assert.equal(sanitized.authMethod, "key");
+  assert.equal(sanitized.authPolicyVersion, 1);
+});
+
 test("sanitizeHost preserves automatic host icon color fields", () => {
   const sanitized = sanitizeHost(makeHost({
     iconMode: "auto",
@@ -180,6 +438,16 @@ test("sanitizeHost trims leading whitespace before extracting the hostname", () 
   }));
 
   assert.equal(sanitized.hostname, "127.0.0.1");
+});
+
+test("sanitizeHost preserves valid per-host SSH timeouts and removes invalid values", () => {
+  const sanitized = sanitizeHost(makeHost({
+    sshTcpConnectTimeoutSeconds: 45.4,
+    sshAuthReadyTimeoutSeconds: 3601,
+  }));
+
+  assert.equal(sanitized.sshTcpConnectTimeoutSeconds, 45);
+  assert.equal(sanitized.sshAuthReadyTimeoutSeconds, undefined);
 });
 
 test("preserves a concurrent terminal timestamp toggle when host details did not edit it", () => {
@@ -334,9 +602,18 @@ test("normalizeDistroId maps Darwin and macOS labels to macos", () => {
   assert.equal(normalizeDistroId("Mac OS X"), "macos");
 });
 
-test("classifyDistroId treats macos as a POSIX stats target", () => {
+test("normalizeDistroId maps FreeBSD uname output to freebsd", () => {
+  assert.equal(normalizeDistroId("FreeBSD"), "freebsd");
+  assert.equal(
+    normalizeDistroId("FreeBSD host.example.com 14.3-RELEASE-p1 GENERIC amd64"),
+    "freebsd",
+  );
+});
+
+test("classifyDistroId limits Linux-like runtime support to implemented POSIX platforms", () => {
   assert.equal(classifyDistroId("macos"), "linux-like");
   assert.equal(classifyDistroId("Darwin"), "linux-like");
+  assert.equal(classifyDistroId("freebsd"), "other");
 });
 
 test("shouldProbeSessionCwd allows the probe on a plain Linux host", () => {
@@ -419,5 +696,34 @@ test("resolveHostKeepalive lets each field fall back independently", () => {
       GLOBAL_KEEPALIVE,
     ),
     { interval: 30, countMax: 50, source: "host" },
+  );
+});
+
+test("hostsEqualForIdentityReuse is true for shallow-identical field values", () => {
+  const a = makeHost({ showLineTimestamps: true });
+  const b = { ...a };
+  assert.equal(hostsEqualForIdentityReuse(a, b), true);
+  assert.equal(hostsEqualForIdentityReuse(a, makeHost({ showLineTimestamps: false })), false);
+});
+
+test("getHostAddressForClipboard returns the trimmed hostname for vault one-click copy", () => {
+  assert.equal(getHostAddressForClipboard(makeHost({ hostname: " 10.0.0.12 " })), "10.0.0.12");
+  assert.equal(getHostAddressForClipboard(makeHost({ hostname: "db.internal" })), "db.internal");
+  assert.equal(getHostAddressForClipboard({ hostname: "" }), "");
+});
+
+test("getHostAddressForClipboard omits synthesized plugin hostnames", () => {
+  assert.equal(
+    getHostAddressForClipboard(
+      makeHost({
+        protocol: "plugin:com.example.transport.connection",
+        hostname: "My Plugin Label",
+        pluginConnection: {
+          providerId: "com.example.transport.connection",
+          configuration: { endpoint: "opaque-target" },
+        },
+      }),
+    ),
+    "",
   );
 });

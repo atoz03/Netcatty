@@ -1,38 +1,92 @@
 #!/usr/bin/env node
 /* eslint-disable no-console */
 //
-// Resolve the mosh-client binary release used by build-packages.
+// Resolve the MoshCatty mosh-client binary release used by packaging / dev.
 //
 // Priority:
 //   1. MOSH_BIN_RELEASE from workflow input / repository variable.
 //   2. Latest non-draft, non-prerelease GitHub Release whose tag is
-//      mosh-bin-* in MOSH_BIN_OWNER/MOSH_BIN_REPO. By default this is a
-//      dedicated sibling binary repository named Netcatty-mosh-bin.
+//      moshcatty-* in MOSH_BIN_OWNER/MOSH_BIN_REPO (default binaricat/MoshCatty).
 //
-// In GitHub Actions, the resolved tag is written back to $GITHUB_ENV so
-// later steps can run scripts/fetch-mosh-binaries.cjs without duplicating
-// release discovery logic.
+// In GitHub Actions, the resolved tag is written to $GITHUB_ENV.
 
 const fs = require("node:fs");
 const https = require("node:https");
 
-const TAG_RE = /^mosh-bin-[A-Za-z0-9._-]+$/;
+// MoshCatty pure-Rust releases only.
+// Minimum 0.1.8: disable local backspace prediction until the host confirms
+// the resulting screen, preventing stale cursor/character display on latency.
+// 0.1.7 reconstructed numbered remote states before display; 0.1.6 added
+// prediction hardening; 0.1.5 introduced the Diff path.
+// 0.1.4 ConPTY shortcut; 0.1.2+ Linux glibc floors match Netcatty.
+// Allow semver prerelease (-rc1) and build metadata (+meta); no path separators.
+const TAG_RE = /^moshcatty-[A-Za-z0-9._+-]+$/;
+const MIN_VERSION = { major: 0, minor: 1, patch: 8 };
+const MIN_TAG = `moshcatty-${MIN_VERSION.major}.${MIN_VERSION.minor}.${MIN_VERSION.patch}`;
 
 function log(msg) {
   console.log(`[resolve-mosh-bin-release] ${msg}`);
 }
 
+/**
+ * Parse moshcatty-X.Y.Z with optional prerelease (-rc1) and build (+meta).
+ * Returns null if not semver-ish.
+ */
+function parseMoshCattyVersion(tag) {
+  const match = String(tag || "").trim().match(
+    /^moshcatty-(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/,
+  );
+  if (!match) return null;
+  return {
+    major: Number(match[1]),
+    minor: Number(match[2]),
+    patch: Number(match[3]),
+    // Present when tag is e.g. moshcatty-0.1.4-rc1 (semver: prerelease < final).
+    prerelease: match[4] || null,
+  };
+}
+
+function compareCoreVersion(a, b) {
+  if (a.major !== b.major) return a.major - b.major;
+  if (a.minor !== b.minor) return a.minor - b.minor;
+  return a.patch - b.patch;
+}
+
+/**
+ * True when tag is usable for packaging (core version ≥ min, with semver
+ * prerelease rules: X.Y.Z-rcN is below final X.Y.Z).
+ */
+function isAtLeastMinRelease(tag) {
+  const version = parseMoshCattyVersion(tag);
+  if (!version) return false;
+  const core = compareCoreVersion(version, MIN_VERSION);
+  if (core > 0) return true;
+  if (core < 0) return false;
+  // Equal to the floor: final only (no prerelease suffix).
+  return !version.prerelease;
+}
+
 function validateReleaseTag(tag) {
   const value = String(tag || "").trim();
-  if (!TAG_RE.test(value)) {
-    throw new Error(`invalid mosh binary release tag: ${tag}`);
+  if (!TAG_RE.test(value) || !parseMoshCattyVersion(value)) {
+    throw new Error(`invalid mosh binary release tag: ${tag} (expected moshcatty-X.Y.Z[(-pre)|(+build)])`);
+  }
+  if (!isAtLeastMinRelease(value)) {
+    throw new Error(
+      `mosh binary release ${value} is below minimum ${MIN_TAG} `
+        + "(0.1.8 disables unsafe local backspace prediction; "
+        + "prereleases of the floor e.g. 0.1.8-rc1 are not accepted)",
+    );
   }
   return value;
 }
 
 function parseRepository(env) {
-  const owner = env.MOSH_BIN_OWNER || (env.GITHUB_REPOSITORY || "").split("/")[0] || "binaricat";
-  const repo = env.MOSH_BIN_REPO || "Netcatty-mosh-bin";
+  // Canonical default is always binaricat/MoshCatty. Do not derive owner from
+  // GITHUB_REPOSITORY — fork packaging would otherwise look for
+  // <fork-owner>/MoshCatty and fail. Override only via MOSH_BIN_OWNER/REPO.
+  const owner = env.MOSH_BIN_OWNER || "binaricat";
+  const repo = env.MOSH_BIN_REPO || "MoshCatty";
   return { owner, repo };
 }
 
@@ -46,8 +100,10 @@ function pickLatestMoshBinRelease(releases) {
   return releases
     .map((release, index) => ({ release, index }))
     .filter(({ release }) => {
+      const tag = String(release?.tag_name || "");
       return release
-        && TAG_RE.test(String(release.tag_name || ""))
+        && TAG_RE.test(tag)
+        && isAtLeastMinRelease(tag)
         && release.draft !== true
         && release.prerelease !== true;
     })
@@ -122,7 +178,7 @@ async function loadReleases(env, request = requestJsonWithHeaders) {
   const { owner, repo } = parseRepository(env);
   const apiBase = (env.GITHUB_API_URL || "https://api.github.com").replace(/\/+$/, "");
   let url = `${apiBase}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/releases?per_page=100`;
-  log(`looking up latest mosh-bin-* release in ${owner}/${repo}`);
+  log(`looking up latest moshcatty-* release in ${owner}/${repo}`);
   const releases = [];
   const seen = new Set();
   while (url) {
@@ -159,7 +215,8 @@ async function main(env = process.env) {
   const release = pickLatestMoshBinRelease(releases);
   if (!release) {
     throw new Error(
-      "could not find a non-draft mosh-bin-* release in the mosh binary repository. Publish build-mosh-binaries artifacts with release_tag (for example mosh-bin-1.4.0-1) before packaging.",
+      `could not find a non-draft ${MIN_TAG}+ release in binaricat/MoshCatty. `
+        + `Publish a MoshCatty GitHub Release (e.g. ${MIN_TAG}) before packaging.`,
     );
   }
 
@@ -180,7 +237,10 @@ module.exports = {
   loadReleases,
   parseNextLink,
   validateReleaseTag,
+  parseMoshCattyVersion,
+  isAtLeastMinRelease,
   parseRepository,
   pickLatestMoshBinRelease,
+  MIN_TAG,
   main,
 };

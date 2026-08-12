@@ -23,22 +23,73 @@ export type TerminalPaneStyle = {
   height?: string | number;
   visibility?: string;
   pointerEvents?: string;
+  zIndex?: number;
 };
 
-export function resolveHiddenTerminalPaneStyle<T extends TerminalPaneStyle>(
+export function shouldUseTerminalPaneSplitLayout({
+  workspace,
+  sessionId,
+  isVisible,
+  hibernateHiddenTabs,
+}: {
+  workspace: Workspace | undefined;
+  sessionId: string;
+  isVisible: boolean;
+  hibernateHiddenTabs: boolean;
+}): boolean {
+  if (!workspace) return false;
+  // Default viewMode is tiled split (including undefined from createWorkspaceFromSessions).
+  // Only focus mode uses a full-size focused pane; other panes keep split geometry while
+  // continuously rendered in the background.
+  if (workspace.viewMode === "focus") {
+    return !isVisible
+      && !hibernateHiddenTabs
+      && workspace.focusedSessionId !== sessionId;
+  }
+  return true;
+}
+
+export function shouldMeasureTerminalLayerLayout({
+  isTerminalLayerVisible,
+  keepHiddenLayoutActive,
+  workspaceArea,
+}: {
+  isTerminalLayerVisible: boolean;
+  keepHiddenLayoutActive: boolean;
+  workspaceArea: TerminalPaneHiddenSize;
+}): boolean {
+  return isTerminalLayerVisible
+    || (keepHiddenLayoutActive && (workspaceArea.width <= 0 || workspaceArea.height <= 0));
+}
+
+export function resolveInactiveTerminalPaneStyle<T extends TerminalPaneStyle>(
   layoutStyle: T,
   lastVisibleSize: TerminalPaneHiddenSize | null,
+  hibernateHiddenTabs: boolean,
+  preserveLastVisibleSize = false,
 ): T {
   return {
     ...layoutStyle,
-    visibility: "hidden",
+    visibility: hibernateHiddenTabs ? "hidden" : "visible",
     pointerEvents: "none",
-    ...(lastVisibleSize
+    zIndex: 0,
+    ...((hibernateHiddenTabs || preserveLastVisibleSize) && lastVisibleSize
       ? {
         width: `${lastVisibleSize.width}px`,
         height: `${lastVisibleSize.height}px`,
       }
       : {}),
+  };
+}
+
+export function resolveTerminalLayerSurfaceStyle(
+  isActive: boolean,
+  hibernateHiddenTabs: boolean,
+): { visibility: "visible" | "hidden"; pointerEvents: "auto" | "none"; zIndex: number } {
+  return {
+    visibility: isActive || !hibernateHiddenTabs ? "visible" : "hidden",
+    pointerEvents: isActive ? "auto" : "none",
+    zIndex: isActive ? 10 : 0,
   };
 }
 

@@ -6,6 +6,7 @@ import type { VaultOrderPosition } from '../../domain/vaultOrder';
 export interface VaultHostTreeActions {
   onDeleteHost: (host: Host) => void;
   onDuplicateHost: (host: Host) => void;
+  onCopyHostname?: (host: Host) => void;
   onCopyCredentials: (host: Host) => void;
   onRenameHost: (host: Host) => void;
   onNewGroup: (parentPath?: string) => void;

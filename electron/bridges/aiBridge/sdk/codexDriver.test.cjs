@@ -1,6 +1,13 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { translateCodexEvent, buildCodexConstructorOptions, buildCodexThreadOptions, buildCodexPromptInput, runCodexTurn } = require("./codexDriver.cjs");
+const {
+  translateCodexEvent,
+  buildCodexConstructorOptions,
+  buildCodexThreadOptions,
+  buildCodexPromptInput,
+  runCodexTurn,
+  toCodexMcpConfig,
+} = require("./codexDriver.cjs");
 
 function collector() {
   const events = [];
@@ -12,6 +19,11 @@ function collector() {
       reasoningEnd: () => events.push({ k: "reasoningEnd" }),
       toolCall: (n, a, id) => events.push({ k: "toolCall", n, a, id }),
       toolResult: (id, o, n) => events.push({ k: "toolResult", id, o, n }),
+      fileChange: (id, changes, status) => events.push({ k: "fileChange", id, changes, status }),
+      webSearch: (id, query, status) => events.push({ k: "webSearch", id, query, status }),
+      planUpdate: (id, items, status) => events.push({ k: "planUpdate", id, items, status }),
+      warning: (id, message) => events.push({ k: "warning", id, message }),
+      usage: (usage) => events.push({ k: "usage", usage }),
       status: (m) => events.push({ k: "status", m }),
       sessionId: (s) => events.push({ k: "sessionId", s }),
       emitError: (e) => events.push({ k: "error", e }),
@@ -155,10 +167,233 @@ test("turn.failed -> error event", () => {
   assert.deepEqual(events, [{ k: "error", e: "stale login" }]);
 });
 
-test("turn.completed is a no-op event-wise", () => {
+test("turn.completed emits actual token usage", () => {
+  const { events, emitter } = collector();
+  translateCodexEvent({
+    type: "turn.completed",
+    usage: {
+      input_tokens: 100,
+      cached_input_tokens: 40,
+      output_tokens: 25,
+      reasoning_output_tokens: 10,
+    },
+  }, emitter);
+  assert.deepEqual(events, [{
+    k: "usage",
+    usage: {
+      inputTokens: 100,
+      cachedInputTokens: 40,
+      outputTokens: 25,
+      reasoningTokens: 10,
+      totalTokens: 125,
+    },
+  }]);
+});
+
+test("turn.completed without usage preserves the estimated fallback", () => {
   const { events, emitter } = collector();
   translateCodexEvent({ type: "turn.completed", usage: {} }, emitter);
   assert.deepEqual(events, []);
+});
+
+test("file changes emit once on completion", () => {
+  const { events, emitter } = collector();
+  const item = {
+    id: "patch-1",
+    type: "file_change",
+    changes: [{ path: "src/app.ts", kind: "update" }],
+    status: "completed",
+  };
+  translateCodexEvent({ type: "item.started", item }, emitter);
+  translateCodexEvent({ type: "item.completed", item }, emitter);
+  assert.deepEqual(events, [{
+    k: "fileChange",
+    id: "patch-1",
+    changes: item.changes,
+    status: "completed",
+  }]);
+});
+
+test("web search and todo list updates keep stable item ids", () => {
+  const { events, emitter } = collector();
+  translateCodexEvent({
+    type: "item.started",
+    item: { id: "search-1", type: "web_search", query: "Codex SDK events" },
+  }, emitter);
+  translateCodexEvent({
+    type: "item.completed",
+    item: { id: "search-1", type: "web_search", query: "Codex SDK events" },
+  }, emitter);
+  translateCodexEvent({
+    type: "item.updated",
+    item: {
+      id: "plan-1",
+      type: "todo_list",
+      items: [{ text: "Map events", completed: false }],
+    },
+  }, emitter);
+  translateCodexEvent({
+    type: "item.completed",
+    item: {
+      id: "plan-1",
+      type: "todo_list",
+      items: [{ text: "Map events", completed: true }],
+    },
+  }, emitter);
+  assert.deepEqual(events.map((event) => [event.k, event.id, event.status]), [
+    ["webSearch", "search-1", "running"],
+    ["webSearch", "search-1", "completed"],
+    ["planUpdate", "plan-1", "running"],
+    ["planUpdate", "plan-1", "completed"],
+  ]);
+});
+
+test("item errors and reconnectable stream errors are warnings; other stream errors stay fatal", () => {
+  const { events, emitter } = collector();
+  const state = {};
+  translateCodexEvent({
+    type: "item.completed",
+    item: { id: "warning-1", type: "error", message: "Search result was unavailable" },
+  }, emitter, state);
+  translateCodexEvent({
+    type: "error",
+    message: "Reconnecting... 1/5 (stream disconnected before completion: Transport error: network error: error decoding response body)",
+  }, emitter, state);
+  translateCodexEvent({
+    type: "error",
+    message: "stream disconnected before completion: Transport error: error decoding response body; retrying 2/5 in 361ms…",
+  }, emitter, state);
+  translateCodexEvent({ type: "error", message: "stream disconnected", willRetry: true }, emitter, state);
+  translateCodexEvent({ type: "error", message: "transport error", will_retry: true }, emitter, state);
+  translateCodexEvent({ type: "error", message: "stream disconnected" }, emitter, state);
+  translateCodexEvent({ type: "error", message: "error decoding response body" }, emitter, state);
+  translateCodexEvent({ type: "error", message: "transport error" }, emitter, state);
+  translateCodexEvent({
+    type: "error",
+    message: "Reconnecting... 5/5 (stream disconnected before completion: Transport error)",
+    willRetry: false,
+  }, emitter, state);
+  translateCodexEvent({
+    type: "error",
+    message: "transport error; retrying 5/5 after retries exhausted",
+    will_retry: false,
+  }, emitter, state);
+  translateCodexEvent({ type: "error", message: "not authenticated" }, emitter, state);
+  assert.equal(events.filter((event) => event.k === "warning").length, 5);
+  assert.deepEqual(events.filter((event) => event.k === "error"), [
+    { k: "error", e: "stream disconnected" },
+    { k: "error", e: "error decoding response body" },
+    { k: "error", e: "transport error" },
+    { k: "error", e: "Reconnecting... 5/5 (stream disconnected before completion: Transport error)" },
+    { k: "error", e: "transport error; retrying 5/5 after retries exhausted" },
+    { k: "error", e: "not authenticated" },
+  ]);
+  assert.match(events[1].message, /Reconnecting|error decoding response body/);
+});
+
+test("explicit non-retryable stream disconnect fails the turn even after partial content", async () => {
+  const { events, emitter } = collector();
+  class FakeCodex {
+    startThread() {
+      return {
+        id: "thr-exhausted",
+        async runStreamed() {
+          return {
+            events: (async function* () {
+              yield { type: "thread.started", thread_id: "thr-exhausted" };
+              yield {
+                type: "item.completed",
+                item: { type: "agent_message", text: "partial answer" },
+              };
+              yield {
+                type: "error",
+                message: "Reconnecting... 5/5 (stream disconnected before completion: Transport error)",
+                willRetry: false,
+              };
+            })(),
+          };
+        },
+      };
+    }
+    resumeThread() { return this.startThread(); }
+  }
+  await runCodexTurn({
+    prompt: "hi", constructorOptions: {}, threadOptions: {}, emitter, CodexCtor: FakeCodex,
+  });
+  assert.deepEqual(events.filter((event) => event.k === "text"), [{ k: "text", t: "partial answer" }]);
+  assert.deepEqual(events.filter((event) => event.k === "error"), [
+    { k: "error", e: "Reconnecting... 5/5 (stream disconnected before completion: Transport error)" },
+  ]);
+  assert.equal(events.some((event) => event.k === "done"), false);
+});
+
+test("message-only transport failure fails the turn even after partial content", async () => {
+  const { events, emitter } = collector();
+  class FakeCodex {
+    startThread() {
+      return {
+        id: "thr-disconnected",
+        async runStreamed() {
+          return {
+            events: (async function* () {
+              yield { type: "thread.started", thread_id: "thr-disconnected" };
+              yield {
+                type: "item.completed",
+                item: { type: "agent_message", text: "partial answer" },
+              };
+              yield {
+                type: "error",
+                message: "stream disconnected before completion: Transport error",
+              };
+            })(),
+          };
+        },
+      };
+    }
+    resumeThread() { return this.startThread(); }
+  }
+  await runCodexTurn({
+    prompt: "hi", constructorOptions: {}, threadOptions: {}, emitter, CodexCtor: FakeCodex,
+  });
+  assert.deepEqual(events.filter((event) => event.k === "text"), [{ k: "text", t: "partial answer" }]);
+  assert.deepEqual(events.filter((event) => event.k === "error"), [
+    { k: "error", e: "stream disconnected before completion: Transport error" },
+  ]);
+  assert.equal(events.some((event) => event.k === "done"), false);
+});
+
+test("reconnectable Codex stream errors keep the turn open for later output", async () => {
+  const { events, emitter } = collector();
+  class FakeCodex {
+    startThread() {
+      return {
+        id: "thr-reconnect",
+        async runStreamed() {
+          return {
+            events: (async function* () {
+              yield { type: "thread.started", thread_id: "thr-reconnect" };
+              yield {
+                type: "error",
+                message: "Reconnecting... 1/5 (stream disconnected before completion: error decoding response body)",
+              };
+              yield {
+                type: "item.completed",
+                item: { type: "agent_message", text: "recovered answer" },
+              };
+            })(),
+          };
+        },
+      };
+    }
+    resumeThread() { return this.startThread(); }
+  }
+  await runCodexTurn({
+    prompt: "hi", constructorOptions: {}, threadOptions: {}, emitter, CodexCtor: FakeCodex,
+  });
+  assert.ok(events.some((event) => event.k === "warning" && /decoding response body|Reconnecting/.test(event.message)));
+  assert.deepEqual(events.filter((event) => event.k === "text"), [{ k: "text", t: "recovered answer" }]);
+  assert.ok(events.some((event) => event.k === "done"));
+  assert.equal(events.some((event) => event.k === "error"), false);
 });
 
 test("runCodexTurn captures+emits the thread id early so an aborted turn still resumes", async () => {
@@ -253,6 +488,20 @@ test("buildCodexConstructorOptions sets path override + env + mcp config table",
   assert.equal(opts.config.model_reasoning_summary, "concise");
 });
 
+test("toCodexMcpConfig can delegate MCP approval to the embedding client", () => {
+  const config = toCodexMcpConfig([{
+    name: "netcatty-remote-hosts",
+    command: "/abs/electron",
+    args: ["/abs/server.cjs"],
+    env: [],
+  }], { defaultToolsApprovalMode: "approve" });
+
+  assert.equal(
+    config["netcatty-remote-hosts"].default_tools_approval_mode,
+    "approve",
+  );
+});
+
 test("buildCodexThreadOptions enables MCP via danger-full-access + approvalPolicy never", () => {
   // codex-sdk: model/sandboxMode/workingDirectory are ThreadOptions (startThread),
   // not runStreamed TurnOptions. Non-interactive `codex exec` cancels MCP tool
@@ -272,6 +521,13 @@ test("buildCodexThreadOptions splits <model>/<effort> into model + modelReasonin
   const t = buildCodexThreadOptions({ model: "gpt-5.5/high" });
   assert.equal(t.model, "gpt-5.5");
   assert.equal(t.modelReasoningEffort, "high");
+  // GPT-5.6 advertises max/ultra reasoning efforts in the Codex catalog.
+  const solMax = buildCodexThreadOptions({ model: "gpt-5.6-sol/max" });
+  assert.equal(solMax.model, "gpt-5.6-sol");
+  assert.equal(solMax.modelReasoningEffort, "max");
+  const solUltra = buildCodexThreadOptions({ model: "gpt-5.6-sol/ultra" });
+  assert.equal(solUltra.model, "gpt-5.6-sol");
+  assert.equal(solUltra.modelReasoningEffort, "ultra");
   // a trailing segment that isn't a valid effort (custom/OpenRouter id) is kept whole
   const c = buildCodexThreadOptions({ model: "openrouter/some-model" });
   assert.equal(c.model, "openrouter/some-model");

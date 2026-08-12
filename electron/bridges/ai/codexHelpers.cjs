@@ -10,6 +10,7 @@ const { createHash } = require("node:crypto");
 const { existsSync, readFileSync } = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { StringDecoder } = require("node:string_decoder");
 
 const { stripAnsi, extractFirstNonLocalhostUrl, toUnpackedAsarPath } = require("./shellUtils.cjs");
 
@@ -17,6 +18,10 @@ const { stripAnsi, extractFirstNonLocalhostUrl, toUnpackedAsarPath } = require("
 
 const codexLoginSessions = new Map();
 let codexValidationCache = null;
+const MAX_CODEX_LOGIN_OUTPUT_BYTES = 64 * 1024;
+const MAX_CODEX_LOGIN_OUTPUT_CHARS = MAX_CODEX_LOGIN_OUTPUT_BYTES;
+const MAX_CODEX_LOGIN_TERMINAL_SESSIONS = 8;
+const CODEX_LOGIN_KILL_GRACE_MS = 750;
 
 const CODEX_AUTH_HINTS = [
   "not logged in",
@@ -41,10 +46,78 @@ function appendCodexLoginOutput(session, chunk) {
   const cleanChunk = stripAnsi(chunk);
   if (!cleanChunk) return;
 
-  session.output += cleanChunk;
+  const combined = `${session.output || ""}${cleanChunk}`;
   if (!session.url) {
-    session.url = extractFirstNonLocalhostUrl(session.output);
+    session.url = extractFirstNonLocalhostUrl(combined);
   }
+  session.output = retainUtf8Tail(combined, MAX_CODEX_LOGIN_OUTPUT_BYTES);
+}
+
+function retainUtf8Tail(value, maxBytes) {
+  const buffer = Buffer.from(String(value || ""), "utf8");
+  if (buffer.length <= maxBytes) return String(value || "");
+  let start = buffer.length - maxBytes;
+  // Never begin inside a UTF-8 continuation sequence.
+  while (start < buffer.length && (buffer[start] & 0xc0) === 0x80) start += 1;
+  return buffer.subarray(start).toString("utf8");
+}
+
+function createCodexLoginOutputDecoder(session) {
+  const decoder = new StringDecoder("utf8");
+  let ended = false;
+  return {
+    write(chunk) {
+      if (ended) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      appendCodexLoginOutput(session, decoder.write(buffer));
+    },
+    end() {
+      if (ended) return;
+      ended = true;
+      appendCodexLoginOutput(session, decoder.end());
+    },
+  };
+}
+
+function pruneCodexLoginSessions() {
+  const terminalSessionIds = [];
+  for (const [sessionId, session] of codexLoginSessions) {
+    if (session?.state !== "running" && !session?.process) terminalSessionIds.push(sessionId);
+  }
+  const excess = terminalSessionIds.length - MAX_CODEX_LOGIN_TERMINAL_SESSIONS;
+  for (let index = 0; index < excess; index += 1) {
+    codexLoginSessions.delete(terminalSessionIds[index]);
+  }
+}
+
+function clearCodexLoginKillTimer(session, clearTimeoutFn = clearTimeout) {
+  if (!session?.killTimer) return;
+  clearTimeoutFn(session.killTimer);
+  session.killTimer = null;
+}
+
+function stopCodexLoginProcess(session, {
+  setTimeoutFn = setTimeout,
+  clearTimeoutFn = clearTimeout,
+} = {}) {
+  const child = session?.process;
+  if (!child) return false;
+  clearCodexLoginKillTimer(session, clearTimeoutFn);
+  session.killTimer = setTimeoutFn(() => {
+    session.killTimer = null;
+    if (session.process !== child) return;
+    try { child.kill("SIGKILL"); } catch {}
+  }, CODEX_LOGIN_KILL_GRACE_MS);
+  session.killTimer?.unref?.();
+  try { child.kill("SIGTERM"); } catch {}
+  return true;
+}
+
+function recordCodexLoginSession(session) {
+  if (!session?.id) return;
+  codexLoginSessions.delete(session.id);
+  codexLoginSessions.set(session.id, session);
+  pruneCodexLoginSessions();
 }
 
 function toCodexLoginSessionResponse(session) {
@@ -377,8 +450,17 @@ function setCodexValidationCache(value) {
 }
 
 module.exports = {
+  MAX_CODEX_LOGIN_OUTPUT_BYTES,
+  MAX_CODEX_LOGIN_OUTPUT_CHARS,
+  MAX_CODEX_LOGIN_TERMINAL_SESSIONS,
+  CODEX_LOGIN_KILL_GRACE_MS,
   codexLoginSessions,
   appendCodexLoginOutput,
+  createCodexLoginOutputDecoder,
+  pruneCodexLoginSessions,
+  recordCodexLoginSession,
+  clearCodexLoginKillTimer,
+  stopCodexLoginProcess,
   toCodexLoginSessionResponse,
   getActiveCodexLoginSession,
   normalizeCodexIntegrationState,

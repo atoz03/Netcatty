@@ -17,10 +17,30 @@ function startsWithToolResult(message: ModelMessage | undefined): boolean {
   });
 }
 
+function skipToolResultsForward(messages: ModelMessage[], startIndex: number): number {
+  let index = startIndex;
+  while (index < messages.length && startsWithToolResult(messages[index])) index += 1;
+  return index;
+}
+
+function findToolResultsStart(messages: ModelMessage[]): number {
+  let index = messages.length;
+  while (index > 0 && startsWithToolResult(messages[index - 1])) index -= 1;
+  return index;
+}
+
 /** Prune from the tail while preserving valid tool-call/tool-result pairing. */
 export function pruneLastModelMessage(messages: ModelMessage[]): ModelMessage[] {
   if (messages.length === 0) return messages;
   if (messages.length === 1) return [];
+
+  const trailingToolStart = findToolResultsStart(messages);
+  if (trailingToolStart < messages.length) {
+    const preceding = messages[trailingToolStart - 1];
+    return preceding?.role === 'assistant' && endsWithToolCall(preceding)
+      ? messages.slice(0, trailingToolStart - 1)
+      : messages.slice(0, trailingToolStart);
+  }
 
   const secondToLastIndex = messages.length - 2;
   const secondToLast = messages[secondToLastIndex];
@@ -31,10 +51,6 @@ export function pruneLastModelMessage(messages: ModelMessage[]): ModelMessage[] 
   if (secondToLast.role === 'user') {
     return messages.slice(0, -2);
   }
-  if (startsWithToolResult(messages[messages.length - 1])) {
-    return messages.slice(0, -1);
-  }
-
   return messages.slice(0, -1);
 }
 
@@ -46,17 +62,17 @@ export function pruneFirstModelMessage(messages: ModelMessage[]): ModelMessage[]
   const first = messages[0];
   const second = messages[1];
 
-  if (first.role === 'assistant' && endsWithToolCall(first) && second?.role === 'tool') {
-    return messages.slice(2);
+  if (first.role === 'assistant' && endsWithToolCall(first)) {
+    return messages.slice(skipToolResultsForward(messages, 1));
   }
-  if (first.role === 'user' && second?.role === 'assistant' && endsWithToolCall(second) && messages[2]?.role === 'tool') {
-    return messages.slice(3);
+  if (first.role === 'user' && second?.role === 'assistant' && endsWithToolCall(second)) {
+    return messages.slice(skipToolResultsForward(messages, 2));
   }
   if (first.role === 'user' && second?.role === 'assistant') {
     return messages.slice(2);
   }
   if (startsWithToolResult(first)) {
-    return messages.slice(1);
+    return messages.slice(skipToolResultsForward(messages, 0));
   }
 
   return messages.slice(1);

@@ -16,6 +16,7 @@ import {
     CloudOff,
     Github,
     Loader2,
+    Plug,
     RefreshCw,
     Settings,
     X,
@@ -26,6 +27,7 @@ import {
 } from 'lucide-react';
 import { useCloudSync } from '../application/state/useCloudSync';
 import { isProviderReadyForSync, type CloudProvider, formatSyncDateTime } from '../domain/sync';
+import { isPluginCloudProviderId } from '../domain/cloudProviderIds';
 import { useI18n } from '../application/i18n/I18nProvider';
 import { cn } from '../lib/utils';
 import { Button } from './ui/button';
@@ -53,7 +55,7 @@ const OneDriveIcon: React.FC<{ className?: string }> = ({ className }) => (
     </svg>
 );
 
-const providerIcons: Record<CloudProvider, React.ReactNode> = {
+const providerIcons: Partial<Record<CloudProvider, React.ReactNode>> = {
     github: <Github size={16} />,
     google: <GoogleDriveIcon className="w-4 h-4" />,
     onedrive: <OneDriveIcon className="w-4 h-4" />,
@@ -61,13 +63,19 @@ const providerIcons: Record<CloudProvider, React.ReactNode> = {
     s3: <Database size={16} />,
 };
 
-const providerNames: Record<CloudProvider, string> = {
+const providerNames: Partial<Record<CloudProvider, string>> = {
     github: 'GitHub Gist',
     google: 'Google Drive',
     onedrive: 'OneDrive',
     webdav: 'WebDAV',
     s3: 'S3 Compatible',
 };
+
+const resolveProviderIcon = (provider: CloudProvider): React.ReactNode =>
+    providerIcons[provider] ?? <Plug size={16} />;
+
+const resolveProviderName = (provider: CloudProvider): string =>
+    providerNames[provider] ?? provider;
 
 // ============================================================================
 // Status Dot Component
@@ -123,13 +131,17 @@ export const SyncStatusButton: React.FC<SyncStatusButtonProps> = ({
 
     // State is now automatically synced via useSyncExternalStore - no manual refresh needed
 
-    // Get connected provider (include syncing status as it's still connected)
+    // Get connected provider (built-ins first, then any namespaced plugin provider).
     const getConnectedProvider = (): CloudProvider | null => {
-        if (isProviderReadyForSync(sync.providers.github)) return 'github';
-        if (isProviderReadyForSync(sync.providers.google)) return 'google';
-        if (isProviderReadyForSync(sync.providers.onedrive)) return 'onedrive';
-        if (isProviderReadyForSync(sync.providers.webdav)) return 'webdav';
-        if (isProviderReadyForSync(sync.providers.s3)) return 's3';
+        const preferred: CloudProvider[] = ['github', 'google', 'onedrive', 'webdav', 's3'];
+        for (const id of preferred) {
+            const conn = sync.providers[id];
+            if (conn && isProviderReadyForSync(conn)) return id;
+        }
+        for (const [id, conn] of Object.entries(sync.providers)) {
+            if (preferred.includes(id as CloudProvider)) continue;
+            if (conn && isProviderReadyForSync(conn)) return id as CloudProvider;
+        }
         return null;
     };
 
@@ -286,15 +298,17 @@ export const SyncStatusButton: React.FC<SyncStatusButtonProps> = ({
                             {connectedProvider && providerConnection && (
                                 <div className="flex items-center gap-3 p-2 rounded-lg bg-muted/30">
                                     <div className="w-10 h-10 rounded-lg bg-primary/10 text-primary flex items-center justify-center">
-                                        {providerIcons[connectedProvider]}
+                                        {resolveProviderIcon(connectedProvider)}
                                     </div>
                                     <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-2">
-                                            <span className="text-sm font-medium">{providerNames[connectedProvider]}</span>
+                                            <span className="text-sm font-medium">{resolveProviderName(connectedProvider)}</span>
                                             <StatusIndicator status={overallStatus} />
                                         </div>
                                         <div className="flex items-center gap-2 mt-0.5">
-                                            {providerConnection.account?.avatarUrl && (
+                                            {providerConnection.account?.avatarUrl
+                                              && connectedProvider
+                                              && !isPluginCloudProviderId(connectedProvider) && (
                                                 <img
                                                     src={providerConnection.account.avatarUrl}
                                                     alt=""

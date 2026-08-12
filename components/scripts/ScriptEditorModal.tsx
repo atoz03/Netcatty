@@ -25,6 +25,7 @@ export interface ScriptEditorModalProps {
   customGroups?: string[];
   selectedHostIds: string[];
   onSelectHost: (host: Host) => void;
+  onSelectionChange?: (selectedHostIds: string[]) => void;
   targetsAllHosts?: boolean;
   onTargetsAllHostsChange?: (checked: boolean) => void;
 }
@@ -51,6 +52,7 @@ export const ScriptEditorModal: React.FC<ScriptEditorModalProps> = ({
   customGroups = [],
   selectedHostIds,
   onSelectHost,
+  onSelectionChange,
   targetsAllHosts = false,
   onTargetsAllHostsChange,
 }) => {
@@ -100,7 +102,7 @@ export const ScriptEditorModal: React.FC<ScriptEditorModalProps> = ({
           <div className="h-full flex flex-col min-h-0">
             <div className="h-9 px-3 py-1.5 border-b border-border/60 flex-shrink-0">
               <div className="flex h-full items-center justify-between gap-3">
-                <span className="text-sm font-semibold leading-none truncate">{title}</span>
+                <span className="truncate text-sm font-semibold leading-5">{title}</span>
                 <div className="flex h-6 items-center gap-1.5">
                   <Button
                     variant="outline"
@@ -187,6 +189,7 @@ export const ScriptEditorModal: React.FC<ScriptEditorModalProps> = ({
         selectedHostIds={selectedHostIds}
         multiSelect
         onSelect={onSelectHost}
+        onSelectionChange={onSelectionChange}
         onConfirm={handleTargetsConfirm}
       />
     </>

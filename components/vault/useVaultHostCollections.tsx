@@ -24,6 +24,41 @@ interface UseVaultHostCollectionsOptions {
   viewMode: "grid" | "list" | "tree";
 }
 
+export function hostBelongsToSelectedVaultGroup(host: Host, selectedGroupPath: string): boolean {
+  const hostGroup = host.group || "";
+  if (selectedGroupPath === "General") {
+    return hostGroup === "" || hostGroup === "General";
+  }
+  return hostGroup === selectedGroupPath;
+}
+
+export function filterVaultHostsForDisplay({
+  filteredHosts,
+  searchTerm,
+  selectedGroupPath,
+  showOnlyUngroupedHostsInRoot,
+}: {
+  filteredHosts: Host[];
+  searchTerm: string;
+  selectedGroupPath: string | null;
+  showOnlyUngroupedHostsInRoot: boolean;
+}): Host[] {
+  if (selectedGroupPath) {
+    return filteredHosts.filter((host) =>
+      hostBelongsToSelectedVaultGroup(host, selectedGroupPath),
+    );
+  }
+
+  if (!searchTerm && showOnlyUngroupedHostsInRoot) {
+    return filteredHosts.filter((host) => {
+      const hostGroup = (host.group || "").trim();
+      return hostGroup === "";
+    });
+  }
+
+  return filteredHosts;
+}
+
 export function useVaultHostCollections({
   customGroups,
   groupConfigs,
@@ -192,32 +227,14 @@ export function useVaultHostCollections({
     };
   
   const displayedHosts = useMemo(() => {
-      let filtered = filteredHosts;
-      // Search spans all groups (#777): when the user types in the search box
-      // we skip group/ungrouped-root scoping, so a matching host in another
-      // group is still reachable without having to navigate into it first.
-      // The tree view already uses this shape — see `treeViewHosts` below.
-      const hasSearch = searchTerm.length > 0;
-      if (!hasSearch) {
-        if (selectedGroupPath) {
-          // Match hosts whose group equals the selected path
-          // For "General" group, also match hosts with empty/undefined group
-          filtered = filtered.filter((h) => {
-            const hostGroup = h.group || "";
-            if (selectedGroupPath === "General") {
-              return hostGroup === "" || hostGroup === "General";
-            }
-            return hostGroup === selectedGroupPath;
-          });
-        } else if (showOnlyUngroupedHostsInRoot) {
-          filtered = filtered.filter((h) => {
-            const hostGroup = (h.group || "").trim();
-            return hostGroup === "";
-          });
-        }
-      }
+      const filtered = filterVaultHostsForDisplay({
+        filteredHosts,
+        searchTerm,
+        selectedGroupPath,
+        showOnlyUngroupedHostsInRoot,
+      });
       return sortHosts(filtered);
-    }, [filteredHosts, searchTerm.length, selectedGroupPath, showOnlyUngroupedHostsInRoot, sortHosts]);
+    }, [filteredHosts, searchTerm, selectedGroupPath, showOnlyUngroupedHostsInRoot, sortHosts]);
   
   // Pinned hosts for root-level display (not inside a subgroup)
     // Respects active search and tag filters
@@ -231,15 +248,16 @@ export function useVaultHostCollections({
     // Respects active search and tag filters
     const recentHosts = useMemo(() => {
       if (selectedGroupPath) return [];
-      const filtered = filteredHosts.filter((h) => h.lastConnectedAt);
+      const filtered = filteredHosts.filter((h) => h.lastConnectedAt && !h.pinned);
       return filtered
         .sort((a, b) => (b.lastConnectedAt || 0) - (a.lastConnectedAt || 0))
         .slice(0, 6);
     }, [filteredHosts, selectedGroupPath]);
   
-  // No longer deduplicate pinned/recent hosts from the main list,
-    // so hosts always appear in their groups regardless of pinned/recent status.
-    const pinnedRecentIds = useMemo(() => new Set<string>(), []);
+    const pinnedRecentIds = useMemo(() => new Set<string>([
+      ...pinnedHosts.map((host) => host.id),
+      ...(showRecentHosts ? recentHosts.map((host) => host.id) : []),
+    ]), [pinnedHosts, recentHosts, showRecentHosts]);
   
   const visibleDisplayedHosts = useMemo(
       () => displayedHosts.filter((h) => selectedGroupPath || !pinnedRecentIds.has(h.id)),
@@ -256,7 +274,7 @@ export function useVaultHostCollections({
       const groups: { name: string; hosts: Host[] }[] = [];
       const groupMap = new Map<string, Host[]>();
   
-      for (const host of displayedHosts) {
+      for (const host of visibleDisplayedHosts) {
         const groupName = host.group || "";
         if (!groupMap.has(groupName)) {
           groupMap.set(groupName, []);
@@ -269,7 +287,7 @@ export function useVaultHostCollections({
         groups.push({ name: key, hosts: groupMap.get(key)! });
       }
       return groups;
-    }, [displayedHosts, sortMode]);
+    }, [sortMode, visibleDisplayedHosts]);
   
   const buildTreeViewGroupTree = useMemo<Record<string, GroupNode>>(() => {
       const root: Record<string, GroupNode> = {};
@@ -292,7 +310,9 @@ export function useVaultHostCollections({
           currentLevel = currentLevel[part].children;
         });
       };
-      orderedCustomGroups.forEach((path) => insertPath(path));
+      if (!searchTerm && selectedTags.length === 0) {
+        orderedCustomGroups.forEach((path) => insertPath(path));
+      }
       // Use filtered hosts (treeViewHosts) instead of all hosts to respect search/tag filters
       treeViewHosts.forEach((host) => {
         if (host.group && host.group.trim() !== "") {
@@ -303,7 +323,7 @@ export function useVaultHostCollections({
       Object.values(root).forEach(countAllHostsInNode);
       
       return root;
-    }, [treeViewHosts, orderedCustomGroups, countAllHostsInNode]);
+    }, [treeViewHosts, orderedCustomGroups, countAllHostsInNode, searchTerm, selectedTags.length]);
   
   // Create tree view specific group tree that excludes ungrouped hosts
   const treeViewGroupTree = useMemo<GroupNode[]>(() => {
@@ -351,13 +371,26 @@ export function useVaultHostCollections({
     );
   
   const displayedGroups = useMemo(() => {
+      const hasActiveFilters = Boolean(searchTerm) || selectedTags.length > 0;
+      const sourceTree = hasActiveFilters ? buildTreeViewGroupTree : buildGroupTree;
+      const findSourceNode = (path: string): GroupNode | null => {
+        const parts = path.split("/").filter(Boolean);
+        let currentLevel = sourceTree;
+        let currentNode: GroupNode | null = null;
+        for (const part of parts) {
+          currentNode = currentLevel[part] ?? null;
+          if (!currentNode) return null;
+          currentLevel = currentNode.children;
+        }
+        return currentNode;
+      };
       if (!selectedGroupPath) {
         // Hide "General" group at root level only if it's auto-generated
         // (not user-created and has no subgroups)
         const isGeneralUserCreated = customGroups.some(
           (g) => g === "General" || g.startsWith("General/")
         );
-        const nodes = (Object.values(buildGroupTree) as GroupNode[])
+        const nodes = (Object.values(sourceTree) as GroupNode[])
           .filter((node) => {
             if (node.name !== "General") return true;
             // Keep General if user explicitly created it or it has subgroups
@@ -368,13 +401,21 @@ export function useVaultHostCollections({
         if (sortMode === "manual") return sortGroupNodes(nodes);
         return nodes.sort((a, b) => a.name.localeCompare(b.name));
       }
-      const node = findGroupNode(selectedGroupPath);
+      const node = findSourceNode(selectedGroupPath);
       if (!node || !node.children) return [];
       const children = Object.values(node.children) as GroupNode[];
       if (sortMode === "manual") return sortGroupNodes(children);
       return children.sort((a, b) => a.name.localeCompare(b.name));
-      // eslint-disable-next-line react-hooks/exhaustive-deps -- findGroupNode is derived from buildGroupTree
-    }, [buildGroupTree, selectedGroupPath, customGroups, sortGroupNodes, sortMode]);
+    }, [
+      buildGroupTree,
+      buildTreeViewGroupTree,
+      customGroups,
+      searchTerm,
+      selectedGroupPath,
+      selectedTags.length,
+      sortGroupNodes,
+      sortMode,
+    ]);
   
   const shouldHideEmptyRootHostsSection = useMemo(() => {
       if (selectedGroupPath || viewMode === "tree") return false;

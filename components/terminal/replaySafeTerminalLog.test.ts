@@ -185,14 +185,18 @@ test("pending cursor-home lookahead controls are bounded before clear", () => {
   assert.equal(log.includes("\x1b[31m"), false);
 });
 
-test("alternate-screen entry protects preserved replay history", () => {
+test("alternate-screen body is omitted from replay-safe connection logs", () => {
   const log = createReplaySafeTerminalLog(
-    "before\n\x1b[?1049h\x1b[Hvim screen\n\x1b[?1049lafter\n"
+    "before\n\x1b[?1049h\x1b[Hvim screen\n~\n\"file\" 0L, 0B\x1b[?1049lafter\n"
       + "\x1b[?47h\x1b[10;5Htop screen\n\x1b[?47l"
       + "\x1b[?25lcursor hidden\n",
   );
 
-  assert.equal(log, "before\n\r\nvim screen\nafter\n\r\ntop screen\n\x1b[?25lcursor hidden\n");
+  assert.equal(log, "before\nafter\n\x1b[?25lcursor hidden\n");
+  assert.equal(log.includes("vim screen"), false);
+  assert.equal(log.includes("~"), false);
+  assert.equal(log.includes("0L, 0B"), false);
+  assert.equal(log.includes("top screen"), false);
   assert.equal(log.includes("\x1b[?1049h"), false);
   assert.equal(log.includes("\x1b[?1049l"), false);
   assert.equal(log.includes("\x1b[?47h"), false);
@@ -200,6 +204,49 @@ test("alternate-screen entry protects preserved replay history", () => {
   assert.equal(log.includes("\x1b[H"), false);
   assert.equal(log.includes("\x1b[10;5H"), false);
   assert.equal(log.includes("\x1b[?25l"), true);
+});
+
+test("alternate-screen omit tracks enter/leave split across chunks", () => {
+  const sanitizer = createReplaySafeTerminalLogSanitizer();
+  const log = sanitizer.append("$ vim\n\x1b[?1049")
+    + sanitizer.append("h~\nstatus\x1b[?1049")
+    + sanitizer.append("l$ ")
+    + sanitizer.finish();
+
+  assert.equal(log, "$ vim\n$ ");
+  assert.equal(log.includes("~"), false);
+  assert.equal(log.includes("status"), false);
+});
+
+test("alternate-screen omit does not use plain-text fast path between chunks", () => {
+  const sanitizer = createReplaySafeTerminalLogSanitizer();
+  const log = sanitizer.append("\x1b[?1049h")
+    + sanitizer.append("~\nstatus")
+    + sanitizer.append("\x1b[?1049l")
+    + sanitizer.finish();
+
+  assert.equal(log, "");
+  assert.equal(log.includes("~"), false);
+  assert.equal(log.includes("status"), false);
+});
+
+test("seeded alternate-screen sanitizer omits TUI paint until leave", () => {
+  const sanitizer = createReplaySafeTerminalLogSanitizer({ alternateScreenActive: true });
+  const log = sanitizer.append("~\nstatus")
+    + sanitizer.append("\x1b[?1049l$ done")
+    + sanitizer.finish();
+
+  assert.equal(log, "$ done");
+  assert.equal(log.includes("~"), false);
+  assert.equal(log.includes("status"), false);
+});
+
+test("pending cursor-home is discarded when entering alternate screen", () => {
+  const log = createReplaySafeTerminalLog("before\n\x1b[H\x1b[?1049hTUI\x1b[?1049lafter");
+
+  assert.equal(log, "before\nafter");
+  assert.equal(log.includes("\x1b[H"), false);
+  assert.equal(log.includes("TUI"), false);
 });
 
 test("dec cursor save mode is not treated as alternate screen", () => {
@@ -222,6 +269,26 @@ test("terminal reset controls are dropped from replay data", () => {
   const log = createReplaySafeTerminalLog("before\x1bcafter\n");
 
   assert.equal(log, "before\r\n\r\nafter\n");
+  assert.equal(log.includes("\x1bc"), false);
+});
+
+test("RIS during alternate screen restores logging of later shell output", () => {
+  const log = createReplaySafeTerminalLog("before\n\x1b[?1049hTUI\x1bcshell-after\n");
+
+  assert.equal(log, "before\n\r\nshell-after\n");
+  assert.equal(log.includes("TUI"), false);
+  assert.equal(log.includes("\x1bc"), false);
+});
+
+test("split RIS during alternate screen restores logging of later shell output", () => {
+  const sanitizer = createReplaySafeTerminalLogSanitizer();
+
+  const log = sanitizer.append("before\n\x1b[?1049hTUI\x1b")
+    + sanitizer.append("cshell-after\n")
+    + sanitizer.finish();
+
+  assert.equal(log, "before\n\r\nshell-after\n");
+  assert.equal(log.includes("TUI"), false);
   assert.equal(log.includes("\x1bc"), false);
 });
 

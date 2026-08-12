@@ -1,4 +1,5 @@
 import type { ModelMessage } from 'ai';
+import { redactSecretsForModel, redactSecretsInValueForModel } from './modelSecretRedaction';
 
 const SUPERSEDED_READ_PREFIX = '[superseded read:';
 const EARLIER_TERMINAL_PREFIX = '[earlier terminal output omitted:';
@@ -11,7 +12,7 @@ function getToolCallMap(messages: ModelMessage[]): Map<string, { toolName: strin
   const map = new Map<string, { toolName: string; input: unknown }>();
   for (const message of messages) {
     if (message.role !== 'assistant' || !Array.isArray(message.content)) continue;
-    for (const part of message.content) {
+    for (const part of message.content as unknown[]) {
       if (!isRecord(part) || part.type !== 'tool-call') continue;
       const toolCallId = typeof part.toolCallId === 'string' ? part.toolCallId : '';
       const toolName = typeof part.toolName === 'string' ? part.toolName : '';
@@ -25,7 +26,7 @@ function getToolCallMap(messages: ModelMessage[]): Map<string, { toolName: strin
 
 function getToolResultParts(message: ModelMessage): Array<Record<string, unknown>> {
   if (message.role !== 'tool' || !Array.isArray(message.content)) return [];
-  return message.content.filter((part) => {
+  return (message.content as unknown[]).filter((part) => {
     return isRecord(part) && part.type === 'tool-result';
   }) as Array<Record<string, unknown>>;
 }
@@ -79,8 +80,35 @@ function isSftpReadTool(toolName: string): boolean {
     || toolName === 'sftp_read_file';
 }
 
+function isSafeReadOnlyToolName(toolName: string): boolean {
+  const segments = toolName.toLowerCase().split(/[._-]+/);
+  const readMarkers = new Set(['read', 'get', 'list', 'search', 'fetch', 'inspect', 'status', 'info', 'poll']);
+  const writeMarkers = new Set([
+    'write', 'set', 'update', 'create', 'delete', 'remove', 'start', 'stop', 'close',
+    'execute', 'exec', 'run', 'upload', 'download', 'move', 'copy', 'rename', 'kill',
+  ]);
+  return segments.some(segment => readMarkers.has(segment))
+    && !segments.some(segment => writeMarkers.has(segment));
+}
+
 function readFingerprint(toolName: string, args: unknown): string | null {
   if (!isRecord(args)) return null;
+  if (toolName === 'terminal_poll' || toolName === 'terminal.poll') {
+    const jobId = args.jobId;
+    if (typeof jobId !== 'string') return null;
+    return `terminal-poll:${jobId}:${String(args.offset ?? 0)}`;
+  }
+  if (toolName === 'terminal_read_context' || toolName === 'terminal.read_context') {
+    const sessionId = args.sessionId;
+    if (typeof sessionId !== 'string') return null;
+    return [
+      'terminal-context',
+      sessionId,
+      String(args.range ?? 'viewport'),
+      String(args.startLine ?? ''),
+      String(args.maxLines ?? ''),
+    ].join(':');
+  }
   if (isSftpReadTool(toolName)) {
     const path = args.path ?? args.remotePath;
     if (typeof path !== 'string') return null;
@@ -110,6 +138,19 @@ function replaceToolResultText(part: Record<string, unknown>, text: string): Rec
   return { ...part, output: { type: 'text', value: text } };
 }
 
+function redactToolCallInputs(message: ModelMessage): ModelMessage {
+  if (message.role !== 'assistant' || !Array.isArray(message.content)) return message;
+  let changed = false;
+  const content = (message.content as unknown[]).map(part => {
+    if (!isRecord(part) || part.type !== 'tool-call' || !('input' in part)) return part;
+    const redacted = redactSecretsInValueForModel(part.input);
+    if (JSON.stringify(redacted) === JSON.stringify(part.input)) return part;
+    changed = true;
+    return { ...part, input: redacted };
+  });
+  return changed ? ({ ...message, content } as ModelMessage) : message;
+}
+
 function compressMessageToolResults(
   message: ModelMessage,
   updater: (toolName: string, args: unknown, text: string, isError: boolean) => string | null,
@@ -134,7 +175,7 @@ function compressMessageToolResults(
     return replaceToolResultText(part, replacement);
   });
 
-  return changed ? { ...message, content: nextContent as ModelMessage['content'] } : message;
+  return changed ? ({ ...message, content: nextContent } as ModelMessage) : message;
 }
 
 export interface PruneStaleToolContextOptions {
@@ -153,6 +194,12 @@ export function pruneStaleToolContext(
   const latestReadByKey = new Map<string, number>();
   const terminalExecutionsBySession = new Map<string, Array<{ index: number; command?: string }>>();
   const underBudgetPressure = options.underBudgetPressure === true;
+  const userTurnsAfter = new Array<number>(messages.length).fill(0);
+  let laterUserTurns = 0;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    userTurnsAfter[index] = laterUserTurns;
+    if (messages[index].role === 'user') laterUserTurns += 1;
+  }
 
   messages.forEach((message, index) => {
     for (const part of getToolResultParts(message)) {
@@ -196,7 +243,7 @@ export function pruneStaleToolContext(
         if (keepTerminalIndices.has(entry.index)) continue;
         terminalOmitByIndex.set(
           entry.index,
-          `${EARLIER_TERMINAL_PREFIX} command=${entry.command ?? 'unknown'}]`,
+          `${EARLIER_TERMINAL_PREFIX} command=${redactSecretsForModel(entry.command ?? 'unknown')}]`,
         );
       }
     }
@@ -204,7 +251,8 @@ export function pruneStaleToolContext(
 
   let didAdjust = false;
   const next = messages.map((message, index) => {
-    const updated = compressMessageToolResults(message, (toolName, args, text, isError) => {
+    const redactedMessage = redactToolCallInputs(message);
+    const updated = compressMessageToolResults(redactedMessage, (toolName, args, text, isError) => {
       if (isError) return null;
       const readKey = readFingerprint(toolName, args);
       if (underBudgetPressure && readKey) {
@@ -216,6 +264,15 @@ export function pruneStaleToolContext(
       const termKey = terminalFingerprint(toolName, args);
       if (underBudgetPressure && termKey && terminalOmitByIndex.has(index)) {
         return terminalOmitByIndex.get(index)!;
+      }
+      if (underBudgetPressure) {
+        const age = userTurnsAfter[index];
+        if (age > 10 && !isError && isSafeReadOnlyToolName(toolName)) {
+          return `[older tool result omitted: tool=${toolName || 'unknown'}, chars=${text.length}]`;
+        }
+        if (age >= 3 && text.length > 4_000) {
+          return `${text.slice(0, 1_500)}\n\n[... tool result shortened: ${text.length - 3_000} chars omitted ...]\n\n${text.slice(-1_500)}`;
+        }
       }
       return null;
     }, toolCallMap);

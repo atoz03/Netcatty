@@ -29,25 +29,38 @@ import { Spinner } from '../ui/spinner';
 
 export interface PromptInputProps extends HTMLAttributes<HTMLFormElement> {
   onSubmit: (text: string, event: FormEvent<HTMLFormElement>) => void | Promise<void>;
+  /** Allow attachments that carry their own prompt context to submit without textarea text. */
+  allowEmptySubmit?: boolean;
+  /** Optional styling for the bordered input group inside the form. */
+  inputGroupClassName?: string;
 }
 
+export const shouldSubmitPromptInput = (text: string, allowEmptySubmit = false): boolean =>
+  Boolean(text.trim()) || allowEmptySubmit;
+
 export const PromptInput = forwardRef<HTMLFormElement, PromptInputProps>(
-  ({ className, onSubmit, children, ...props }, ref) => {
+  ({ className, onSubmit, allowEmptySubmit = false, inputGroupClassName, children, ...props }, ref) => {
     const handleSubmit = useCallback(
       (e: FormEvent<HTMLFormElement>) => {
         e.preventDefault();
         const form = e.currentTarget;
         const textarea = form.querySelector('textarea');
         const text = textarea?.value?.trim() ?? '';
-        if (!text) return;
+        if (!shouldSubmitPromptInput(text, allowEmptySubmit)) return;
         onSubmit(text, e);
       },
-      [onSubmit],
+      [allowEmptySubmit, onSubmit],
     );
 
     return (
-      <form ref={ref} onSubmit={handleSubmit} className={className} {...props}>
-        <InputGroup>{children}</InputGroup>
+      <form
+        ref={ref}
+        onSubmit={handleSubmit}
+        className={className}
+        data-allow-empty-submit={allowEmptySubmit ? 'true' : undefined}
+        {...props}
+      >
+        <InputGroup className={inputGroupClassName}>{children}</InputGroup>
       </form>
     );
   },
@@ -189,6 +202,7 @@ export const PromptInputSubmit = forwardRef<HTMLButtonElement, PromptInputSubmit
               ref={ref}
               type={isRunning ? 'button' : 'submit'}
               onClick={isRunning ? handleClick : undefined}
+              aria-label={tooltipLabel}
               variant="ghost"
               disabled={disabled && !isRunning}
               className={cn(

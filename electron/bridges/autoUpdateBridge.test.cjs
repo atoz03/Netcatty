@@ -1,7 +1,9 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const path = require("node:path");
 const Module = require("node:module");
+const tempDirBridge = require("./tempDirBridge.cjs");
 
 const BRIDGE_PATH = require.resolve("./autoUpdateBridge.cjs");
 const WINDOW_MANAGER_PATH = require.resolve("./windowManager.cjs");
@@ -191,6 +193,7 @@ function makeWindowManagerWithMainWindows(count, options = {}) {
     calls: [],
     windows,
     appContentWindows: options.appContentWindows || windows,
+    dirtyEditorWindows: options.dirtyEditorWindows || windows,
     setQuittingForUpdate(value) {
       this.calls.push(value);
     },
@@ -206,7 +209,48 @@ function makeWindowManagerWithMainWindows(count, options = {}) {
     getAppContentWindows() {
       return this.appContentWindows;
     },
+    getDirtyEditorWindows() {
+      return this.dirtyEditorWindows;
+    },
   };
+}
+
+async function withLinuxPackageEnvironment({ packageType, appImage }, fn) {
+  const packageDir = fs.mkdtempSync(path.join(tempDirBridge.getTempDir(), "auto-update-test-"));
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+  const resourcesPathDescriptor = Object.getOwnPropertyDescriptor(process, "resourcesPath");
+  const previousAppImage = process.env.APPIMAGE;
+
+  try {
+    if (packageType) {
+      fs.writeFileSync(path.join(packageDir, "package-type"), `${packageType}\n`, "utf8");
+    }
+    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+    Object.defineProperty(process, "resourcesPath", { value: packageDir, configurable: true });
+    if (appImage) {
+      process.env.APPIMAGE = path.join(packageDir, "Netcatty.AppImage");
+    } else {
+      delete process.env.APPIMAGE;
+    }
+    return await fn();
+  } finally {
+    if (platformDescriptor) {
+      Object.defineProperty(process, "platform", platformDescriptor);
+    } else {
+      delete process.platform;
+    }
+    if (resourcesPathDescriptor) {
+      Object.defineProperty(process, "resourcesPath", resourcesPathDescriptor);
+    } else {
+      delete process.resourcesPath;
+    }
+    if (previousAppImage === undefined) {
+      delete process.env.APPIMAGE;
+    } else {
+      process.env.APPIMAGE = previousAppImage;
+    }
+    fs.rmSync(packageDir, { recursive: true, force: true });
+  }
 }
 
 /**
@@ -230,6 +274,66 @@ function makeIpcMain() {
     },
   };
 }
+
+test("recognizes packaged Linux FPM formats as auto-update capable", async () => {
+  for (const packageType of ["deb", "rpm", "pacman"]) {
+    await withLinuxPackageEnvironment({ packageType }, async () => {
+      await withMocks({}, async ({ bridge }) => {
+        assert.equal(bridge.isAutoUpdateSupported(), true, packageType);
+      });
+    });
+  }
+});
+
+test("allows the update check to reach electron-updater for a packaged Linux deb", async () => {
+  let checkCalls = 0;
+  const autoUpdater = {
+    autoDownload: true,
+    autoInstallOnAppQuit: false,
+    logger: undefined,
+    on() {},
+    checkForUpdates() {
+      checkCalls += 1;
+      return Promise.resolve({
+        updateInfo: {
+          version: "1.1.18",
+          releaseNotes: "",
+          releaseDate: null,
+        },
+      });
+    },
+  };
+
+  await withLinuxPackageEnvironment({ packageType: "deb" }, async () => {
+    await withMocks({ autoUpdater }, async ({ bridge, fakeAutoUpdater }) => {
+      fakeAutoUpdater.autoDownload = false;
+      const ipcMain = makeIpcMain();
+      bridge.registerHandlers(ipcMain);
+
+      const result = await ipcMain.invoke("netcatty:update:check");
+      assert.equal(checkCalls, 1);
+      assert.equal(result.supported, true);
+      assert.equal(result.available, true);
+      assert.equal(result.version, "1.1.18");
+    });
+  });
+});
+
+test("keeps the manual-update fallback for an unmarked Linux package", async () => {
+  await withLinuxPackageEnvironment({}, async () => {
+    await withMocks({}, async ({ bridge }) => {
+      assert.equal(bridge.isAutoUpdateSupported(), false);
+    });
+  });
+});
+
+test("keeps AppImage auto-update support on Linux", async () => {
+  await withLinuxPackageEnvironment({ appImage: true }, async () => {
+    await withMocks({}, async ({ bridge }) => {
+      assert.equal(bridge.isAutoUpdateSupported(), true);
+    });
+  });
+});
 
 test("install handler marks quitting-for-update before quitAndInstall", async () => {
   const order = [];
@@ -265,8 +369,9 @@ test("install handler marks quitting-for-update before quitAndInstall", async ()
     // close-to-tray / before-quit guards would already be racing the quit (#1215).
     assert.equal(order[0], "setQuittingForUpdate");
     assert.ok(order.indexOf("setQuittingForUpdate") < order.indexOf("quitAndInstall"));
-    // Tray cleanup still runs so the tray doesn't keep the process alive.
-    assert.equal(fakeGlobalShortcut.cleanupCount, 1);
+    // Only macOS needs the tray destroyed before quitAndInstall; other
+    // platforms clean it up from the normal will-quit handler.
+    assert.equal(fakeGlobalShortcut.cleanupCount, process.platform === "darwin" ? 1 : 0);
     assert.equal(order.includes("quitAndInstall"), true);
   });
 });
@@ -325,6 +430,159 @@ test("install handler rolls back quitting-for-update when quitAndInstall throws"
     assert.deepEqual(fakeWindowManager.calls, [true, false]);
     assert.equal(fakeWindowManager.isQuittingForUpdate(), false);
   });
+});
+
+test("install handler reports package-manager failures and restores the app state", async () => {
+  const listeners = new Map();
+  const autoUpdater = {
+    autoDownload: true,
+    autoInstallOnAppQuit: false,
+    logger: undefined,
+    on(event, listener) {
+      listeners.set(event, listener);
+    },
+    quitAndInstall() {
+      listeners.get("error")(new Error("authorization cancelled"));
+    },
+  };
+  const fakeWindowManager = {
+    calls: [],
+    setQuittingForUpdate(value) {
+      this.calls.push(value);
+    },
+    isQuittingForUpdate() {
+      return this.calls[this.calls.length - 1] === true;
+    },
+  };
+  const broadcastWindow = makeBroadcastWindow();
+
+  await withLinuxPackageEnvironment({ packageType: "deb" }, async () => {
+    await withMocks({
+      autoUpdater,
+      windowManager: fakeWindowManager,
+      browserWindows: [broadcastWindow],
+    }, async ({ bridge, fakeGlobalShortcut }) => {
+      const ipcMain = makeIpcMain();
+      bridge.registerHandlers(ipcMain);
+
+      listeners.get("update-available")({ version: "1.1.18" });
+      listeners.get("update-downloaded")();
+      assert.equal((await ipcMain.invoke("netcatty:update:getStatus")).status, "ready");
+
+      await ipcMain.invoke("netcatty:update:install");
+
+      assert.deepEqual(fakeWindowManager.calls, [true, false]);
+      assert.equal(fakeWindowManager.isQuittingForUpdate(), false);
+      assert.equal(fakeGlobalShortcut.cleanupCount, 0);
+      assert.deepEqual(await ipcMain.invoke("netcatty:update:getStatus"), {
+        status: "error",
+        percent: 100,
+        error: "authorization cancelled",
+        version: "1.1.18",
+        isChecking: false,
+      });
+      assert.equal(broadcastWindow.sentChannels.includes("netcatty:update:error"), true);
+    });
+  });
+});
+
+test("install handler ignores concurrent install requests", async () => {
+  let installCalls = 0;
+  const autoUpdater = {
+    autoDownload: true,
+    autoInstallOnAppQuit: false,
+    logger: undefined,
+    on() {},
+    quitAndInstall() {
+      installCalls += 1;
+    },
+  };
+  const fakeWindowManager = makeWindowManagerWithMainWindow();
+  const dirtyResolvers = [];
+  const fakeDirtyEditorGuard = {
+    queryDirtyEditors() {
+      return new Promise((resolve) => dirtyResolvers.push(resolve));
+    },
+  };
+  const originalSetTimeout = global.setTimeout;
+  let watchdogFn = null;
+  global.setTimeout = (fn) => {
+    watchdogFn = fn;
+    return { unref() {} };
+  };
+
+  try {
+    await withMocks({
+      autoUpdater,
+      windowManager: fakeWindowManager,
+      dirtyEditorGuard: fakeDirtyEditorGuard,
+    }, async ({ bridge }) => {
+      const ipcMain = makeIpcMain();
+      bridge.registerHandlers(ipcMain);
+
+      const firstInstall = ipcMain.invoke("netcatty:update:install");
+      const secondInstall = ipcMain.invoke("netcatty:update:install");
+      assert.equal(dirtyResolvers.length, 2);
+
+      dirtyResolvers.forEach((resolve) => resolve(false));
+      await Promise.all([firstInstall, secondInstall]);
+
+      assert.equal(installCalls, 1);
+      assert.deepEqual(fakeWindowManager.calls, [true]);
+      watchdogFn?.();
+      assert.equal(fakeWindowManager.isQuittingForUpdate(), false);
+    });
+  } finally {
+    global.setTimeout = originalSetTimeout;
+  }
+});
+
+test("cancelPendingInstall releases the install guard for an immediate retry", async () => {
+  let installCalls = 0;
+  const autoUpdater = {
+    autoDownload: true,
+    autoInstallOnAppQuit: false,
+    logger: undefined,
+    on() {},
+    quitAndInstall() {
+      installCalls += 1;
+    },
+  };
+  const fakeWindowManager = {
+    calls: [],
+    setQuittingForUpdate(value) {
+      this.calls.push(value);
+    },
+    isQuittingForUpdate() {
+      return this.calls[this.calls.length - 1] === true;
+    },
+  };
+  const originalSetTimeout = global.setTimeout;
+  const originalClearTimeout = global.clearTimeout;
+  global.setTimeout = () => ({ unref() {} });
+  global.clearTimeout = () => {};
+
+  try {
+    await withMocks({ autoUpdater, windowManager: fakeWindowManager }, async ({ bridge }) => {
+      const ipcMain = makeIpcMain();
+      bridge.registerHandlers(ipcMain);
+
+      await ipcMain.invoke("netcatty:update:install");
+      assert.equal(installCalls, 1);
+      assert.deepEqual(fakeWindowManager.calls, [true]);
+
+      // Simulate main.cjs cancelling the quit after a dirty-editor result.
+      bridge.cancelPendingInstall();
+      assert.deepEqual(fakeWindowManager.calls, [true, false]);
+
+      await ipcMain.invoke("netcatty:update:install");
+      assert.equal(installCalls, 2);
+      assert.deepEqual(fakeWindowManager.calls, [true, false, true]);
+    });
+  } finally {
+    global.setTimeout = originalSetTimeout;
+    global.clearTimeout = originalClearTimeout;
+  }
 });
 
 test("install handler watchdog clears quitting-for-update if the app never quits", async () => {
@@ -443,7 +701,7 @@ test("install handler aborts and notifies when the renderer reports dirty editor
   );
 });
 
-test("install handler checks every app content window before installing", async () => {
+test("install handler checks every registered dirty-editor window before installing", async () => {
   const order = [];
   const autoUpdater = {
     autoDownload: true,
@@ -474,7 +732,20 @@ test("install handler checks every app content window before installing", async 
       return false;
     },
   };
-  fakeWindowManager.appContentWindows = [fakeWindowManager.windows[0], peerWindow];
+  const lifecycleOnlyWindow = {
+    webContents: {
+      id: 3,
+      isDestroyed: () => false,
+      isCrashed: () => false,
+    },
+    isDestroyed: () => false,
+  };
+  fakeWindowManager.appContentWindows = [
+    fakeWindowManager.windows[0],
+    peerWindow,
+    lifecycleOnlyWindow,
+  ];
+  fakeWindowManager.dirtyEditorWindows = [fakeWindowManager.windows[0], peerWindow];
   const queriedWebContents = [];
   const fakeDirtyEditorGuard = {
     queryDirtyEditors(webContents) {
@@ -497,7 +768,7 @@ test("install handler checks every app content window before installing", async 
       bridge.registerHandlers(ipcMain);
       await ipcMain.invoke("netcatty:update:install");
 
-      assert.deepEqual(queriedWebContents, fakeWindowManager.appContentWindows.map((window) => window.webContents));
+      assert.deepEqual(queriedWebContents, fakeWindowManager.dirtyEditorWindows.map((window) => window.webContents));
       assert.equal(order.includes("quitAndInstall"), false);
       assert.deepEqual(fakeWindowManager.calls, []);
       assert.equal(fakeGlobalShortcut.cleanupCount, 0);
@@ -554,7 +825,7 @@ test("install handler proceeds to quitAndInstall when there are no dirty editors
         assert.deepEqual(fakeWindowManager.calls, [true]);
         assert.ok(order.indexOf("setQuittingForUpdate") < order.indexOf("quitAndInstall"));
         assert.equal(order.includes("quitAndInstall"), true);
-        assert.equal(fakeGlobalShortcut.cleanupCount, 1);
+        assert.equal(fakeGlobalShortcut.cleanupCount, process.platform === "darwin" ? 1 : 0);
         // No needs-save broadcast when nothing is dirty.
         assert.equal(win.sentChannels.includes("netcatty:update:needs-save"), false);
       },

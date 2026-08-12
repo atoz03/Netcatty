@@ -4,20 +4,34 @@ import { KeywordHighlightRule } from "../../types";
 
 import { XTERM_PERFORMANCE_CONFIG } from "../../infrastructure/config/xtermPerformance";
 import { checkRegexSafetyPattern } from "../../lib/regexSafety";
+import { isSafePluginDecorationPattern } from "../../domain/pluginTerminalProviders";
 import { TERMINAL_AUX_LONG_LINE_SCAN_LIMIT_CHARS } from "./runtime/terminalFlowConstants";
 import { getTerminalOutputPressure } from "./runtime/terminalOutputPressure";
-import { forEachNonEmptyRegexMatch } from "./keywordHighlightRegex";
+import { compileRe2RangeMatcher, forEachNonEmptyRegexMatch, type NonEmptyRangeVisitor } from "./keywordHighlightRegex";
 
 /** Pre-compiled rule with regex ready for matching */
 interface CompiledRule {
-  regex: RegExp;
+  forEachMatch: (text: string, onMatch: NonEmptyRangeVisitor) => void;
   color: string;
   priority: number;
+  plugin: boolean;
 }
+
+type RuntimeKeywordHighlightRule = KeywordHighlightRule & { readonly providerId?: string };
+
+export const MAX_PLUGIN_DECORATION_SCAN_CHARS = 4_096;
+export const MAX_PLUGIN_DECORATION_MATCHES_PER_LOGICAL_LINE = 256;
 
 interface CachedDecorationRange {
   x: number;
   width: number;
+  color: string;
+  priority: number;
+}
+
+interface LogicalDecorationRange {
+  start: number;
+  length: number;
   color: string;
   priority: number;
 }
@@ -31,6 +45,7 @@ interface LineDecorationState {
   marker: IMarker;
   decorations: IDecoration[];
   signature: string;
+  indexedLine: number;
 }
 
 type RefreshReason = "scroll" | "write" | "full";
@@ -51,6 +66,7 @@ interface ViewportProbeSample {
 interface WrappedBlockContext {
   logicalLineText: string;
   segmentBounds: Map<number, { lineStart: number; lineEnd: number }>;
+  matchRanges?: readonly LogicalDecorationRange[];
 }
 
 type WrappedBlockCacheEntry = WrappedBlockContext | null;
@@ -58,15 +74,6 @@ type WrappedBlockCacheEntry = WrappedBlockContext | null;
 interface WrappedBlockScanCache {
   contexts: Map<number, WrappedBlockCacheEntry>;
   cappedMiss: DirtyLineSegment | null;
-}
-
-interface ScrollRefreshJob {
-  generation: number;
-  start: number;
-  end: number;
-  nextLine: number;
-  cursorAbsoluteY: number;
-  wrappedBlockCache: WrappedBlockScanCache;
 }
 
 /** Shared empty array for non-matching lines to avoid per-call allocations. */
@@ -78,14 +85,21 @@ const RE_ASCII_ONLY = /^[\x00-\x7f]*$/;
 
 /**
  * Manages terminal decorations for keyword highlighting.
- * Uses xterm.js Decoration API to overlay styles without modifying the data stream.
- * This ensures zero impact on scrolling performance ("lazy" highlighting).
+ * Uses persistent xterm.js markers so nearby indexed lines keep decorations
+ * across scrollback navigation without modifying the terminal data stream.
+ * Retention is bounded to protect xterm's marker listeners for broad rules.
  */
 export class KeywordHighlighter implements IDisposable {
   private term: XTerm;
   private compiledRules: CompiledRule[] = [];
   private lineDecorations = new Map<number, LineDecorationState>();
+  private markerLineOffset = 0;
+  private lineDecorationIndexNeedsRebuild = false;
   private debounceTimer: NodeJS.Timeout | null = null;
+  /** Single quiet-window catch-up after bulk dumps (no per-write schedule). */
+  private bulkPressureCatchUpTimer: NodeJS.Timeout | null = null;
+  private enterInputIdleTimer: NodeJS.Timeout | null = null;
+  private writePruneTimer: NodeJS.Timeout | null = null;
   private animationFrameId: number | null = null;
   private lastRefreshTime: number = 0;
   private matchCache = new Map<string, CachedDecorationRange[]>();
@@ -105,10 +119,11 @@ export class KeywordHighlighter implements IDisposable {
   private lastWriteAt = 0;
   private lastBurstDecayAt = 0;
   private lastUserInputAt = 0;
-  private scrollRefreshJob: ScrollRefreshJob | null = null;
-  private scrollRefreshGeneration = 0;
+  private enterInputPending = false;
+  private enterQueuedWriteCancellationPending = false;
+  private enterViewportScanInProgress = false;
+  private enterViewportScanNeedsRepeat = false;
   private static readonly DIRTY_SCAN_PADDING = XTERM_PERFORMANCE_CONFIG.highlighting.dirtyScanPadding;
-  private static readonly SCROLL_SETTLE_DEBOUNCE_MS = XTERM_PERFORMANCE_CONFIG.highlighting.scrollSettleDebounceMs;
   private static readonly INPUT_QUIET_MS = XTERM_PERFORMANCE_CONFIG.highlighting.inputQuietMs;
   private static readonly WRITE_BURST_INTERVAL_MS = 28;
   private static readonly WRITE_BURST_DECAY_MS = 80;
@@ -116,9 +131,11 @@ export class KeywordHighlighter implements IDisposable {
   private static readonly WRITE_BURST_OVERSCAN_SCALE = 0.35;
   private static readonly WRITE_BURST_BUDGET_SCALE = 0.5;
   private static readonly WRITE_BURST_CHUNK_SCALE = 0.5;
-  private static readonly WRITE_BURST_DEBOUNCE_MS = 140;
-  private static readonly WRITE_BURST_IMMEDIATE_MIN_INTERVAL_MS = 32;
-  private static readonly WRITE_BURST_HIGHLIGHT_PAUSE_MS = 180;
+  private static readonly WRITE_BURST_DEBOUNCE_MS = 180;
+  private static readonly WRITE_BURST_IMMEDIATE_MIN_INTERVAL_MS = 48;
+  private static readonly WRITE_BURST_HIGHLIGHT_PAUSE_MS = 260;
+  private static readonly ENTER_INPUT_GUARD_MS = 600;
+  private static readonly WRITE_PRUNE_IDLE_MS = 600;
 
   constructor(term: XTerm) {
     this.term = term;
@@ -126,37 +143,118 @@ export class KeywordHighlighter implements IDisposable {
     // Hook into terminal events to trigger highlighting
     this.disposables.push(
       // When user scrolls, refresh visible area
-      this.term.onScroll(() => {
+      this.term.onScroll((viewportY) => {
+        this.lastViewportY = viewportY;
         this.triggerViewportChangeRefresh();
       }),
       // User input should keep terminal echo responsive; highlight can catch up
       // once typing pauses.
-      this.term.onData(() => {
+      this.term.onData((data) => {
         this.lastUserInputAt = performance.now();
+        if (data.includes("\r") || data.includes("\n")) {
+          this.enterInputPending = true;
+          this.enterQueuedWriteCancellationPending = true;
+          // Time-bound Enter protection even when no echo/write arrives (echo
+          // off, stalled PTY). onWriteParsed re-arms this on each write.
+          this.scheduleEnterInputIdleClear();
+          // Drop any pending user-scroll refresh so Enter echo cannot finish a
+          // scroll pass that rescans/repaints still-visible keyword decorations
+          // before onWriteParsed owns the write path (Ubuntu RTT).
+          if (this.pendingRefreshReason === "scroll" && !this.isBrowsingScrollback()) {
+            this.cancelQueuedRefreshSchedule();
+            this.pendingRefreshReason = "write";
+          }
+        }
       }),
       // When new data is written, refresh on the next frame so highlights land
       // with the freshly rendered content instead of trailing behind it.
       this.term.onWriteParsed(() => {
+        if (this.enterInputPending) {
+          this.scheduleEnterInputIdleClear();
+        }
+        const isBrowsingScrollback = this.isBrowsingScrollback();
+        const outputDrivenPendingScroll =
+          this.pendingRefreshReason === "scroll"
+          && !isBrowsingScrollback
+          && (
+            this.hasOutputDrivenViewportChange()
+          );
+        const cancelQueuedWriteForEnter =
+          this.enterQueuedWriteCancellationPending
+          && this.pendingRefreshReason === "write";
+        // Convert output-driven auto-scroll to write refresh. Do not cancel a
+        // real user scrollback browse just because Enter write-path is active.
+        if (outputDrivenPendingScroll && this.pendingRefreshReason === "scroll") {
+          this.cancelQueuedRefreshSchedule();
+          this.pendingRefreshReason = "write";
+        } else if (cancelQueuedWriteForEnter) {
+          this.cancelQueuedRefreshSchedule();
+        }
+        this.enterQueuedWriteCancellationPending = false;
         const pressure = getTerminalOutputPressure(this.term);
-        if (
-          pressure.longLine
-          || pressure.largeOutput
-          || pressure.background
-          || this.isInputProtectionActive(performance.now())
-        ) {
+        if (pressure.background || pressure.longLine || pressure.largeOutput) {
+          if (this.pendingRefreshReason === "write") {
+            this.cancelQueuedRefreshSchedule();
+          }
+          this.enterViewportScanInProgress = false;
+          this.enterViewportScanNeedsRepeat = false;
+        }
+        if (pressure.background) {
+          // Hidden panes: avoid immediate scans that fight xterm, but still arm a
+          // debounced refresh. Reveal only flushes writes/repaints — without a
+          // scheduled tick, decorations for hidden-pane output never apply if no
+          // further write/scroll/resize happens after show (Codex PR review).
           this.updateWriteBurst();
           this.markVisibleRangeDirty();
           this.triggerRefresh("debounced", "write");
           return;
         }
+        if (
+          pressure.longLine
+          || pressure.largeOutput
+        ) {
+          this.updateWriteBurst();
+          // Tabby has no keyword path. During bulk dumps do not schedule
+          // decoration work at all (debounced scans still compete with xterm).
+          // Mark dirty + one quiet catch-up after pressure drops.
+          this.markVisibleRangeDirty();
+          this.scheduleBulkPressureCatchUp();
+          return;
+        }
+        const inputProtectionActive = this.isInputProtectionActive(performance.now());
+        if (inputProtectionActive || this.enterInputPending) {
+          if (this.enterInputPending) {
+            if (this.enterViewportScanInProgress) {
+              this.updateWriteBurst();
+              this.enterViewportScanNeedsRepeat = true;
+            } else {
+              this.markDirtyFromWrite({ includeViewportProbe: false });
+              const buffer = this.term.buffer.active;
+              this.addDirtyRange(buffer.viewportY, buffer.viewportY + this.term.rows - 1);
+              this.enterViewportScanInProgress = true;
+            }
+          } else {
+            this.updateWriteBurst();
+            this.markVisibleRangeDirty();
+          }
+          this.triggerRefresh(inputProtectionActive ? "debounced" : "immediate", "write");
+          return;
+        }
         this.markDirtyFromWrite();
+        if (outputDrivenPendingScroll) {
+          this.markVisibleRangeDirty();
+        }
         this.triggerRefresh(
           "immediate",
           "write",
         );
       }),
       // Also refresh on resize as viewport content changes
-      this.term.onResize(() => this.triggerRefresh("debounced", "full")),
+      this.term.onResize(() => {
+        this.syncLineDecorationIndex(true);
+        this.lastRenderRange = null;
+        this.triggerRefresh("debounced", "full");
+      }),
       // onRender fires after each render cycle - catch scrolls that onScroll might miss
       this.term.onRender(() => {
         // Only trigger refresh if viewport position changed
@@ -170,7 +268,7 @@ export class KeywordHighlighter implements IDisposable {
     this.lastBufferSnapshot = this.readBufferSnapshot();
   }
 
-  public setRules(rules: KeywordHighlightRule[], enabled: boolean) {
+  public setRules(rules: readonly RuntimeKeywordHighlightRule[], enabled: boolean) {
     this.enabled = enabled;
     this.matchCache.clear();
 
@@ -179,6 +277,35 @@ export class KeywordHighlighter implements IDisposable {
     this.compiledRules = [];
     for (const [ruleIndex, rule] of rules.entries()) {
       if (!rule.enabled || rule.patterns.length === 0) continue;
+      if (rule.providerId) {
+        const patterns = rule.patterns.filter((pattern) => {
+          if (!pattern) return false;
+          const safetyCheck = checkRegexSafetyPattern(pattern);
+          if (safetyCheck.safe === false) {
+            console.warn("[KeywordHighlight] Skipping unsafe regex pattern:", pattern, "reason:", safetyCheck.reason);
+            return false;
+          }
+          if (!isSafePluginDecorationPattern(pattern)) {
+            console.warn("[KeywordHighlight] Skipping unsupported plugin regex pattern:", pattern);
+            return false;
+          }
+          return true;
+        });
+        for (const pattern of patterns) {
+          try {
+            const match = compileRe2RangeMatcher(pattern);
+            this.compiledRules.push({
+              forEachMatch: (text, onMatch) => match(text.slice(0, MAX_PLUGIN_DECORATION_SCAN_CHARS), onMatch),
+              color: rule.color,
+              priority: ruleIndex,
+              plugin: true,
+            });
+          } catch (err) {
+            console.error("Invalid plugin regex pattern:", pattern, err);
+          }
+        }
+        continue;
+      }
       for (const pattern of rule.patterns) {
         if (!pattern) continue;  // Skip empty patterns — RegExp("") is valid but matches nothing useful
         const safetyCheck = checkRegexSafetyPattern(pattern);
@@ -187,10 +314,17 @@ export class KeywordHighlighter implements IDisposable {
           continue;
         }
         try {
+          const regex = new RegExp(pattern, 'gi');
+          const forEachMatch = (text: string, onMatch: NonEmptyRangeVisitor) => {
+            forEachNonEmptyRegexMatch(regex, text, (match) => {
+              onMatch(match.index, match[0].length);
+            });
+          };
           this.compiledRules.push({
-            regex: new RegExp(pattern, "gi"),
+            forEachMatch,
             color: rule.color,
             priority: ruleIndex,
+            plugin: false,
           });
         } catch (err) {
           console.error("Invalid regex pattern:", pattern, err);
@@ -206,18 +340,59 @@ export class KeywordHighlighter implements IDisposable {
   }
 
   public dispose() {
-    this.cancelScrollRefresh();
     this.clearDecorations();
     this.disposables.forEach(d => d.dispose());
     this.disposables = [];
     if (this.debounceTimer) {
       clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
+    }
+    if (this.bulkPressureCatchUpTimer) {
+      clearTimeout(this.bulkPressureCatchUpTimer);
+      this.bulkPressureCatchUpTimer = null;
+    }
+    if (this.enterInputIdleTimer) {
+      clearTimeout(this.enterInputIdleTimer);
+      this.enterInputIdleTimer = null;
+    }
+    if (this.writePruneTimer) {
+      clearTimeout(this.writePruneTimer);
+      this.writePruneTimer = null;
     }
     if (this.animationFrameId !== null) {
       cancelAnimationFrame(this.animationFrameId);
       this.animationFrameId = null;
     }
     this.matchCache.clear();
+  }
+
+  /**
+   * After bulk/large-output dumps, apply keyword decorations once output is
+   * quiet. Avoids per-write timer/rAF work during the flood (Tabby has none).
+   */
+  private scheduleBulkPressureCatchUp(): void {
+    if (this.bulkPressureCatchUpTimer !== null) return;
+    const quietMs = Math.max(
+      48,
+      XTERM_PERFORMANCE_CONFIG.highlighting.largeOutputQuietMs ?? 480,
+    );
+    const tick = (): void => {
+      this.bulkPressureCatchUpTimer = null;
+      if (!this.enabled || this.compiledRules.length === 0) return;
+      const pressure = getTerminalOutputPressure(this.term);
+      // Only largeOutput is time-bounded. longLine stays sticky until a later
+      // short write updates pressure — waiting on it would poll forever after a
+      // single threshold-sized line with no follow-up (Codex review).
+      if (pressure.largeOutput) {
+        this.bulkPressureCatchUpTimer = setTimeout(tick, 50);
+        return;
+      }
+      this.markVisibleRangeDirty();
+      // One catch-up scan after the dump — immediate so decorations appear
+      // without another full large-output debounce wait.
+      this.triggerRefresh("immediate", "write");
+    };
+    this.bulkPressureCatchUpTimer = setTimeout(tick, quietMs);
   }
 
   /** Shared refresh execution for both rAF and timer callbacks. */
@@ -230,7 +405,6 @@ export class KeywordHighlighter implements IDisposable {
     // Re-check state: may have changed since the refresh was scheduled
     if (!this.enabled || this.compiledRules.length === 0) return;
     if (this.term.buffer.active.type === 'alternate') {
-      this.cancelScrollRefresh();
       if (this.lineDecorations.size > 0) this.clearDecorations();
       return;
     }
@@ -242,23 +416,27 @@ export class KeywordHighlighter implements IDisposable {
   }
 
   private clearDecorations() {
-    this.cancelScrollRefresh();
     const hadDecorations = this.lineDecorations.size > 0;
     for (const [lineY, state] of this.lineDecorations) {
       this.disposeLineDecorations(lineY, state);
     }
     this.lineDecorations.clear();
+    this.markerLineOffset = 0;
+    this.lineDecorationIndexNeedsRebuild = false;
     this.lastViewportRange = null;
     this.lastRenderRange = null;
     this.clearDirtySegments();
     this.dirtyAllInRenderRange = false;
+    this.enterQueuedWriteCancellationPending = false;
+    this.enterViewportScanInProgress = false;
+    this.enterViewportScanNeedsRepeat = false;
     if (hadDecorations) {
       this.term.refresh(0, this.term.rows - 1);
     }
   }
 
   private disposeLineDecorations(lineY: number, state?: LineDecorationState) {
-    const target = state ?? this.lineDecorations.get(lineY);
+    const target = state ?? this.getLineDecorationState(lineY);
     if (!target) return;
     const removedLineY = this.removeLineDecorationState(target, lineY);
     const markerLineBeforeDispose = target.marker.isDisposed ? -1 : target.marker.line;
@@ -269,17 +447,26 @@ export class KeywordHighlighter implements IDisposable {
   }
 
   private removeLineDecorationState(target: LineDecorationState, lineHint?: number): number | null {
+    const indexedState = this.lineDecorations.get(target.indexedLine);
+    if (indexedState === target) {
+      this.lineDecorations.delete(target.indexedLine);
+      return target.marker.isDisposed
+        ? (lineHint ?? null)
+        : target.marker.line;
+    }
     if (lineHint != null) {
-      const hinted = this.lineDecorations.get(lineHint);
+      const hinted = this.lineDecorations.get(this.toIndexedLine(lineHint));
       if (hinted === target) {
-        this.lineDecorations.delete(lineHint);
+        this.lineDecorations.delete(hinted.indexedLine);
         return lineHint;
       }
     }
     for (const [mappedLineY, mappedState] of this.lineDecorations) {
       if (mappedState === target) {
         this.lineDecorations.delete(mappedLineY);
-        return mappedLineY;
+        return target.marker.isDisposed
+          ? (lineHint ?? null)
+          : target.marker.line;
       }
     }
     return null;
@@ -303,7 +490,7 @@ export class KeywordHighlighter implements IDisposable {
     const offset = lineY - cursorAbsoluteY;
     const marker = this.term.registerMarker(offset);
     if (!marker) {
-      this.lineDecorations.delete(lineY);
+      this.lineDecorations.delete(this.toIndexedLine(lineY));
       return;
     }
 
@@ -322,15 +509,24 @@ export class KeywordHighlighter implements IDisposable {
 
     if (decorations.length === 0) {
       marker.dispose();
-      this.lineDecorations.delete(lineY);
+      this.lineDecorations.delete(this.toIndexedLine(lineY));
       return;
     }
 
-    this.lineDecorations.set(lineY, {
+    const state: LineDecorationState = {
       marker,
       decorations,
       signature,
+      indexedLine: this.toIndexedLine(lineY),
+    };
+    marker.onDispose(() => {
+      this.removeLineDecorationState(state, lineY);
+      this.lastRenderRange = null;
+      for (const decoration of decorations) {
+        if (!decoration.isDisposed) decoration.dispose();
+      }
     });
+    this.lineDecorations.set(state.indexedLine, state);
     this.markTerminalRefreshNeeded(lineY);
   }
 
@@ -379,9 +575,6 @@ export class KeywordHighlighter implements IDisposable {
 
   private triggerRefresh(mode: "immediate" | "debounced" | "continuation", reason: RefreshReason = "full") {
     if (!this.enabled || this.compiledRules.length === 0) return;
-    if (reason !== "scroll") {
-      this.cancelScrollRefresh();
-    }
     this.pendingRefreshReason = this.mergeRefreshReason(this.pendingRefreshReason, reason);
 
     // Optimization: Disable highlighting in Alternate Buffer (e.g. Vim, Htop)
@@ -410,6 +603,22 @@ export class KeywordHighlighter implements IDisposable {
         this.debounceTimer = null;
         this.executeRefresh();
       }, delay);
+      return;
+    }
+
+    // xterm emits onScroll synchronously before it queues the viewport refresh.
+    // Reconcile only the newly visible lines in that event so decorations are
+    // registered before the next frame, including for distant scrollbar jumps.
+    if (mode === "immediate" && reason === "scroll") {
+      if (this.animationFrameId !== null) {
+        cancelAnimationFrame(this.animationFrameId);
+        this.animationFrameId = null;
+      }
+      if (this.debounceTimer) {
+        clearTimeout(this.debounceTimer);
+        this.debounceTimer = null;
+      }
+      this.executeRefresh();
       return;
     }
 
@@ -497,9 +706,7 @@ export class KeywordHighlighter implements IDisposable {
     const inputQuietDelay = reason === "write"
       ? this.getInputProtectionRemainingMs(performance.now())
       : 0;
-    const delay = reason === "scroll"
-      ? KeywordHighlighter.SCROLL_SETTLE_DEBOUNCE_MS
-      : Math.max(this.getAdaptiveHighlightingProfile().debounceMs, inputQuietDelay);
+    const delay = Math.max(this.getAdaptiveHighlightingProfile().debounceMs, inputQuietDelay);
     this.debounceTimer = setTimeout(() => {
       this.debounceTimer = null;
       this.executeRefresh();
@@ -507,18 +714,37 @@ export class KeywordHighlighter implements IDisposable {
   }
 
   private triggerViewportChangeRefresh() {
-    this.cancelScrollRefresh();
+    const isBrowsingScrollback = this.isBrowsingScrollback();
+    // Enter echo often emits onScroll before onWriteParsed. After an idle gap
+    // lastWriteAt looks stale and lastRenderRange is usually null (cleared by
+    // the previous write refresh), so the output-driven scroll path would
+    // synchronously rescan the viewport and flash keywords still on screen.
+    // Keep real scrollback browsing synchronous; only defer the bottom-pinned
+    // viewport movement that can be caused by the pending Enter echo.
+    if (
+      this.enterInputPending
+      && !isBrowsingScrollback
+      && this.hasOutputDrivenViewportChange()
+    ) {
+      if (this.pendingRefreshReason === "scroll") {
+        this.cancelQueuedRefreshSchedule();
+        this.pendingRefreshReason = "write";
+      }
+      this.markVisibleRangeDirty();
+      return;
+    }
     const now = performance.now();
     const isOutputDrivenViewportChange =
+      !isBrowsingScrollback &&
       this.lastWriteAt > 0 &&
       now - this.lastWriteAt <= KeywordHighlighter.WRITE_BURST_HIGHLIGHT_PAUSE_MS;
-    if (isOutputDrivenViewportChange || this.isWriteBurstActive(now)) {
+    if (isOutputDrivenViewportChange || (!isBrowsingScrollback && this.isWriteBurstActive(now))) {
       this.markVisibleRangeDirty();
       this.triggerRefresh("debounced", "write");
       return;
     }
 
-    this.triggerRefresh("debounced", "scroll");
+    this.triggerRefresh("immediate", "scroll");
   }
 
   private refreshViewport(reason: RefreshReason) {
@@ -536,16 +762,26 @@ export class KeywordHighlighter implements IDisposable {
     const rangeStart = Math.max(0, viewportY - overscan);
     const rangeEnd = viewportEnd + overscan;
 
-    const previousRange = this.lastRenderRange;
     this.beginTerminalRefreshTracking(viewportStart, viewportEnd);
+    let writeContinuationPending = false;
     try {
-      this.reindexLineDecorationsFromMarkers();
+      this.syncLineDecorationIndex();
+      const previousRange = this.lastRenderRange;
 
       if (reason === "write") {
-        this.processDirtyLinesInRange(rangeStart, rangeEnd, cursorAbsoluteY, "write");
+        writeContinuationPending = this.processDirtyLinesInRange(
+          rangeStart,
+          rangeEnd,
+          cursorAbsoluteY,
+          "write",
+        );
       } else if (reason === "scroll") {
-        this.startScrollRefresh(viewportStart, viewportEnd, cursorAbsoluteY);
-        return;
+        this.processScrollViewport(
+          viewportStart,
+          viewportEnd,
+          cursorAbsoluteY,
+          previousRange,
+        );
       } else if (previousRange !== null && this.lineDecorations.size > 0) {
         if (rangeStart < previousRange.start) {
           this.processLineRange(rangeStart, Math.min(rangeEnd, previousRange.start - 1), cursorAbsoluteY);
@@ -557,10 +793,13 @@ export class KeywordHighlighter implements IDisposable {
         this.processLineRange(rangeStart, rangeEnd, cursorAbsoluteY);
       }
 
-      for (const [lineY, state] of this.lineDecorations) {
-        if (lineY < rangeStart || lineY > rangeEnd || state.marker.isDisposed) {
-          this.disposeLineDecorations(lineY, state);
-        }
+      if (reason === "write") {
+        this.pruneWriteDecorationsIfNeeded(rangeStart, rangeEnd, true);
+        this.finishEnterViewportScan(
+          writeContinuationPending,
+          viewportStart,
+          viewportEnd,
+        );
       }
 
       // `write` refresh only processes dirty lines and does NOT guarantee the whole
@@ -569,13 +808,33 @@ export class KeywordHighlighter implements IDisposable {
       if (reason === "write") {
         this.lastViewportRange = null;
         this.lastRenderRange = null;
+      } else if (reason === "scroll") {
+        // processScrollViewport records the contiguous range already indexed.
       } else {
         this.lastViewportRange = { start: viewportStart, end: viewportEnd };
         this.lastRenderRange = { start: rangeStart, end: rangeEnd };
+        if (reason === "full" && this.enterViewportScanInProgress) {
+          this.triggerRefresh("debounced", "write");
+        }
       }
     } finally {
       this.flushTerminalRefresh();
     }
+  }
+
+  private finishEnterViewportScan(
+    continuationPending: boolean,
+    viewportStart: number,
+    viewportEnd: number,
+  ): void {
+    if (!this.enterViewportScanInProgress || continuationPending) return;
+    this.enterViewportScanInProgress = false;
+    if (!this.enterViewportScanNeedsRepeat) return;
+
+    this.enterViewportScanNeedsRepeat = false;
+    this.addDirtyRange(viewportStart, viewportEnd);
+    this.enterViewportScanInProgress = true;
+    this.triggerRefresh("continuation", "write");
   }
 
   private beginTerminalRefreshTracking(viewportStart: number, viewportEnd: number) {
@@ -608,8 +867,36 @@ export class KeywordHighlighter implements IDisposable {
     }
   }
 
-  private reindexLineDecorationsFromMarkers() {
-    if (this.lineDecorations.size === 0) return;
+  private toIndexedLine(lineY: number): number {
+    return lineY - this.markerLineOffset;
+  }
+
+  private getLineDecorationState(lineY: number): LineDecorationState | undefined {
+    this.syncLineDecorationIndex();
+    let state = this.lineDecorations.get(this.toIndexedLine(lineY));
+    if (state && state.marker.line !== lineY) {
+      this.syncLineDecorationIndex(true);
+      state = this.lineDecorations.get(this.toIndexedLine(lineY));
+    }
+    return state;
+  }
+
+  private syncLineDecorationIndex(force = false) {
+    force = force || this.lineDecorationIndexNeedsRebuild;
+    if (this.lineDecorations.size === 0) {
+      this.markerLineOffset = 0;
+      this.lineDecorationIndexNeedsRebuild = false;
+      return;
+    }
+
+    if (!force) {
+      const anchor = this.lineDecorations.values().next().value as LineDecorationState | undefined;
+      if (anchor && !anchor.marker.isDisposed && anchor.marker.line >= 0) {
+        this.markerLineOffset += anchor.marker.line - (anchor.indexedLine + this.markerLineOffset);
+        return;
+      }
+    }
+
     const nextLineDecorations = new Map<number, LineDecorationState>();
     const staleStates = new Set<LineDecorationState>();
 
@@ -618,12 +905,12 @@ export class KeywordHighlighter implements IDisposable {
         staleStates.add(state);
         continue;
       }
-      const markerLine = state.marker.line;
-      const existing = nextLineDecorations.get(markerLine);
+      state.indexedLine = state.marker.line;
+      const existing = nextLineDecorations.get(state.indexedLine);
       if (existing && existing !== state) {
         staleStates.add(existing);
       }
-      nextLineDecorations.set(markerLine, state);
+      nextLineDecorations.set(state.indexedLine, state);
     }
 
     for (const state of nextLineDecorations.values()) {
@@ -631,6 +918,11 @@ export class KeywordHighlighter implements IDisposable {
     }
 
     this.lineDecorations = nextLineDecorations;
+    this.markerLineOffset = 0;
+    this.lineDecorationIndexNeedsRebuild = false;
+    if (staleStates.size > 0) {
+      this.lastRenderRange = null;
+    }
 
     for (const state of staleStates) {
       const markerLineBeforeDispose = state.marker.isDisposed ? -1 : state.marker.line;
@@ -642,12 +934,29 @@ export class KeywordHighlighter implements IDisposable {
     }
   }
 
+  private prunePersistentDecorations() {
+    const config = XTERM_PERFORMANCE_CONFIG.highlighting;
+    const maxPersistentLines = Math.min(
+      config.maxPersistentDecorationLines,
+      Math.max(
+        config.minPersistentDecorationLines,
+        this.term.rows * config.persistentDecorationViewports,
+      ),
+    );
+
+    while (this.lineDecorations.size > maxPersistentLines) {
+      const oldest = this.lineDecorations.values().next().value as LineDecorationState | undefined;
+      if (!oldest) break;
+      this.disposeLineDecorations(oldest.marker.line, oldest);
+    }
+  }
+
   private processDirtyLinesInRange(
     rangeStart: number,
     rangeEnd: number,
     cursorAbsoluteY: number,
     continuationReason: RefreshReason
-  ) {
+  ): boolean {
     if (this.dirtyAllInRenderRange) {
       this.dirtySegments = [{ start: rangeStart, end: rangeEnd }];
       this.rebuildDirtyLineCount();
@@ -655,7 +964,7 @@ export class KeywordHighlighter implements IDisposable {
     }
 
     if (this.dirtySegments.length === 0) {
-      return;
+      return false;
     }
 
     const dirtyInRange: DirtyLineSegment[] = [];
@@ -669,7 +978,7 @@ export class KeywordHighlighter implements IDisposable {
     }
 
     if (dirtyInRange.length === 0) {
-      return;
+      return false;
     }
 
     const { writeRefreshBudgetMs, dirtySegmentChunkSize } = this.getAdaptiveHighlightingProfile();
@@ -686,14 +995,114 @@ export class KeywordHighlighter implements IDisposable {
 
         if (chunkStart <= segment.end && performance.now() - startTime >= writeRefreshBudgetMs) {
           this.triggerRefresh("continuation", continuationReason);
-          return;
+          return true;
         }
       }
-      if (performance.now() - startTime >= writeRefreshBudgetMs) {
+      if (
+        this.dirtySegments.length > 0
+        && performance.now() - startTime >= writeRefreshBudgetMs
+      ) {
         this.triggerRefresh("continuation", continuationReason);
-        return;
+        return true;
       }
     }
+    return false;
+  }
+
+  private pruneWriteDecorationsIfNeeded(
+    rangeStart: number,
+    rangeEnd: number,
+    deferUntilIdle = false,
+  ): void {
+    const renderLineCount = Math.max(1, rangeEnd - rangeStart + 1);
+    const highWaterMark = Math.max(64, renderLineCount * 2);
+    if (this.lineDecorations.size <= highWaterMark) return;
+    if (deferUntilIdle) {
+      const hardLimit = Math.max(256, highWaterMark * 4);
+      if (this.lineDecorations.size > hardLimit) {
+        const trimTarget = Math.max(highWaterMark, Math.floor(hardLimit * 0.75));
+        this.pruneWriteDecorationsToLimit(rangeStart, rangeEnd, trimTarget);
+      }
+      this.scheduleDeferredWritePrune();
+      return;
+    }
+
+    // Decoration registration/removal makes xterm repaint the full viewport.
+    // Prune in batches so ordinary one-line output keeps existing highlights
+    // stable while long-running output remains bounded.
+    this.syncLineDecorationIndex();
+    for (const state of [...this.lineDecorations.values()]) {
+      const lineY = state.marker.isDisposed ? -1 : state.marker.line;
+      if (lineY < rangeStart || lineY > rangeEnd || state.marker.isDisposed) {
+        this.disposeLineDecorations(lineY, state);
+      }
+    }
+  }
+
+  private pruneWriteDecorationsToLimit(
+    rangeStart: number,
+    rangeEnd: number,
+    targetSize: number,
+  ): void {
+    this.syncLineDecorationIndex();
+    for (const state of [...this.lineDecorations.values()]) {
+      if (this.lineDecorations.size <= targetSize) return;
+      const lineY = state.marker.isDisposed ? -1 : state.marker.line;
+      if (lineY < rangeStart || lineY > rangeEnd || state.marker.isDisposed) {
+        this.disposeLineDecorations(lineY, state);
+      }
+    }
+  }
+
+  private scheduleDeferredWritePrune(): void {
+    if (this.writePruneTimer) clearTimeout(this.writePruneTimer);
+    this.writePruneTimer = setTimeout(() => {
+      this.writePruneTimer = null;
+      if (!this.enabled || this.compiledRules.length === 0) return;
+      const now = performance.now();
+      if (
+        (
+          this.lastUserInputAt > 0
+          && now - this.lastUserInputAt < KeywordHighlighter.WRITE_PRUNE_IDLE_MS
+        )
+        || (
+          this.lastWriteAt > 0
+          && now - this.lastWriteAt < KeywordHighlighter.WRITE_PRUNE_IDLE_MS
+        )
+      ) {
+        this.scheduleDeferredWritePrune();
+        return;
+      }
+      const buffer = this.term.buffer.active;
+      const overscan = this.getOverscanLines("write");
+      const rangeStart = Math.max(0, buffer.viewportY - overscan);
+      const rangeEnd = buffer.viewportY + this.term.rows - 1 + overscan;
+      this.pruneWriteDecorationsIfNeeded(rangeStart, rangeEnd);
+    }, KeywordHighlighter.WRITE_PRUNE_IDLE_MS);
+  }
+
+  private scheduleEnterInputIdleClear(): void {
+    if (this.enterInputIdleTimer) clearTimeout(this.enterInputIdleTimer);
+    this.enterInputIdleTimer = setTimeout(() => {
+      this.enterInputIdleTimer = null;
+      this.enterInputPending = false;
+      // Catch up any viewport motion deferred while Enter protection blocked
+      // scroll refresh (e.g. user scrolled during the post-Enter window).
+      this.markVisibleRangeDirty();
+      this.triggerRefresh("debounced", "write");
+    }, KeywordHighlighter.ENTER_INPUT_GUARD_MS);
+  }
+
+  private isBrowsingScrollback(): boolean {
+    const buffer = this.term.buffer.active;
+    return buffer.viewportY < buffer.baseY;
+  }
+
+  private hasOutputDrivenViewportChange(): boolean {
+    return (
+      this.hasOutputPositionChangedSinceLastSnapshot()
+      || this.hasDecorationMarkerShiftSinceLastRefresh()
+    );
   }
 
   private mergeRefreshReason(current: RefreshReason, next: RefreshReason): RefreshReason {
@@ -714,6 +1123,29 @@ export class KeywordHighlighter implements IDisposable {
       cursorAbsoluteY: buffer.baseY + buffer.cursorY,
       viewportProbe: includeViewportProbe ? this.buildViewportProbe(buffer, this.term.rows) : [],
     };
+  }
+
+  private hasOutputPositionChangedSinceLastSnapshot(): boolean {
+    const previous = this.lastBufferSnapshot;
+    const current = this.readBufferSnapshot({ includeViewportProbe: false });
+    if (!previous || !current) return false;
+    return (
+      current.length !== previous.length
+      || current.baseY !== previous.baseY
+      || current.cursorAbsoluteY !== previous.cursorAbsoluteY
+    );
+  }
+
+  private hasDecorationMarkerShiftSinceLastRefresh(): boolean {
+    for (const state of this.lineDecorations.values()) {
+      if (
+        state.marker.isDisposed
+        || state.marker.line !== state.indexedLine + this.markerLineOffset
+      ) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private buildViewportProbe(buffer: IBuffer, rows: number): readonly ViewportProbeSample[] {
@@ -854,9 +1286,9 @@ export class KeywordHighlighter implements IDisposable {
     return Math.min(maxDirtyLines, Math.max(minDirtyLines, dynamicDirtyLines));
   }
 
-  private markDirtyFromWrite() {
+  private markDirtyFromWrite({ includeViewportProbe = true }: { includeViewportProbe?: boolean } = {}) {
     this.updateWriteBurst();
-    const snapshot = this.readBufferSnapshot();
+    const snapshot = this.readBufferSnapshot({ includeViewportProbe });
     if (!snapshot) {
       this.markVisibleRangeDirty();
       return;
@@ -905,6 +1337,7 @@ export class KeywordHighlighter implements IDisposable {
     // Detect in-place ANSI redraw chunks (cursor returns near original line while
     // multiple viewport regions are actually rewritten).
     if (sameWindow && cursorSpan <= Math.max(1, padding * 2) && probeDiffCount >= 2) {
+      this.lineDecorationIndexNeedsRebuild = true;
       this.markVisibleRangeDirty();
       return;
     }
@@ -983,6 +1416,28 @@ export class KeywordHighlighter implements IDisposable {
   private getAdaptiveHighlightingProfile(now = performance.now()) {
     const config = XTERM_PERFORMANCE_CONFIG.highlighting;
     const overscanLines = this.getBaseOverscanLines();
+    const pressure = getTerminalOutputPressure(this.term);
+    const underOutputPressure = pressure.largeOutput || pressure.longLine || pressure.background;
+
+    if (underOutputPressure) {
+      return {
+        overscanLines: Math.max(4, Math.round(overscanLines * 0.25)),
+        writeRefreshBudgetMs: Math.max(1, Math.floor(config.writeRefreshBudgetMs * 0.35)),
+        dirtySegmentChunkSize: Math.max(8, Math.round(config.dirtySegmentChunkSize * 0.35)),
+        debounceMs: Math.max(
+          config.debounceMs,
+          config.largeOutputDebounceMs ?? KeywordHighlighter.WRITE_BURST_DEBOUNCE_MS,
+          KeywordHighlighter.WRITE_BURST_DEBOUNCE_MS,
+        ),
+        immediateMinIntervalMs: Math.max(
+          config.immediateMinIntervalMs,
+          config.largeOutputImmediateMinIntervalMs
+            ?? KeywordHighlighter.WRITE_BURST_IMMEDIATE_MIN_INTERVAL_MS,
+          KeywordHighlighter.WRITE_BURST_IMMEDIATE_MIN_INTERVAL_MS,
+        ),
+      };
+    }
+
     if (!this.isWriteBurstActive(now)) {
       return {
         overscanLines,
@@ -1012,6 +1467,9 @@ export class KeywordHighlighter implements IDisposable {
   ): boolean {
     if (mode !== "immediate") return false;
     if (!this.isWriteBurstActive(now)) return false;
+    if (now - this.lastRefreshTime >= KeywordHighlighter.WRITE_BURST_HIGHLIGHT_PAUSE_MS) {
+      return false;
+    }
     return reason === "write";
   }
 
@@ -1072,8 +1530,10 @@ export class KeywordHighlighter implements IDisposable {
       }
 
       const hasWrappedContext = this.hasWrappedNeighbor(buffer, lineY, line);
-      const cachedRanges = hasWrappedContext && !pressure.longLine
-        ? this.scanWrappedLine(buffer, lineY, line, lineText, wrappedBlockCache)
+      const cachedRanges = hasWrappedContext
+        ? pressure.longLine
+          ? this.getCachedRanges(line, lineText, false)
+          : this.scanWrappedLine(buffer, lineY, line, lineText, wrappedBlockCache)
         : this.getCachedRanges(line, lineText);
       if (cachedRanges.length === 0) {
         this.disposeLineDecorations(lineY);
@@ -1081,7 +1541,7 @@ export class KeywordHighlighter implements IDisposable {
       }
 
       const signature = this.buildRangesSignature(cachedRanges);
-      const existing = this.lineDecorations.get(lineY);
+      const existing = this.getLineDecorationState(lineY);
       if (
         existing &&
         !existing.marker.isDisposed &&
@@ -1098,80 +1558,98 @@ export class KeywordHighlighter implements IDisposable {
     }
   }
 
-  private startScrollRefresh(start: number, end: number, cursorAbsoluteY: number) {
-    this.cancelScrollRefresh();
-    const generation = this.scrollRefreshGeneration;
-    this.scrollRefreshJob = {
-      generation,
-      start,
-      end,
-      nextLine: start,
-      cursorAbsoluteY,
-      wrappedBlockCache: this.createWrappedBlockScanCache(),
-    };
-    this.runScrollRefreshChunk(generation);
-  }
+  private processScrollViewport(
+    start: number,
+    end: number,
+    cursorAbsoluteY: number,
+    previousRange: DirtyLineSegment | null,
+  ) {
+    const wrappedBlockCache = this.createWrappedBlockScanCache();
+    const overlapsPreviousRange = previousRange !== null
+      && start <= previousRange.end + 1
+      && end + 1 >= previousRange.start;
 
-  private runScrollRefreshChunk(generation: number) {
-    const job = this.scrollRefreshJob;
-    if (!job || job.generation !== generation) return;
-    if (!this.enabled || this.compiledRules.length === 0 || this.term.buffer.active.type === "alternate") {
-      this.cancelScrollRefresh();
-      return;
+    if (!overlapsPreviousRange || previousRange === null) {
+      this.processLineRange(start, end, cursorAbsoluteY, wrappedBlockCache);
+      this.lastRenderRange = { start, end };
+      this.removeDirtyRange(start, end);
+      this.dirtyAllInRenderRange = false;
+    } else {
+      if (start < previousRange.start) {
+        const exposedEnd = Math.min(end, previousRange.start - 1);
+        this.processLineRange(
+          start,
+          exposedEnd,
+          cursorAbsoluteY,
+          wrappedBlockCache,
+        );
+        this.removeDirtyRange(start, exposedEnd);
+      }
+      if (end > previousRange.end) {
+        const exposedStart = Math.max(start, previousRange.end + 1);
+        this.processLineRange(
+          exposedStart,
+          end,
+          cursorAbsoluteY,
+          wrappedBlockCache,
+        );
+        this.removeDirtyRange(exposedStart, end);
+      }
+
+      // Overlap was previously indexed; only rescan lines still marked dirty by
+      // writes (in-place redraws). Never clear the whole viewport dirty set here —
+      // scroll can outrank/cancel a pending write refresh.
+      const overlapStart = Math.max(start, previousRange.start);
+      const overlapEnd = Math.min(end, previousRange.end);
+      if (
+        overlapStart <= overlapEnd
+        && (this.dirtyAllInRenderRange || this.dirtySegments.length > 0)
+      ) {
+        this.processDirtyLinesInRange(
+          overlapStart,
+          overlapEnd,
+          cursorAbsoluteY,
+          "write",
+        );
+      }
+
+      this.lastRenderRange = {
+        start: Math.min(start, previousRange.start),
+        end: Math.max(end, previousRange.end),
+      };
     }
 
-    this.beginTerminalRefreshTracking(job.start, job.end);
-    try {
-      this.reindexLineDecorationsFromMarkers();
-      this.processLineRange(
-        job.nextLine,
-        job.end,
-        job.cursorAbsoluteY,
-        job.wrappedBlockCache,
-      );
-      this.removeDirtyRange(job.nextLine, job.end);
-      job.nextLine = job.end + 1;
-    } finally {
-      this.flushTerminalRefresh();
+    this.lastViewportRange = { start, end };
+    this.prunePersistentDecorations();
+  }
+
+  private cancelQueuedRefreshSchedule() {
+    if (this.animationFrameId !== null) {
+      cancelAnimationFrame(this.animationFrameId);
+      this.animationFrameId = null;
     }
-
-    this.finishScrollRefresh(job);
-  }
-
-  private finishScrollRefresh(job: ScrollRefreshJob) {
-    if (this.scrollRefreshJob !== job) return;
-    this.scrollRefreshJob = null;
-    this.dirtyAllInRenderRange = false;
-    this.clearLineDecorationsOutsideRange(job.start, job.end);
-    this.lastViewportRange = { start: job.start, end: job.end };
-    this.lastRenderRange = { start: job.start, end: job.end };
-  }
-
-  private cancelScrollRefresh() {
-    this.scrollRefreshJob = null;
-    this.scrollRefreshGeneration += 1;
-  }
-
-  private clearLineDecorationsOutsideRange(start: number, end: number) {
-    if (this.lineDecorations.size === 0) return;
-    const entries = Array.from(this.lineDecorations.entries());
-    for (const [lineY, state] of entries) {
-      if (lineY >= start && lineY <= end) continue;
-      this.disposeLineDecorations(lineY, state);
+    if (this.debounceTimer) {
+      clearTimeout(this.debounceTimer);
+      this.debounceTimer = null;
     }
   }
 
-  private getCachedRanges(line: IBufferLine, lineText: string): CachedDecorationRange[] {
-    const cached = this.matchCache.get(lineText);
+  private getCachedRanges(
+    line: IBufferLine,
+    lineText: string,
+    includePlugin = true,
+  ): CachedDecorationRange[] {
+    const cacheKey = `${includePlugin ? 'all' : 'host'}\0${lineText}`;
+    const cached = this.matchCache.get(cacheKey);
     if (cached) {
       // LRU: move to end
-      this.matchCache.delete(lineText);
-      this.matchCache.set(lineText, cached);
+      this.matchCache.delete(cacheKey);
+      this.matchCache.set(cacheKey, cached);
       return cached;
     }
 
-    const ranges = this.scanLine(line, lineText);
-    this.matchCache.set(lineText, ranges);
+    const ranges = this.scanLine(line, lineText, includePlugin);
+    this.matchCache.set(cacheKey, ranges);
 
     const maxEntries = XTERM_PERFORMANCE_CONFIG.highlighting.cacheEntries;
     if (this.matchCache.size > maxEntries) {
@@ -1248,7 +1726,7 @@ export class KeywordHighlighter implements IDisposable {
     lineY: number,
     line: IBufferLine,
     cache: WrappedBlockScanCache,
-  ): { logicalLineText: string; lineStart: number; lineEnd: number } | null {
+  ): { block: WrappedBlockContext; lineStart: number; lineEnd: number } | null {
     if (this.isInCappedWrappedMiss(lineY, line, cache)) {
       return null;
     }
@@ -1266,7 +1744,7 @@ export class KeywordHighlighter implements IDisposable {
     const bounds = block.segmentBounds.get(lineY);
     if (!bounds) return null;
     return {
-      logicalLineText: block.logicalLineText,
+      block,
       lineStart: bounds.lineStart,
       lineEnd: bounds.lineEnd,
     };
@@ -1298,7 +1776,10 @@ export class KeywordHighlighter implements IDisposable {
     wrappedBlockCache: WrappedBlockScanCache,
   ): CachedDecorationRange[] {
     const context = this.getWrappedContext(buffer, lineY, line, wrappedBlockCache);
-    if (!context || context.logicalLineText === lineText) {
+    if (!context) {
+      return this.scanLine(line, lineText, false);
+    }
+    if (context.block.logicalLineText === lineText) {
       return this.scanLine(line, lineText);
     }
 
@@ -1306,46 +1787,44 @@ export class KeywordHighlighter implements IDisposable {
     let cellMap: number[] | null = null;
     let ranges: CachedDecorationRange[] | null = null;
 
-    for (const { regex, color, priority } of this.compiledRules) {
-      forEachNonEmptyRegexMatch(regex, context.logicalLineText, (match) => {
-        const matchStart = match.index;
-        const matchEnd = matchStart + match[0].length;
-        if (matchEnd <= context.lineStart || matchStart >= context.lineEnd) {
-          return;
+    context.block.matchRanges ??= this.scanLogicalLineText(context.block.logicalLineText);
+    for (const { start: matchStart, length: matchLength, color, priority } of context.block.matchRanges) {
+      const matchEnd = matchStart + matchLength;
+      if (matchEnd <= context.lineStart || matchStart >= context.lineEnd) {
+        continue;
+      }
+
+      const localStart = Math.max(matchStart, context.lineStart) - context.lineStart;
+      const localEnd = Math.min(matchEnd, context.lineEnd) - context.lineStart;
+      if (localEnd <= localStart) continue;
+
+      let cellStartCol: number;
+      let cellEndCol: number;
+
+      if (asciiOnly) {
+        cellStartCol = localStart;
+        cellEndCol = localEnd;
+      } else {
+        if (cellMap === null) {
+          cellMap = this.buildStringToCellMap(line);
         }
+        cellStartCol = cellMap[localStart] ?? localStart;
+        cellEndCol = localEnd < cellMap.length
+          ? (cellMap[localEnd] ?? localEnd)
+          : (cellMap[cellMap.length - 1] ?? localEnd);
+      }
 
-        const localStart = Math.max(matchStart, context.lineStart) - context.lineStart;
-        const localEnd = Math.min(matchEnd, context.lineEnd) - context.lineStart;
-        if (localEnd <= localStart) return;
+      const cellWidth = cellEndCol - cellStartCol;
+      if (cellWidth <= 0) continue;
 
-        let cellStartCol: number;
-        let cellEndCol: number;
-
-        if (asciiOnly) {
-          cellStartCol = localStart;
-          cellEndCol = localEnd;
-        } else {
-          if (cellMap === null) {
-            cellMap = this.buildStringToCellMap(line);
-          }
-          cellStartCol = cellMap[localStart] ?? localStart;
-          cellEndCol = localEnd < cellMap.length
-            ? (cellMap[localEnd] ?? localEnd)
-            : (cellMap[cellMap.length - 1] ?? localEnd);
-        }
-
-        const cellWidth = cellEndCol - cellStartCol;
-        if (cellWidth <= 0) return;
-
-        if (ranges === null) {
-          ranges = [];
-        }
-        ranges.push({
-          x: cellStartCol,
-          width: cellWidth,
-          color,
-          priority,
-        });
+      if (ranges === null) {
+        ranges = [];
+      }
+      ranges.push({
+        x: cellStartCol,
+        width: cellWidth,
+        color,
+        priority,
       });
     }
 
@@ -1358,18 +1837,42 @@ export class KeywordHighlighter implements IDisposable {
     return this.mergeDecorationRanges(ranges);
   }
 
-  private scanLine(line: IBufferLine, lineText: string): CachedDecorationRange[] {
+  private scanLogicalLineText(lineText: string): readonly LogicalDecorationRange[] {
+    const ranges: LogicalDecorationRange[] = [];
+    let pluginMatchCount = 0;
+    for (const { forEachMatch, color, priority, plugin } of this.compiledRules) {
+      if (plugin && pluginMatchCount >= MAX_PLUGIN_DECORATION_MATCHES_PER_LOGICAL_LINE) continue;
+      forEachMatch(lineText, (start, length) => {
+        ranges.push({ start, length, color, priority });
+        if (plugin) {
+          pluginMatchCount += 1;
+          return pluginMatchCount < MAX_PLUGIN_DECORATION_MATCHES_PER_LOGICAL_LINE;
+        }
+      });
+    }
+    return ranges;
+  }
+
+  private scanLine(
+    line: IBufferLine,
+    lineText: string,
+    includePlugin = true,
+  ): CachedDecorationRange[] {
     // ASCII-only lines have a 1:1 string-index-to-cell-column mapping,
     // so we can skip the expensive buildStringToCellMap call entirely.
     const asciiOnly = RE_ASCII_ONLY.test(lineText);
     let cellMap: number[] | null = null;
     let ranges: CachedDecorationRange[] | null = null;
+    let pluginMatchCount = 0;
 
     // Process each pre-compiled rule
-    for (const { regex, color, priority } of this.compiledRules) {
-      forEachNonEmptyRegexMatch(regex, lineText, (match) => {
-        const strStart = match.index;
-        const strEnd = strStart + match[0].length;
+    for (const { forEachMatch, color, priority, plugin } of this.compiledRules) {
+      if (plugin && !includePlugin) continue;
+      if (plugin && pluginMatchCount >= MAX_PLUGIN_DECORATION_MATCHES_PER_LOGICAL_LINE) continue;
+      forEachMatch(lineText, (strStart, matchLength) => {
+        const shouldContinuePluginMatching = !plugin
+          || ++pluginMatchCount < MAX_PLUGIN_DECORATION_MATCHES_PER_LOGICAL_LINE;
+        const strEnd = strStart + matchLength;
 
         let cellStartCol: number;
         let cellEndCol: number;
@@ -1391,7 +1894,7 @@ export class KeywordHighlighter implements IDisposable {
         const cellWidth = cellEndCol - cellStartCol;
 
         // Skip if width is 0 or negative (shouldn't happen, but be safe)
-        if (cellWidth <= 0) return;
+        if (cellWidth <= 0) return shouldContinuePluginMatching;
 
         if (ranges === null) {
           ranges = [];
@@ -1402,6 +1905,7 @@ export class KeywordHighlighter implements IDisposable {
           color,
           priority,
         });
+        return shouldContinuePluginMatching;
       });
     }
 

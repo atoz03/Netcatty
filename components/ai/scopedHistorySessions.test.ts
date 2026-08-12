@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { AISession } from "../../infrastructure/ai/types.ts";
-import { getScopedHistorySessions } from "./scopedHistorySessions.ts";
+import {
+  _getScopedHistoryCacheSizeForTests,
+  getScopedHistorySessions,
+} from "./scopedHistorySessions.ts";
 
 function createSession(
   id: string,
@@ -41,6 +44,31 @@ test("workspace history remains visible after the original workspace target is g
       new Set(),
     ),
     [staleWorkspaceSession],
+  );
+});
+
+test("workspace history includes member-terminal chats and ranks them above stale workspaces", () => {
+  const memberTerminalSession = createSession(
+    "terminal-a-chat",
+    { type: "terminal", targetId: "terminal-a" },
+    1,
+  );
+  const staleWorkspaceSession = createSession(
+    "workspace-stale",
+    { type: "workspace", targetId: "workspace-before-restart" },
+    99,
+  );
+
+  assert.deepEqual(
+    getScopedHistorySessions(
+      [staleWorkspaceSession, memberTerminalSession],
+      "workspace",
+      "workspace-merged",
+      ["host-a"],
+      new Set(),
+      new Set(["terminal-a", "terminal-b"]),
+    ).map((session) => session.id),
+    ["terminal-a-chat", "workspace-stale"],
   );
 });
 
@@ -109,4 +137,39 @@ test("same-scope fallback excludes sessions already displayed by another termina
     ),
     [],
   );
+});
+
+test("workspace cache ignores unrelated active terminal churn", () => {
+  const sessions = [createSession("workspace", { type: "workspace", targetId: "workspace-1" }, 1)];
+  const first = getScopedHistorySessions(
+    sessions,
+    "workspace",
+    "workspace-1",
+    undefined,
+    new Set(["terminal-0"]),
+  );
+  for (let index = 1; index < 1_000; index += 1) {
+    assert.equal(getScopedHistorySessions(
+      sessions,
+      "workspace",
+      "workspace-1",
+      undefined,
+      new Set([`terminal-${index}`]),
+    ), first);
+  }
+  assert.equal(_getScopedHistoryCacheSizeForTests(sessions), 1);
+});
+
+test("terminal scoped history cache has a hard LRU bound", () => {
+  const sessions = [createSession("terminal", { type: "terminal", targetId: "terminal-current" }, 1)];
+  for (let index = 0; index < 1_000; index += 1) {
+    getScopedHistorySessions(
+      sessions,
+      "terminal",
+      "terminal-current",
+      undefined,
+      new Set([`other-session-${index}`]),
+    );
+  }
+  assert.ok(_getScopedHistoryCacheSizeForTests(sessions) <= 64);
 });

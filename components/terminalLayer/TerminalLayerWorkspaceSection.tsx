@@ -1,16 +1,35 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { memo } from 'react';
+import React, { memo, useSyncExternalStore } from 'react';
 
+import {
+  getSidePanelLiveSnapshot,
+  sidePanelLiveStore,
+} from '../../application/state/sidePanelLiveStore';
 import { terminalLayerWorkspaceCtxEqual } from './terminalLayerViewMemo';
 
 type WorkspaceContext = Record<string, any>;
 
 function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) {
+  // Active workspace / focused session come ONLY from the live store so top-tab
+  // switches do not force a TerminalLayerView ctx rebuild just to flip them.
+  // Do not fall back to ctx.* — after memo omits activeWorkspace from equality,
+  // ctx can still hold a previous workspace after live has been cleared
+  // (workspace → solo session). Falling back would keep compose bar / resizer
+  // handlers bound to a stale workspace.
+  // Panes already derive visibility from activeTabStore themselves.
+  const live = useSyncExternalStore(
+    sidePanelLiveStore.subscribe,
+    sidePanelLiveStore.getSnapshot,
+    () => getSidePanelLiveSnapshot(false),
+  );
+  const activeWorkspace = live.activeWorkspace;
+  const focusedSessionId = live.focusedSessionId;
+  const isFocusMode = activeWorkspace?.viewMode === 'focus';
+
   const {
     workspaceInnerRef,
     workspaceOverlayRef,
     draggingSessionId,
-    isFocusMode,
     dropHint,
     setDropHint,
     computeSplitHint,
@@ -20,6 +39,7 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
     sessionHostsMap,
     sessionChainHostsMap,
     sessionSudoAutofillPasswordsMap,
+    sessionSudoAutofillCandidatesMap,
     resolvedSessionHostIds,
     workspaceById,
     workspaceRectsById,
@@ -80,10 +100,8 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
     handleProgrammaticCommandLogRewriteChange,
     handleAddSelectionToAI,
     activeResizers,
-    activeWorkspace,
     composeBarThemeColors,
     findSplitNode,
-    focusedSessionId,
     handleComposeSend,
     handleSnippetFromPanel,
     refocusTerminalSession,
@@ -144,6 +162,7 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
           sessionHostsMap={sessionHostsMap}
           sessionChainHostsMap={sessionChainHostsMap}
           sessionSudoAutofillPasswordsMap={sessionSudoAutofillPasswordsMap}
+          sessionSudoAutofillCandidatesMap={sessionSudoAutofillCandidatesMap}
           resolvedSessionHostIds={resolvedSessionHostIds}
           workspaceById={workspaceById}
           workspaceRectsById={workspaceRectsById}

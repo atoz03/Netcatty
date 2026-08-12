@@ -57,10 +57,14 @@ interface SftpPaneDialogsProps {
   showHostPicker: boolean;
   setShowHostPicker: (open: boolean) => void;
   hosts: Host[];
+  connectedHosts?: import("../../domain/sftpConnectedHosts").SftpConnectedHostEntry[];
   side: "left" | "right";
   hostSearch: string;
   setHostSearch: (value: string) => void;
-  onConnect: (host: Host | "local") => void;
+  onConnect: (
+    host: Host | "local",
+    options?: { sourceSessionId?: string },
+  ) => void;
   onDisconnect: () => Promise<boolean>;
 }
 
@@ -105,6 +109,7 @@ export const SftpPaneDialogs: React.FC<SftpPaneDialogsProps> = ({
   showHostPicker,
   setShowHostPicker,
   hosts,
+  connectedHosts = [],
   side,
   hostSearch,
   setHostSearch,
@@ -373,6 +378,7 @@ export const SftpPaneDialogs: React.FC<SftpPaneDialogsProps> = ({
       open={showHostPicker}
       onOpenChange={setShowHostPicker}
       hosts={hosts}
+      connectedHosts={connectedHosts}
       side={side}
       hostSearch={hostSearch}
       onHostSearchChange={setHostSearch}
@@ -383,9 +389,9 @@ export const SftpPaneDialogs: React.FC<SftpPaneDialogsProps> = ({
         const ok = await onDisconnect();
         if (ok) onConnect("local");
       }}
-      onSelectHost={async (host) => {
+      onSelectHost={async (host, options) => {
         const ok = await onDisconnect();
-        if (ok) onConnect(host);
+        if (ok) onConnect(host, options);
       }}
     />
   </>

@@ -7,6 +7,7 @@ const {
   createClipboardImageFileName,
   decodeWindowsHDrop,
   decodeWindowsFileNameW,
+  hasClipboardImage,
   parseClipboardTextFilePaths,
   readClipboardFiles,
   readClipboardImage,
@@ -203,4 +204,104 @@ test("returns null when clipboard image is empty", async () => {
   });
 
   assert.equal(result, null);
+});
+
+test("hasClipboardImage is true when native clipboard holds an image", () => {
+  assert.equal(
+    hasClipboardImage({
+      clipboard: {
+        readImage: () => ({
+          isEmpty: () => false,
+          getSize: () => ({ width: 10, height: 8 }),
+        }),
+      },
+    }),
+    true,
+  );
+});
+
+test("hasClipboardImage is true when availableFormats lists an image type", () => {
+  assert.equal(
+    hasClipboardImage({
+      clipboard: {
+        availableFormats: () => ["text/plain", "image/png"],
+        readImage: () => assert.fail("formats probe should short-circuit"),
+      },
+    }),
+    true,
+  );
+});
+
+test("hasClipboardImage falls back to readImage when availableFormats throws", () => {
+  assert.equal(
+    hasClipboardImage({
+      clipboard: {
+        availableFormats: () => {
+          throw new Error("formats unavailable");
+        },
+        readImage: () => ({
+          isEmpty: () => false,
+          getSize: () => ({ width: 1, height: 1 }),
+        }),
+      },
+    }),
+    true,
+  );
+});
+
+test("hasClipboardImage is false when native clipboard image is empty", () => {
+  assert.equal(
+    hasClipboardImage({
+      clipboard: {
+        readImage: () => ({
+          isEmpty: () => true,
+          getSize: () => ({ width: 10, height: 8 }),
+        }),
+      },
+    }),
+    false,
+  );
+});
+
+test("hasClipboardImage is false when clipboard image has no measurable size", () => {
+  assert.equal(
+    hasClipboardImage({
+      clipboard: {
+        readImage: () => ({
+          isEmpty: () => false,
+          getSize: () => ({ width: 0, height: 0 }),
+        }),
+      },
+    }),
+    false,
+  );
+});
+
+test("hasClipboardImage falls back to toPNG when getSize is unavailable", () => {
+  assert.equal(
+    hasClipboardImage({
+      clipboard: {
+        readImage: () => ({
+          isEmpty: () => false,
+          toPNG: () => Buffer.from("png"),
+        }),
+      },
+    }),
+    true,
+  );
+  assert.equal(
+    hasClipboardImage({
+      clipboard: {
+        readImage: () => ({
+          isEmpty: () => false,
+        }),
+      },
+    }),
+    false,
+  );
+});
+
+test("hasClipboardImage is false when clipboard API is unavailable", () => {
+  assert.equal(hasClipboardImage({ clipboard: null }), false);
+  assert.equal(hasClipboardImage({ clipboard: {} }), false);
 });

@@ -27,23 +27,6 @@ interface UseSftpViewPaneCallbacksParams {
   listSftp?: (sftpId: string, path: string, encoding?: SftpFilenameEncoding) => Promise<RemoteFile[]>;
   showSaveDialog?: (defaultPath: string, filters?: Array<{ name: string; extensions: string[] }>) => Promise<string | null>;
   selectDirectory?: (title?: string, defaultPath?: string) => Promise<string | null>;
-  startStreamTransfer?: (
-    options: {
-      transferId: string;
-      sourcePath: string;
-      targetPath: string;
-      sourceType: 'local' | 'sftp';
-      targetType: 'local' | 'sftp';
-      sourceSftpId?: string;
-      targetSftpId?: string;
-      totalBytes?: number;
-      sourceEncoding?: SftpFilenameEncoding;
-      targetEncoding?: SftpFilenameEncoding;
-    },
-    onProgress?: (transferred: number, total: number, speed: number) => void,
-    onComplete?: () => void,
-    onError?: (error: string) => void
-  ) => Promise<{ transferId: string; totalBytes?: number; error?: string }>;
   getSftpIdForConnection?: (connectionId: string) => string | undefined;
   listLocalFiles: (path: string) => Promise<RemoteFile[]>;
   mkdirLocal?: (path: string) => Promise<void>;
@@ -61,12 +44,11 @@ export const useSftpViewPaneCallbacks = ({
   listSftp,
   showSaveDialog,
   selectDirectory,
-  startStreamTransfer,
   getSftpIdForConnection,
   listLocalFiles,
   listDrives,
 }: UseSftpViewPaneCallbacksParams) => {
-  const paneActions = useSftpViewPaneActions({ sftpRef });
+  const paneActions = useSftpViewPaneActions({ sftpRef, t });
   const fileOps = useSftpViewFileOps({
     sftpRef,
     behaviorRef,
@@ -76,7 +58,6 @@ export const useSftpViewPaneCallbacks = ({
     t,
     showSaveDialog,
     selectDirectory,
-    startStreamTransfer,
     getSftpIdForConnection,
   });
 

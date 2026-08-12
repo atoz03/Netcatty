@@ -5,6 +5,7 @@ import {
   buildManagedAgentState,
   getInitialManagedAgentPaths,
   updateCodebuddyManagedEnv,
+  updateCodebuddyManagedOptions,
 } from '../settings/tabs/ai/managedAgentState';
 import type { ExternalAgentConfig } from '../../infrastructure/ai/types';
 
@@ -101,8 +102,48 @@ test('buildManagedAgentState stores SDK backend keys for discovered managed agen
   );
 
   assert.equal(codexState.agents[0].sdkBackend, 'codex');
+  assert.equal(codexState.agents[0].cliVersion, '1.0.0');
   assert.equal(copilotState.agents[0].sdkBackend, 'copilot');
   assert.equal(copilotState.agents[0].acpArgs, undefined);
+});
+
+test('buildManagedAgentState preserves the experimental Codex runtime across path refreshes', () => {
+  const state = buildManagedAgentState(
+    [{
+      id: 'discovered_codex',
+      name: 'Codex CLI',
+      command: '/old/codex',
+      enabled: true,
+      sdkBackend: 'codex',
+      codexRuntime: 'app-server',
+    }],
+    'discovered_codex',
+    'codex',
+    { path: '/new/codex', version: '0.144.3', available: true },
+  );
+
+  assert.equal(state.agents[0].codexRuntime, 'app-server');
+  assert.equal(state.agents[0].command, '/new/codex');
+});
+
+test('buildManagedAgentState preserves Grok runtime across path refreshes', () => {
+  const state = buildManagedAgentState(
+    [{
+      id: 'discovered_grok',
+      name: 'Grok Build',
+      command: '/old/grok',
+      enabled: true,
+      sdkBackend: 'grok',
+      grokRuntime: 'streaming-json',
+    }],
+    'discovered_grok',
+    'grok',
+    { path: '/new/grok', version: '0.2.118', available: true },
+  );
+
+  assert.equal(state.agents[0].grokRuntime, 'streaming-json');
+  assert.equal(state.agents[0].command, '/new/grok');
+  assert.equal(state.agents[0].sdkBackend, 'grok');
 });
 
 test('getInitialManagedAgentPaths ignores auto-detected command paths', () => {
@@ -174,9 +215,101 @@ test('buildManagedAgentState preserves a saved Cursor API key when SDK is not re
 
   assert.equal(state.agents[0].id, 'discovered_cursor');
   assert.equal(state.agents[0].apiKey, 'enc:v1:test');
-  assert.equal(state.agents[0].enabled, false);
+  // Keep enabled so a later mode/path that becomes available is not sticky-disabled.
+  assert.equal(state.agents[0].enabled, true);
   assert.equal(state.agents[0].available, false);
   assert.equal(state.defaultAgentId, 'catty');
+});
+
+test('buildManagedAgentState preserves enabled when CLI login probe is temporarily unavailable', () => {
+  const agents: ExternalAgentConfig[] = [
+    {
+      id: 'discovered_cursor',
+      name: 'Cursor',
+      command: '/bin/cursor-agent',
+      enabled: true,
+      available: true,
+      sdkBackend: 'cursor',
+      cursorAuthMode: 'cli-login',
+      apiKey: 'enc:v1:test',
+    },
+  ];
+
+  const unavailable = buildManagedAgentState(
+    agents,
+    'discovered_cursor',
+    'cursor',
+    {
+      path: 'cursor',
+      version: 'Cursor Agent CLI',
+      available: false,
+      installed: true,
+      cliLoginOk: false,
+      apiKeyOk: true,
+      sdkInstalled: true,
+    },
+  );
+  assert.equal(unavailable.agents[0].enabled, true);
+  assert.equal(unavailable.agents[0].available, false);
+  assert.equal(unavailable.agents[0].apiKey, 'enc:v1:test');
+  assert.equal(unavailable.agents[0].cursorAuthMode, 'cli-login');
+
+  // When CLI login returns, mode-aware available becomes true and enabled stays on.
+  const recovered = buildManagedAgentState(
+    unavailable.agents,
+    'catty',
+    'cursor',
+    {
+      path: '/bin/cursor-agent',
+      cliBinPath: '/bin/cursor-agent',
+      version: 'Cursor Agent CLI',
+      available: true,
+      installed: true,
+      cliLoginOk: true,
+      apiKeyOk: true,
+      sdkInstalled: true,
+      authSource: 'cli-login',
+    },
+  );
+  assert.equal(recovered.agents[0].enabled, true);
+  assert.equal(recovered.agents[0].available, true);
+  assert.equal(recovered.agents[0].cursorAuthMode, 'cli-login');
+  assert.equal(recovered.agents[0].command, '/bin/cursor-agent');
+});
+
+test('buildManagedAgentState keeps API key when Cursor stays on CLI login mode', () => {
+  const agents: ExternalAgentConfig[] = [
+    {
+      id: 'discovered_cursor',
+      name: 'Cursor',
+      command: '/bin/cursor-agent',
+      enabled: true,
+      available: true,
+      sdkBackend: 'cursor',
+      cursorAuthMode: 'cli-login',
+      apiKey: 'enc:v1:keep-me',
+    },
+  ];
+
+  const state = buildManagedAgentState(
+    agents,
+    'discovered_cursor',
+    'cursor',
+    {
+      path: '/bin/cursor-agent',
+      cliBinPath: '/bin/cursor-agent',
+      version: 'Cursor Agent CLI',
+      available: true,
+      installed: true,
+      cliLoginOk: true,
+      apiKeyOk: true,
+      sdkInstalled: true,
+      authSource: 'cli-login',
+    },
+  );
+
+  assert.equal(state.agents[0].apiKey, 'enc:v1:keep-me');
+  assert.equal(state.agents[0].cursorAuthMode, 'cli-login');
 });
 
 test('buildManagedAgentState stores CODEBUDDY_CODE_PATH for codebuddy', () => {
@@ -268,6 +401,46 @@ test('buildManagedAgentState enables preconfigured CodeBuddy when path detection
 test('updateCodebuddyManagedEnv removes an empty pre-detection placeholder', () => {
   const agents = updateCodebuddyManagedEnv([], 'internal', 'CODEBUDDY_API_KEY=secret');
   const cleared = updateCodebuddyManagedEnv(agents, '', '');
+
+  assert.deepEqual(cleared, []);
+});
+
+test('updateCodebuddyManagedOptions persists settings before CLI detection', () => {
+  const state = updateCodebuddyManagedOptions([], {
+    effort: 'high',
+    enableFileCheckpointing: true,
+  });
+
+  assert.equal(state.length, 1);
+  assert.equal(state[0].id, 'discovered_codebuddy');
+  assert.equal(state[0].command, 'codebuddy');
+  assert.equal(state[0].enabled, false);
+  assert.deepEqual(state[0].codebuddyOptions, {
+    effort: 'high',
+    enableFileCheckpointing: true,
+  });
+});
+
+test('buildManagedAgentState preserves advanced CodeBuddy config when detection fails', () => {
+  const agents = updateCodebuddyManagedOptions([], { effort: 'high' });
+
+  const state = buildManagedAgentState(
+    agents,
+    'discovered_codebuddy',
+    'codebuddy',
+    { path: null, version: null, available: false },
+  );
+
+  assert.equal(state.defaultAgentId, 'catty');
+  assert.equal(state.agents.length, 1);
+  assert.equal(state.agents[0].enabled, false);
+  assert.equal(state.agents[0].available, false);
+  assert.deepEqual(state.agents[0].codebuddyOptions, { effort: 'high' });
+});
+
+test('updateCodebuddyManagedOptions removes an empty pre-detection placeholder', () => {
+  const agents = updateCodebuddyManagedOptions([], { effort: 'high' });
+  const cleared = updateCodebuddyManagedOptions(agents, undefined);
 
   assert.deepEqual(cleared, []);
 });

@@ -114,3 +114,35 @@ test("scope type mismatch returns 0 regardless of target or hosts", () => {
     0,
   );
 });
+
+test("workspace scope treats member-terminal chats as exact matches after merge", () => {
+  const session = createSession("session-1", "terminal-a", ["host-a"]);
+
+  assert.equal(
+    getSessionScopeMatchRank(
+      session,
+      "workspace",
+      "ws-1",
+      ["host-a"],
+      undefined,
+      new Set(["terminal-a", "terminal-b"]),
+    ),
+    3,
+  );
+});
+
+test("workspace scope ignores terminal chats that are not workspace members", () => {
+  const session = createSession("session-1", "terminal-other", ["host-a"]);
+
+  assert.equal(
+    getSessionScopeMatchRank(
+      session,
+      "workspace",
+      "ws-1",
+      ["host-a"],
+      undefined,
+      new Set(["terminal-a", "terminal-b"]),
+    ),
+    0,
+  );
+});

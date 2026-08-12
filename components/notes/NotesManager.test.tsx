@@ -8,6 +8,7 @@ import { I18nProvider } from "../../application/i18n/I18nProvider.tsx";
 import type { VaultNote } from "../../types.ts";
 import { TooltipProvider } from "../ui/tooltip.tsx";
 import {
+  clampNotesTreeWidth,
   getFallbackNoteSelectionState,
   getNoteActionTargetGroup,
   getNoteGroupSelectionState,
@@ -56,7 +57,14 @@ test("NotesManager renders notes tree and selected markdown editor", () => {
 
   assert.match(markup, /Ops/);
   assert.match(markup, /Postgres failover checklist/);
-  assert.match(markup, /data-notes-editor-loading="true"/);
+  // React.lazy may show Suspense fallback or the resolved editor depending on
+  // whether a prior test already settled the MDX chunk.
+  assert.ok(
+    markup.includes('data-notes-editor-loading="true"')
+      || markup.includes("editable markdown")
+      || markup.includes("Promote replica"),
+    "full mode should mount the note editor (loading fallback or resolved MDX)",
+  );
 });
 
 test("NotesManager marks selected notebook rows with shared tree state", () => {
@@ -74,6 +82,36 @@ test("NotesManager balances folder and note tree icon sizes", () => {
 
   assert.match(markup, /width="16" height="16"[^>]*class="lucide lucide-folder/);
   assert.match(markup, /width="16" height="16"[^>]*class="lucide lucide-file-text/);
+});
+
+test("NotesManager tree scroll area constrains width so titles can truncate", () => {
+  const markup = renderNotes();
+
+  // Radix ScrollArea viewport child is display:table by default; force block +
+  // min-w-0 so narrowing the notes sidebar ellipsizes long titles instead of
+  // clipping them. React encodes `&` / `>` in class attributes.
+  assert.match(
+    markup,
+    /data-radix-scroll-area-viewport\](?:&gt;|>)div\]:!block/,
+  );
+  assert.match(
+    markup,
+    /data-radix-scroll-area-viewport\](?:&gt;|>)div\]:!min-w-0/,
+  );
+  assert.match(markup, /data-notes-drop-zone="root"/);
+  assert.match(markup, /min-h-full min-w-0 space-y-1 overflow-hidden/);
+  // Aside stays unclipped so the resize handle's outer half remains hit-testable;
+  // truncation is enforced by the inner tree shell + ScrollArea constraints.
+  assert.match(markup, /aside class="[^"]*min-w-0[^"]*flex-col bg-background/);
+  assert.match(markup, /flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden/);
+  assert.match(markup, /role="separator"/);
+  assert.match(markup, /translate-x-1\/2 cursor-col-resize/);
+});
+
+test("clampNotesTreeWidth keeps the sidebar within the design range", () => {
+  assert.equal(clampNotesTreeWidth(100), 160);
+  assert.equal(clampNotesTreeWidth(300), 300);
+  assert.equal(clampNotesTreeWidth(900), 520);
 });
 
 test("NotesManager selection helpers keep note and folder selection exclusive", () => {
@@ -246,12 +284,28 @@ test("NotesManager shows placeholder label for notes without titles", () => {
   assert.match(markup, /Note title/);
 });
 
+test("NotesManager flushes drafts on pagehide/beforeunload", () => {
+  const source = readFileSync(new URL("./NotesManager.tsx", import.meta.url), "utf8");
+  assert.match(source, /addEventListener\("pagehide"/);
+  assert.match(source, /addEventListener\("beforeunload"/);
+  assert.match(source, /flushNoteDraft/);
+});
+
+test("NotesManager flushes drafts when retained mounts become inactive", () => {
+  const source = readFileSync(new URL("./NotesManager.tsx", import.meta.url), "utf8");
+  assert.match(source, /isActive\?: boolean/);
+  assert.match(source, /if \(isActive\) return;/);
+  assert.match(source, /useLayoutEffect\(\(\) => \{\s*if \(isActive\) return;/);
+  assert.match(source, /visibilitychange/);
+});
+
 test("NotesManager tree rename allows clearing note titles", () => {
   const source = readFileSync(new URL("./NotesManager.tsx", import.meta.url), "utf8");
   const renameBlock = source.match(/onRenameCommit=\{\(name\) => \{[\s\S]*?\}\}/)?.[0] ?? "";
 
-  assert.match(renameBlock, /saveNote\(\{ \.\.\.note, title: name\.trim\(\)/);
+  assert.match(renameBlock, /renameNoteFromTree\(note\.id, name\)/);
   assert.doesNotMatch(renameBlock, /if \(!title\) return/);
+  assert.match(source, /note\.id === noteId \? \{ \.\.\.note, title: nextTitle, updatedAt \}/);
 });
 
 test("NotesManager sidebar mode renders list without editor by default", () => {
@@ -281,7 +335,12 @@ test("NotesManager sidebar mode opens the requested note without selecting its f
   );
 
   assert.match(markup, /Deploy overlay/);
-  assert.match(markup, /data-notes-editor-loading="true"/);
+  assert.ok(
+    markup.includes('data-notes-editor-loading="true"')
+      || markup.includes("Deploy overlay content")
+      || markup.includes("editable markdown"),
+    "openNoteId should mount the sidebar note overlay editor",
+  );
   assert.equal(markup.match(/data-selected="true"/g)?.length, 1);
   assert.match(markup, /data-vault-tree-row="group"[^>]*data-selected="false"/);
   assert.match(markup, /data-vault-tree-row="item"[^>]*data-selected="true"[^>]*data-note-id="note-2"/);

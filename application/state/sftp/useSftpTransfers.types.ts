@@ -1,8 +1,13 @@
 import type { MutableRefObject } from "react";
 import type { FileConflict, FileConflictAction, SftpFileEntry, SftpFilenameEncoding, TransferStatus, TransferTask } from "../../../domain/models";
 import type { SftpPane } from "./types";
+import type { AcquireTransferSessionFn } from "./transferDirectoryOps";
 
 export interface UseSftpTransfersParams {
+  ownerId: string;
+  canPrepareAdoption?: boolean;
+  /** False when SFTP side panel is retained-but-hidden after close. */
+  surfaceVisible?: boolean;
   getActivePane: (side: "left" | "right") => SftpPane | null;
   getPaneByConnectionId: (connectionId: string) => SftpPane | null;
   getTabByConnectionId: (connectionId: string) => { side: "left" | "right"; tabId: string; pane: SftpPane } | null;
@@ -14,6 +19,8 @@ export interface UseSftpTransfersParams {
   listLocalFiles: (path: string) => Promise<SftpFileEntry[]>;
   listRemoteFiles: (sftpId: string, path: string, encoding?: SftpFilenameEncoding) => Promise<SftpFileEntry[]>;
   handleSessionError: (side: "left" | "right", error: Error) => void;
+  /** FileZilla-style dedicated transfer sessions (1–2 per host). */
+  acquireTransferSession?: AcquireTransferSessionFn;
 }
 
 export interface UseSftpTransfersResult {
@@ -38,13 +45,16 @@ export interface UseSftpTransfersResult {
     targetPath: string;
     sftpId: string;
     connectionId: string;
+    sourceHostId: string;
+    sourceHostLabel: string;
     sourceEncoding?: SftpFilenameEncoding;
     isDirectory: boolean;
     totalBytes?: number;
   }) => Promise<TransferStatus>;
-  addExternalUpload: (task: TransferTask) => void;
-  updateExternalUpload: (taskId: string, updates: Partial<TransferTask>) => void;
   cancelTransfer: (transferId: string) => Promise<void>;
+  pauseTransfer: (transferId: string) => Promise<void>;
+  resumeTransfer: (transferId: string) => Promise<void>;
+  prioritizeTransfer: (transferId: string) => void;
   isTransferCancelled: (transferId: string) => boolean;
   retryTransfer: (transferId: string) => Promise<void>;
   clearCompletedTransfers: () => void;

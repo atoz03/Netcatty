@@ -2,6 +2,12 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
+import {
+  clearTerminalSessionRuntimeState,
+  pruneTerminalTabMemoryState,
+  pruneTerminalSessionRuntimeState,
+} from "./useTerminalLayerEffects";
+
 const source = readFileSync(new URL("./useTerminalLayerEffects.ts", import.meta.url), "utf8");
 
 test("theme preview DOM effects were removed in favor of ThemeRuntime injection", () => {
@@ -37,4 +43,114 @@ test("side panel layout changes remeasure workspace before paint", () => {
   assert.notEqual(layoutEffectIndex, -1);
   assert.notEqual(shellWidthDependencyIndex, -1);
   assert.ok(commentIndex < layoutEffectIndex);
+});
+
+test("transfer navigation helper is used for open-target and resume routing", () => {
+  assert.match(source, /resolveSftpTransferNavigationTarget/);
+  assert.match(source, /resolveSftpTransferNavigationPath/);
+  assert.match(source, /pickHostForTransferNavigation/);
+  assert.match(source, /isTransferNavigationTerminalTabId/);
+  assert.match(source, /navigation\.kind === 'local-copy-panel'/);
+  assert.match(source, /navigation\.kind === 'local-path'/);
+  // No terminal tab → connect host then open SFTP at target path.
+  assert.match(source, /onConnectToHost/);
+  assert.match(source, /openHostThenSftp/);
+  assert.match(source, /allowLiveUploadFallback/);
+});
+
+const createSessionRuntimeState = () => ({
+  terminalRendererCwdBySessionRef: {
+    current: new Map([
+      ["closed", "/closed"],
+      ["live", "/live"],
+    ]),
+  },
+  terminalOsc7SignalBySessionRef: {
+    current: new Map([
+      ["closed", 4],
+      ["live", 7],
+    ]),
+  },
+  cwdProbeGenerationRef: {
+    current: new Map([
+      ["closed", 2],
+      ["live", 3],
+    ]),
+  },
+  cwdProbeCancelersRef: {
+    current: new Map<string, () => void>(),
+  },
+});
+
+test("closing a terminal session cancels its probe and deletes only its runtime state", () => {
+  const state = createSessionRuntimeState();
+  let closedCancelCount = 0;
+  let liveCancelCount = 0;
+  state.cwdProbeCancelersRef.current.set("closed", () => { closedCancelCount += 1; });
+  state.cwdProbeCancelersRef.current.set("live", () => { liveCancelCount += 1; });
+
+  clearTerminalSessionRuntimeState(state, "closed");
+
+  assert.equal(closedCancelCount, 1);
+  assert.equal(liveCancelCount, 0);
+  for (const runtimeMap of [
+    state.terminalRendererCwdBySessionRef.current,
+    state.terminalOsc7SignalBySessionRef.current,
+    state.cwdProbeGenerationRef.current,
+    state.cwdProbeCancelersRef.current,
+  ]) {
+    assert.equal(runtimeMap.has("closed"), false);
+    assert.equal(runtimeMap.has("live"), true);
+  }
+
+  clearTerminalSessionRuntimeState(state, "closed");
+  assert.equal(closedCancelCount, 1, "repeated cleanup must not cancel the same probe twice");
+});
+
+test("session pruning preserves reconnecting sessions and unmount cleanup removes the rest", () => {
+  const state = createSessionRuntimeState();
+  let closedCancelCount = 0;
+  let liveCancelCount = 0;
+  state.cwdProbeCancelersRef.current.set("closed", () => { closedCancelCount += 1; });
+  state.cwdProbeCancelersRef.current.set("live", () => { liveCancelCount += 1; });
+
+  pruneTerminalSessionRuntimeState(state, new Set(["live"]));
+  assert.equal(closedCancelCount, 1);
+  assert.equal(liveCancelCount, 0);
+  assert.equal(state.cwdProbeGenerationRef.current.has("live"), true);
+
+  pruneTerminalSessionRuntimeState(state, new Set());
+  assert.equal(liveCancelCount, 1);
+  for (const runtimeMap of [
+    state.terminalRendererCwdBySessionRef.current,
+    state.terminalOsc7SignalBySessionRef.current,
+    state.cwdProbeGenerationRef.current,
+    state.cwdProbeCancelersRef.current,
+  ]) {
+    assert.equal(runtimeMap.size, 0);
+  }
+});
+
+test("tab memory pruning releases side-panel and SFTP paths for closed sessions", () => {
+  const state = {
+    lastSidePanelTabRef: { current: new Map([["closed", "sftp"], ["live", "scripts"]]) },
+    notesReturnTabRef: { current: new Map([["closed", "notes"], ["live", "sftp"]]) },
+    sftpLastPathForSourceRef: {
+      current: new Map([
+        ["closed", { hostId: "host-1", connectionKey: "closed", path: "/old" }],
+        ["live", { hostId: "host-2", connectionKey: "live", path: "/current" }],
+      ]),
+    },
+  };
+
+  pruneTerminalTabMemoryState(state, new Set(["live"]));
+
+  for (const memoryMap of [
+    state.lastSidePanelTabRef.current,
+    state.notesReturnTabRef.current,
+    state.sftpLastPathForSourceRef.current,
+  ]) {
+    assert.equal(memoryMap.has("closed"), false);
+    assert.equal(memoryMap.has("live"), true);
+  }
 });

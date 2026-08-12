@@ -65,6 +65,13 @@ export function buildRuleSummary(
   }
 }
 
+export async function stopRuntimeTunnelBeforeDelete(
+  ruleId: string,
+  stopTunnel: (ruleId: string) => Promise<{ success: boolean }>,
+): Promise<boolean> {
+  return (await stopTunnel(ruleId)).success;
+}
+
 /**
  * Get status color class for a rule
  */
@@ -76,6 +83,8 @@ export function getStatusColor(status: string): string {
       return 'bg-yellow-500 animate-pulse';
     case 'error':
       return 'bg-red-500';
+    case 'unknown':
+      return 'bg-muted-foreground/60 animate-pulse';
     default:
       return 'bg-muted-foreground/40';
   }

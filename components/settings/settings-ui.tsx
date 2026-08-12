@@ -1,6 +1,7 @@
 import React from "react";
 import * as SelectPrimitive from "@radix-ui/react-select";
 import { Check, ChevronDown, ChevronUp } from "lucide-react";
+import { settingsAnchorDomId } from "../../domain/settingsSearchCatalog";
 import { cn } from "../../lib/utils";
 import { TabsContent } from "../ui/tabs";
 
@@ -111,10 +112,19 @@ export const Select: React.FC<SelectProps> = ({
   );
 };
 
-export const SectionHeader: React.FC<{ title: string; className?: string }> = ({
-  title,
-  className,
-}) => <h3 className={cn("text-sm font-semibold text-foreground mb-3", className)}>{title}</h3>;
+export const SectionHeader: React.FC<{
+  title: string;
+  className?: string;
+  anchorId?: string;
+}> = ({ title, className, anchorId }) => (
+  <h3
+    id={anchorId ? settingsAnchorDomId(anchorId) : undefined}
+    data-settings-anchor={anchorId}
+    className={cn("text-sm font-semibold text-foreground mb-3 rounded-md", className)}
+  >
+    {title}
+  </h3>
+);
 
 /** Section title row → content gap (shared across settings pages). */
 export const settingsSectionGapClassName = "gap-2";
@@ -126,8 +136,13 @@ export const SettingsSection: React.FC<{
   actions?: React.ReactNode;
   children: React.ReactNode;
   className?: string;
-}> = ({ title, leading, actions, children, className }) => (
-  <section className={cn("flex flex-col", settingsSectionGapClassName, className)}>
+  anchorId?: string;
+}> = ({ title, leading, actions, children, className, anchorId }) => (
+  <section
+    id={anchorId ? settingsAnchorDomId(anchorId) : undefined}
+    data-settings-anchor={anchorId}
+    className={cn("flex flex-col rounded-md", settingsSectionGapClassName, className)}
+  >
     {(title || leading || actions) && (
       <div
         className={cn(
@@ -179,10 +194,27 @@ interface SettingRowProps {
   label?: string;
   description?: string;
   children: React.ReactNode;
+  align?: "center" | "start";
+  /** Stable catalog id for settings search jump targets. */
+  anchorId?: string;
 }
 
-export const SettingRow: React.FC<SettingRowProps> = ({ label, description, children }) => (
-  <div className="flex items-center justify-between py-3 gap-4">
+export const SettingRow: React.FC<SettingRowProps> = ({
+  label,
+  description,
+  children,
+  align = "center",
+  anchorId,
+}) => (
+  <div
+    id={anchorId ? settingsAnchorDomId(anchorId) : undefined}
+    data-settings-anchor={anchorId}
+    className={cn(
+      // Keep square corners: rounded rows bend divide-y separators at both ends.
+      "flex justify-between py-3 gap-4",
+      align === "start" ? "items-start" : "items-center",
+    )}
+  >
     <div className="flex-1 min-w-0">
       {label && <div className="text-sm font-medium">{label}</div>}
       {description && (
@@ -193,12 +225,32 @@ export const SettingRow: React.FC<SettingRowProps> = ({ label, description, chil
   </div>
 );
 
+/** Lightweight wrapper for non-SettingRow search targets. */
+export const SettingsAnchor: React.FC<{
+  anchorId: string;
+  className?: string;
+  children: React.ReactNode;
+}> = ({ anchorId, className, children }) => (
+  <div
+    id={settingsAnchorDomId(anchorId)}
+    data-settings-anchor={anchorId}
+    // No default rounded-md: inside divide-y cards, child border-radius bends separators.
+    className={className}
+  >
+    {children}
+  </div>
+);
+
 export const SettingsTabContent: React.FC<{
   value: string;
   children: React.ReactNode;
 }> = ({ value, children }) => (
   <TabsContent value={value} className="flex-1 m-0 h-full overflow-hidden">
-    <div className="h-full overflow-y-auto overflow-x-hidden">
+    {/* data-settings-scroll-pane: search jump scrolls only this pane, not the window */}
+    <div
+      data-settings-scroll-pane
+      className="h-full overflow-y-auto overflow-x-hidden"
+    >
       <div className="p-6 space-y-6">{children}</div>
     </div>
   </TabsContent>

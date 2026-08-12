@@ -56,7 +56,7 @@ export function subscribePaneVisible(sessionId: string, listener: Listener): () 
   };
 }
 
-export function usePaneVisible(sessionId: string): boolean {
+export function usePaneVisible(sessionId: string, fallbackVisible = false): boolean {
   const subscribe = useCallback((listener: Listener) => {
     let set = listenersBySession.get(sessionId);
     if (!set) {
@@ -70,7 +70,10 @@ export function usePaneVisible(sessionId: string): boolean {
     };
   }, [sessionId]);
 
-  const getSnapshot = useCallback(() => visibleBySession.get(sessionId) ?? false, [sessionId]);
+  const getSnapshot = useCallback(
+    () => resolvePaneVisible(sessionId, fallbackVisible),
+    [sessionId, fallbackVisible],
+  );
 
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }

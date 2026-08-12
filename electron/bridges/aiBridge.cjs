@@ -16,7 +16,9 @@ const { existsSync } = fs;
 const { appendVaultAgentGuidance } = require("../shared/vaultAgentGuidance.cjs");
 
 const mcpServerBridge = require("./mcpServerBridge.cjs");
+const { createExternalMcpController } = require("./externalMcpController.cjs");
 const { getCliLauncherPath, TOOL_CLI_DISCOVERY_ENV_VAR } = require("../cli/discoveryPath.cjs");
+const { getExternalMcpDiscoveryFilePath } = require("../cli/externalMcpDiscoveryPath.cjs");
 const {
   scanUserSkills,
   buildUserSkillsContext,
@@ -25,7 +27,7 @@ const {
 const { registerProviderHandlers } = require("./aiBridge/providerHandlers.cjs"), { registerCattyExecHandlers } = require("./aiBridge/cattyExecHandlers.cjs"), { createAgentCliHelpers } = require("./aiBridge/agentCliHelpers.cjs");
 const { createVaultAgentBridge } = require("./aiBridge/vaultAgentBridge.cjs");
 const { registerAgentDiscoveryHandlers } = require("./aiBridge/agentDiscoveryHandlers.cjs"), { registerAgentProcessHandlers } = require("./aiBridge/agentProcessHandlers.cjs"), { registerSdkStreamHandlers } = require("./aiBridge/sdk/sdkStreamHandlers.cjs");
-const { probeClaudeAuth, probeCopilotAuth, probeCodexAuth, probeCodebuddyAuth } = require("./aiBridge/agentAuthProbes.cjs");
+const { probeClaudeAuth, probeCopilotAuth, probeCodexAuth, probeCodebuddyAuth, probeCursorCliAuth, probeGrokAuth } = require("./aiBridge/agentAuthProbes.cjs");
 
 // ── Extracted modules ──
 const {
@@ -56,6 +58,10 @@ const CLAUDE_AUTH_HELP_MESSAGE =
 const {
   codexLoginSessions,
   appendCodexLoginOutput,
+  createCodexLoginOutputDecoder,
+  recordCodexLoginSession,
+  clearCodexLoginKillTimer,
+  stopCodexLoginProcess,
   toCodexLoginSessionResponse,
   getActiveCodexLoginSession,
   normalizeCodexIntegrationState,
@@ -168,7 +174,8 @@ function buildExternalAgentSystemContext({ mode, chatSessionId, defaultTargetSes
       `${scopeHint}` +
       `${defaultTargetHint}` +
       `Use Skills + CLI instead of the "netcatty-remote-hosts" MCP server for Netcatty session access. ` +
-      `Use the local shell only to invoke Netcatty CLI commands or inspect local attachments explicitly supplied by the user. Do not use local shell or filesystem tools for unrelated local-machine work. ` +
+      `Use the local shell only to invoke Netcatty CLI commands. Do not use local shell or filesystem tools for unrelated local-machine work. ` +
+      `For files explicitly attached by the user, call \`${cliCommandPrefix} attachment list --json${chatSessionId ? ` --chat-session ${chatSessionId}` : ""}\`, then read the selected file with \`${cliCommandPrefix} attachment read --filename <filename> --json${chatSessionId ? ` --chat-session ${chatSessionId}` : ""}\`. ` +
       `First classify the task: remote command execution tasks go through \`exec\`, while remote file or directory tasks go through \`sftp\`. If the user explicitly says to avoid shell or \`exec\`, do not use \`exec\`. Treat \`exec\` as the short-command path only: use it only for commands expected to finish within about 60 seconds. For builds, scans, watch mode, tail-following, ping, or anything likely to exceed that budget or stream output for an extended period, do not use plain \`exec\`; use the long-running job commands instead. ` +
       `${discoveryHint}` +
       `After choosing a target session ID, call \`${cliCommandPrefix} session --session <id> --json${chatSessionId ? ` --chat-session ${chatSessionId}` : ""}\` before executing anything. Do not infer protocol, shell type, device type, or connection readiness from the \`env\` result alone when you are about to run a command. ` +
@@ -216,6 +223,8 @@ function buildExternalAgentContextualPrompt({ mode, prompt, chatSessionId, defau
 
 const { execViaPty } = require("./ai/ptyExec.cjs");
 
+let externalMcpController = null;
+let userDataDir = null;
 let sessions = null;
 let sftpClients = null;
 let electronModule = null;
@@ -316,7 +325,11 @@ function getChildProcessTreePids(rootPid) {
     const pid = queue.shift();
     if (!Number.isInteger(pid) || pid <= 0) continue;
     try {
-      const output = execFileSync("pgrep", ["-P", String(pid)], { encoding: "utf8" }).trim();
+      const output = execFileSync("pgrep", ["-P", String(pid)], {
+        encoding: "utf8",
+        maxBuffer: 1024 * 1024,
+        timeout: 1_000,
+      }).trim();
       if (!output) continue;
       for (const line of output.split(/\s+/)) {
         const childPid = Number(line);
@@ -336,7 +349,11 @@ function killTrackedProcessTree(rootPid, childPids) {
   if (process.platform === "win32") {
     if (Number.isInteger(rootPid) && rootPid > 0) {
       try {
-        execFileSync("taskkill", ["/PID", String(rootPid), "/T", "/F"], { stdio: "ignore" });
+        execFileSync("taskkill", ["/PID", String(rootPid), "/T", "/F"], {
+          stdio: "ignore",
+          timeout: 5_000,
+          windowsHide: true,
+        });
       } catch {
         // Ignore kill failures; the process may have already exited.
       }
@@ -368,7 +385,8 @@ function init(deps) {
   electronModule = deps.electronModule;
   terminalWorkerManager = deps.terminalWorkerManager || null;
   cliDiscoveryFilePath = deps.cliDiscoveryFilePath || null;
-  mcpServerBridge.init({ sessions, sftpClients, electronModule, cliDiscoveryFilePath, terminalWorkerManager });
+  userDataDir = deps.userDataDir || null;
+  mcpServerBridge.init({ sessions, sftpClients, electronModule, cliDiscoveryFilePath, terminalWorkerManager, transferBridge: deps.transferBridge });
 
   // Wire up main window getter for MCP approval IPC
   mcpServerBridge.setMainWindowGetter(() => {
@@ -392,6 +410,23 @@ function init(deps) {
     // windowManager may not be available yet; will be set lazily
   }
 
+  if (!externalMcpController) {
+    externalMcpController = createExternalMcpController({
+      mcpServerBridge,
+    });
+  }
+  externalMcpController.init({
+    mcpServerBridge,
+    discoveryFilePath: getExternalMcpDiscoveryFilePath(
+      userDataDir ? { userDataDir } : {},
+    ),
+  });
+  externalMcpController.setSessionSyncHandler(async () => {
+    mcpServerBridge.syncLiveSessionsToExternalScope();
+  });
+  if (typeof mcpServerBridge.setExternalMcpHooks === "function") {
+    mcpServerBridge.setExternalMcpHooks(externalMcpController);
+  }
 }
 
 function withCliDiscoveryEnv(env) {
@@ -486,32 +521,133 @@ function safeReadJson(filePath) {
 }
 
 /**
- * Make a streaming HTTP request and forward SSE events back to renderer
- */
-/**
  * Start a streaming HTTP request. The returned promise resolves as soon as
  * the HTTP response headers arrive (with { statusCode, statusText }) so the
  * renderer can construct a Response with the real status. Data continues to
  * flow via stream:data / stream:end / stream:error IPC events.
  */
-function streamRequest(url, options, event, requestId, skipTLS) {
+function createAbortError() {
+  const err = new Error("Aborted");
+  err.name = "AbortError";
+  return err;
+}
+
+function raceAgainstAbort(promise, signal) {
+  const abortReason = () => (
+    signal.reason instanceof Error ? signal.reason : createAbortError()
+  );
+  if (signal.aborted) return Promise.reject(abortReason());
   return new Promise((resolve, reject) => {
-    const parsedUrl = new URL(url);
+    const onAbort = () => reject(abortReason());
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
+}
+
+async function streamRequest(url, options, event, requestId, skipTLS) {
+  const parsedUrl = new URL(url);
+  // Register cancellation before any await so Stop during PAC/proxy lookup works.
+  const controller = new AbortController();
+  const totalTimeoutMs = Math.max(1, Number(options.totalTimeoutMs) || 120_000);
+  const maxErrorBodyBytes = Math.max(1, Number(options.maxErrorBodyBytes) || 64 * 1024);
+  let lifecycleFinished = false;
+  const finishLifecycle = () => {
+    if (lifecycleFinished) return;
+    lifecycleFinished = true;
+    clearTimeout(totalTimer);
+    activeStreams.delete(requestId);
+  };
+  const totalTimer = setTimeout(() => {
+    controller.abort(new Error(`AI stream total deadline exceeded after ${totalTimeoutMs} ms`));
+  }, totalTimeoutMs);
+  activeStreams.set(requestId, controller);
+  if (controller.signal.aborted) {
+    finishLifecycle();
+    throw controller.signal.reason instanceof Error ? controller.signal.reason : createAbortError();
+  }
+
+  const { resolveOutboundHttpAgent } = require("./httpNetworkProxyAgent.cjs");
+  let proxyAgent;
+  try {
+    proxyAgent = await raceAgainstAbort(
+      resolveOutboundHttpAgent(url, {
+        session: electronModule?.session?.defaultSession,
+        rejectUnauthorized: skipTLS ? false : undefined,
+      }),
+      controller.signal,
+    );
+  } catch (err) {
+    if (err?.name === "AbortError" || controller.signal.aborted) {
+      finishLifecycle();
+      throw controller.signal.reason instanceof Error ? controller.signal.reason : createAbortError();
+    }
+    proxyAgent = undefined;
+  }
+
+  if (controller.signal.aborted) {
+    finishLifecycle();
+    throw controller.signal.reason instanceof Error ? controller.signal.reason : createAbortError();
+  }
+
+  return new Promise((resolve, reject) => {
     const isHttps = parsedUrl.protocol === "https:";
     const lib = isHttps ? https : http;
+    let requestSettled = false;
+    let streamFinished = false;
+    let req = null;
 
-    // Store an AbortController before starting the request so that
-    // cancellation requests arriving before the http.request callback
-    // are not lost (fixes a race between request start and activeStreams.set).
-    const controller = new AbortController();
-    activeStreams.set(requestId, controller);
+    const settleResolve = (value) => {
+      if (requestSettled) return;
+      requestSettled = true;
+      resolve(value);
+    };
+    const settleReject = (error) => {
+      if (requestSettled) return;
+      requestSettled = true;
+      reject(error);
+    };
+    const sendStreamError = (error) => {
+      safeSend(event.sender, "netcatty:ai:stream:error", {
+        requestId,
+        error: error?.message || String(error),
+      });
+    };
+    const failStream = (error, { destroy = true } = {}) => {
+      if (streamFinished) return;
+      streamFinished = true;
+      finishLifecycle();
+      controller.signal.removeEventListener("abort", onAbort);
+      sendStreamError(error);
+      settleReject(error);
+      if (destroy) {
+        try { req?.destroy?.(); } catch { /* ignore */ }
+      }
+    };
+    const onAbort = () => {
+      const error = controller.signal.reason instanceof Error
+        ? controller.signal.reason
+        : createAbortError();
+      failStream(error);
+    };
 
-    // If already aborted (cancel arrived before we even got here), bail out.
+    // Re-check after entering the Promise in case cancel raced the await above.
     if (controller.signal.aborted) {
-      activeStreams.delete(requestId);
-      resolve({ statusCode: 0, statusText: "Aborted" });
+      finishLifecycle();
+      settleReject(controller.signal.reason instanceof Error
+        ? controller.signal.reason
+        : createAbortError());
       return;
     }
+    controller.signal.addEventListener("abort", onAbort, { once: true });
 
     const reqOpts = {
         method: options.method || "POST",
@@ -519,17 +655,40 @@ function streamRequest(url, options, event, requestId, skipTLS) {
         timeout: 120000, // 2 min connection timeout
     };
     if (skipTLS && isHttps) reqOpts.rejectUnauthorized = false;
+    if (proxyAgent) reqOpts.agent = proxyAgent;
 
-    const req = lib.request(parsedUrl, reqOpts,
-      (res) => {
+    try {
+      req = lib.request(parsedUrl, reqOpts,
+        (res) => {
+        if (streamFinished) {
+          res.destroy?.();
+          return;
+        }
+        // Decode the response as one continuous UTF-8 stream. Calling
+        // Buffer#toString() on each network chunk corrupts multi-byte
+        // characters when a chunk boundary falls in the middle of one.
+        res.setEncoding("utf8");
         const statusCode = res.statusCode || 0;
         const statusText = res.statusMessage || "";
 
         if (statusCode < 200 || statusCode >= 300) {
           // Read the error body before resolving so we can include it in the response
           let errorBody = "";
-          res.on("data", (chunk) => { errorBody += chunk.toString(); });
+          let errorBodyBytes = 0;
+          res.on("data", (chunk) => {
+            if (streamFinished) return;
+            const text = chunk.toString();
+            errorBodyBytes += Buffer.byteLength(text);
+            if (errorBodyBytes > maxErrorBodyBytes) {
+              failStream(new Error(
+                `AI error response exceeded maximum size (${maxErrorBodyBytes} bytes)`,
+              ));
+              return;
+            }
+            errorBody += text;
+          });
           res.on("end", () => {
+            if (streamFinished) return;
             // Try to extract error message from JSON response (OpenAI-compatible format)
             let errorDetail = statusText;
             try {
@@ -542,34 +701,36 @@ function streamRequest(url, options, event, requestId, skipTLS) {
               requestId,
               error: `HTTP ${statusCode}: ${errorDetail}`,
             });
-            activeStreams.delete(requestId);
-            resolve({ statusCode, statusText: `${statusCode} ${errorDetail}` });
+            streamFinished = true;
+            finishLifecycle();
+            controller.signal.removeEventListener("abort", onAbort);
+            settleResolve({ statusCode, statusText: `${statusCode} ${errorDetail}` });
           });
+          res.on("error", (error) => failStream(error, { destroy: false }));
           return;
         }
 
         // Resolve with success status — data will flow via stream events
-        resolve({ statusCode, statusText });
+        settleResolve({ statusCode, statusText });
 
         let buffer = "";
         const MAX_BUFFER_SIZE = 10 * 1024 * 1024; // 10MB safety limit
 
         res.on("data", (chunk) => {
+          const previousBufferLength = buffer.length;
           buffer += chunk.toString();
           // Guard against unbounded buffer growth
           if (buffer.length > MAX_BUFFER_SIZE) {
-            safeSend(event.sender, "netcatty:ai:stream:error", {
-              requestId,
-              error: "Stream buffer exceeded maximum size (10MB)",
-            });
-            req.destroy();
-            activeStreams.delete(requestId);
+            failStream(new Error("Stream buffer exceeded maximum size (10MB)"));
             return;
           }
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-
-          for (const line of lines) {
+          let consumedUntil = 0;
+          let searchFrom = previousBufferLength;
+          let newlineIndex;
+          while ((newlineIndex = buffer.indexOf("\n", searchFrom)) >= 0) {
+            const line = buffer.slice(consumedUntil, newlineIndex);
+            consumedUntil = newlineIndex + 1;
+            searchFrom = consumedUntil;
             const trimmed = line.trim();
             if (!trimmed) continue;
 
@@ -581,9 +742,11 @@ function streamRequest(url, options, event, requestId, skipTLS) {
               });
             }
           }
+          if (consumedUntil > 0) buffer = buffer.slice(consumedUntil);
         });
 
         res.on("end", () => {
+          if (streamFinished) return;
           // Flush any remaining buffer
           if (buffer.trim().startsWith("data: ")) {
             safeSend(event.sender, "netcatty:ai:stream:data", {
@@ -592,46 +755,33 @@ function streamRequest(url, options, event, requestId, skipTLS) {
             });
           }
           safeSend(event.sender, "netcatty:ai:stream:end", { requestId });
-          activeStreams.delete(requestId);
+          streamFinished = true;
+          finishLifecycle();
+          controller.signal.removeEventListener("abort", onAbort);
         });
 
-        res.on("error", (err) => {
-          safeSend(event.sender, "netcatty:ai:stream:error", {
-            requestId,
-            error: err.message,
-          });
-          activeStreams.delete(requestId);
-        });
-      }
-    );
+        res.on("error", (err) => failStream(err, { destroy: false }));
+        }
+      );
+    } catch (error) {
+      failStream(error, { destroy: false });
+      return;
+    }
 
-    req.on("error", (err) => {
-      safeSend(event.sender, "netcatty:ai:stream:error", {
-        requestId,
-        error: err.message,
-      });
-      activeStreams.delete(requestId);
-      reject(err);
-    });
+    req.on("error", (err) => failStream(err, { destroy: false }));
 
     req.on("timeout", () => {
-      req.destroy();
-      safeSend(event.sender, "netcatty:ai:stream:error", {
-        requestId,
-        error: "Request timeout",
-      });
-      activeStreams.delete(requestId);
+      failStream(new Error("Request timeout"));
     });
 
-    // Wire up abort signal to destroy the request
-    controller.signal.addEventListener("abort", () => {
-      req.destroy();
-    }, { once: true });
-
-    if (options.body) {
-      req.write(options.body);
+    try {
+      if (options.body) {
+        req.write(options.body);
+      }
+      req.end();
+    } catch (error) {
+      failStream(error);
     }
-    req.end();
   });
 }
 
@@ -650,6 +800,7 @@ function createHandlerContext(ipcMain) {
     fs,
     existsSync,
     mcpServerBridge,
+    getExternalMcpController: () => externalMcpController,
     getCliLauncherPath,
     TOOL_CLI_DISCOVERY_ENV_VAR,
     scanUserSkills,
@@ -671,6 +822,8 @@ function createHandlerContext(ipcMain) {
     probeCopilotAuth,
     probeCodexAuth,
     probeCodebuddyAuth,
+    probeCursorCliAuth,
+    probeGrokAuth,
     isPlausibleCliVersionOutput,
     getShellEnv,
     getFreshIdlePrompt,
@@ -681,6 +834,10 @@ function createHandlerContext(ipcMain) {
     CLAUDE_AUTH_HELP_MESSAGE,
     codexLoginSessions,
     appendCodexLoginOutput,
+    createCodexLoginOutputDecoder,
+    recordCodexLoginSession,
+    clearCodexLoginKillTimer,
+    stopCodexLoginProcess,
     toCodexLoginSessionResponse,
     getActiveCodexLoginSession,
     normalizeCodexIntegrationState,
@@ -741,6 +898,7 @@ function createHandlerContext(ipcMain) {
     normalizeAgentEnv,
     safeReadJson,
     streamRequest,
+    loadCodexSdk: () => import("@openai/codex-sdk"),
   };
 }
 
@@ -771,6 +929,10 @@ function registerHandlers(ipcMain) {
   registerAgentDiscoveryHandlers(context);
   registerAgentProcessHandlers(context);
   registerSdkStreamHandlers(context);
+
+  if (externalMcpController) {
+    externalMcpController.registerHandlers(ipcMain, validateSenderOrSettings);
+  }
 }
 
 // Abort active streams and child processes on shutdown
@@ -787,23 +949,43 @@ function cleanup() {
     }
     registeredContext.sdkActiveStreams.clear();
   }
+  try {
+    registeredContext?.codexAppServerRuntime?.close?.();
+  } catch {}
+  try {
+    registeredContext?.codebuddySessionManager?.closeAll?.();
+  } catch {}
 
   for (const [id, session] of codexLoginSessions) {
     try {
-      if (session.process && !session.process.killed) {
-        session.process.kill("SIGTERM");
-      }
+      stopCodexLoginProcess(session);
     } catch {}
   }
   codexLoginSessions.clear();
   invalidateCodexValidationCache();
+  try {
+    externalMcpController?.cleanup?.();
+  } catch {
+    // Ignore external MCP cleanup failures during shutdown.
+  }
+  if (typeof mcpServerBridge.setExternalMcpHooks === "function") {
+    mcpServerBridge.setExternalMcpHooks(null);
+  }
   mcpServerBridge.cleanup();
+}
+
+function reportOpenedSessionActivity(event) {
+  return mcpServerBridge.reportOpenedSessionActivity?.(event) ?? false;
 }
 
 module.exports = {
   init,
   registerHandlers,
   cleanup,
+  reportOpenedSessionActivity,
   buildExternalAgentSystemContext,
   buildExternalAgentContextualPrompt,
+  _streamRequestForTests: streamRequest,
+  _getActiveStreamCountForTests: () => activeStreams.size,
+  getExternalMcpController: () => externalMcpController,
 };

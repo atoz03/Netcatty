@@ -8,12 +8,35 @@ import { migrateDeprecatedFontOverride } from '../infrastructure/config/fonts';
  * defaults too.
  */
 export function sanitizeGroupConfig(config: GroupConfig): GroupConfig {
-  return migrateDeprecatedFontOverride(config);
+  const migrated = migrateDeprecatedFontOverride(config);
+  const hasLegacyPasswordOnlyCredentials = migrated.authMethod === undefined
+    && Boolean(migrated.password?.length)
+    && !migrated.identityId
+    && !migrated.identityFileId
+    && !migrated.identityFilePaths?.length;
+
+  return hasLegacyPasswordOnlyCredentials
+    ? { ...migrated, authMethod: 'password' }
+    : migrated;
 }
 
 export interface ApplyGroupDefaultsOptions {
   validProxyProfileIds?: ReadonlySet<string>;
 }
+
+export const hasManualGroupSshCredentials = (config: Partial<GroupConfig>): boolean => [
+  config.username,
+  config.password,
+  config.savePassword,
+  config.authMethod,
+  config.identityFileId,
+  config.identityFilePaths,
+].some((value) => value !== undefined);
+
+export const hasManualGroupTelnetCredentials = (config: Partial<GroupConfig>): boolean => [
+  config.telnetUsername,
+  config.telnetPassword,
+].some((value) => value !== undefined);
 
 const hasUsableProxyProfileId = (
   proxyProfileId: string | undefined,
@@ -40,6 +63,42 @@ export function resolveGroupDefaults(
     const ancestorPath = parts.slice(0, i + 1).join('/');
     const config = configMap.get(ancestorPath);
     if (config) {
+      const hasSshIdentitySetting = config.identityId !== undefined;
+      const hasManualSshCredentials = hasManualGroupSshCredentials(config);
+      if (hasSshIdentitySetting) {
+        delete merged.username;
+        delete merged.password;
+        delete merged.savePassword;
+        delete merged.authMethod;
+        delete merged.identityFileId;
+        delete merged.identityFilePaths;
+      } else if (!hasSshIdentitySetting && hasManualSshCredentials) {
+        const replacesInheritedIdentity = Boolean(merged.identityId);
+        delete merged.identityId;
+        if (replacesInheritedIdentity) {
+          delete merged.username;
+          delete merged.password;
+          delete merged.savePassword;
+          delete merged.authMethod;
+          delete merged.identityFileId;
+          delete merged.identityFilePaths;
+        }
+      }
+
+      const hasTelnetIdentitySetting = config.telnetIdentityId !== undefined;
+      const hasManualTelnetCredentials = hasManualGroupTelnetCredentials(config);
+      if (hasTelnetIdentitySetting) {
+        delete merged.telnetUsername;
+        delete merged.telnetPassword;
+      } else if (!hasTelnetIdentitySetting && hasManualTelnetCredentials) {
+        const replacesInheritedIdentity = Boolean(merged.telnetIdentityId);
+        delete merged.telnetIdentityId;
+        if (replacesInheritedIdentity) {
+          delete merged.telnetUsername;
+          delete merged.telnetPassword;
+        }
+      }
+
       for (const [key, value] of Object.entries(config)) {
         if (
           key === 'proxyProfileId' &&
@@ -90,7 +149,7 @@ const INHERITABLE_KEYS: (keyof GroupConfig)[] = [
   'legacyAlgorithms', 'skipEcdsaHostKey', 'algorithms',
   'environmentVariables', 'charset', 'moshEnabled', 'moshServerPath',
   'etEnabled', 'etPort',
-  'telnetEnabled', 'telnetPort', 'telnetUsername', 'telnetPassword',
+  'telnetEnabled', 'telnetPort', 'telnetIdentityId', 'telnetUsername', 'telnetPassword',
   'theme', 'themeOverride', 'fontFamily', 'fontFamilyOverride', 'fontSize', 'fontSizeOverride', 'fontWeight', 'fontWeightOverride',
   'backspaceBehavior',
 ];
@@ -98,8 +157,19 @@ const INHERITABLE_KEYS: (keyof GroupConfig)[] = [
 const EMPTY_STRING_OVERRIDES_GROUP_DEFAULT = new Set<keyof GroupConfig>([
   'telnetUsername',
   'telnetPassword',
+  'telnetIdentityId',
   // Empty-string host identityId = explicitly no identity (auth-retry save, #1956); do not re-inherit group identity.
   'identityId',
+]);
+
+const SSH_CREDENTIAL_KEYS = new Set<keyof GroupConfig>([
+  'username',
+  'password',
+  'savePassword',
+  'authMethod',
+  'identityId',
+  'identityFileId',
+  'identityFilePaths',
 ]);
 
 /**
@@ -113,8 +183,34 @@ export function applyGroupDefaults(
 ): Host {
   const effective = { ...host };
   const hostHasUsableProxyProfile = hasUsableProxyProfileId(host.proxyProfileId, options);
+  const hostUsername = host.username?.trim();
+  const hostHasManualSshCredentials = !host.identityId && Boolean(
+    (hostUsername && hostUsername !== 'root') ||
+    (host.authPolicyVersion === 1 && host.authMethod !== undefined) ||
+    host.password !== undefined ||
+    host.savePassword === false ||
+    host.identityFileId ||
+    host.identityFilePaths?.length,
+  );
+  const shouldSkipGroupSshCredentialBundle = Boolean(host.identityId) || (
+    Boolean(groupDefaults.identityId) &&
+    (host.identityId === '' || hostHasManualSshCredentials)
+  );
+  const primaryTelnetHasManualSharedCredentials = host.protocol === 'telnet' && Boolean(
+    (hostUsername && hostUsername !== 'root') ||
+    host.password !== undefined ||
+    host.savePassword === false
+  );
+  const hostHasManualTelnetCredentials = !host.telnetIdentityId && (
+    host.telnetUsername !== undefined ||
+    host.telnetPassword !== undefined ||
+    primaryTelnetHasManualSharedCredentials
+  );
 
   for (const key of INHERITABLE_KEYS) {
+    if (shouldSkipGroupSshCredentialBundle && SSH_CREDENTIAL_KEYS.has(key)) continue;
+    if (key === 'password' && effective.savePassword === false) continue;
+    if (key === 'telnetIdentityId' && hostHasManualTelnetCredentials) continue;
     if (key === 'proxyProfileId') {
       if (host.proxyConfig !== undefined || !groupDefaults.proxyProfileId) continue;
     }

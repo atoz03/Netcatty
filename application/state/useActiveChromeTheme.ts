@@ -101,6 +101,7 @@ function buildChromeCss(theme: TerminalTheme): string {
 }
 
 const cssCache = new Map<string, string>();
+export const CHROME_THEME_CSS_CACHE_MAX_ENTRIES = 256;
 
 export function themeFingerprint(theme: TerminalTheme): string {
   return `${theme.id}\0${theme.type}\0${theme.colors.background}\0${theme.colors.foreground}\0${theme.colors.cursor}`;
@@ -111,8 +112,19 @@ function getAppliedChromeFingerprint(): string | null {
   return document.documentElement.dataset.activeChromeTheme ?? null;
 }
 
+function retainChromeCss(fingerprint: string, css: string): string {
+  cssCache.delete(fingerprint);
+  cssCache.set(fingerprint, css);
+  while (cssCache.size > CHROME_THEME_CSS_CACHE_MAX_ENTRIES) {
+    const oldestFingerprint = cssCache.keys().next().value as string | undefined;
+    if (oldestFingerprint === undefined) break;
+    cssCache.delete(oldestFingerprint);
+  }
+  return css;
+}
+
 for (const theme of TERMINAL_THEMES) {
-  cssCache.set(themeFingerprint(theme), buildChromeCss(theme));
+  retainChromeCss(themeFingerprint(theme), buildChromeCss(theme));
 }
 
 function getChromeCss(theme: TerminalTheme): string {
@@ -120,9 +132,18 @@ function getChromeCss(theme: TerminalTheme): string {
   let css = cssCache.get(fingerprint);
   if (!css) {
     css = buildChromeCss(theme);
-    cssCache.set(fingerprint, css);
+  } else {
+    cssCache.delete(fingerprint);
   }
-  return css;
+  return retainChromeCss(fingerprint, css);
+}
+
+export function _cacheChromeThemeCssForTests(theme: TerminalTheme): void {
+  getChromeCss(theme);
+}
+
+export function _getChromeThemeCssCacheStatsForTests(): { size: number; keys: string[] } {
+  return { size: cssCache.size, keys: [...cssCache.keys()] };
 }
 
 const STYLE_ID = "netcatty-active-chrome-theme";

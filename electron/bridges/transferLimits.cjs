@@ -1,16 +1,38 @@
 "use strict";
 
-// ssh2's fastPut/fastGet send multiple SFTP read/write requests in parallel.
-// Keep defaults conservative so one file transfer does not monopolize a shared
-// SSH/SFTP path used by interactive terminals.
-//
-// chunkSize must stay at ssh2's default (32KB). Larger values (e.g. 512KB) can
-// exceed what some SFTP servers accept and silently produce truncated/corrupt
-// remote files — see GitHub #2022 and ssh2-sftp-client's fastPut warnings.
+// Keep ssh2's default 32KB request size. Some SFTP servers mishandle larger
+// requests and can silently produce truncated/corrupt files (GitHub #2022).
 const TRANSFER_CHUNK_SIZE = 32 * 1024;
-const TRANSFER_CONCURRENCY = 4;
+
+// Upload fanout: 64 parallel 32KB WRITE requests (~2MB in flight). Matches
+// Electerm transfer.js / ssh2-style defaults (concurrency 64, chunk 32KB) for
+// high-RTT body feel after #2449. Chunk size stays 32KB for server compatibility
+// (#2022 / #2030). Uploads still prefer an isolated SFTP channel / dedicated
+// transfer session so interactive terminal traffic is not starved (#1507).
+const UPLOAD_TRANSFER_CONCURRENCY = 64;
+
+// Downloads need a larger request window on high-latency proxy paths. 64 is
+// ssh2's fastGet default and, with the safe 32KB request size, restores the 2MB
+// in-flight window Netcatty used before the shared chunk-size fix in #2030.
+const DOWNLOAD_TRANSFER_CONCURRENCY = 64;
+// Prefix verification must fail closed when a server stops answering, but allow
+// slow links to make progress without imposing a whole-transfer deadline.
+const SFTP_OPEN_TIMEOUT_MS = 15_000;
+const SFTP_REQUEST_TIMEOUT_MS = 30_000;
+// Only one file per SFTP session holds the 64-request concurrent READ fanout
+// (isolated channel or shared/sudo browse path). Additional downloads wait for
+// a free slot rather than degrading to serial createReadStream (#2719 / #2449
+// fail-closed). Folder fan-out is capped in the renderer by
+// runSftpTransferWorkers (settings transfer concurrency). Multi-select
+// top-level downloads enqueue in parallel and share the same host scheduler /
+// channel pool caps - they must never fall back to serial body streams.
+const FAST_DOWNLOAD_CHANNELS_PER_SESSION = 1;
 
 module.exports = {
+  DOWNLOAD_TRANSFER_CONCURRENCY,
+  FAST_DOWNLOAD_CHANNELS_PER_SESSION,
+  SFTP_OPEN_TIMEOUT_MS,
+  SFTP_REQUEST_TIMEOUT_MS,
   TRANSFER_CHUNK_SIZE,
-  TRANSFER_CONCURRENCY,
+  UPLOAD_TRANSFER_CONCURRENCY,
 };

@@ -8,7 +8,7 @@ const Module = require("node:module");
 
 const passphraseHandler = require("./passphraseHandler.cjs");
 
-function loadBridgeWithMockedSsh2(t) {
+function loadBridgeWithMockedSsh2(t, ClientClass) {
   const bridgePath = require.resolve("./sshBridge.cjs");
   const authHelperPath = require.resolve("./sshAuthHelper.cjs");
   const originalLoad = Module._load;
@@ -28,7 +28,7 @@ function loadBridgeWithMockedSsh2(t) {
   Module._load = function patchedLoad(request, parent, isMain) {
     if (request === "ssh2") {
       return {
-        Client: MockSSHClient,
+        Client: ClientClass || MockSSHClient,
         utils: {
           parseKey: () => new Error("bad passphrase"),
         },
@@ -52,6 +52,33 @@ function loadBridgeWithMockedSsh2(t) {
     getConnectCount: () => connectCount,
   };
 }
+
+class SuccessfulSshClient extends EventEmitter {
+  constructor() {
+    super();
+    this.socketTimeouts = [];
+    this._sock = { setTimeout: (value) => this.socketTimeouts.push(value) };
+    SuccessfulSshClient.instances.push(this);
+  }
+
+  connect(options) {
+    this.connectOptions = options;
+    queueMicrotask(() => {
+      this.emit("connect");
+      this.emit("ready");
+    });
+  }
+
+  exec(_command, callback) {
+    const stream = new EventEmitter();
+    stream.stderr = new EventEmitter();
+    callback(null, stream);
+    queueMicrotask(() => stream.emit("close", 0));
+  }
+
+  end() {}
+}
+SuccessfulSshClient.instances = [];
 
 function createEncryptedIdentityFile(t) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "netcatty-ssh-exec-"));
@@ -105,4 +132,36 @@ test("execCommand stops when an identity file passphrase prompt is cancelled", a
     /Passphrase entry cancelled/,
   );
   assert.equal(getConnectCount(), 0);
+});
+
+test("execCommand applies separate host connection timeouts", async (t) => {
+  SuccessfulSshClient.instances = [];
+  const { bridge } = loadBridgeWithMockedSsh2(t, SuccessfulSshClient);
+  const ipcMain = {
+    handlers: new Map(),
+    handle(channel, handler) {
+      this.handlers.set(channel, handler);
+    },
+    on() {},
+  };
+  bridge.registerHandlers(ipcMain);
+
+  const execHandler = ipcMain.handlers.get("netcatty:ssh:exec");
+  const result = await execHandler(
+    { sender: { isDestroyed: () => false, send: () => {} } },
+    {
+      hostname: "example.test",
+      username: "alice",
+      command: "true",
+      timeout: 30_000,
+      sshTcpConnectTimeoutMs: 45_000,
+      sshAuthReadyTimeoutMs: 300_000,
+    },
+  );
+
+  const client = SuccessfulSshClient.instances[0];
+  assert.equal(client.connectOptions.timeout, 45_000);
+  assert.equal(client.connectOptions.readyTimeout, 0);
+  assert.deepEqual(client.socketTimeouts, [0]);
+  assert.equal(result.code, 0);
 });

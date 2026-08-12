@@ -12,6 +12,7 @@ export interface CompressUploadOptions {
   targetPath: string;
   sftpId: string;
   folderName: string;
+  totalBytes: number;
 }
 
 export interface CompressUploadProgress {
@@ -27,18 +28,11 @@ export interface CompressUploadSupport {
   error?: string;
 }
 
-export type CompressUploadProgressCallback = (phase: string, transferred: number, total: number) => void;
-export type CompressUploadCompleteCallback = () => void;
-export type CompressUploadErrorCallback = (error: string) => void;
-
 /**
  * Start a compressed folder upload
  */
 export async function startCompressedUpload(
   options: CompressUploadOptions,
-  onProgress?: CompressUploadProgressCallback,
-  onComplete?: CompressUploadCompleteCallback,
-  onError?: CompressUploadErrorCallback
 ): Promise<{ compressionId: string; success?: boolean; error?: string }> {
   const bridge = netcattyBridge.get();
   if (!bridge?.startCompressedUpload) {
@@ -46,7 +40,7 @@ export async function startCompressedUpload(
   }
 
   try {
-    return await bridge.startCompressedUpload(options, onProgress, onComplete, onError);
+    return await bridge.startCompressedUpload(options);
   } catch (error) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     return {

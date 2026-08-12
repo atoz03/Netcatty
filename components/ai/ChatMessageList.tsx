@@ -9,17 +9,21 @@
 import { AlertCircle, FileText, RotateCcw, SquareTerminal, X, ZoomIn, ZoomOut } from 'lucide-react';
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
-import type { ChatMessage } from '../../infrastructure/ai/types';
+import type { ChatMessage, ToolCall as AgentToolCall } from '../../infrastructure/ai/types';
 import { Dialog, DialogContent, DialogTitle } from '../ui/dialog';
 import {
   Conversation,
   ConversationContent,
   ConversationScrollButton,
 } from '../ai-elements/conversation';
-import { Message, MessageContent, MessageResponse } from '../ai-elements/message';
+import { LazyMessageResponse } from '../ai-elements/LazyMessageResponse';
+import { Message, MessageContent } from '../ai-elements/messageShell';
 import { ToolCall } from '../ai-elements/tool-call';
 import ThinkingBlock from './ThinkingBlock';
+import AgentActivityGroup from './AgentActivityGroup';
 import ToolCallGroup from './ToolCallGroup';
+import { CodexUserInputCard } from './CodexUserInputCard';
+import { CodebuddyElicitationCard } from './CodebuddyElicitationCard';
 import {
   VaultArtifactNavigationProvider,
   type VaultArtifactNavSection,
@@ -41,6 +45,21 @@ import {
   type ApprovalRequest,
 } from '../../infrastructure/ai/shared/approvalGate';
 import {
+  onCodexAppServerInteraction,
+  onCodexAppServerInteractionCleared,
+  replayPendingCodexAppServerInteractions,
+  respondCodexUserInput,
+  type CodexAppServerInteraction,
+} from '../../infrastructure/ai/shared/codexAppServerInteractions';
+import {
+  onCodebuddyElicitation,
+  onCodebuddyElicitationCleared,
+  replayPendingCodebuddyElicitations,
+  respondCodebuddyElicitation,
+  type CodebuddyElicitation,
+  type CodebuddyElicitationAction,
+} from '../../infrastructure/ai/shared/codebuddyElicitations';
+import {
   buildGrantsFromApproval,
   resolveCapabilityId,
 } from '../../infrastructure/ai/harness/permissionGrants';
@@ -48,12 +67,18 @@ import {
   compactionStatusText,
   resolveCompactionStatusText,
   type ActiveCompactionUi,
-} from './hooks/useAgentCompactionUi';
+} from '../../application/state/useAgentCompactionUi';
 import {
   getAIPanelDiagnosticHiddenParts,
   getAIPanelProfilerProps,
   isAIPanelDiagnosticPartHidden,
 } from './aiPanelDiagnostics';
+import {
+  buildChatJumpEntries,
+  chatMessageDomId,
+  resolveTailCountForJumpTarget,
+} from '../../domain/chatJumpNav';
+import ChatJumpNav from './ChatJumpNav';
 
 interface ChatMessageListProps {
   messages: ChatMessage[];
@@ -86,8 +111,63 @@ export function shouldProvideVaultArtifactNavigation({
   return Boolean(onOpenVaultNote || onOpenVaultHost || onOpenVaultSnippet || onOpenVaultSection);
 }
 
+export function shouldRenderAssistantAsPlainText(options: {
+  hideMarkdown: boolean;
+}): boolean {
+  // Streaming stays on Streamdown with isAnimating so incomplete markdown
+  // updates live. Only diagnostic hideMarkdown forces plain text.
+  return options.hideMarkdown;
+}
+
+const ASSISTANT_PLAIN_TEXT_CLASS = 'whitespace-pre-wrap break-words text-[13px] leading-[1.45]';
+
+export interface CodexApprovalRenderEntry {
+  approvalId: string;
+  request: ApprovalRequest;
+}
+
+export function buildCodexApprovalRenderPlan(
+  pendingApprovals: ReadonlyMap<string, ApprovalRequest>,
+  renderedPendingToolCallIds: ReadonlySet<string>,
+  activeSessionId?: string | null,
+): {
+  byItemId: Map<string, CodexApprovalRenderEntry[]>;
+  standalone: CodexApprovalRenderEntry[];
+} {
+  const byItemId = new Map<string, CodexApprovalRenderEntry[]>();
+  const standalone: CodexApprovalRenderEntry[] = [];
+  for (const [approvalId, request] of pendingApprovals) {
+    if (request.source !== 'codex-app-server') continue;
+    if (activeSessionId && request.chatSessionId !== activeSessionId) continue;
+    const entry = { approvalId, request };
+    if (request.itemId && renderedPendingToolCallIds.has(request.itemId)) {
+      const entries = byItemId.get(request.itemId) ?? [];
+      entries.push(entry);
+      byItemId.set(request.itemId, entries);
+    } else {
+      standalone.push(entry);
+    }
+  }
+  return { byItemId, standalone };
+}
+
 const MESSAGE_RENDER_BATCH = 50;
 const MESSAGE_RENDER_STEP = 50;
+
+export function pruneResolvedApprovals(
+  previous: ReadonlyMap<string, boolean>,
+  messages: readonly ChatMessage[],
+): Map<string, boolean> {
+  const visibleToolCallIds = new Set<string>();
+  for (const message of messages) {
+    for (const toolCall of message.toolCalls ?? []) visibleToolCallIds.add(toolCall.id);
+  }
+  const next = new Map<string, boolean>();
+  for (const [toolCallId, approved] of previous) {
+    if (visibleToolCallIds.has(toolCallId)) next.set(toolCallId, approved);
+  }
+  return next;
+}
 
 const ChatMessageList: React.FC<ChatMessageListProps> = ({
   messages,
@@ -105,6 +185,12 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   // Track pending approvals from the approval gate
   const [pendingApprovals, setPendingApprovals] = useState<Map<string, ApprovalRequest>>(new Map());
   const [resolvedApprovals, setResolvedApprovals] = useState<Map<string, boolean>>(new Map());
+  const [pendingCodexInteractions, setPendingCodexInteractions] = useState<Map<string, CodexAppServerInteraction>>(new Map());
+  const [pendingCodebuddyElicitations, setPendingCodebuddyElicitations] = useState<Map<string, CodebuddyElicitation>>(new Map());
+
+  useEffect(() => {
+    setResolvedApprovals((previous) => pruneResolvedApprovals(previous, messages));
+  }, [activeSessionId, messages]);
 
   // Subscribe to approval gate events (SDK + MCP tool calls)
   useEffect(() => {
@@ -128,13 +214,57 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     });
   }, []);
 
-  const handleApproveOnce = useCallback((toolCallId: string) => {
-    resolveApproval(toolCallId, true);
-    setPendingApprovals(prev => { const m = new Map(prev); m.delete(toolCallId); return m; });
-    setResolvedApprovals(prev => new Map(prev).set(toolCallId, true));
+  useEffect(() => {
+    const handler = (interaction: CodexAppServerInteraction) => {
+      setPendingCodexInteractions((current) => new Map(current).set(interaction.interactionId, interaction));
+    };
+    const unsubscribe = onCodexAppServerInteraction(handler);
+    replayPendingCodexAppServerInteractions(handler);
+    return unsubscribe;
   }, []);
 
+  useEffect(() => onCodexAppServerInteractionCleared((interactionIds) => {
+    setPendingCodexInteractions((current) => {
+      const next = new Map(current);
+      for (const interactionId of interactionIds) next.delete(interactionId);
+      return next;
+    });
+  }), []);
+
+  useEffect(() => {
+    const handler = (elicitation: CodebuddyElicitation) => {
+      setPendingCodebuddyElicitations((current) =>
+        new Map(current).set(elicitation.elicitationId, elicitation));
+    };
+    const unsubscribe = onCodebuddyElicitation(handler);
+    replayPendingCodebuddyElicitations(handler);
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => onCodebuddyElicitationCleared((elicitationIds) => {
+    setPendingCodebuddyElicitations((current) => {
+      const next = new Map(current);
+      for (const elicitationId of elicitationIds) next.delete(elicitationId);
+      return next;
+    });
+  }), []);
+
+  const handleApproveOnce = useCallback((toolCallId: string) => {
+    const request = pendingApprovals.get(toolCallId);
+    resolveApproval(toolCallId, request?.source === 'codex-app-server'
+      ? { approved: true, scope: 'once' }
+      : true);
+    setPendingApprovals(prev => { const m = new Map(prev); m.delete(toolCallId); return m; });
+    setResolvedApprovals(prev => new Map(prev).set(request?.itemId ?? toolCallId, true));
+  }, [pendingApprovals]);
+
   const handleAlwaysAllow = useCallback((toolCallId: string, request: ApprovalRequest) => {
+    if (request.source === 'codex-app-server') {
+      resolveApproval(toolCallId, { approved: true, scope: 'session' });
+      setPendingApprovals(prev => { const m = new Map(prev); m.delete(toolCallId); return m; });
+      setResolvedApprovals(prev => new Map(prev).set(request.itemId ?? toolCallId, true));
+      return;
+    }
     const capabilityId = request.capabilityId ?? resolveCapabilityId(request.toolName);
     const persistGrants = buildGrantsFromApproval(capabilityId, request.args, request.chatSessionId);
     resolveApproval(toolCallId, { approved: true, persistGrants });
@@ -143,10 +273,25 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   }, []);
 
   const handleReject = useCallback((toolCallId: string) => {
+    const request = pendingApprovals.get(toolCallId);
     resolveApproval(toolCallId, false);
     setPendingApprovals(prev => { const m = new Map(prev); m.delete(toolCallId); return m; });
-    setResolvedApprovals(prev => new Map(prev).set(toolCallId, false));
+    setResolvedApprovals(prev => new Map(prev).set(request?.itemId ?? toolCallId, false));
+  }, [pendingApprovals]);
+
+  const handleCodexUserInput = useCallback((
+    interactionId: string,
+    answers: Record<string, { answers: string[] }>,
+  ) => {
+    void respondCodexUserInput(interactionId, answers).catch((error) => {
+      console.error('[Codex App Server] Failed to answer request_user_input:', error);
+    });
   }, []);
+  const handleCodebuddyElicitation = useCallback((
+    elicitationId: string,
+    action: CodebuddyElicitationAction,
+    content?: Record<string, unknown>,
+  ) => respondCodebuddyElicitation(elicitationId, action, content), []);
   const [preview, setPreview] = useState<{ src: string; name: string } | null>(null);
   const [zoom, setZoom] = useState(100);
   const [dragged, setDragged] = useState(false);
@@ -217,9 +362,13 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
   const hideMarkdown = isAIPanelDiagnosticPartHidden('markdown', hiddenParts);
   const hideToolCalls = isAIPanelDiagnosticPartHidden('toolcalls', hiddenParts);
   const [renderedTailCount, setRenderedTailCount] = useState(MESSAGE_RENDER_BATCH);
+  const [activeJumpMessageId, setActiveJumpMessageId] = useState<string | null>(null);
+  const [pendingJumpMessageId, setPendingJumpMessageId] = useState<string | null>(null);
 
   useEffect(() => {
     setRenderedTailCount(MESSAGE_RENDER_BATCH);
+    setActiveJumpMessageId(null);
+    setPendingJumpMessageId(null);
   }, [activeSessionId]);
 
   const visibleMessages = useMemo(
@@ -227,15 +376,66 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     [messages],
   );
 
-  const hiddenMessageCount = Math.max(0, visibleMessages.length - renderedTailCount);
+  // While a jump target is active, re-resolve the tail against the current list
+  // so streaming appends cannot slide the window past the selected message.
+  const effectiveTailCount = activeJumpMessageId
+    ? resolveTailCountForJumpTarget(visibleMessages, activeJumpMessageId, renderedTailCount)
+    : renderedTailCount;
+
+  const hiddenMessageCount = Math.max(0, visibleMessages.length - effectiveTailCount);
   const displayedMessages = hiddenMessageCount > 0
-    ? visibleMessages.slice(-renderedTailCount)
+    ? visibleMessages.slice(-effectiveTailCount)
     : visibleMessages;
+
+  const jumpEntries = useMemo(
+    () => buildChatJumpEntries(visibleMessages, {
+      emptyLabel: t('ai.chat.jumpUntitled'),
+    }),
+    [t, visibleMessages],
+  );
+
+  const handleJumpToMessage = useCallback((messageId: string) => {
+    setActiveJumpMessageId(messageId);
+    // Persist the expanded window so releasing the pin (or a spurious isAtBottom
+    // flip) cannot unmount the jump target. Load-earlier progress is preserved
+    // because we never reset renderedTailCount on pin release.
+    setRenderedTailCount((count) =>
+      resolveTailCountForJumpTarget(visibleMessages, messageId, count));
+    setPendingJumpMessageId(messageId);
+  }, [visibleMessages]);
+
+  const handleReleaseJumpPin = useCallback(() => {
+    setActiveJumpMessageId(null);
+    setPendingJumpMessageId(null);
+  }, []);
+
+  useEffect(() => {
+    if (!pendingJumpMessageId) return;
+    const target = document.getElementById(chatMessageDomId(pendingJumpMessageId));
+    if (!target) return;
+    target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    setPendingJumpMessageId(null);
+  }, [displayedMessages, pendingJumpMessageId]);
 
   const resolvedToolCallIds = new Set(
     displayedMessages
       .filter((m) => m.role === 'tool')
       .flatMap((m) => m.toolResults?.map((tr) => tr.toolCallId) ?? []),
+  );
+  const renderedPendingToolCallIds = new Set(
+    displayedMessages
+      .filter((message) => message.role === 'assistant')
+      .flatMap((message) => (message.toolCalls ?? [])
+        .filter((toolCall) => !resolvedToolCallIds.has(toolCall.id))
+        .map((toolCall) => toolCall.id)),
+  );
+  const {
+    byItemId: codexApprovalsByItemId,
+    standalone: standaloneCodexApprovals,
+  } = buildCodexApprovalRenderPlan(
+    pendingApprovals,
+    renderedPendingToolCallIds,
+    activeSessionId,
   );
 
   // Build maps from toolCallId → toolName / toolArgs for display
@@ -267,6 +467,65 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
     && activeCompaction.sessionId === activeSessionId,
   );
 
+  const renderPendingToolCallCards = (
+    toolCall: AgentToolCall,
+    options: { historical: boolean; isToolRunning?: boolean },
+  ): React.ReactElement[] => {
+    const codexApprovals = codexApprovalsByItemId.get(toolCall.id) ?? [];
+    if (codexApprovals.length > 0) {
+      return codexApprovals.map(({ approvalId, request }) => (
+        <div key={approvalId} className="px-2 py-1.5">
+          <ToolCall
+            name={toolCall.name}
+            args={request.args}
+            isInterrupted={false}
+            approvalStatus="pending"
+            approvalId={approvalId}
+            onApproveOnce={() => handleApproveOnce(approvalId)}
+            onAlwaysAllow={request.allowSession === false
+              ? undefined
+              : () => handleAlwaysAllow(approvalId, request)}
+            alwaysAllowLabel={request.allowSession === false
+              ? undefined
+              : t('ai.codex.appServer.approval.allowSession')}
+            onReject={() => handleReject(approvalId)}
+          />
+        </div>
+      ));
+    }
+
+    const pendingRequest = pendingApprovals.get(toolCall.id);
+    const isPending = Boolean(pendingRequest);
+    const resolved = resolvedApprovals.get(toolCall.id);
+    const approvalStatus = isPending
+      ? "pending" as const
+      : resolved === true
+        ? "approved" as const
+        : resolved === false
+          ? "denied" as const
+          : undefined;
+    return [(
+      <div key={toolCall.id} className="px-2 py-1.5">
+        <ToolCall
+          name={toolCall.name}
+          args={toolCall.arguments}
+          isInterrupted={options.historical ? !isPending : undefined}
+          isLoading={options.historical ? undefined : Boolean(options.isToolRunning && !isPending)}
+          approvalStatus={approvalStatus}
+          approvalId={isPending ? toolCall.id : undefined}
+          onApproveOnce={() => handleApproveOnce(toolCall.id)}
+          onAlwaysAllow={() => handleAlwaysAllow(toolCall.id, pendingRequest ?? {
+            toolCallId: toolCall.id,
+            toolName: toolCall.name,
+            args: toolCall.arguments ?? {},
+            chatSessionId: activeSessionId ?? undefined,
+          })}
+          onReject={() => handleReject(toolCall.id)}
+        />
+      </div>
+    )];
+  };
+
   const conversation = (
     <>
     <Conversation className="flex-1">
@@ -274,7 +533,8 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
         {hiddenMessageCount > 0 && (
           <button
             type="button"
-            onClick={() => setRenderedTailCount((count) => count + MESSAGE_RENDER_STEP)}
+            onClick={() => setRenderedTailCount((count) =>
+              Math.max(count, effectiveTailCount) + MESSAGE_RENDER_STEP)}
             className="w-full py-2 text-center text-[12px] text-muted-foreground/50 hover:text-muted-foreground transition-colors cursor-pointer"
           >
             {t('ai.chat.loadEarlierMessages').replace('{n}', String(hiddenMessageCount))}
@@ -382,7 +642,11 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           const isThisStreaming = isStreaming && isLastAssistant;
 
           return (
-            <Message key={message.id} from={message.role}>
+            <Message
+              key={message.id}
+              id={chatMessageDomId(message.id)}
+              from={message.role}
+            >
               <MessageContent from={message.role}>
                 {/* Thinking block */}
                 {!isUser && message.thinking && (
@@ -390,6 +654,15 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     content={message.thinking}
                     isStreaming={!!isThisStreaming && !message.content}
                     durationMs={message.thinkingDurationMs}
+                  />
+                )}
+
+                {!isUser && (message.agentActivities?.length || message.usage) && (
+                  <AgentActivityGroup
+                    activities={message.agentActivities}
+                    usage={message.usage}
+                    isStreaming={!!isThisStreaming}
+                    t={t}
                   />
                 )}
 
@@ -428,14 +701,23 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
 
                 {message.content && (
                   isUser
-                    ? <div className="whitespace-pre-wrap break-words text-[13px] leading-[1.45]">{message.content}</div>
-                    : hideMarkdown
-                      ? <div className="whitespace-pre-wrap break-words text-[13px] leading-[1.45]">{message.content}</div>
+                    ? <div className={ASSISTANT_PLAIN_TEXT_CLASS}>{message.content}</div>
+                    : shouldRenderAssistantAsPlainText({ hideMarkdown })
+                      ? (
+                          <div
+                            className={ASSISTANT_PLAIN_TEXT_CLASS}
+                            data-ai-content="plain"
+                          >
+                            {message.content}
+                          </div>
+                        )
                       : (
                           <React.Profiler {...getAIPanelProfilerProps('AIChatPanel.Markdown')}>
-                            <MessageResponse isAnimating={isThisStreaming}>
-                              {message.content}
-                            </MessageResponse>
+                            <div data-ai-content="markdown">
+                              <LazyMessageResponse isAnimating={!!isThisStreaming}>
+                                {message.content}
+                              </LazyMessageResponse>
+                            </div>
                           </React.Profiler>
                         )
                 )}
@@ -449,37 +731,15 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                   if (message === lastAssistantMessage && message.executionStatus !== "cancelled") return null;
                   const unresolvedTcs = message.toolCalls?.filter((tc) => !resolvedToolCallIds.has(tc.id)) ?? [];
                   if (unresolvedTcs.length === 0) return null;
+                  const approvalCardCount = unresolvedTcs.reduce(
+                    (count, toolCall) => count + Math.max(1, codexApprovalsByItemId.get(toolCall.id)?.length ?? 0),
+                    0,
+                  );
                   return (
-                    <ToolCallGroup count={unresolvedTcs.length} defaultExpanded={false}>
-                      {unresolvedTcs.map((tc) => {
-                        const isPending = pendingApprovals.has(tc.id);
-                        const resolved = resolvedApprovals.get(tc.id);
-                        const approvalStatus = isPending
-                          ? "pending" as const
-                          : resolved === true
-                            ? "approved" as const
-                            : resolved === false
-                              ? "denied" as const
-                              : undefined;
-                        return (
-                          <div key={tc.id} className="px-2 py-1.5">
-                            <ToolCall
-                              name={tc.name}
-                              args={tc.arguments}
-                              isInterrupted={!isPending}
-                              approvalStatus={approvalStatus}
-                              onApproveOnce={() => handleApproveOnce(tc.id)}
-                              onAlwaysAllow={() => handleAlwaysAllow(tc.id, pendingApprovals.get(tc.id) ?? {
-                                toolCallId: tc.id,
-                                toolName: tc.name,
-                                args: tc.arguments ?? {},
-                                chatSessionId: activeSessionId ?? undefined,
-                              })}
-                              onReject={() => handleReject(tc.id)}
-                            />
-                          </div>
-                        );
-                      })}
+                    <ToolCallGroup count={approvalCardCount} defaultExpanded={false}>
+                      {unresolvedTcs.flatMap((toolCall) => renderPendingToolCallCards(toolCall, {
+                        historical: true,
+                      }))}
                     </ToolCallGroup>
                   );
                 })()}
@@ -522,44 +782,29 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           if (pendingTcs.length === 0) return null;
           const isActive = lastAssistantMessage.executionStatus !== "error";
           const isToolRunning = !!(isStreaming && lastAssistantMessage.executionStatus === "running");
+          const approvalCardCount = pendingTcs.reduce(
+            (count, toolCall) => count + Math.max(1, codexApprovalsByItemId.get(toolCall.id)?.length ?? 0),
+            0,
+          );
           return (
-            <ToolCallGroup count={pendingTcs.length} defaultExpanded={isActive}>
-              {pendingTcs.map((tc) => {
-                const isPending = pendingApprovals.has(tc.id);
-                const resolved = resolvedApprovals.get(tc.id);
-                const approvalStatus = isPending
-                  ? "pending" as const
-                  : resolved === true
-                    ? "approved" as const
-                    : resolved === false
-                      ? "denied" as const
-                      : undefined;
-                return (
-                  <div key={tc.id} className="px-2 py-1.5">
-                    <ToolCall
-                      name={tc.name}
-                      args={tc.arguments}
-                      isLoading={isToolRunning && !isPending}
-                      approvalStatus={approvalStatus}
-                      onApproveOnce={() => handleApproveOnce(tc.id)}
-                      onAlwaysAllow={() => handleAlwaysAllow(tc.id, pendingApprovals.get(tc.id) ?? {
-                        toolCallId: tc.id,
-                        toolName: tc.name,
-                        args: tc.arguments ?? {},
-                        chatSessionId: activeSessionId ?? undefined,
-                      })}
-                      onReject={() => handleReject(tc.id)}
-                    />
-                  </div>
-                );
-              })}
+            <ToolCallGroup count={approvalCardCount} defaultExpanded={isActive}>
+              {pendingTcs.flatMap((toolCall) => renderPendingToolCallCards(toolCall, {
+                historical: false,
+                isToolRunning,
+              }))}
             </ToolCallGroup>
           );
         })()}
 
         {/* Standalone MCP/SDK approval requests (not tied to SDK tool calls) */}
         {!hideToolCalls && Array.from(pendingApprovals.entries())
-          .filter(([id, req]) => id.startsWith('mcp_approval_') && (!activeSessionId || req.chatSessionId === activeSessionId))
+          .filter(([id, req]) => {
+            if (!id.startsWith('mcp_approval_')) return false;
+            // External MCP approvals render in ExternalMcpApprovalsHost so they
+            // remain visible even when the Catty AI panel is closed.
+            if (req.chatSessionId === '__external_mcp__') return false;
+            return !activeSessionId || req.chatSessionId === activeSessionId;
+          })
           .map(([id, req]) => {
             return (
               <React.Profiler key={id} {...getAIPanelProfilerProps('AIChatPanel.ToolCall.Approval')}>
@@ -570,6 +815,7 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
                     isLoading={false}
                     isInterrupted={false}
                     approvalStatus={'pending'}
+                    approvalId={id}
                     onApproveOnce={() => handleApproveOnce(id)}
                     onAlwaysAllow={() => handleAlwaysAllow(id, req)}
                     onReject={() => handleReject(id)}
@@ -578,6 +824,52 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
               </React.Profiler>
             );
           })}
+
+        {!hideToolCalls && standaloneCodexApprovals
+          .map(({ approvalId, request }) => (
+            <React.Profiler key={approvalId} {...getAIPanelProfilerProps('AIChatPanel.ToolCall.Approval')}>
+              <div>
+                <ToolCall
+                  name={request.toolName}
+                  args={request.args}
+                  isLoading={false}
+                  isInterrupted={false}
+                  approvalStatus="pending"
+                  approvalId={approvalId}
+                  onApproveOnce={() => handleApproveOnce(approvalId)}
+                  onAlwaysAllow={request.allowSession === false
+                    ? undefined
+                    : () => handleAlwaysAllow(approvalId, request)}
+                  alwaysAllowLabel={request.allowSession === false
+                    ? undefined
+                    : t('ai.codex.appServer.approval.allowSession')}
+                  onReject={() => handleReject(approvalId)}
+                />
+              </div>
+            </React.Profiler>
+          ))}
+
+        {Array.from(pendingCodexInteractions.values())
+          .filter((interaction): interaction is Extract<CodexAppServerInteraction, { kind: 'user-input' }> => interaction.kind === 'user-input')
+          .filter((interaction) => !activeSessionId || interaction.chatSessionId === activeSessionId)
+          .map((interaction) => (
+            <CodexUserInputCard
+              key={interaction.interactionId}
+              interaction={interaction}
+              onSubmit={(answers) => handleCodexUserInput(interaction.interactionId, answers)}
+              onSkip={() => handleCodexUserInput(interaction.interactionId, {})}
+            />
+          ))}
+        {(Array.from(pendingCodebuddyElicitations.values()) as CodebuddyElicitation[])
+          .filter((elicitation) => !activeSessionId || elicitation.chatSessionId === activeSessionId)
+          .map((elicitation) => (
+            <CodebuddyElicitationCard
+              key={`${elicitation.elicitationId}:${elicitation.requestInstanceId ?? 0}`}
+              elicitation={elicitation}
+              onRespond={(action, content) =>
+                handleCodebuddyElicitation(elicitation.elicitationId, action, content)}
+            />
+          ))}
         {/* Transient compaction status — inline, no banner */}
         {showCompactionStatus && activeCompaction && (
           <div className="py-1">
@@ -596,7 +888,14 @@ const ChatMessageList: React.FC<ChatMessageListProps> = ({
           </div>
         )}
       </ConversationContent>
-      <ConversationScrollButton />
+      <ChatJumpNav
+        entries={jumpEntries}
+        activeMessageId={activeJumpMessageId}
+        isStreaming={!!isStreaming}
+        onSelect={handleJumpToMessage}
+        onReleasePin={handleReleaseJumpPin}
+      />
+      <ConversationScrollButton onClick={handleReleaseJumpPin} />
     </Conversation>
 
     {/* Image preview lightbox */}
@@ -730,7 +1029,9 @@ function areMessagesEqual(prev: ChatMessageListProps, next: ChatMessageListProps
         p.executionStatus !== n.executionStatus ||
         p.errorInfo !== n.errorInfo ||
         p.toolCalls !== n.toolCalls ||
-        p.toolResults !== n.toolResults
+        p.toolResults !== n.toolResults ||
+        p.agentActivities !== n.agentActivities ||
+        p.usage !== n.usage
       ) {
         return false;
       }

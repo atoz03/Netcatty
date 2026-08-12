@@ -1,6 +1,6 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const { translateClaudeMessage, buildClaudeQueryOptions, buildClaudePromptInput, classifyClaudeSpawnError, mapClaudeModels, parseClaudeSettings } = require("./claudeDriver.cjs");
+const { translateClaudeMessage, buildClaudeQueryOptions, buildClaudePromptInput, classifyClaudeSpawnError, listClaudeModels, mapClaudeModels, parseClaudeSettings } = require("./claudeDriver.cjs");
 
 function collector() {
   const events = [];
@@ -182,4 +182,39 @@ test("buildClaudePromptInput keeps plain text when there are no supported images
     buildClaudePromptInput("hello", [{ filename: "note.txt", mediaType: "text/plain", base64Data: "abc" }]),
     "hello",
   );
+});
+
+test("listClaudeModels aborts a hung SDK query and returns it for cleanup", async () => {
+  const abortController = new AbortController();
+  let queryAbortSignal;
+  let returnCount = 0;
+  let releaseModels;
+  const pendingModels = new Promise((resolve) => { releaseModels = resolve; });
+  const queryFn = ({ options }) => {
+    queryAbortSignal = options.abortController.signal;
+    return {
+      supportedModels: () => pendingModels,
+      async return() {
+        returnCount += 1;
+      },
+    };
+  };
+
+  const modelsPromise = listClaudeModels({
+    pathToClaudeCodeExecutable: "/bin/claude",
+    env: {},
+    queryFn,
+    abortController,
+  });
+  abortController.abort();
+
+  const outcome = await Promise.race([
+    modelsPromise.then(() => "settled"),
+    new Promise((resolve) => setTimeout(() => resolve("hung"), 20)),
+  ]);
+  if (outcome === "hung") releaseModels([]);
+  assert.equal(outcome, "settled");
+  assert.deepEqual(await modelsPromise, []);
+  assert.equal(queryAbortSignal.aborted, true);
+  assert.equal(returnCount, 1);
 });

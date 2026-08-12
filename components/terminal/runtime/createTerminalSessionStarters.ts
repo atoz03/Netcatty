@@ -1,6 +1,9 @@
 import type { Terminal as XTerm } from "@xterm/xterm";
+import type { ProviderValidationIssue } from "@netcatty/plugin-contract";
 import { logger } from "../../../lib/logger";
 import type { Host, SSHKey } from "../../../types";
+import type { TerminalSessionExitEvent } from "../../../application/state/resolveTerminalSessionExitIntent";
+import { setTerminalBootEpoch } from "../../../domain/terminalBootEpoch";
 import type { TerminalSessionStartersContext } from "./createTerminalSessionStarters.types";
 export type {
   PendingAuth,
@@ -10,11 +13,12 @@ export type {
 } from "./createTerminalSessionStarters.types";
 export { normalizeStartupCommandDelay, splitStartupCommandLines } from "./terminalStartupCommands";
 import {
+  acknowledgeDroppedTerminalDisplayBytes,
   attachSessionToTerminal,
   buildTermEnv,
   closeOrphanBackendSession,
+  createBootAttemptGuard,
   getFlowController,
-  isTerminalBootActive,
   notePendingOutputScrollIfEnabled,
   resetTerminalLineTimestampState,
   tryAttachSessionToTerminal,
@@ -31,7 +35,7 @@ import {
   isEncryptedCredentialPlaceholder,
   sanitizeCredentialValue,
 } from "../../../domain/credentials";
-import { resolveHostAuth } from "../../../domain/sshAuth";
+import { resolveBridgeSshAgentAuth, resolveHostAuth } from "../../../domain/sshAuth";
 import {
   resolveHostKeepalive,
   resolveTelnetPassword,
@@ -48,8 +52,47 @@ import {
   resolveProxyConfigAuth,
 } from "../../../domain/proxyProfiles";
 import { hasConnectionPassedTcpDial } from "../connectionTimeouts";
+import { resolveHostSshConnectionTimeouts } from "../../../domain/sshConnectionTimeouts";
+import { isPluginHostProtocol, sanitizePluginConnection } from "../../../domain/pluginConnection";
 
 const TELNET_SESSION_REPLACED_ERROR = "Telnet session start was replaced";
+const JUMP_HOST_AUTH_FAILED_PREFIX = "Jump host authentication failed";
+
+const createPluginConnectionRequestId = (): string => {
+  const randomId = globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 18)}`;
+  return `plugin-connection-${randomId}`.slice(0, 128);
+};
+
+const formatPluginDiagnosticLines = (
+  diagnostics: ReadonlyArray<ProviderValidationIssue> | undefined,
+): string[] => (diagnostics ?? [])
+  .map((issue) => `[Plugin ${issue.severity}] ${issue.message}`);
+
+const formatPluginConnectionExitMessage = (event: TerminalSessionExitEvent): string => {
+  const lines = [
+    event.error
+      ? `[Plugin connection closed: ${event.error}]`
+      : "[Plugin connection closed]",
+    ...formatPluginDiagnosticLines(event.diagnostics),
+  ];
+  return `\r\n${lines.join("\r\n")}`;
+};
+
+const isAuthFailureMessage = (message: string): boolean => {
+  const normalized = message.toLowerCase();
+  return normalized.includes("all configured authentication methods failed") ||
+    normalized.includes("authentication failed") ||
+    normalized.includes("too many authentication failures") ||
+    /permission denied\s*\(/.test(normalized) ||
+    normalized.includes("no authentication methods available");
+};
+
+const isJumpHostAuthError = (err: unknown, message: string): boolean =>
+  Boolean(
+    err instanceof Error &&
+    (err as Error & { isJumpHostAuthError?: boolean }).isJumpHostAuthError,
+  ) || message.includes(JUMP_HOST_AUTH_FAILED_PREFIX);
 
 export const getMissingChainHostIds = (
   host: Host,
@@ -59,6 +102,15 @@ export const getMissingChainHostIds = (
   if (requestedIds.length === 0) return [];
   const resolvedIds = new Set(resolvedChainHosts.map((chainHost) => chainHost.id));
   return requestedIds.filter((hostId) => !resolvedIds.has(hostId));
+};
+
+/**
+ * Cancellation handle for one boot attempt. The mount effect owns the
+ * controller and aborts it in cleanup, so a start that is still awaiting the
+ * bridge stops counting as the current attempt and closes any session it wins.
+ */
+export type TerminalSessionStartOptions = {
+  signal?: AbortSignal;
 };
 
 export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContext) => {
@@ -80,6 +132,19 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
     ctx.updateStatus("disconnected");
     ctx.setProgressValue(0);
     ctx.setChainProgress(null);
+  };
+
+  const createAttemptGuards = (options?: TerminalSessionStartOptions) => {
+    const bootEpoch = ctx.bootEpochRef?.current ?? 0;
+    const isBootEpochCurrent = createBootAttemptGuard(ctx);
+    // An aborted boot is never the current attempt, so every existing guard
+    // (orphan close, attach refusal, UI suppression) also covers cancellation.
+    const isCurrentAttempt = () => options?.signal?.aborted !== true && isBootEpochCurrent();
+    return {
+      bootEpoch,
+      isCurrentAttempt,
+      ignoreStaleAttemptUi: () => !isCurrentAttempt(),
+    };
   };
 
   const consumeRestoreCwdIntent = (term: XTerm, id: string): void => {
@@ -104,6 +169,9 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
     return sanitizeCredentialValue(ctx.sudoAutofillPassword);
   };
 
+  const resolveSudoAutofillCandidates = () =>
+    ctx.sudoAutofillCandidatesRef?.current ?? ctx.sudoAutofillCandidates ?? [];
+
   const clearTelnetEchoMode = ({ resetLocalEcho = true }: { resetLocalEcho?: boolean } = {}) => {
     ctx.disposeTelnetEchoModeRef?.current?.();
     if (ctx.disposeTelnetEchoModeRef) ctx.disposeTelnetEchoModeRef.current = null;
@@ -120,12 +188,19 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
     if (!ctx.telnetLocalEchoRef || !ctx.terminalBackend.onTelnetEchoMode) return;
     clearTelnetEchoMode({ resetLocalEcho });
     if (resetLocalEcho) ctx.telnetLocalEchoRef.current = false;
+    let receivedLiveUpdate = false;
     const dispose = ctx.terminalBackend.onTelnetEchoMode(
       backendSessionId,
       (evt) => {
+        receivedLiveUpdate = true;
         ctx.telnetLocalEchoRef!.current = Boolean(evt.localEcho);
       },
     ) ?? null;
+    void ctx.terminalBackend.getTelnetEchoMode?.(backendSessionId).then((mode) => {
+      if (!receivedLiveUpdate && mode?.success) {
+        ctx.telnetLocalEchoRef!.current = Boolean(mode.localEcho);
+      }
+    }).catch(() => {});
     if (ctx.disposeTelnetEchoModeRef) {
       ctx.disposeTelnetEchoModeRef.current = dispose;
     } else {
@@ -133,7 +208,12 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
     }
   };
 
-  const startSSH = async (term: XTerm) => {
+  const startSSH = async (term: XTerm, options?: TerminalSessionStartOptions) => {
+    if (options?.signal?.aborted) return;
+    const { isCurrentAttempt, ignoreStaleAttemptUi, bootEpoch } = createAttemptGuards(options);
+    // Correlate host-key prompts with this boot so a superseded start cannot
+    // reopen approval UI after disconnect → reconnect.
+    setTerminalBootEpoch(ctx.sessionId, bootEpoch);
     if (!ctx.terminalBackend.backendAvailable()) {
       ctx.setError("Native SSH bridge unavailable. Launch via Electron app.");
       writeTerminalLine(
@@ -189,13 +269,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
 
     const isAuthError = (err: unknown): boolean => {
       if (!(err instanceof Error)) return false;
-      const msg = err.message.toLowerCase();
-      return (
-        msg.includes("authentication") ||
-        msg.includes("auth") ||
-        msg.includes("password") ||
-        msg.includes("permission denied")
-      );
+      return isAuthFailureMessage(err.message);
     };
 
     if (ctx.host.proxyProfileId && !ctx.host.proxyConfig) {
@@ -280,7 +354,10 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
           : jumpAllowsLocalIdentityFallback
             ? jumpHost.identityFilePaths
             : undefined;
-      const hasJumpKeyMaterial = Boolean(jumpPrivateKey || jumpIdentityFilePaths?.length);
+      const jumpAgentAuth = resolveBridgeSshAgentAuth(jumpHost, jumpKey, jumpAuth.authMethod);
+      const hasJumpKeyMaterial = Boolean(
+        jumpAgentAuth.useSshAgent || jumpPrivateKey || jumpIdentityFilePaths?.length,
+      );
       const hasConfiguredJumpProxyEndpoint =
         index === 0 &&
         hasUsableProxyConfig(jumpHost.proxyConfig);
@@ -293,7 +370,12 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         isEncryptedCredentialPlaceholder(rawJumpPrivateKey) ||
         isEncryptedCredentialPlaceholder(rawJumpPassphrase);
 
-      if (hasEncryptedJumpProxyCredential || (hasEncryptedJumpCredential && !jumpPassword && !hasJumpKeyMaterial)) {
+      if (hasEncryptedJumpProxyCredential || (
+        jumpAuth.authMethod !== "auto"
+        && hasEncryptedJumpCredential
+        && !jumpPassword
+        && !hasJumpKeyMaterial
+      )) {
         jumpHostsWithUnavailableCredentials.push(jumpHost.label || jumpHost.hostname);
       }
 
@@ -301,11 +383,15 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       // override toggle, so a bastion that is a router (interval=0) can
       // coexist with a cloud target host (interval=30) in the same chain.
       const hopKeepalive = resolveHostKeepalive(jumpHost, globalTerminalSettings);
+      const hopConnectionTimeouts = resolveHostSshConnectionTimeouts(jumpHost);
 
       return {
         hostname: jumpHost.hostname,
+        hostId: jumpHost.id,
         port: jumpHost.port || 22,
         username: jumpAuth.username || "root",
+        authMethod: jumpAuth.authMethod,
+        requiresMfa: !!jumpHost.requiresMfa,
         password: jumpPassword,
         privateKey: jumpKey?.source === 'reference' ? undefined : jumpPrivateKey,
         certificate: jumpKey?.certificate,
@@ -318,8 +404,11 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
           ? resolveProxyConfigAuth(jumpHost.proxyConfig, ctx.identities)
           : undefined,
         identityFilePaths: jumpIdentityFilePaths,
+        ...jumpAgentAuth,
         keepaliveInterval: hopKeepalive.interval,
         keepaliveCountMax: hopKeepalive.countMax,
+        sshTcpConnectTimeoutMs: hopConnectionTimeouts.tcpConnectTimeoutSeconds * 1000,
+        sshAuthReadyTimeoutMs: hopConnectionTimeouts.authReadyTimeoutSeconds * 1000,
         verifyHostKeys: globalTerminalSettings.verifyHostKeys,
         legacyAlgorithms: jumpHost.legacyAlgorithms,
         skipEcdsaHostKey: jumpHost.skipEcdsaHostKey,
@@ -370,6 +459,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         totalHops,
         currentHostLabel:
           jumpHosts[0]?.label || jumpHosts[0]?.hostname || ctx.host.hostname,
+        connectionPhase: 'connecting',
       });
     }
 
@@ -377,6 +467,9 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       const unsub = ctx.terminalBackend.onChainProgress((sid, hop, total, label, status, error) => {
         // P1: Only process events for this session
         if (sid !== ctx.sessionId) return;
+        // Disconnect/reconnect can leave two SSH starts sharing this UI
+        // sessionId; ignore progress from the superseded boot attempt.
+        if (!isCurrentAttempt()) return;
 
         // P3: Only show chain progress UI for multi-hop connections
         if (total > 1) {
@@ -384,6 +477,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
             currentHop: hop,
             totalHops: total,
             currentHostLabel: label,
+            connectionPhase: status,
           });
         }
 
@@ -466,11 +560,27 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
             ? ctx.host.identityFilePaths
             : undefined;
 
+      let sourceReuseAttemptedWithinStart = false;
       const startAttempt = async (attempt: {
         password?: string;
         key?: SSHKey;
         useIdentityFiles?: boolean;
+        useSshAgent?: boolean;
       }): Promise<string> => {
+        const sourceSessionId = ctx.reuseConnectionFromSessionIdRef?.current;
+        const sourceReuseAttempted = ctx.reuseConnectionSourceAttemptedRef?.current
+          ?? sourceReuseAttemptedWithinStart;
+        const isFallbackAfterSourceReuse = sourceReuseAttempted && !sourceSessionId;
+        if (ctx.reuseConnectionFromSessionIdRef) {
+          ctx.reuseConnectionFromSessionIdRef.current = undefined;
+        }
+        if (sourceSessionId) {
+          sourceReuseAttemptedWithinStart = true;
+          if (ctx.reuseConnectionSourceAttemptedRef) {
+            ctx.reuseConnectionSourceAttemptedRef.current = true;
+          }
+        }
+        ctx.setConnectionReuseAttemptSourceId?.(sourceSessionId);
         ctx.setIsConnectionAwaitingUserInput?.(false);
         ctx.setIsConnectionPastTcpDial?.(false);
         // Resolve keepalive per-host: a host can opt into its own values
@@ -481,11 +591,16 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
           ctx.host,
           globalTerminalSettings,
         );
-        return ctx.terminalBackend.startSSHSession({
+        const connectionTimeouts = resolveHostSshConnectionTimeouts(ctx.host);
+        const requiresFreshSshConnection = ctx.shouldUseFreshSshConnection?.() === true;
+        const startedSessionId = await ctx.terminalBackend.startSSHSession({
           sessionId: ctx.sessionId,
           hostLabel: ctx.host.label,
           hostname: ctx.host.hostname,
+          hostId: ctx.host.id,
           username: effectiveUsername,
+          authMethod,
+          requiresMfa: !!ctx.host.requiresMfa,
           port: ctx.host.port || 22,
           password: attempt.password,
           privateKey: attempt.key?.source === 'reference' ? undefined : sanitizeCredentialValue(attempt.key?.privateKey),
@@ -505,33 +620,64 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
           cols: term.cols,
           rows: term.rows,
           charset: ctx.host.charset,
+          // Persist for session-backed SFTP opens (AI tools / clipboard paste).
+          sftpFileProtocol: ctx.host.sftpFileProtocol || "auto",
           env: termEnv,
           proxy: proxyConfig,
           jumpHosts: jumpHosts.length > 0 ? jumpHosts : undefined,
           keepaliveInterval: keepalive.interval,
           keepaliveCountMax: keepalive.countMax,
+          sshTcpConnectTimeoutMs: connectionTimeouts.tcpConnectTimeoutSeconds * 1000,
+          sshAuthReadyTimeoutMs: connectionTimeouts.authReadyTimeoutSeconds * 1000,
           verifyHostKeys: globalTerminalSettings.verifyHostKeys,
+          bootEpoch,
           sessionLog: ctx.sessionLog?.enabled ? ctx.sessionLog : undefined,
           sshDebugLogEnabled: ctx.sshDebugLogEnabled,
           identityFilePaths: attempt.useIdentityFiles ? targetIdentityFilePaths : undefined,
+          ...resolveBridgeSshAgentAuth(
+            attempt.useSshAgent === false
+              ? { ...ctx.host, useSshAgent: false }
+              : ctx.host,
+            attempt.key,
+            authMethod,
+          ),
           knownHosts: ctx.knownHosts,
           sudoAutofillPassword: resolveSavedSudoAutofillPassword(),
           // Ask the bridge to reuse the source tab's authenticated connection
           // (issue #1204). Only honored on the very first connect attempt; the
           // bridge silently falls back to a fresh connection if the source is
           // gone, so reconnect/retry after the source closed still works.
-          sourceSessionId: ctx.reuseConnectionFromSessionId,
+          sourceSessionId,
+          // Connect-time automation must see the complete login sequence. An
+          // explicit Copy/Split keeps its source-session reuse contract, while
+          // an ordinary open bypasses endpoint/idle transport reuse.
+          reuseTransport: !sourceSessionId && (requiresFreshSshConnection || isFallbackAfterSourceReuse)
+            ? false
+            : undefined,
+          skipShellPidDiscovery: ctx.isNetworkDevice === true,
         });
+        if (!requiresFreshSshConnection) {
+          ctx.onConnectAutomationSnapshotCommitted?.();
+        }
+        sourceReuseAttemptedWithinStart = false;
+        if (ctx.reuseConnectionSourceAttemptedRef) {
+          ctx.reuseConnectionSourceAttemptedRef.current = false;
+        }
+        return startedSessionId;
       };
 
       let id: string;
       // Respect explicit auth method selection - don't use key if password auth was explicitly selected
-      const hasKeyMaterial = (!!sanitizeCredentialValue(key?.privateKey) || !!targetIdentityFilePaths?.length) && authMethod !== 'password';
+      const usesSystemAgent = resolveBridgeSshAgentAuth(ctx.host, key, authMethod).useSshAgent === true;
+      const hasKeyMaterial = usesSystemAgent || (
+        (!!sanitizeCredentialValue(key?.privateKey) || !!targetIdentityFilePaths?.length)
+        && (authMethod !== 'password' || ctx.host.useSshAgent === true)
+      );
       const hasPassword = !!effectivePassword;
 
       const needsCredentialReentry =
         (authMethod === "password" && hasEncryptedPrimaryPassword && !hasPassword) ||
-        (authMethod !== "password" && hasEncryptedPrimaryKey && !hasKeyMaterial && !hasPassword);
+        (authMethod !== "password" && authMethod !== "auto" && hasEncryptedPrimaryKey && !hasKeyMaterial && !hasPassword);
 
       if (needsCredentialReentry) {
         if (unsubscribeChainProgress) unsubscribeChainProgress();
@@ -572,11 +718,14 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
           id = await startAttempt({ key, password: hasPassword ? effectivePassword : undefined, useIdentityFiles: true });
         } catch (err) {
           if (isAuthError(err) && hasPassword) {
+            // Disconnect/reconnect may have invalidated this boot; do not
+            // launch a password fallback that cannot be cleaned up yet.
+            if (!isCurrentAttempt()) throw err;
             ctx.setProgressLogs((prev) => [
               ...prev,
               "Key auth failed. Trying password...",
             ]);
-            id = await startAttempt({ password: effectivePassword });
+            id = await startAttempt({ password: effectivePassword, useSshAgent: false });
           } else {
             throw err;
           }
@@ -586,15 +735,27 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       }
 
       if (unsubscribeChainProgress) unsubscribeChainProgress();
+      // A superseded start may still resolve after reconnect; do not clear the
+      // replacement's MFA wait / connection-timeout state, and do not close the
+      // shared sessionId while the newer boot is active.
+      if (!isCurrentAttempt()) {
+        closeOrphanBackendSession(ctx, id, { bootEpoch });
+        return;
+      }
       ctx.setIsConnectionAwaitingUserInput?.(false);
 
       if (!tryAttachSessionToTerminal(ctx, term, id, {
+        isCurrentAttempt,
+        bootEpoch,
         onConnected: () => ctx.setChainProgress(null),
         onExitMessage: (evt) =>
           `\r\n[session closed${evt?.exitCode !== undefined ? ` (code ${evt.exitCode})` : ""}]`,
         sudoAutofillPassword: resolveSavedSudoAutofillPassword(),
+        sudoAutofillCandidates: resolveSudoAutofillCandidates(),
       })) {
-        abortSessionStartAfterUnmount();
+        // Only the current attempt may clear UI; a stale attach must not
+        // disconnect a newer reconnect that already re-armed boot.
+        if (isCurrentAttempt()) abortSessionStartAfterUnmount();
         return;
       }
 
@@ -615,10 +776,25 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         }, 600);
       }
     } catch (err) {
+      // Always drop this attempt's progress listener; only the current
+      // boot may reset shared reconnect/UI state that a replacement owns.
+      if (unsubscribeChainProgress) unsubscribeChainProgress();
+      if (ignoreStaleAttemptUi()) return;
+      ctx.setChainProgress(null);
+      ctx.setIsConnectionAwaitingUserInput?.(false);
+      ctx.setIsConnectionPastTcpDial?.(false);
+
       const message = err instanceof Error ? err.message : String(err);
       const authError = isAuthError(err);
 
-      if (authError) {
+      if (isJumpHostAuthError(err, message)) {
+        ctx.setNeedsAuth(false);
+        ctx.setAuthRetryMessage(null);
+        ctx.setAuthPassword("");
+        ctx.setError(message);
+        writeTerminalLine(ctx, term, `\r\n[Failed to start SSH: ${message}]`);
+        ctx.updateStatus("disconnected");
+      } else if (authError) {
         ctx.setError(null);
         ctx.setNeedsAuth(true);
         ctx.setAuthRetryMessage(
@@ -634,19 +810,19 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         ]);
         ctx.setStatus("connecting");
       } else {
+        ctx.setNeedsAuth(false);
+        ctx.setAuthRetryMessage(null);
+        ctx.setAuthPassword("");
         ctx.setError(message);
         writeTerminalLine(ctx, term, `\r\n[Failed to start SSH: ${message}]`);
         ctx.updateStatus("disconnected");
       }
-
-      ctx.setChainProgress(null);
-      ctx.setIsConnectionAwaitingUserInput?.(false);
-      ctx.setIsConnectionPastTcpDial?.(false);
-      if (unsubscribeChainProgress) unsubscribeChainProgress();
     }
   };
 
-  const startTelnet = async (term: XTerm) => {
+  const startTelnet = async (term: XTerm, options?: TerminalSessionStartOptions) => {
+    if (options?.signal?.aborted) return;
+    const { isCurrentAttempt, ignoreStaleAttemptUi, bootEpoch } = createAttemptGuards(options);
     if (!ctx.terminalBackend.telnetAvailable()) {
       ctx.setError("Telnet bridge unavailable. Please run the desktop build.");
       writeTerminalLine(ctx, term, "\r\n[Telnet bridge unavailable. Please run the desktop build.]");
@@ -754,7 +930,14 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       if (waitsForAutoLogin) {
         disposeAutoLoginComplete = ctx.terminalBackend.onTelnetAutoLoginComplete?.(
           ctx.sessionId,
-          () => {
+          (evt) => {
+            if (
+              Number.isFinite(bootEpoch)
+              && Number.isFinite(evt?.bootEpoch)
+              && evt.bootEpoch !== bootEpoch
+            ) {
+              return;
+            }
             disposeAutoLoginListener();
             cancelPendingStartupCommand = scheduleStartupCommand(ctx, term, telnetSessionId, () => {
               cancelPendingStartupCommand = undefined;
@@ -764,12 +947,22 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         );
         disposeAutoLoginCancelled = ctx.terminalBackend.onTelnetAutoLoginCancelled?.(
           ctx.sessionId,
-          cleanupTelnetStartupWait,
+          (evt) => {
+            if (
+              Number.isFinite(bootEpoch)
+              && Number.isFinite(evt?.bootEpoch)
+              && evt.bootEpoch !== bootEpoch
+            ) {
+              return;
+            }
+            cleanupTelnetStartupWait();
+          },
         );
       }
       attachTelnetEchoMode(ctx.sessionId);
       const id = await ctx.terminalBackend.startTelnetSession({
         sessionId: ctx.sessionId,
+        protocol: ctx.host.protocol,
         hostname: ctx.host.hostname,
         port: resolveTelnetPort(ctx.host),
         username: telnetUsername,
@@ -779,6 +972,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         charset: ctx.host.charset,
         env: telnetEnv,
         sessionLog: ctx.sessionLog?.enabled ? ctx.sessionLog : undefined,
+        bootEpoch,
       });
       telnetSessionId = id;
       if (id !== ctx.sessionId) {
@@ -786,12 +980,14 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       }
 
       if (!tryAttachSessionToTerminal(ctx, term, id, {
+        isCurrentAttempt,
+        bootEpoch,
         onExitMessage: (evt) =>
           `\r\n[Telnet session closed${evt?.exitCode !== undefined ? ` (code ${evt.exitCode})` : ""}]`,
         onExit: cleanupTelnetSession,
       })) {
         cleanupTelnetSession();
-        abortSessionStartAfterUnmount();
+        if (isCurrentAttempt()) abortSessionStartAfterUnmount();
         return;
       }
 
@@ -812,19 +1008,27 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         return;
       }
       cleanupTelnetSession();
+      if (ignoreStaleAttemptUi()) return;
       ctx.setError(message);
       writeTerminalLine(ctx, term, `\r\n[Failed to start Telnet: ${message}]`);
       ctx.updateStatus("disconnected");
     }
   };
 
-  const startMosh = async (term: XTerm) => {
+  const startMosh = async (term: XTerm, options?: TerminalSessionStartOptions) => {
+    if (options?.signal?.aborted) return;
+    const { isCurrentAttempt, ignoreStaleAttemptUi, bootEpoch } = createAttemptGuards(options);
     if (!ctx.terminalBackend.moshAvailable()) {
       ctx.setError("Mosh bridge unavailable. Please run the desktop build.");
       writeTerminalLine(ctx, term, "\r\n[Mosh bridge unavailable. Please run the desktop build.]");
       ctx.updateStatus("disconnected");
       return;
     }
+
+    // Hoisted so the catch path can dispose a ready subscription registered
+    // before startMoshSession resolves.
+    let disposeMoshReady: (() => void) | undefined;
+    let cancelPendingStartupCommand: (() => void) | undefined;
 
     try {
       const stopMosh = (message: string) => {
@@ -898,11 +1102,16 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
           : allowsLocalIdentityFallback
             ? ctx.host.identityFilePaths
             : undefined;
-      const hasKeyMaterial = (!!sanitizeCredentialValue(key?.privateKey) || !!moshIdentityFilePaths?.length) && authMethod !== "password";
+      const moshAgentAuth = resolveBridgeSshAgentAuth(ctx.host, key, authMethod);
+      const usesSystemAgent = moshAgentAuth.useSshAgent === true;
+      const hasKeyMaterial = usesSystemAgent || (
+        (!!sanitizeCredentialValue(key?.privateKey) || !!moshIdentityFilePaths?.length)
+        && (authMethod !== "password" || ctx.host.useSshAgent === true)
+      );
       const hasPassword = !!effectivePassword;
       const needsCredentialReentry =
         (authMethod === "password" && hasEncryptedPrimaryPassword && !hasPassword) ||
-        (authMethod !== "password" && hasEncryptedPrimaryKey && !hasKeyMaterial && !hasPassword);
+        (authMethod !== "password" && authMethod !== "auto" && hasEncryptedPrimaryKey && !hasKeyMaterial && !hasPassword);
 
       if (needsCredentialReentry) {
         ctx.setError(null);
@@ -919,18 +1128,67 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       }
 
       const moshEnv = buildTermEnv(ctx.host, ctx.terminalSettings);
+
+      // Defer startup commands until mosh-client is ready. The backend
+      // handshake uses an ephemeral SSH PTY first; writing too early lands
+      // input on that PTY and is lost on the swap (issue #2199).
+      //
+      // Do not gate status=connected on ready: interactive password/OTP
+      // prompts during the SSH handshake need the overlay dismissed so the
+      // user can type into the terminal. Scripts wait on moshShellReady in
+      // Terminal.tsx instead.
+      //
+      // Subscribe BEFORE startMoshSession: a fast passwordless handshake can
+      // emit ready before the await returns, and the event is not replayed.
+      let sessionAttached = false;
+      let moshReadyFired = false;
+      let attachedSessionId = ctx.sessionId;
+      const cleanupMoshStartupWait = () => {
+        disposeMoshReady?.();
+        disposeMoshReady = undefined;
+        cancelPendingStartupCommand?.();
+        cancelPendingStartupCommand = undefined;
+      };
+      const runMoshStartup = () => {
+        disposeMoshReady?.();
+        disposeMoshReady = undefined;
+        cancelPendingStartupCommand = scheduleStartupCommand(ctx, term, attachedSessionId, () => {
+          cancelPendingStartupCommand = undefined;
+        });
+      };
+      const onMoshReady = (evt?: { sessionId: string; bootEpoch?: number }) => {
+        if (
+          Number.isFinite(bootEpoch)
+          && Number.isFinite(evt?.bootEpoch)
+          && evt.bootEpoch !== bootEpoch
+        ) {
+          return;
+        }
+        moshReadyFired = true;
+        if (sessionAttached) {
+          runMoshStartup();
+        }
+      };
+
+      if (ctx.terminalBackend.onMoshSessionReady) {
+        disposeMoshReady = ctx.terminalBackend.onMoshSessionReady(ctx.sessionId, onMoshReady);
+      }
+
       const id = await ctx.terminalBackend.startMoshSession({
         sessionId: ctx.sessionId,
         hostname: ctx.host.hostname,
         username: resolvedAuth.username || "root",
+        authMethod,
+        requiresMfa: !!ctx.host.requiresMfa,
         password: effectivePassword,
-        privateKey: key?.source === 'reference' ? undefined : sanitizeCredentialValue(key?.privateKey),
+        privateKey: (usesSystemAgent && !key?.certificate) || key?.source === 'reference' ? undefined : sanitizeCredentialValue(key?.privateKey),
         certificate: key?.certificate,
         keyId: key?.id,
-        passphrase: key
+        passphrase: key && (!usesSystemAgent || Boolean(key.certificate))
           ? (effectivePassphrase || sanitizeCredentialValue(key.passphrase))
           : undefined,
         identityFilePaths: moshIdentityFilePaths,
+        ...moshAgentAuth,
         port: ctx.host.port || 22,
         moshServerPath: ctx.host.moshServerPath,
         agentForwarding: ctx.host.agentForwarding,
@@ -951,19 +1209,43 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         charset: ctx.host.charset,
         env: moshEnv,
         sessionLog: ctx.sessionLog?.enabled ? ctx.sessionLog : undefined,
+        bootEpoch,
       });
+      attachedSessionId = id;
 
       if (!tryAttachSessionToTerminal(ctx, term, id, {
+        isCurrentAttempt,
+        bootEpoch,
         onExitMessage: (evt) =>
           `\r\n[Mosh session closed${evt?.exitCode !== undefined ? ` (code ${evt.exitCode})` : ""}]`,
+        // Real backend exit only — do not chain onto disposeExitRef, because
+        // hibernate detaches exit listeners without closing the session and
+        // would otherwise cancel a still-pending startup command.
+        onExit: cleanupMoshStartupWait,
         sudoAutofillPassword: resolveSavedSudoAutofillPassword(),
+        sudoAutofillCandidates: resolveSudoAutofillCandidates(),
       })) {
-        abortSessionStartAfterUnmount();
+        cleanupMoshStartupWait();
+        if (isCurrentAttempt()) abortSessionStartAfterUnmount();
         return;
       }
+      sessionAttached = true;
 
-      scheduleStartupCommand(ctx, term, id);
+      if (ctx.terminalBackend.onMoshSessionReady) {
+        if (moshReadyFired) {
+          runMoshStartup();
+        }
+      } else {
+        // Older bridges without the ready event: keep previous behavior.
+        scheduleStartupCommand(ctx, term, id);
+      }
     } catch (err) {
+      // Drop any pre-start ready subscription if handshake never attached.
+      disposeMoshReady?.();
+      disposeMoshReady = undefined;
+      cancelPendingStartupCommand?.();
+      cancelPendingStartupCommand = undefined;
+      if (ignoreStaleAttemptUi()) return;
       const message = err instanceof Error ? err.message : String(err);
       ctx.setError(message);
       writeTerminalLine(ctx, term, `\r\n[Failed to start Mosh: ${message}]`);
@@ -971,7 +1253,9 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
     }
   };
 
-  const startEt = async (term: XTerm) => {
+  const startEt = async (term: XTerm, options?: TerminalSessionStartOptions) => {
+    if (options?.signal?.aborted) return;
+    const { isCurrentAttempt, ignoreStaleAttemptUi, bootEpoch } = createAttemptGuards(options);
     if (!ctx.terminalBackend.etAvailable()) {
       ctx.setError("EternalTerminal bridge unavailable. Please run the desktop build.");
       writeTerminalLine(ctx, term, "\r\n[EternalTerminal bridge unavailable. Please run the desktop build.]");
@@ -1090,11 +1374,16 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
           : allowsLocalIdentityFallback
             ? ctx.host.identityFilePaths
             : undefined;
-      const hasKeyMaterial = (!!sanitizeCredentialValue(key?.privateKey) || !!etIdentityFilePaths?.length) && authMethod !== "password";
+      const etAgentAuth = resolveBridgeSshAgentAuth(ctx.host, key, authMethod);
+      const usesSystemAgent = etAgentAuth.useSshAgent === true;
+      const hasKeyMaterial = usesSystemAgent || (
+        (!!sanitizeCredentialValue(key?.privateKey) || !!etIdentityFilePaths?.length)
+        && (authMethod !== "password" || ctx.host.useSshAgent === true)
+      );
       const hasPassword = !!effectivePassword;
       const needsCredentialReentry =
         (authMethod === "password" && hasEncryptedPrimaryPassword && !hasPassword) ||
-        (authMethod !== "password" && hasEncryptedPrimaryKey && !hasKeyMaterial && !hasPassword);
+        (authMethod !== "password" && authMethod !== "auto" && hasEncryptedPrimaryKey && !hasKeyMaterial && !hasPassword);
 
       if (needsCredentialReentry) {
         ctx.setError(null);
@@ -1134,7 +1423,15 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
           isEncryptedCredentialPlaceholder(rawJumpPassword) ||
           isEncryptedCredentialPlaceholder(rawJumpPrivateKey) ||
           isEncryptedCredentialPlaceholder(rawJumpPassphrase);
-        if (hasEncryptedJumpCredential && !jumpPassword && !jumpPrivateKey && !jumpPassphrase) {
+        const jumpAgentAuth = resolveBridgeSshAgentAuth(jumpHost, jumpKey, jumpAuth.authMethod);
+        if (
+          jumpAuth.authMethod !== "auto"
+          && hasEncryptedJumpCredential
+          && !jumpPassword
+          && !jumpPrivateKey
+          && !jumpPassphrase
+          && !jumpAgentAuth.useSshAgent
+        ) {
           jumpHostsWithUnavailableCredentials.push(jumpHost.label || jumpHost.hostname);
         }
 
@@ -1156,20 +1453,23 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
 
         return {
           hostname: jumpHost.hostname,
+          hostId: jumpHost.id,
           port: jumpHost.port || 22,
           // ET server port on this bastion: the bridge tunnels the ET socket to
           // the jumphost's etserver, so a custom etPort must be forwarded or it
           // defaults to 2022 and the connection fails.
           etPort: jumpHost.etPort,
           username: jumpAuth.username || "root",
+          authMethod: jumpAuth.authMethod,
           password: jumpPassword,
-          privateKey: jumpKey?.source === 'reference' ? undefined : jumpPrivateKey,
+          privateKey: (jumpAgentAuth.useSshAgent && !jumpKey?.certificate) || jumpKey?.source === 'reference' ? undefined : jumpPrivateKey,
           certificate: jumpKey?.certificate,
-          passphrase: jumpPassphrase,
+          passphrase: jumpAgentAuth.useSshAgent && !jumpKey?.certificate ? undefined : jumpPassphrase,
           keyId: jumpAuth.keyId,
           keySource: jumpKey?.source,
           label: jumpHost.label,
           identityFilePaths: jumpIdentityFilePaths,
+          ...jumpAgentAuth,
         };
       });
 
@@ -1198,16 +1498,18 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       const id = await ctx.terminalBackend.startEtSession({
         sessionId: ctx.sessionId,
         hostname: ctx.host.hostname,
+        hostId: ctx.host.id,
         username: resolvedAuth.username || "root",
         password: effectivePassword,
-        privateKey: key?.source === 'reference' ? undefined : sanitizeCredentialValue(key?.privateKey),
+        privateKey: (usesSystemAgent && !key?.certificate) || key?.source === 'reference' ? undefined : sanitizeCredentialValue(key?.privateKey),
         certificate: key?.certificate,
         keyId: key?.id,
-        passphrase: key
+        passphrase: key && (!usesSystemAgent || Boolean(key.certificate))
           ? (effectivePassphrase || sanitizeCredentialValue(key.passphrase))
           : undefined,
         authMethod,
         identityFilePaths: etIdentityFilePaths,
+        ...etAgentAuth,
         port: ctx.host.port || 22,
         etPort: ctx.host.etPort,
         legacyAlgorithms: ctx.host.legacyAlgorithms,
@@ -1223,14 +1525,20 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         charset: ctx.host.charset,
         env: etEnv,
         sessionLog: ctx.sessionLog?.enabled ? ctx.sessionLog : undefined,
+        bootEpoch,
       });
 
       if (!tryAttachSessionToTerminal(ctx, term, id, {
+        isCurrentAttempt,
+        bootEpoch,
         onExitMessage: (evt) =>
           `\r\n[EternalTerminal session closed${evt?.exitCode !== undefined ? ` (code ${evt.exitCode})` : ""}]`,
         sudoAutofillPassword: resolveSavedSudoAutofillPassword(),
+        sudoAutofillCandidates: resolveSudoAutofillCandidates(),
       })) {
-        abortSessionStartAfterUnmount();
+        // Only the current attempt may clear UI; a stale attach must not
+        // disconnect a newer reconnect that already re-armed boot.
+        if (isCurrentAttempt()) abortSessionStartAfterUnmount();
         return;
       }
 
@@ -1246,6 +1554,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         }, 600);
       }
     } catch (err) {
+      if (ignoreStaleAttemptUi()) return;
       const message = err instanceof Error ? err.message : String(err);
       ctx.setError(message);
       writeTerminalLine(ctx, term, `\r\n[Failed to start EternalTerminal: ${message}]`);
@@ -1253,7 +1562,161 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
     }
   };
 
-  const startLocal = async (term: XTerm) => {
+  const startPluginConnection = async (term: XTerm, options?: TerminalSessionStartOptions) => {
+    if (options?.signal?.aborted) return;
+    const { isCurrentAttempt, ignoreStaleAttemptUi, bootEpoch } = createAttemptGuards(options);
+    if (!ctx.terminalBackend.pluginConnectionAvailable()) {
+      ctx.setError("Plugin connection bridge unavailable. Please run the desktop build with Plugin Development enabled.");
+      writeTerminalLine(ctx, term, "\r\n[Plugin connection bridge unavailable.]");
+      ctx.updateStatus("disconnected");
+      return;
+    }
+    if (!isPluginHostProtocol(ctx.host.protocol)) {
+      ctx.setError("Plugin connection protocol is invalid.");
+      ctx.updateStatus("disconnected");
+      return;
+    }
+    const connection = sanitizePluginConnection(ctx.host.pluginConnection, ctx.host.protocol);
+    if (!connection) {
+      const message = "Plugin connection configuration is missing or invalid. Open host settings and select an installed connection Provider.";
+      ctx.setError(message);
+      writeTerminalLine(ctx, term, `\r\n[${message}]`);
+      ctx.updateStatus("disconnected");
+      return;
+    }
+    const requestId = createPluginConnectionRequestId();
+    const startController = new AbortController();
+    let pendingCancelReleased = false;
+    let bootMonitorTimer: ReturnType<typeof setTimeout> | null = null;
+    const previousDisposeExit = ctx.disposeExitRef.current;
+    const clearBootMonitor = () => {
+      if (bootMonitorTimer === null) return;
+      clearTimeout(bootMonitorTimer);
+      bootMonitorTimer = null;
+    };
+    const cancelPendingStart = () => {
+      previousDisposeExit?.();
+      if (pendingCancelReleased) return;
+      pendingCancelReleased = true;
+      clearBootMonitor();
+      startController.abort(new DOMException("Plugin connection request was cancelled", "AbortError"));
+      if (ctx.terminalBackend.cancelPluginExtensionRequest) {
+        try {
+          const cancelPromise = Promise.resolve(
+            ctx.terminalBackend.cancelPluginExtensionRequest(requestId),
+          ).catch((err) => {
+            logger.warn("Failed to cancel pending plugin connection request", err);
+          });
+          ctx.trackSessionCleanup?.(cancelPromise);
+        } catch (err) {
+          logger.warn("Failed to cancel pending plugin connection request", err);
+        }
+      }
+    };
+    const scheduleBootMonitor = () => {
+      if (pendingCancelReleased) return;
+      bootMonitorTimer = setTimeout(() => {
+        bootMonitorTimer = null;
+        if (pendingCancelReleased) return;
+        if (!isCurrentAttempt()) {
+          cancelPendingStart();
+          return;
+        }
+        scheduleBootMonitor();
+      }, 50);
+    };
+    // The mount effect aborts its boot controller before the async teardown
+    // runs, so forward that straight to the in-flight extension request.
+    const onBootAborted = () => cancelPendingStart();
+    const releasePendingStartCancellation = () => {
+      options?.signal?.removeEventListener("abort", onBootAborted);
+      if (ctx.disposeExitRef.current === cancelPendingStart) {
+        ctx.disposeExitRef.current = previousDisposeExit;
+      }
+      pendingCancelReleased = true;
+      clearBootMonitor();
+    };
+    ctx.disposeExitRef.current = cancelPendingStart;
+    options?.signal?.addEventListener("abort", onBootAborted, { once: true });
+    scheduleBootMonitor();
+    try {
+      const startPromise = ctx.terminalBackend.startPluginConnection({
+        requestId,
+        sessionId: ctx.sessionId,
+        protocol: ctx.host.protocol,
+        hostLabel: ctx.host.label,
+        hostname: ctx.host.hostname,
+        providerId: connection.providerId,
+        configuration: connection.configuration,
+        columns: term.cols,
+        rows: term.rows,
+        sessionLog: ctx.sessionLog?.enabled ? ctx.sessionLog : undefined,
+        ...(connection.authenticationProviderId
+          ? { authenticationProviderId: connection.authenticationProviderId }
+          : {}),
+        ...(connection.credentialId
+          ? { credential: { kind: "credential" as const, id: connection.credentialId } }
+          : {}),
+        signal: startController.signal,
+      });
+      // Disconnect may cancel before this settles; reconnect must wait until
+      // finishExternalSession cleared the shared sessionId registration.
+      ctx.trackSessionCleanup?.(startPromise);
+      const opened = await startPromise;
+      releasePendingStartCancellation();
+      if (!isCurrentAttempt()) {
+        closeOrphanBackendSession(ctx, opened.sessionId, { bootEpoch });
+        return;
+      }
+      if (startController.signal.aborted) {
+        closeOrphanBackendSession(ctx, opened.sessionId, { bootEpoch });
+        abortSessionStartAfterUnmount();
+        return;
+      }
+      const id = opened.sessionId;
+      if (opened.diagnostics.length > 0) {
+        ctx.setProgressLogs((previous) => [
+          ...previous,
+          ...formatPluginDiagnosticLines(opened.diagnostics),
+        ]);
+      }
+      let startupScheduled = false;
+      const schedulePluginStartup = () => {
+        if (startupScheduled) return;
+        startupScheduled = true;
+        scheduleStartupCommand(ctx, term, id);
+      };
+      if (!tryAttachSessionToTerminal(ctx, term, id, {
+        isCurrentAttempt,
+        bootEpoch,
+        onExitMessage: formatPluginConnectionExitMessage,
+        requireExplicitConnectionReady: true,
+        onConnected: (meta) => {
+          if (meta?.pluginConnectionReady === true) schedulePluginStartup();
+        },
+      })) {
+        // Only the current attempt may clear UI; a stale attach must not
+        // disconnect a newer reconnect that already re-armed boot.
+        if (isCurrentAttempt()) abortSessionStartAfterUnmount();
+        return;
+      }
+      if (opened.status === "connected") {
+        ctx.updateStatus("connected");
+        schedulePluginStartup();
+      }
+    } catch (error) {
+      releasePendingStartCancellation();
+      if (ignoreStaleAttemptUi()) return;
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.setError(message);
+      writeTerminalLine(ctx, term, "\r\n[Failed to start plugin connection. See connection details.]");
+      ctx.updateStatus("disconnected");
+    }
+  };
+
+  const startLocal = async (term: XTerm, options?: TerminalSessionStartOptions) => {
+    if (options?.signal?.aborted) return;
+    const { isCurrentAttempt, ignoreStaleAttemptUi, bootEpoch } = createAttemptGuards(options);
     if (!ctx.terminalBackend.localAvailable()) {
       ctx.setError("Local shell bridge unavailable. Please run the desktop build.");
       writeTerminalLine(
@@ -1286,10 +1749,11 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
           TERM: ctx.terminalSettings?.terminalEmulationType ?? "xterm-256color",
         },
         sessionLog: ctx.sessionLog?.enabled ? ctx.sessionLog : undefined,
+        bootEpoch,
       });
 
-      if (!isTerminalBootActive(ctx)) {
-        closeOrphanBackendSession(ctx, id);
+      if (!isCurrentAttempt()) {
+        closeOrphanBackendSession(ctx, id, { bootEpoch });
         return;
       }
 
@@ -1302,7 +1766,14 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       ctx.disposeDataRef.current = ctx.terminalBackend.onSessionData(
         id,
         (chunk, meta) => {
-          writeSessionData(ctx, term, chunk, chunk.length, meta);
+          const pluginPipelineIngressBytes = Number.isFinite(meta?.pluginPipelineIngressBytes)
+            ? Math.max(0, Number(meta.pluginPipelineIngressBytes))
+            : chunk.length;
+          if (!chunk && pluginPipelineIngressBytes > 0) {
+            acknowledgeDroppedTerminalDisplayBytes(ctx, pluginPipelineIngressBytes);
+          } else {
+            writeSessionData(ctx, term, chunk, pluginPipelineIngressBytes, meta);
+          }
           ctx.onTerminalOutput?.(chunk, meta);
           if (!ctx.hasConnectedRef.current) {
             ctx.updateStatus("connected");
@@ -1357,6 +1828,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       consumeRestoreCwdIntent(term, id);
       scheduleStartupCommand(ctx, term, id);
     } catch (err) {
+      if (ignoreStaleAttemptUi()) return;
       const message = err instanceof Error ? err.message : String(err);
       ctx.setError(message);
       writeTerminalLine(ctx, term, `\r\n[Failed to start local shell: ${message}]`);
@@ -1365,7 +1837,9 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
   };
 
   // Start Serial session
-  const startSerial = async (term: XTerm) => {
+  const startSerial = async (term: XTerm, options?: TerminalSessionStartOptions) => {
+    if (options?.signal?.aborted) return;
+    const { isCurrentAttempt, ignoreStaleAttemptUi, bootEpoch } = createAttemptGuards(options);
     if (!ctx.serialConfig) {
       ctx.setError("No serial configuration provided");
       writeTerminalLine(ctx, term, "\r\n[Error: No serial configuration provided]");
@@ -1389,15 +1863,20 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         flowControl: ctx.serialConfig.flowControl,
         charset: ctx.host.charset,
         sessionLog: ctx.sessionLog?.enabled ? ctx.sessionLog : undefined,
+        bootEpoch,
       });
 
       if (!tryAttachSessionToTerminal(ctx, term, id, {
+        isCurrentAttempt,
+        bootEpoch,
         onExitMessage: (evt) =>
           `\r\n[serial port closed${evt?.exitCode !== undefined ? ` (code ${evt.exitCode})` : ""}]`,
         // Convert lone LF to CRLF to prevent "staircase effect" in serial terminals
         convertLfToCrlf: true,
       })) {
-        abortSessionStartAfterUnmount();
+        // Only the current attempt may clear UI; a stale attach must not
+        // disconnect a newer reconnect that already re-armed boot.
+        if (isCurrentAttempt()) abortSessionStartAfterUnmount();
         return;
       }
 
@@ -1406,6 +1885,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       ctx.setProgressValue(100);
       writeTerminalLine(ctx, term, `[Connected to ${ctx.serialConfig.path} at ${ctx.serialConfig.baudRate} baud]`);
     } catch (err) {
+      if (ignoreStaleAttemptUi()) return;
       const message = err instanceof Error ? err.message : String(err);
       ctx.setError(message);
       writeTerminalLine(ctx, term, `\r\n[Failed to connect to serial port: ${message}]`);
@@ -1424,11 +1904,12 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
     attachSessionToTerminal(ctx, term, id, {
       convertLfToCrlf: isSerial,
       sudoAutofillPassword: ctx.sudoAutofillPassword,
+      sudoAutofillCandidates: resolveSudoAutofillCandidates(),
     });
     attachTelnetEchoMode(id, { resetLocalEcho: false });
     ctx.hasConnectedRef.current = true;
     return true;
   };
 
-  return { startSSH, startTelnet, startMosh, startEt, startLocal, startSerial, reattachSession };
+  return { startSSH, startTelnet, startMosh, startEt, startPluginConnection, startLocal, startSerial, reattachSession };
 };

@@ -1,5 +1,5 @@
 import { AlertCircle, AlertTriangle, CheckCircle, Info, X } from 'lucide-react';
-import React, { createContext, useCallback, useContext, useEffect, useState } from 'react';
+import React, { createContext, useCallback, useContext, useEffect, useMemo, useState } from 'react';
 import { setNotify } from '../../application/notification';
 import { cn } from '../../lib/utils';
 
@@ -15,20 +15,35 @@ export interface Toast {
     actionLabel?: string;
 }
 
-interface ToastContextValue {
-    toasts: Toast[];
+interface ToastActionsValue {
     showToast: (toast: Omit<Toast, 'id'>) => void;
     dismissToast: (id: string) => void;
 }
 
-const ToastContext = createContext<ToastContextValue | null>(null);
+interface ToastStateValue {
+    toasts: Toast[];
+}
 
-export const useToast = () => {
-    const context = useContext(ToastContext);
+const ToastActionsContext = createContext<ToastActionsValue | null>(null);
+const ToastStateContext = createContext<ToastStateValue | null>(null);
+
+/** Actions-only subscription — does not re-render when the toast list changes. */
+export const useToastActions = () => {
+    const context = useContext(ToastActionsContext);
     if (!context) {
-        throw new Error('useToast must be used within a ToastProvider');
+        throw new Error('useToastActions must be used within a ToastProvider');
     }
     return context;
+};
+
+/** Full toast API. Prefer useToastActions when you do not need the list. */
+export const useToast = () => {
+    const actions = useContext(ToastActionsContext);
+    const state = useContext(ToastStateContext);
+    if (!actions || !state) {
+        throw new Error('useToast must be used within a ToastProvider');
+    }
+    return { ...state, ...actions };
 };
 
 // Simple hook for components that may not be inside ToastProvider
@@ -77,22 +92,32 @@ const TOAST_STYLES: Record<ToastType, string> = {
 export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const [toasts, setToasts] = useState<Toast[]>([]);
 
-    const showToast = useCallback((toast: Omit<Toast, 'id'>) => {
+    const showToast = useCallback((nextToast: Omit<Toast, 'id'>) => {
         const id = `toast-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-        const newToast: Toast = { ...toast, id };
-        setToasts(prev => [...prev, newToast]);
+        const created: Toast = { ...nextToast, id };
+        setToasts(prev => [...prev, created]);
 
         // Auto dismiss
-        if (toast.duration !== 0) {
+        if (nextToast.duration !== 0) {
             setTimeout(() => {
                 setToasts(prev => prev.filter(t => t.id !== id));
-            }, toast.duration || 4000);
+            }, nextToast.duration || 4000);
         }
     }, []);
 
     const dismissToast = useCallback((id: string) => {
         setToasts(prev => prev.filter(t => t.id !== id));
     }, []);
+
+    const actionsValue = useMemo<ToastActionsValue>(
+        () => ({ showToast, dismissToast }),
+        [showToast, dismissToast],
+    );
+
+    const stateValue = useMemo<ToastStateValue>(
+        () => ({ toasts }),
+        [toasts],
+    );
 
     // Register global toast function
     useEffect(() => {
@@ -104,15 +129,21 @@ export const ToastProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     }, [showToast]);
 
     return (
-        <ToastContext.Provider value={{ toasts, showToast, dismissToast }}>
-            {children}
-            <ToastContainer toasts={toasts} onDismiss={dismissToast} />
-        </ToastContext.Provider>
+        <ToastActionsContext.Provider value={actionsValue}>
+            <ToastStateContext.Provider value={stateValue}>
+                {children}
+                <ToastContainer />
+            </ToastStateContext.Provider>
+        </ToastActionsContext.Provider>
     );
 };
 
-const ToastContainer: React.FC<{ toasts: Toast[]; onDismiss: (id: string) => void }> = ({ toasts, onDismiss }) => {
-    if (toasts.length === 0) return null;
+const ToastContainer: React.FC = () => {
+    const { toasts } = useContext(ToastStateContext) ?? { toasts: [] as Toast[] };
+    const actions = useContext(ToastActionsContext);
+    const onDismiss = actions?.dismissToast;
+
+    if (toasts.length === 0 || !onDismiss) return null;
 
     const handleToastClick = (t: Toast) => {
         if (t.onClick) {

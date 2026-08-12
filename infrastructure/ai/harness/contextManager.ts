@@ -26,6 +26,8 @@ import type {
   ExternalBridgeHistoryMessage,
 } from './types';
 import { buildExternalBridgeContextMessages } from './externalBridgeContext';
+import { repairToolMessageIntegrity } from './toolMessageIntegrity';
+import { pruneFirstModelMessage } from './compactionPruner';
 
 export interface PrepareTurnContextInput {
   messages: ModelMessage[];
@@ -186,9 +188,10 @@ export async function prepareTurnContext(
   const protectRecent = input.protectRecentMessages ?? DEFAULT_PROTECT_RECENT_MESSAGES;
   const maxOutputTokens = input.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
   const messagesBeforeCount = input.messages.length;
+  const integrity = repairToolMessageIntegrity(input.messages);
 
   const underBudgetPressure = isContextUnderBudgetPressure({
-    messages: input.messages,
+    messages: integrity.messages,
     contextWindow,
     maxOutputTokens,
     providerId: input.providerId,
@@ -196,11 +199,11 @@ export async function prepareTurnContext(
     force: input.force,
     trigger: input.trigger,
   });
-  const stale = pruneStaleToolContext(input.messages, {
+  const stale = pruneStaleToolContext(integrity.messages, {
     underBudgetPressure,
   });
   let working = stale.messages;
-  let didAdjust = stale.didAdjust;
+  let didAdjust = integrity.didAdjust || stale.didAdjust;
 
   const tokensBeforeResult = estimateModelMessagesTokensWithKind({
     messages: working,
@@ -263,7 +266,19 @@ export async function prepareTurnContext(
 
   const reinjection = buildReinjectionMessages(input.reinjection);
   if (reinjection.length > 0 && didAdjust) {
-    working = [...reinjection, ...working];
+    const reinjectionTokens = estimateModelMessagesTokensWithKind({
+      messages: reinjection,
+      providerId: input.providerId,
+    }).tokens;
+    const finalGuard = applyStepBudgetGuard(working, {
+      contextWindow,
+      reservedTokens: (input.reservedTokens ?? 0) + reinjectionTokens,
+      maxOutputTokens,
+      providerId: input.providerId,
+      protectRecentMessages: protectRecent,
+    });
+    working = [...reinjection, ...finalGuard.messages];
+    didAdjust = didAdjust || finalGuard.didAdjust;
   }
 
   const tokensAfter = estimateModelMessagesTokensWithKind({
@@ -349,6 +364,22 @@ function applyStepBudgetGuard(
   if (afterTotal >= threshold && splitAt > 0) {
     next = keepRecentContextMessages(next, input.protectRecentMessages);
     didAdjust = true;
+    afterTotal = computeTotalInputTokens({
+      messages: next,
+      providerId: input.providerId,
+      reservedTokens: input.reservedTokens,
+    });
+  }
+  while (afterTotal >= threshold && next.length > 2) {
+    const pruned = pruneFirstModelMessage(next);
+    if (pruned.length === next.length) break;
+    next = pruned;
+    didAdjust = true;
+    afterTotal = computeTotalInputTokens({
+      messages: next,
+      providerId: input.providerId,
+      reservedTokens: input.reservedTokens,
+    });
   }
 
   return {
@@ -366,15 +397,16 @@ export async function prepareStepContext(
   const maxOutputTokens = input.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS;
   const protectRecent = input.protectRecentMessages ?? DEFAULT_PROTECT_RECENT_MESSAGES;
   const messagesBeforeCount = input.messages.length;
+  const integrity = repairToolMessageIntegrity(input.messages);
 
   const underBudgetPressure = isContextUnderBudgetPressure({
-    messages: input.messages,
+    messages: integrity.messages,
     contextWindow,
     maxOutputTokens,
     providerId: input.providerId,
     reservedTokens: input.reservedTokens,
   });
-  const stale = pruneStaleToolContext(input.messages, {
+  const stale = pruneStaleToolContext(integrity.messages, {
     underBudgetPressure,
   });
   let working = stale.messages;
@@ -417,7 +449,28 @@ export async function prepareStepContext(
       }, ...working];
     }
   }
-  const didBudgetAdjust = stale.didAdjust || typed.didAdjust || budgetGuard.didAdjust;
+  if (didHandleNotice) {
+    const notices = working.filter(
+      message => message.role === 'user' && isStepHandleNoticeMessage(message.content),
+    );
+    const body = working.filter(
+      message => !(message.role === 'user' && isStepHandleNoticeMessage(message.content)),
+    );
+    const noticeTokens = estimateModelMessagesTokensWithKind({
+      messages: notices,
+      providerId: input.providerId,
+    }).tokens;
+    const finalGuard = applyStepBudgetGuard(body, {
+      contextWindow,
+      reservedTokens: (input.reservedTokens ?? 0) + noticeTokens,
+      maxOutputTokens,
+      providerId: input.providerId,
+      protectRecentMessages: protectRecent,
+    });
+    working = [...notices, ...finalGuard.messages];
+    budgetGuard.didAdjust = budgetGuard.didAdjust || finalGuard.didAdjust;
+  }
+  const didBudgetAdjust = integrity.didAdjust || stale.didAdjust || typed.didAdjust || budgetGuard.didAdjust;
   const didAdjust = didBudgetAdjust || didHandleNotice;
 
   const before = estimateModelMessagesTokensWithKind({

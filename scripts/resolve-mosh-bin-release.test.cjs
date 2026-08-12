@@ -11,6 +11,8 @@ const {
   parseNextLink,
   pickLatestMoshBinRelease,
   validateReleaseTag,
+  isAtLeastMinRelease,
+  MIN_TAG,
 } = require("./resolve-mosh-bin-release.cjs");
 
 function makeTmp(t) {
@@ -19,17 +21,46 @@ function makeTmp(t) {
   return dir;
 }
 
-test("validateReleaseTag accepts only mosh binary release tags", () => {
-  assert.equal(validateReleaseTag("mosh-bin-1.4.0-1"), "mosh-bin-1.4.0-1");
+test("validateReleaseTag accepts only moshcatty-* tags at min version", () => {
+  assert.equal(validateReleaseTag("moshcatty-0.1.8"), "moshcatty-0.1.8");
+  assert.equal(validateReleaseTag("moshcatty-0.2.0"), "moshcatty-0.2.0");
+  assert.equal(validateReleaseTag("moshcatty-0.1.9-rc1"), "moshcatty-0.1.9-rc1");
+  assert.equal(validateReleaseTag("moshcatty-0.1.8+build.1"), "moshcatty-0.1.8+build.1");
+  assert.throws(() => validateReleaseTag("mosh-bin-1.4.0-1"), /invalid mosh binary release tag/);
   assert.throws(() => validateReleaseTag("v1.2.3"), /invalid mosh binary release tag/);
-  assert.throws(() => validateReleaseTag("mosh-bin-../bad"), /invalid mosh binary release tag/);
+  assert.throws(() => validateReleaseTag("moshcatty-../bad"), /invalid mosh binary release tag/);
+  assert.throws(() => validateReleaseTag("moshcatty-not-a-version"), /invalid mosh binary release tag/);
+  assert.throws(() => validateReleaseTag("moshcatty-0.1.0"), /below minimum/);
+  assert.throws(() => validateReleaseTag("moshcatty-0.1.1"), /below minimum/);
+  assert.throws(() => validateReleaseTag("moshcatty-0.1.2"), /below minimum/);
+  assert.throws(() => validateReleaseTag("moshcatty-0.1.3"), /below minimum/);
+  assert.throws(() => validateReleaseTag("moshcatty-0.1.4"), /below minimum/);
+  assert.throws(() => validateReleaseTag("moshcatty-0.1.5"), /below minimum/);
+  assert.throws(() => validateReleaseTag("moshcatty-0.1.6"), /below minimum/);
+  assert.throws(() => validateReleaseTag("moshcatty-0.1.7"), /below minimum/);
+  assert.throws(() => validateReleaseTag("moshcatty-0.1.8-rc1"), /below minimum/);
 });
 
-test("parseRepository falls back to the dedicated mosh binary repository", () => {
-  assert.deepEqual(parseRepository({}), { owner: "binaricat", repo: "Netcatty-mosh-bin" });
+test("isAtLeastMinRelease enforces moshcatty-0.1.8 floor with semver prerelease rules", () => {
+  assert.equal(MIN_TAG, "moshcatty-0.1.8");
+  assert.equal(isAtLeastMinRelease("moshcatty-0.1.3"), false);
+  assert.equal(isAtLeastMinRelease("moshcatty-0.1.4"), false);
+  assert.equal(isAtLeastMinRelease("moshcatty-0.1.5"), false);
+  assert.equal(isAtLeastMinRelease("moshcatty-0.1.6"), false);
+  assert.equal(isAtLeastMinRelease("moshcatty-0.1.7"), false);
+  // Prerelease of the floor sorts below the final floor release.
+  assert.equal(isAtLeastMinRelease("moshcatty-0.1.8-rc1"), false);
+  // Above the floor, prereleases are fine.
+  assert.equal(isAtLeastMinRelease("moshcatty-0.1.9-rc1"), true);
+  assert.equal(isAtLeastMinRelease("moshcatty-0.1.8+build.1"), true);
+  assert.equal(isAtLeastMinRelease("moshcatty-not-a-version"), false);
+});
+
+test("parseRepository defaults to binaricat/MoshCatty (ignores GITHUB_REPOSITORY fork owner)", () => {
+  assert.deepEqual(parseRepository({}), { owner: "binaricat", repo: "MoshCatty" });
   assert.deepEqual(parseRepository({ GITHUB_REPOSITORY: "owner/project" }), {
-    owner: "owner",
-    repo: "Netcatty-mosh-bin",
+    owner: "binaricat",
+    repo: "MoshCatty",
   });
   assert.deepEqual(
     parseRepository({ GITHUB_REPOSITORY: "owner/project", MOSH_BIN_OWNER: "bin", MOSH_BIN_REPO: "binaries" }),
@@ -37,16 +68,19 @@ test("parseRepository falls back to the dedicated mosh binary repository", () =>
   );
 });
 
-test("pickLatestMoshBinRelease ignores non-packaging releases", () => {
+test("pickLatestMoshBinRelease ignores non-moshcatty and pre-0.1.8 tags", () => {
   const got = pickLatestMoshBinRelease([
     { tag_name: "v1.0.0", published_at: "2026-03-01T00:00:00Z" },
-    { tag_name: "mosh-bin-1.4.0-3", draft: true, published_at: "2026-04-01T00:00:00Z" },
-    { tag_name: "mosh-bin-1.4.0-4", prerelease: true, published_at: "2026-04-02T00:00:00Z" },
-    { tag_name: "mosh-bin-1.4.0-1", published_at: "2026-02-01T00:00:00Z" },
-    { tag_name: "mosh-bin-1.4.0-2", published_at: "2026-03-01T00:00:00Z" },
+    { tag_name: "mosh-bin-1.4.0-2", published_at: "2026-06-01T00:00:00Z" },
+    { tag_name: "moshcatty-0.1.8", draft: true, published_at: "2026-07-13T00:00:00Z" },
+    { tag_name: "moshcatty-0.1.2", published_at: "2026-07-10T00:00:00Z" },
+    { tag_name: "moshcatty-0.1.5", published_at: "2026-07-10T13:00:00Z" },
+    { tag_name: "moshcatty-0.1.6", published_at: "2026-07-13T01:00:00Z" },
+    { tag_name: "moshcatty-0.1.7", published_at: "2026-07-14T01:00:00Z" },
+    { tag_name: "moshcatty-0.1.8", published_at: "2026-07-17T01:00:00Z" },
   ]);
 
-  assert.equal(got, "mosh-bin-1.4.0-2");
+  assert.equal(got, "moshcatty-0.1.8");
 });
 
 test("parseNextLink reads the next GitHub pagination URL", () => {
@@ -69,7 +103,7 @@ test("loadReleases follows GitHub pagination until the last page", async () => {
     requested.push(url);
     if (url.includes("page=2")) {
       return {
-        json: [{ tag_name: "mosh-bin-1.4.0-1", published_at: "2026-01-01T00:00:00Z" }],
+        json: [{ tag_name: "moshcatty-0.1.6", published_at: "2026-01-01T00:00:00Z" }],
         headers: {},
       };
     }
@@ -81,7 +115,7 @@ test("loadReleases follows GitHub pagination until the last page", async () => {
     };
   });
 
-  assert.deepEqual(got.map((release) => release.tag_name), ["v1.0.0", "mosh-bin-1.4.0-1"]);
+  assert.deepEqual(got.map((release) => release.tag_name), ["v1.0.0", "moshcatty-0.1.6"]);
   assert.equal(requested.length, 2);
 });
 
@@ -99,34 +133,50 @@ test("main keeps an explicit MOSH_BIN_RELEASE and exports it", async (t) => {
   const githubEnv = path.join(makeTmp(t), "github-env");
 
   const got = await main({
-    MOSH_BIN_RELEASE: "mosh-bin-1.4.0-1",
+    MOSH_BIN_RELEASE: "moshcatty-0.1.8",
     GITHUB_ENV: githubEnv,
   });
 
-  assert.equal(got, "mosh-bin-1.4.0-1");
-  assert.equal(fs.readFileSync(githubEnv, "utf8"), "MOSH_BIN_RELEASE=mosh-bin-1.4.0-1\n");
+  assert.equal(got, "moshcatty-0.1.8");
+  assert.equal(fs.readFileSync(githubEnv, "utf8"), "MOSH_BIN_RELEASE=moshcatty-0.1.8\n");
 });
 
-test("main resolves the latest release from the release list and exports it", async (t) => {
+test("main rejects explicit pre-0.1.8 MOSH_BIN_RELEASE", async () => {
+  await assert.rejects(
+    main({ MOSH_BIN_RELEASE: "moshcatty-0.1.7" }),
+    /below minimum/,
+  );
+});
+
+test("main resolves the latest moshcatty release from the list and exports it", async (t) => {
   const githubEnv = path.join(makeTmp(t), "github-env");
   const got = await main({
     GITHUB_ENV: githubEnv,
     MOSH_BIN_RELEASES_JSON: JSON.stringify([
-      { tag_name: "mosh-bin-1.4.0-1", published_at: "2026-01-01T00:00:00Z" },
-      { tag_name: "mosh-bin-1.4.0-2", published_at: "2026-02-01T00:00:00Z" },
+      { tag_name: "moshcatty-0.1.0", published_at: "2026-01-01T00:00:00Z" },
+      { tag_name: "moshcatty-0.1.2", published_at: "2026-07-10T00:00:00Z" },
+      { tag_name: "moshcatty-0.1.5", published_at: "2026-07-10T13:00:00Z" },
+      { tag_name: "moshcatty-0.1.6", published_at: "2026-07-13T01:00:00Z" },
+      { tag_name: "moshcatty-0.1.7", published_at: "2026-07-14T01:00:00Z" },
+      { tag_name: "moshcatty-0.1.8", published_at: "2026-07-17T01:00:00Z" },
+      { tag_name: "mosh-bin-1.4.0-2", published_at: "2026-08-01T00:00:00Z" },
     ]),
   });
 
-  assert.equal(got, "mosh-bin-1.4.0-2");
-  assert.equal(fs.readFileSync(githubEnv, "utf8"), "MOSH_BIN_RELEASE=mosh-bin-1.4.0-2\n");
+  assert.equal(got, "moshcatty-0.1.8");
+  assert.equal(fs.readFileSync(githubEnv, "utf8"), "MOSH_BIN_RELEASE=moshcatty-0.1.8\n");
 });
 
-test("main fails when no usable release exists", async () => {
+test("main fails when no usable moshcatty release exists", async () => {
   await assert.rejects(
     main({
       MOSH_BIN_RELEASES_JSON: JSON.stringify([
         { tag_name: "v1.0.0", published_at: "2026-01-01T00:00:00Z" },
-        { tag_name: "mosh-bin-1.4.0-1", draft: true, published_at: "2026-02-01T00:00:00Z" },
+        { tag_name: "mosh-bin-1.4.0-1", published_at: "2026-02-01T00:00:00Z" },
+        { tag_name: "moshcatty-0.1.5", published_at: "2026-02-01T00:00:00Z" },
+        { tag_name: "moshcatty-0.1.6", published_at: "2026-02-01T00:00:00Z" },
+        { tag_name: "moshcatty-0.1.7", published_at: "2026-02-01T00:00:00Z" },
+        { tag_name: "moshcatty-0.1.8", draft: true, published_at: "2026-02-01T00:00:00Z" },
       ]),
     }),
     /could not find/,

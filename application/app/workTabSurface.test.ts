@@ -9,6 +9,7 @@ import {
   reorderWorkTabIds,
   resolveWorkTabActiveHostId,
   resolveWorkTabHostTreeTheme,
+  shouldOpenHostEditOnWorkSurface,
 } from './workTabSurface';
 import type { EditorTab } from '../state/editorTabStore';
 import type { Host, TerminalSession, TerminalTheme, Workspace } from '../../types';
@@ -77,6 +78,15 @@ test('root pages are not work tab surfaces', () => {
   assert.equal(isRootPageTabId('session-1'), false);
 });
 
+test('host edit overlay prefers work-surface editor except on vault/sftp/plugin tabs', () => {
+  assert.equal(shouldOpenHostEditOnWorkSurface('session-1'), true);
+  assert.equal(shouldOpenHostEditOnWorkSurface('workspace-1'), true);
+  assert.equal(shouldOpenHostEditOnWorkSurface('editor:file-1'), true);
+  assert.equal(shouldOpenHostEditOnWorkSurface('vault'), false);
+  assert.equal(shouldOpenHostEditOnWorkSurface('sftp'), false);
+  assert.equal(shouldOpenHostEditOnWorkSurface('plugin-view:demo'), false);
+});
+
 test('shared host tree is visible for editor, log, session, and workspace tabs', () => {
   const sessionIds = new Set(['session-1']);
   const workspaceIds = new Set(['workspace-1']);
@@ -104,6 +114,17 @@ test('shared host tree recognizes active log view before tab ordering catches up
     sessionIds: new Set(),
     workspaceIds: new Set(),
   }), true);
+});
+
+test('shared host tree stays hidden for native plugin view tabs', () => {
+  const pluginTabId = 'plugin-view:com.example.view:com.example.view.panel';
+  assert.equal(isHostTreeWorkTabSurface({
+    enabled: true,
+    activeTabId: pluginTabId,
+    orderedTabs: [pluginTabId],
+    sessionIds: new Set(),
+    workspaceIds: new Set(),
+  }), false);
 });
 
 test('terminal content surface is limited to sessions and workspaces', () => {
@@ -244,6 +265,32 @@ test('shared host tree uses the followed terminal theme when follow-app terminal
   });
 
   assert.equal(resolved.id, currentTheme.id);
+});
+
+test('follow-app host tree applies custom accent onto the published base theme', () => {
+  const currentTheme = makeTheme('app-light', 'light', '#ffffff');
+  const host = {
+    id: 'host-1',
+    label: 'Host',
+    hostname: 'host.local',
+    username: 'root',
+    tags: [],
+    os: 'linux',
+  } as Host;
+
+  const resolved = resolveWorkTabHostTreeTheme({
+    activeHostId: host.id,
+    accentMode: 'custom',
+    currentTerminalTheme: currentTheme,
+    customAccent: '0 100% 50%',
+    followAppTerminalTheme: true,
+    hostById: new Map([[host.id, host]]),
+    themeById: new Map([[currentTheme.id, currentTheme]]),
+  });
+
+  assert.equal(resolved.id, currentTheme.id);
+  assert.notEqual(resolved.colors.cursor, currentTheme.colors.cursor);
+  assert.notEqual(resolved, currentTheme);
 });
 
 test('shared host tree falls back to the current terminal theme without an active host', () => {

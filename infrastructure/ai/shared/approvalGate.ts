@@ -17,7 +17,10 @@
  * interference when stopping or cancelling sessions.
  */
 
-import { CATTY_APPROVAL_TIMEOUT_MS } from './approvalConstants';
+import {
+  CATTY_APPROVAL_TIMEOUT_MS,
+  resolveCattyApprovalDeadlines,
+} from './approvalConstants';
 import { localStorageAdapter } from '../../persistence/localStorageAdapter';
 import { STORAGE_KEY_AI_PERMISSION_GRANTS } from '../../config/storageKeys';
 import { globalTraceStore } from '../harness/traceStore';
@@ -37,13 +40,25 @@ export interface ApprovalRequest {
   /** Optional chat session scope — used to clear only relevant approvals on stop */
   chatSessionId?: string;
   capabilityId?: string;
+  source?: 'catty' | 'mcp' | 'codex-app-server';
+  approvalType?: 'command' | 'file-change' | 'permissions';
+  itemId?: string;
+  allowSession?: boolean;
 }
 
 export interface ResolveApprovalOptions {
   approved: boolean;
   persistGrant?: PermissionGrantRule;
   persistGrants?: PermissionGrantRule[];
+  scope?: 'once' | 'session';
+  cancelled?: boolean;
 }
+
+export type ApprovalResolution = {
+  approved: boolean;
+  scope: 'once' | 'session';
+  cancelled: boolean;
+};
 
 export type GrantPersister = (rule: PermissionGrantRule) => void;
 
@@ -82,8 +97,10 @@ export function registerGrantPersister(persister: GrantPersister): () => void {
 // SDK approvals have a real `resolve` callback; MCP approvals use a no-op
 // (the real resolution goes via IPC in resolveApproval).
 const pendingApprovals = new Map<string, {
-  resolve: (approved: boolean) => void;
+  resolve: (resolution: ApprovalResolution) => void;
   request: ApprovalRequest;
+  /** Clears the auto-deny timer without resolving the approval. */
+  cancelTimeout?: () => void;
 }>();
 
 // Subscribers for approval request events (UI listens here)
@@ -110,7 +127,7 @@ function emitApprovalEvent(
   const base = {
     sessionId,
     chatSessionId: request.chatSessionId,
-    backend: 'catty' as const,
+    backend: request.source === 'codex-app-server' ? 'external-sdk' as const : 'catty' as const,
     timestamp: Date.now(),
     toolCallId: request.toolCallId,
     toolName: request.toolName,
@@ -151,8 +168,10 @@ function isGrantedByRules(request: ApprovalRequest): boolean {
  * Returns a Promise<boolean> that resolves to `true` (approved) or `false` (denied).
  * The UI is notified via the listener system to render approval buttons.
  *
- * If the user does not respond within `timeoutMs` (default 5 minutes), the
- * approval is auto-denied to prevent the session from hanging indefinitely.
+ * Idle auto-deny uses `timeoutMs` (default 5 minutes). Review activity re-arms
+ * a fresh idle window from *now*, but never past a hard deadline from creation
+ * (default 3× idle, capped at 30 minutes) so late review is not cut off at the
+ * original idle mark while still staying bounded.
  */
 export function requestApproval(
   toolCallId: string,
@@ -174,36 +193,108 @@ export function requestApproval(
     return Promise.resolve(true);
   }
 
+  const existing = pendingApprovals.get(toolCallId);
+  if (existing) {
+    return new Promise<boolean>((resolve) => {
+      const previousResolve = existing.resolve;
+      existing.resolve = (resolution) => {
+        previousResolve(resolution);
+        resolve(resolution.approved);
+      };
+    });
+  }
+
   emitApprovalEvent('approval_requested', request);
 
   return new Promise<boolean>((resolve) => {
     let timerId: ReturnType<typeof setTimeout> | null = null;
+    const { idleMs, hardDeadlineMs } = resolveCattyApprovalDeadlines(timeoutMs);
+    // Hard ceiling from creation — review re-arms idle from now for idleMs
+    // but never past this bound.
+    const hardDeadlineAt = Date.now() + hardDeadlineMs;
 
-    const wrappedResolve = (approved: boolean) => {
-      if (timerId) { clearTimeout(timerId); timerId = null; }
-      resolve(approved);
+    const clearTimer = () => {
+      if (timerId) {
+        clearTimeout(timerId);
+        timerId = null;
+      }
     };
 
-    pendingApprovals.set(toolCallId, { resolve: wrappedResolve, request });
+    const wrappedResolve = (resolution: ApprovalResolution) => {
+      clearTimer();
+      resolve(resolution.approved);
+    };
 
-    // Auto-deny after timeout so the session doesn't hang indefinitely
-    timerId = setTimeout(() => {
-      if (pendingApprovals.has(toolCallId)) {
-        pendingApprovals.delete(toolCallId);
-        wrappedResolve(false);
-        emitApprovalEvent('approval_resolved', request, { outcome: 'timeout' });
-        // Notify UI to remove the stale card
-        for (const cl of clearedListeners) {
-          try { cl([toolCallId]); } catch { /* ignore */ }
-        }
+    const denyTimedOut = () => {
+      const entry = pendingApprovals.get(toolCallId);
+      if (!entry) return;
+      pendingApprovals.delete(toolCallId);
+      wrappedResolve({ approved: false, scope: 'once', cancelled: false });
+      emitApprovalEvent('approval_resolved', request, { outcome: 'timeout' });
+      for (const cl of clearedListeners) {
+        try { cl([toolCallId]); } catch { /* ignore */ }
       }
-    }, timeoutMs);
+    };
+
+    const armTimer = (ms: number) => {
+      clearTimer();
+      if (ms <= 0) {
+        // Hard deadline already elapsed — reject synchronously so a late
+        // approve cannot race a deferred setTimeout(0) deny.
+        denyTimedOut();
+        return;
+      }
+      timerId = setTimeout(denyTimedOut, ms);
+    };
+
+    // Initial arm is the idle window. Review re-arms idle (capped by hard deadline).
+    armTimer(idleMs);
+
+    pendingApprovals.set(toolCallId, {
+      resolve: wrappedResolve,
+      request,
+      cancelTimeout: () => {
+        const remainingHard = hardDeadlineAt - Date.now();
+        if (remainingHard <= 0) {
+          armTimer(0);
+          return;
+        }
+        // Re-arm a full idle window from now, never past the hard deadline.
+        armTimer(Math.min(idleMs, remainingHard));
+      },
+    });
 
     // Notify all UI listeners
     for (const listener of listeners) {
       try { listener(request); } catch { /* ignore listener errors */ }
     }
   });
+}
+
+/**
+ * Cancel / reset the idle auto-deny timer after the user starts reviewing or
+ * interacting with the card. Catty local approvals re-arm idle from *now* for
+ * a fresh idleMs window, never past the hard creation deadline.
+ * Timeout never auto-approves.
+ */
+export function cancelApprovalTimeout(toolCallId: string): void {
+  const entry = pendingApprovals.get(toolCallId);
+  // Keep cancelTimeout registered so further review activity can re-arm idle.
+  entry?.cancelTimeout?.();
+
+  // MCP / Codex App Server approvals are timed in the main process.
+  // MCP cancel drops idle but keeps the absolute creation deadline.
+  if (toolCallId.startsWith('mcp_approval_')) {
+    const bridge = (window as unknown as {
+      netcatty?: { cancelMcpApprovalTimeout?: (id: string) => Promise<unknown> };
+    }).netcatty;
+    void bridge?.cancelMcpApprovalTimeout?.(toolCallId);
+  } else if (toolCallId.startsWith('codex_interaction_')) {
+    const bridge = (window as unknown as {
+      netcatty?: { cancelCodexAppServerInteractionTimeout?: (id: string) => Promise<unknown> };
+    }).netcatty;
+    void bridge?.cancelCodexAppServerInteractionTimeout?.(toolCallId);
+  }
 }
 
 /**
@@ -219,23 +310,32 @@ export function resolveApproval(
   const persistGrants = typeof decision === 'boolean'
     ? undefined
     : (decision.persistGrants ?? (persistGrant ? [persistGrant] : undefined));
+  const resolution: ApprovalResolution = {
+    approved,
+    scope: typeof decision === 'boolean' ? 'once' : (decision.scope ?? 'once'),
+    cancelled: typeof decision === 'boolean' ? false : decision.cancelled === true,
+  };
 
   const entry = pendingApprovals.get(toolCallId);
   const request = entry?.request;
 
-  if (entry) {
-    pendingApprovals.delete(toolCallId);
-    entry.resolve(approved);
+  if (!entry) {
+    // Stale UI click after the map entry was already drained — do not fan out
+    // a second MCP IPC response for a missing approval.
+    return;
   }
 
-  if (request) {
-    let persistedGrantId: string | undefined;
-    if (approved && persistGrants?.length) {
-      for (const grant of persistGrants) {
-        grantPersister?.(grant);
-        persistedGrantId = grant.id;
-      }
+  pendingApprovals.delete(toolCallId);
+  entry.resolve(resolution);
+
+  let persistedGrantId: string | undefined;
+  if (approved && request?.source !== 'codex-app-server' && persistGrants?.length) {
+    for (const grant of persistGrants) {
+      grantPersister?.(grant);
+      persistedGrantId = grant.id;
     }
+  }
+  if (request) {
     emitApprovalEvent('approval_resolved', request, {
       outcome: approved ? 'approved' : 'denied',
       persistedGrantId,
@@ -281,6 +381,30 @@ export function replayPendingApprovals(listener: ApprovalRequestListener): void 
   }
 }
 
+export function registerExternalApproval(
+  request: ApprovalRequest,
+  onResolve: (resolution: ApprovalResolution) => void,
+): void {
+  if (pendingApprovals.has(request.toolCallId)) return;
+  emitApprovalEvent('approval_requested', request);
+  pendingApprovals.set(request.toolCallId, { request, resolve: onResolve });
+  for (const listener of listeners) {
+    try { listener(request); } catch { /* ignore listener errors */ }
+  }
+}
+
+export function clearPendingApprovalIds(toolCallIds: string[]): void {
+  const clearedIds: string[] = [];
+  for (const toolCallId of toolCallIds) {
+    if (pendingApprovals.delete(toolCallId)) clearedIds.push(toolCallId);
+  }
+  if (clearedIds.length > 0) {
+    for (const listener of clearedListeners) {
+      try { listener(clearedIds); } catch { /* ignore listener errors */ }
+    }
+  }
+}
+
 /**
  * Check if a specific toolCallId has a pending approval.
  */
@@ -303,7 +427,7 @@ export function clearAllPendingApprovals(chatSessionId?: string): void {
   if (!chatSessionId) {
     // Clear everything (legacy / global stop)
     for (const [id, entry] of pendingApprovals) {
-      entry.resolve(false);
+      entry.resolve({ approved: false, scope: 'once', cancelled: true });
       clearedIds.push(id);
     }
     pendingApprovals.clear();
@@ -312,7 +436,7 @@ export function clearAllPendingApprovals(chatSessionId?: string): void {
     for (const [id, entry] of pendingApprovals) {
       if (entry.request.chatSessionId === chatSessionId) {
         pendingApprovals.delete(id);
-        entry.resolve(false);
+        entry.resolve({ approved: false, scope: 'once', cancelled: true });
         clearedIds.push(id);
       }
     }
@@ -361,6 +485,7 @@ export function setupMcpApprovalBridge(): () => void {
       args: payload.args,
       chatSessionId: payload.chatSessionId,
       capabilityId: resolveCapabilityId(payload.toolName),
+      source: 'mcp',
     };
 
     // Store in pendingApprovals so it survives unmount/remount

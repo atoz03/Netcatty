@@ -352,7 +352,7 @@ test("findIncompleteProxyIdentityId treats blank usernames as incomplete even wi
         label: "Proxy login",
         username: " ",
         authMethod: "password",
-        password: "enc:v1:djEwAAAA",
+        password: "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==",
         created: 1,
       }],
     ),

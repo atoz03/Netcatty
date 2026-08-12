@@ -5,6 +5,7 @@ import type { Terminal as XTerm } from "@xterm/xterm";
 
 import {
   filterTerminalSessionData,
+  isTerminalSyncBlockOpen,
   resetTerminalSyncBlockFilter,
   SYNC_BLOCK_TIMEOUT_MS,
 } from "./terminalSyncBlockFilter.ts";
@@ -33,7 +34,8 @@ test("abandoned sync blocks stop stripping full redraw clears after timeout", ()
     resetTerminalSyncBlockFilter(term);
     assert.equal(filterTerminalSessionData(term, SYNC_START), SYNC_START);
     assert.equal(filterTerminalSessionData(term, CURSOR_HOME), "");
-    assert.equal(filterTerminalSessionData(term, CLEAR), "");
+    // Home is re-emitted; only the clear is stripped while reading history.
+    assert.equal(filterTerminalSessionData(term, CLEAR), CURSOR_HOME);
 
     mock.timers.tick(SYNC_BLOCK_TIMEOUT_MS);
     assert.equal(filterTerminalSessionData(term, CLEAR), CLEAR);
@@ -51,7 +53,7 @@ test("completed sync blocks clear the timeout without waiting", () => {
     resetTerminalSyncBlockFilter(term);
     assert.equal(
       filterTerminalSessionData(term, `${SYNC_START}${CURSOR_HOME}${CLEAR}frame${SYNC_END}`),
-      `${SYNC_START}frame${SYNC_END}`,
+      `${SYNC_START}${CURSOR_HOME}frame${SYNC_END}`,
     );
 
     mock.timers.tick(SYNC_BLOCK_TIMEOUT_MS);
@@ -112,4 +114,32 @@ test("sync block timeout preserves pending partial marker bytes", () => {
     resetTerminalSyncBlockFilter(term);
     mock.timers.reset();
   }
+});
+
+test("does not strip full redraw through session filter for a one-row lag (#2291)", () => {
+  const term = {
+    rows: 24,
+    buffer: {
+      active: {
+        type: "normal",
+        viewportY: 9,
+        baseY: 10,
+      },
+    },
+  } as XTerm;
+
+  resetTerminalSyncBlockFilter(term);
+  const input = `${SYNC_START}${CURSOR_HOME}${CLEAR}frame${SYNC_END}`;
+  assert.equal(filterTerminalSessionData(term, input), input);
+});
+
+test("isTerminalSyncBlockOpen tracks open state across chunks for erase-scrollback", () => {
+  const term = createMockTerm();
+  resetTerminalSyncBlockFilter(term);
+
+  assert.equal(isTerminalSyncBlockOpen(term), false);
+  assert.equal(filterTerminalSessionData(term, SYNC_START), SYNC_START);
+  assert.equal(isTerminalSyncBlockOpen(term), true);
+  assert.equal(filterTerminalSessionData(term, `${CURSOR_HOME}${CLEAR}frame${SYNC_END}`), `${CURSOR_HOME}frame${SYNC_END}`);
+  assert.equal(isTerminalSyncBlockOpen(term), false);
 });

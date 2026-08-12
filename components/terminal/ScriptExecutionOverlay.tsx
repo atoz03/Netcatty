@@ -1,5 +1,5 @@
 import { Check, Loader2, Pause, Play, Square, X } from 'lucide-react';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useEffectEvent, useMemo, useState } from 'react';
 import { useI18n } from '@/application/i18n/I18nProvider';
 import type { ScriptRun } from '@/types/global/netcatty-bridge-script.d.ts';
 import { Button } from '@/components/ui/button';
@@ -11,7 +11,19 @@ export interface ScriptExecutionOverlayProps {
   onResume: () => void;
   onStop: () => void;
   onDismiss: () => void;
+  /**
+   * Host info bar is hidden: no full toolbar. Sit the banner higher and stack
+   * above the compact speed-dial (cover it for the run duration).
+   */
+  compactTopChrome?: boolean;
 }
+
+/** Default top offset under the full host-info toolbar. */
+export const SCRIPT_OVERLAY_TOP_DEFAULT_PX = 34;
+/** Top offset when only the compact speed-dial is present. */
+export const SCRIPT_OVERLAY_TOP_COMPACT_PX = 8;
+/** Completed script results remain visible briefly before dismissing themselves. */
+export const SCRIPT_OVERLAY_FINISHED_DISMISS_DELAY_MS = 5_000;
 
 function formatElapsed(ms: number) {
   const seconds = Math.max(0, Math.floor(ms / 1000));
@@ -153,7 +165,7 @@ function ScriptStatusLine({
   ) : null;
 
   return (
-    <span className="flex min-w-0 flex-1 items-center gap-1.5 leading-none">
+    <span className="flex min-w-0 flex-1 items-center gap-1.5 leading-4">
       <ScriptStatusIcon status={run.status} />
       <span className="shrink-0 whitespace-nowrap font-semibold text-foreground">{label}</span>
       <span className="inline-flex min-w-0 flex-1 items-center truncate">
@@ -185,15 +197,23 @@ export const ScriptExecutionOverlay: React.FC<ScriptExecutionOverlayProps> = ({
   onResume,
   onStop,
   onDismiss,
+  compactTopChrome = false,
 }) => {
   const { t } = useI18n();
   const [tick, setTick] = useState(0);
   const isFinished = run.status === 'completed' || run.status === 'failed';
+  const dismissFinishedRun = useEffectEvent(onDismiss);
 
   useEffect(() => {
     if (isFinished) return undefined;
     const timer = window.setInterval(() => setTick((value) => value + 1), 1000);
     return () => window.clearInterval(timer);
+  }, [isFinished, run.runId]);
+
+  useEffect(() => {
+    if (!isFinished) return undefined;
+    const timer = setTimeout(dismissFinishedRun, SCRIPT_OVERLAY_FINISHED_DISMISS_DELAY_MS);
+    return () => clearTimeout(timer);
   }, [isFinished, run.runId]);
 
   void tick;
@@ -212,22 +232,25 @@ export const ScriptExecutionOverlay: React.FC<ScriptExecutionOverlayProps> = ({
 
   return (
     <div
-      className="absolute left-2 right-2 z-25 rounded-md border shadow-md backdrop-blur-md pointer-events-auto px-3 py-2"
+      // z-40 sits above the compact speed-dial (z-30) so the full-width banner
+      // covers the toggle while a script is running — no right-edge gutter.
+      className="absolute left-2 right-2 z-40 rounded-md border shadow-md backdrop-blur-md pointer-events-auto px-3 py-2"
       style={{
-        top: 34,
+        top: compactTopChrome ? SCRIPT_OVERLAY_TOP_COMPACT_PX : SCRIPT_OVERLAY_TOP_DEFAULT_PX,
         backgroundColor: 'color-mix(in srgb, var(--terminal-ui-bg) 92%, transparent)',
         borderColor: 'var(--terminal-ui-border)',
         color: 'var(--terminal-ui-fg)',
       }}
       data-section="script-execution-overlay"
+      data-compact-top-chrome={compactTopChrome ? "true" : "false"}
     >
       <div className="flex items-center gap-2 min-w-0">
-        <div className="min-w-0 flex flex-1 items-center text-[11px] leading-none">
+        <div className="flex min-w-0 flex-1 items-center text-[11px] leading-4">
           {statusLine}
         </div>
         {errorMessage ? (
           <div
-            className="min-w-0 max-w-[42%] shrink text-[11px] leading-none text-destructive truncate text-right"
+            className="min-w-0 max-w-[42%] shrink truncate text-right text-[11px] leading-4 text-destructive"
             title={errorMessage}
           >
             {errorMessage}

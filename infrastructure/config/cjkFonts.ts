@@ -87,6 +87,10 @@ export function splitFontFamilyList(css: string): string[] {
     const c = css[i];
     if (quote) {
       buf += c;
+      if (c === '\\' && i + 1 < css.length) {
+        buf += css[++i];
+        continue;
+      }
       if (c === quote) quote = null;
       continue;
     }
@@ -108,14 +112,32 @@ export function splitFontFamilyList(css: string): string[] {
   return tokens;
 }
 
+const CSS_GENERIC_FONT_FAMILIES = new Set([
+  'serif',
+  'sans-serif',
+  'monospace',
+  'cursive',
+  'fantasy',
+  'system-ui',
+  'ui-serif',
+  'ui-sans-serif',
+  'ui-monospace',
+  'ui-rounded',
+  'math',
+  'emoji',
+  'fangsong',
+]);
+
 function quoteIfNeeded(family: string): string {
   const trimmed = family.trim();
   if (!trimmed) return '';
-  if (trimmed === 'monospace') return trimmed;
-  if (trimmed.startsWith('"') && trimmed.endsWith('"')) return trimmed;
-  if (trimmed.includes(',')) return trimmed;
-  if (/\s/.test(trimmed)) return `"${trimmed}"`;
-  return trimmed;
+  if (CSS_GENERIC_FONT_FAMILIES.has(trimmed.toLowerCase())) return trimmed;
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"'))
+    || (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  ) return trimmed;
+  const escaped = trimmed.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return `"${escaped}"`;
 }
 
 interface ComposeArgs {

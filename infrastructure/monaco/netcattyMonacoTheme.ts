@@ -81,6 +81,17 @@ export const getNetcattyMonacoThemeName = (isDark: boolean): string => (
   isDark ? NETCATTY_MONACO_THEME_DARK : NETCATTY_MONACO_THEME_LIGHT
 );
 
+/**
+ * Soft amber find highlights (semi-transparent).
+ * Monaco's built-in light `editor.findMatchBackground` (#A8AC94) is fully
+ * opaque and washes out text on light editor backgrounds; dark's #515C6A is
+ * similarly heavy. Keep alphas below 1 so syntax colors remain readable.
+ */
+const FIND_MATCH_CURRENT = '#E8C54766';
+const FIND_MATCH_OTHER = '#E8C5473A';
+const FIND_MATCH_RANGE = '#E8C54722';
+const FIND_MATCH_OVERVIEW = '#E8C54799';
+
 export const buildNetcattyMonacoThemeColors = (
   colors: NetcattyEditorColors,
 ): Record<string, string> => ({
@@ -92,10 +103,17 @@ export const buildNetcattyMonacoThemeColors = (
   'editorLineNumber.foreground': colors.mutedFg,
   'editorLineNumber.activeForeground': colors.fg,
   'editor.lineHighlightBackground': `${colors.fg}08`,
+  // Soft matching-bracket highlight; inherited Monaco #888 border reads too heavy.
+  'editorBracketMatch.background': `${colors.primary}14`,
+  'editorBracketMatch.border': `${colors.primary}40`,
   'editorWidget.background': colors.card,
   'editorWidget.foreground': colors.fg,
   'editorWidget.border': colors.border,
   'input.background': colors.card,
   'input.foreground': colors.fg,
   'input.border': colors.border,
+  'editor.findMatchBackground': FIND_MATCH_CURRENT,
+  'editor.findMatchHighlightBackground': FIND_MATCH_OTHER,
+  'editor.findRangeHighlightBackground': FIND_MATCH_RANGE,
+  'editorOverviewRuler.findMatchForeground': FIND_MATCH_OVERVIEW,
 });

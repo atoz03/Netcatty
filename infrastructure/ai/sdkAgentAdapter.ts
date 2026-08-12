@@ -5,10 +5,17 @@
  * official SDK drivers and forwards stream events to the renderer.
  */
 
-import type { AIToolIntegrationMode, ExternalAgentConfig } from './types';
+import type {
+  AgentActivity,
+  AgentUsage,
+  AIPermissionMode,
+  AIToolIntegrationMode,
+  ExternalAgentConfig,
+} from './types';
 import { getExternalAgentSdkBackend, getManualAgentCommand } from './managedAgents';
 import { encodeSdkSessionIdentity } from './harness/sdkSessionIdentity';
-import { globalTraceStore, mapSdkStreamEventToAgentEvents } from './harness';
+import { mapSdkStreamEventToAgentEvents } from './harness/agentEventAdapter';
+import { globalTraceStore } from './harness/traceStore';
 import { decryptField } from '../persistence/secureFieldAdapter';
 
 export interface DefaultTargetSessionHint {
@@ -31,7 +38,15 @@ export interface SdkAgentCallbacks {
   onThinkingDone: () => void;
   onToolCall: (toolName: string, args: Record<string, unknown>, toolCallId?: string) => void;
   onToolResult: (toolCallId: string, result: string, toolName?: string) => void;
+  onFileChange?: (activity: Extract<AgentActivity, { type: 'file_change' }>) => void;
+  onWebSearch?: (activity: Extract<AgentActivity, { type: 'web_search' }>) => void;
+  onPlanUpdate?: (activity: Extract<AgentActivity, { type: 'plan_update' }>) => void;
+  onWarning?: (activity: Extract<AgentActivity, { type: 'warning' }>) => void;
+  onUsage?: (usage: AgentUsage) => void;
   onStatus?: (message: string) => void;
+  onHook?: (hookEvent: string, payload: Record<string, unknown>) => void;
+  onElicitationCreate?: (elicitationId: string, request: Record<string, unknown>) => void;
+  onElicitationComplete?: (notification: Record<string, unknown>) => void;
   onError: (error: string) => void;
   onDone: () => void;
 }
@@ -53,12 +68,30 @@ interface SdkAgentBridge {
     userSkillsContext?: string,
     agentEnv?: Record<string, string>,
     agentCommand?: string,
+    codexRuntime?: 'sdk' | 'app-server',
+    permissionMode?: AIPermissionMode,
+    codebuddyOptions?: ExternalAgentConfig['codebuddyOptions'],
   ): Promise<{ ok: boolean; error?: unknown }>;
+  aiSdkAgentSteer?(
+    requestId: string,
+    chatSessionId: string,
+    prompt: string,
+    images: FileAttachment[] | undefined,
+    clientUserMessageId: string,
+  ): Promise<SdkAgentSteerResult>;
   aiSdkAgentCancel(requestId: string, chatSessionId?: string): Promise<{ ok: boolean }>;
   onAiSdkAgentEvent(requestId: string, cb: (event: StreamEvent) => void): () => void;
   onAiSdkAgentDone(requestId: string, cb: () => void): () => void;
   onAiSdkAgentError(requestId: string, cb: (error: unknown) => void): () => void;
 }
+
+export type SdkAgentSteerResult =
+  | { status: 'accepted' }
+  | {
+      status: 'not-steerable' | 'busy' | 'inactive' | 'unsupported' | 'cancelled' | 'failed';
+      message?: string;
+      turnKind?: 'review' | 'compact';
+    };
 
 interface StreamEvent {
   type: string;
@@ -72,16 +105,53 @@ export interface FileAttachment {
   filePath?: string;
 }
 
+export async function steerSdkAgentTurn(
+  bridge: unknown,
+  requestId: string,
+  chatSessionId: string,
+  prompt: string,
+  images: FileAttachment[] | undefined,
+  clientUserMessageId: string,
+): Promise<SdkAgentSteerResult> {
+  const sdkBridge = bridge as SdkAgentBridge | null;
+  if (!sdkBridge?.aiSdkAgentSteer) return { status: 'unsupported' };
+  try {
+    return await sdkBridge.aiSdkAgentSteer(
+      requestId,
+      chatSessionId,
+      prompt,
+      images,
+      clientUserMessageId,
+    );
+  } catch (error) {
+    return {
+      status: 'failed',
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 async function buildAgentEnvWithStoredApiKey(
   sdkBackend: string,
   config: ExternalAgentConfig,
 ): Promise<Record<string, string> | undefined> {
   const env = { ...(config.env ?? {}) };
-  if (sdkBackend === 'cursor' && config.apiKey) {
-    const decrypted = await decryptField(config.apiKey).catch(() => config.apiKey);
-    const apiKey = String(decrypted || '').trim();
-    if (apiKey) {
-      env.CURSOR_API_KEY = apiKey;
+  if (sdkBackend === 'cursor') {
+    const authMode = config.cursorAuthMode === 'cli-login' ? 'cli-login' : 'api-key';
+    env.NETCATTY_CURSOR_AUTH_MODE = authMode;
+    const cliBin = String(config.command || '').trim();
+    if (authMode === 'cli-login') {
+      if (cliBin && cliBin !== 'cursor') {
+        env.NETCATTY_CURSOR_CLI_BIN = cliBin;
+      }
+      return Object.keys(env).length > 0 ? env : undefined;
+    }
+    if (config.apiKey) {
+      const decrypted = await decryptField(config.apiKey).catch(() => config.apiKey);
+      const apiKey = String(decrypted || '').trim();
+      if (apiKey) {
+        env.CURSOR_API_KEY = apiKey;
+      }
     }
   }
   return Object.keys(env).length > 0 ? env : undefined;
@@ -158,6 +228,7 @@ export async function runSdkAgentTurn(
   toolIntegrationMode?: AIToolIntegrationMode,
   defaultTargetSession?: DefaultTargetSessionHint,
   userSkillsContext?: string,
+  permissionMode?: AIPermissionMode,
   harnessOptions?: {
     traceSink?: (event: import('./harness/types').AgentEvent) => void;
     skipHarnessTrace?: boolean;
@@ -185,7 +256,14 @@ export async function runSdkAgentTurn(
     return true;
   };
 
-  const agentEnv = await buildAgentEnvWithStoredApiKey(sdkBackend, config);
+  const baseAgentEnv = await buildAgentEnvWithStoredApiKey(sdkBackend, config);
+  // Grok dual runtime: prefer Settings grokRuntime; env override still works in main.
+  const agentEnv = sdkBackend === 'grok'
+    ? {
+        ...baseAgentEnv,
+        NETCATTY_GROK_RUNTIME: config.grokRuntime === 'streaming-json' ? 'streaming-json' : 'acp',
+      }
+    : baseAgentEnv;
   const agentCommand = getManualAgentCommand(config);
 
   // Set up event listeners before starting stream
@@ -273,6 +351,9 @@ export async function runSdkAgentTurn(
     userSkillsContext,
     agentEnv,
     agentCommand,
+    sdkBackend === 'codex' ? (config.codexRuntime ?? 'sdk') : undefined,
+    permissionMode,
+    sdkBackend === 'codebuddy' ? config.codebuddyOptions : undefined,
   ).then((result) => {
     if (result?.ok === false) {
       settle(() => {
@@ -351,6 +432,62 @@ function handleStreamEvent(event: StreamEvent, callbacks: SdkAgentCallbacks): bo
       callbacks.onToolResult(toolCallId, result, toolName);
       return false;
     }
+    case 'file-change': {
+      callbacks.onFileChange?.({
+        id: (event.itemId as string) || '',
+        type: 'file_change',
+        status: event.status === 'failed' ? 'failed' : 'completed',
+        changes: Array.isArray(event.changes)
+          ? event.changes as Extract<AgentActivity, { type: 'file_change' }>['changes']
+          : [],
+      });
+      return false;
+    }
+    case 'web-search': {
+      callbacks.onWebSearch?.({
+        id: (event.itemId as string) || '',
+        type: 'web_search',
+        status: event.status === 'completed' ? 'completed' : 'running',
+        query: (event.query as string) || '',
+      });
+      return false;
+    }
+    case 'plan-update': {
+      callbacks.onPlanUpdate?.({
+        id: (event.itemId as string) || '',
+        type: 'plan_update',
+        status: event.status === 'completed' ? 'completed' : 'running',
+        items: Array.isArray(event.items)
+          ? event.items as Extract<AgentActivity, { type: 'plan_update' }>['items']
+          : [],
+      });
+      return false;
+    }
+    case 'warning': {
+      const message = (event.message as string) || '';
+      if (message) {
+        callbacks.onWarning?.({
+          id: (event.itemId as string) || '',
+          type: 'warning',
+          status: 'completed',
+          message,
+        });
+      }
+      return false;
+    }
+    case 'usage': {
+      const inputTokens = Number(event.inputTokens) || 0;
+      const outputTokens = Number(event.outputTokens) || 0;
+      callbacks.onUsage?.({
+        inputTokens,
+        cachedInputTokens: Number(event.cachedInputTokens) || 0,
+        outputTokens,
+        reasoningTokens: Number(event.reasoningTokens) || 0,
+        totalTokens: Number(event.totalTokens) || inputTokens + outputTokens,
+        estimated: false,
+      });
+      return false;
+    }
     case 'status': {
       const msg = (event.message as string) || '';
       if (msg) callbacks.onStatus?.(msg);
@@ -359,12 +496,37 @@ function handleStreamEvent(event: StreamEvent, callbacks: SdkAgentCallbacks): bo
     case 'session-id': {
       const sessionId = (event.sessionId as string) || '';
       if (sessionId) {
+        const runtimeRaw = String(event.runtime || 'sdk');
         callbacks.onSessionId?.(encodeSdkSessionIdentity(
           sessionId,
           event.sdkBackend as string | undefined,
           event.binPath as string | undefined,
+          // Preserve Codex + Grok dual-runtime tokens (do not collapse Grok to "sdk").
+          runtimeRaw,
+          event.authMode as string | undefined,
+          event.cliMode as string | undefined,
         ));
       }
+      return false;
+    }
+    case 'hook': {
+      const hookEvent = (event.hookEvent as string) || '';
+      if (hookEvent) {
+        callbacks.onHook?.(hookEvent, event as Record<string, unknown>);
+      }
+      return false;
+    }
+    case 'elicitation-create': {
+      const elicitationId = (event.elicitationId as string) || '';
+      const request = (event.request as Record<string, unknown>) || {};
+      if (elicitationId) {
+        callbacks.onElicitationCreate?.(elicitationId, request);
+      }
+      return false;
+    }
+    case 'elicitation-complete': {
+      const notification = (event.notification as Record<string, unknown>) || {};
+      callbacks.onElicitationComplete?.(notification);
       return false;
     }
     case 'error': {

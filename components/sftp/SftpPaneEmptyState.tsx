@@ -3,6 +3,8 @@ import { HardDrive, Monitor, Plus } from "lucide-react";
 import { Button } from "../ui/button";
 import { SftpHostPicker } from "./SftpHostPicker";
 import type { Host } from "../../domain/models";
+import type { SftpConnectedHostEntry } from "../../domain/sftpConnectedHosts";
+import type { SftpConnectHostOptions, SftpConnectTarget } from "./SftpContext";
 
 interface SftpPaneEmptyStateProps {
   side: "left" | "right";
@@ -13,7 +15,8 @@ interface SftpPaneEmptyStateProps {
   hostSearch: string;
   setHostSearch: (value: string) => void;
   hosts: Host[];
-  onConnect: (hostId: string) => void;
+  connectedHosts?: SftpConnectedHostEntry[];
+  onConnect: (host: SftpConnectTarget, options?: SftpConnectHostOptions) => void;
 }
 
 export const SftpPaneEmptyState: React.FC<SftpPaneEmptyStateProps> = ({
@@ -25,6 +28,7 @@ export const SftpPaneEmptyState: React.FC<SftpPaneEmptyStateProps> = ({
   hostSearch,
   setHostSearch,
   hosts,
+  connectedHosts = [],
   onConnect,
 }) => {
   return (
@@ -69,6 +73,7 @@ export const SftpPaneEmptyState: React.FC<SftpPaneEmptyStateProps> = ({
         open={showHostPicker}
         onOpenChange={setShowHostPicker}
         hosts={hosts}
+        connectedHosts={connectedHosts}
         side={side}
         hostSearch={hostSearch}
         onHostSearchChange={setHostSearch}

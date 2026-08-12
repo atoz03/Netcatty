@@ -2,6 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  buildCursorListModelsAgentEnv,
+  buildSdkRuntimeModelCacheKey,
   createSdkRuntimeModelCache,
   modelPresetsContainId,
   normalizeSdkRuntimeModelPresets,
@@ -10,6 +12,59 @@ import {
   shouldUseStoredAgentModel,
 } from './AIChatSidePanelHelpers';
 import type { AgentModelPreset, ExternalAgentConfig } from '../infrastructure/ai/types';
+
+test('buildCursorListModelsAgentEnv injects cli-login auth mode for list-models', () => {
+  assert.deepEqual(
+    buildCursorListModelsAgentEnv({
+      command: '/Users/me/.local/bin/cursor-agent',
+      cursorAuthMode: 'cli-login',
+      env: { HOME: '/Users/me' },
+    }),
+    {
+      HOME: '/Users/me',
+      NETCATTY_CURSOR_AUTH_MODE: 'cli-login',
+      NETCATTY_CURSOR_CLI_BIN: '/Users/me/.local/bin/cursor-agent',
+    },
+  );
+});
+
+test('buildCursorListModelsAgentEnv defaults to api-key without injecting CLI bin', () => {
+  assert.deepEqual(
+    buildCursorListModelsAgentEnv({
+      command: 'cursor',
+      env: {},
+    }),
+    {
+      NETCATTY_CURSOR_AUTH_MODE: 'api-key',
+    },
+  );
+  assert.deepEqual(
+    buildCursorListModelsAgentEnv({
+      command: 'cursor',
+      cursorAuthMode: 'api-key',
+    }),
+    {
+      NETCATTY_CURSOR_AUTH_MODE: 'api-key',
+    },
+  );
+});
+
+test('Cursor auth mode changes invalidate the SDK model cache key', () => {
+  const base = {
+    id: 'managed_cursor',
+    command: '/Users/me/.local/bin/cursor-agent',
+    sdkBackend: 'cursor',
+  };
+  const apiKey = buildSdkRuntimeModelCacheKey({
+    ...base,
+    cursorAuthMode: 'api-key',
+  });
+  const cliLogin = buildSdkRuntimeModelCacheKey({
+    ...base,
+    cursorAuthMode: 'cli-login',
+  });
+  assert.notEqual(apiKey, cliLogin);
+});
 
 test('modelPresetsContainId matches plain and thinking-level model ids', () => {
   const presets: AgentModelPreset[] = [
@@ -33,10 +88,29 @@ test('shouldLoadSdkRuntimeModels includes SDK agents with model catalogs', () =>
 
   assert.equal(shouldLoadSdkRuntimeModels(agent('claude')), true);
   assert.equal(shouldLoadSdkRuntimeModels(agent('copilot')), true);
+  assert.equal(shouldLoadSdkRuntimeModels(agent('cursor')), true);
   assert.equal(shouldLoadSdkRuntimeModels(agent('codebuddy')), true);
   assert.equal(shouldLoadSdkRuntimeModels(agent('opencode')), true);
+  assert.equal(shouldLoadSdkRuntimeModels(agent('grok')), true);
   assert.equal(shouldLoadSdkRuntimeModels(agent('codex')), false);
+  assert.equal(shouldLoadSdkRuntimeModels({ ...agent('codex'), codexRuntime: 'app-server' }), true);
   assert.equal(shouldLoadSdkRuntimeModels(undefined), false);
+});
+
+test('Codex App Server model discovery uses a separate cache identity', () => {
+  const sdk = buildSdkRuntimeModelCacheKey({
+    id: 'discovered_codex',
+    command: '/bin/codex',
+    sdkBackend: 'codex',
+    codexRuntime: 'sdk',
+  });
+  const appServer = buildSdkRuntimeModelCacheKey({
+    id: 'discovered_codex',
+    command: '/bin/codex',
+    sdkBackend: 'codex',
+    codexRuntime: 'app-server',
+  });
+  assert.notEqual(sdk, appServer);
 });
 
 test('shouldAdoptSdkCurrentModel keeps SDK defaults when no runtime list is returned', () => {
@@ -198,4 +272,34 @@ test('SDK runtime model cache ignores degraded empty catalogs', async () => {
     models: [],
   }));
   assert.equal(emptyCache.read('opencode:/usr/bin/opencode'), null);
+});
+
+test('SDK runtime model cache evicts expired catalogs', async () => {
+  let now = 1_000;
+  const cache = createSdkRuntimeModelCache({ ttlMs: 100, now: () => now });
+
+  await cache.refresh('opencode:/opt/bin/opencode', async () => ({
+    currentModelId: 'openai/gpt-5.1',
+    models: [{ id: 'openai/gpt-5.1', name: 'GPT-5.1' }],
+  }));
+  assert.equal(cache.size(), 1);
+
+  now = 1_101;
+  assert.equal(cache.read('opencode:/opt/bin/opencode'), null);
+  assert.equal(cache.size(), 0);
+});
+
+test('SDK runtime model cache stays bounded under agent configuration churn', async () => {
+  const cache = createSdkRuntimeModelCache({ maxEntries: 4 });
+
+  for (let index = 0; index < 20; index += 1) {
+    await cache.refresh(`agent:${index}`, async () => ({
+      currentModelId: `model-${index}`,
+      models: [{ id: `model-${index}`, name: `Model ${index}` }],
+    }));
+  }
+
+  assert.equal(cache.size(), 4);
+  assert.equal(cache.read('agent:0'), null);
+  assert.equal(cache.read('agent:19')?.currentModelId, 'model-19');
 });

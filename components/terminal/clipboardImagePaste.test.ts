@@ -30,7 +30,7 @@ test("remote paths are quoted for shell-safe insertion", () => {
 });
 
 test("remote clipboard image upload inserts the remote image path without broadcasting", async () => {
-  const writes: Array<{ sessionId: string; data: string }> = [];
+  const writes: Array<{ sessionId: string; data: string; sensitive?: boolean }> = [];
   const scrolled: string[] = [];
   let focused = false;
   let closedSftpId: string | undefined;
@@ -64,9 +64,14 @@ test("remote clipboard image upload inserts the remote image path without broadc
     },
     createTransferId: () => "transfer-1",
     getRemoteCwd: async () => "/home/alice/project",
+    isSensitiveInput: () => true,
     sessionId: "session-1",
     terminalBackend: {
-      writeToSession: (sessionId, data) => writes.push({ sessionId, data }),
+      writeToSession: (sessionId, data, options) => writes.push({
+        sessionId,
+        data,
+        sensitive: options?.sensitive,
+      }),
     },
     term: {
       focus: () => {
@@ -96,6 +101,7 @@ test("remote clipboard image upload inserts the remote image path without broadc
     {
       sessionId: "session-1",
       data: "/home/alice/project/.netcatty-paste-images/shot_1.png",
+      sensitive: true,
     },
   ]);
   assert.deepEqual(scrolled, ["/home/alice/project/.netcatty-paste-images/shot_1.png"]);
@@ -231,6 +237,27 @@ test("remote clipboard image upload reports transfer failures without inserting 
   });
 
   assert.deepEqual(result, { ok: false, reason: "upload-failed" });
+});
+
+test("remote clipboard image upload treats clipboard read failures as no image", async () => {
+  const result = await handleRemoteClipboardImageUpload({
+    bridge: {
+      readClipboardImage: async () => {
+        throw new Error("clipboard unavailable");
+      },
+      openSftpForSession: async () => {
+        assert.fail("should not open SFTP without an image");
+      },
+      startStreamTransfer: async (options) => ({ transferId: options.transferId }),
+    },
+    getRemoteCwd: async () => "/home/alice",
+    sessionId: "session-1",
+    terminalBackend: {
+      writeToSession: () => assert.fail("should not paste without an image"),
+    },
+  });
+
+  assert.deepEqual(result, { ok: false, reason: "no-image" });
 });
 
 test("remote clipboard image upload result maps to user-facing message keys", () => {

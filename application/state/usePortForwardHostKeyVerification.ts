@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { KnownHost } from "../../domain/models";
 import { netcattyBridge } from "../../infrastructure/services/netcattyBridge";
-import type { HostKeyInfo } from "../../components/terminal/TerminalHostKeyVerification";
+import type { HostKeyInfo } from "../../domain/hostKey";
 import {
   createKnownHostFromPortForwardHostKeyInfo,
   enqueuePortForwardHostKeyVerification,
@@ -9,7 +9,7 @@ import {
   toPendingPortForwardHostKeyVerification,
   type PendingPortForwardHostKeyVerification,
   type PortForwardHostKeyRequest,
-} from "../../components/port-forwarding/hostKeyVerification";
+} from "../../domain/portForwardHostKey";
 
 export interface PortForwardHostKeyVerificationState {
   hostKeyInfo: HostKeyInfo;

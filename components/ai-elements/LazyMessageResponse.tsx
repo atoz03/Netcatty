@@ -10,7 +10,7 @@ type LazyMessageResponseProps = {
 };
 
 const MessageResponse = lazy(() =>
-  import('./message').then((module) => ({ default: module.MessageResponse })),
+  import('./messageResponse').then((module) => ({ default: module.MessageResponse })),
 );
 
 const PlainTextFallback = ({ children, className }: LazyMessageResponseProps) => (

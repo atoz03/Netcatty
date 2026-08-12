@@ -1,5 +1,5 @@
 import type { AIPermissionMode } from '../types';
-import { CATTY_APPROVAL_TIMEOUT_MS } from '../shared/approvalConstants';
+import { CATTY_APPROVAL_HARD_DEADLINE_MS } from '../shared/approvalConstants';
 
 const THIRTY_MINUTES_MS = 30 * 60 * 1000;
 const TEN_MINUTES_MS = 10 * 60 * 1000;
@@ -18,7 +18,8 @@ export interface BuildCattyStreamTimeoutsInput {
 export function buildCattyStreamTimeouts(
   input: BuildCattyStreamTimeoutsInput = {},
 ) {
-  const approvalBudgetMs = input.permissionMode === 'confirm' ? CATTY_APPROVAL_TIMEOUT_MS : 0;
+  // Budget the hard approval deadline so a mid-review re-arm is not cut off by toolMs.
+  const approvalBudgetMs = input.permissionMode === 'confirm' ? CATTY_APPROVAL_HARD_DEADLINE_MS : 0;
   const stepCount =
     Number.isFinite(input.maxIterations) && input.maxIterations != null && input.maxIterations > 0
       ? Math.max(1, Math.floor(input.maxIterations))
@@ -33,7 +34,7 @@ export function buildCattyStreamTimeouts(
     totalMs,
     stepMs: Math.max(TEN_MINUTES_MS, commandTimeoutBudgetMs),
     chunkMs: Math.max(TWO_MINUTES_MS, commandTimeoutBudgetMs),
-    toolMs: Math.max(CATTY_APPROVAL_TIMEOUT_MS + NINETY_SECONDS_MS, commandTimeoutBudgetMs),
+    toolMs: Math.max(CATTY_APPROVAL_HARD_DEADLINE_MS + NINETY_SECONDS_MS, commandTimeoutBudgetMs),
   };
 }
 

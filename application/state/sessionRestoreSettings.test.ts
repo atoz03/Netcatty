@@ -88,7 +88,13 @@ test("session restore persistence can be disabled for non-main windows", () => {
   assert.match(hookSource, /if \(!persistSessionRestore\) return;/);
   assert.match(traySource, /useSessionState\(\{ persistSessionRestore: false \}\)/);
   assert.match(appSource, /window\.location\.hash\.startsWith\('#\/session-window'\)/);
-  assert.match(appSource, /persistSessionRestore: !isPeerSessionWindow/);
+  // App no longer calls useSessionState; SessionPublisher owns the hook and
+  // App passes the peer-window flag down to it.
+  assert.match(appSource, /<SessionPublisher persistSessionRestore=\{!isPeerSessionWindow\}>/);
+  assert.match(
+    readFileSync(new URL("../app/publishers/SessionPublisher.tsx", import.meta.url), "utf8"),
+    /useSessionState\(\{ persistSessionRestore \}\)/,
+  );
   assert.match(indexSource, /hash === '#\/session-window'/);
   assert.match(registerBridgesSource, /route: "session-window"/);
   assert.match(registerBridgesSource, /registerAsMainWindow: false/);
@@ -100,7 +106,8 @@ test("session restore persistence can be disabled for non-main windows", () => {
 });
 
 test("session peer windows do not run main-window startup effects", () => {
-  const appSource = readFileSync(new URL("../../App.tsx", import.meta.url), "utf8");
+  const appSource = readFileSync(new URL("../app/AppSideEffects.tsx", import.meta.url), "utf8");
+  const appRootSource = readFileSync(new URL("../../App.tsx", import.meta.url), "utf8");
   const autoSyncSource = readFileSync(new URL("./useAutoSync.ts", import.meta.url), "utf8");
   const startupEffectsSource = readFileSync(new URL("../app/useAppStartupEffects.ts", import.meta.url), "utf8");
   const updateCheckSource = readFileSync(new URL("./useUpdateCheck.ts", import.meta.url), "utf8");
@@ -112,7 +119,13 @@ test("session peer windows do not run main-window startup effects", () => {
   const trayPanelJumpIndex = appSource.indexOf("onTrayPanelJumpToSession");
 
   assert.match(appSource, /const isPeerSessionWindow = typeof window !== 'undefined' && window\.location\.hash\.startsWith\('#\/session-window'\)/);
-  assert.match(appSource, /useSettingsState\(\{[^}]*enableSettingsSync: !isPeerSessionWindow[^}]*enableSystemEffects: !isPeerSessionWindow/s);
+  // SettingsPublisher owns useSettingsState; App only forwards the peer-window
+  // flags to it.
+  assert.match(appRootSource, /<SettingsPublisher\s+enableSettingsSync=\{!isPeerSessionWindow\}\s+enableSystemEffects=\{!isPeerSessionWindow\}/s);
+  assert.match(
+    readFileSync(new URL("../app/publishers/SettingsPublisher.tsx", import.meta.url), "utf8"),
+    /useSettingsState\(\{ enableSettingsSync, enableSystemEffects \}\)/,
+  );
   assert.match(appSource, /useAppStartupEffects\(\{[^}]*enabled: !isPeerSessionWindow/s);
   assert.match(appSource, /useUpdateCheck\(\{[^}]*enabled: !isPeerSessionWindow/s);
   assert.match(appSource, /if \(isPeerSessionWindow \|\| !isVaultInitialized \|\| versionBackupAttemptedRef\.current\) return;/);

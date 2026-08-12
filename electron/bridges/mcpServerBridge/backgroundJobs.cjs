@@ -1,6 +1,20 @@
 /* eslint-disable no-undef */
 function createBackgroundJobApi(ctx) {
   with (ctx) {
+    async function waitForSessionCloseCleanup(pending) {
+      if (!pending.length) return;
+      const allSettled = Promise.allSettled(pending);
+      const timeoutMs = Number.isFinite(SESSION_CLOSE_CLEANUP_TIMEOUT_MS)
+        ? Math.max(1, SESSION_CLOSE_CLEANUP_TIMEOUT_MS)
+        : 5000;
+      let timer = null;
+      const timeout = new Promise((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+      });
+      await Promise.race([allSettled, timeout]);
+      if (timer) clearTimeout(timer);
+    }
+
     function createBackgroundJobId() {
       return `job_${Date.now().toString(36)}_${crypto.randomBytes(6).toString("hex")}`;
     }
@@ -20,13 +34,51 @@ function createBackgroundJobApi(ctx) {
         }
       }
     }
+
+    function cancelBackgroundJobsForTerminalSession(sessionId) {
+      if (!sessionId) return;
+      for (const [, job] of backgroundJobs) {
+        if (job.sessionId !== sessionId) continue;
+        if (job.status !== "running" && job.status !== "stopping") continue;
+        try {
+          job.handle?.cancel?.();
+        } catch {
+          // The terminal close below will still tear down the underlying stream.
+        }
+        job.status = "stopping";
+        job.error = "Cancellation requested";
+        job.updatedAt = Date.now();
+      }
+    }
+
+    async function settleBackgroundJobsForTerminalSession(sessionId) {
+      if (!sessionId) return;
+      const matchingJobs = [];
+      const pending = [];
+      for (const [jobId, job] of backgroundJobs) {
+        if (job.sessionId !== sessionId) continue;
+        matchingJobs.push([jobId, job]);
+        if (job.handle?.resultPromise) pending.push(job.handle.resultPromise);
+      }
+      await waitForSessionCloseCleanup(pending);
+      for (const [jobId] of matchingJobs) backgroundJobs.delete(jobId);
+      activeSessionExecutions.delete(sessionId);
+    }
     
-    function registerSftpOp(chatSessionId, cancel) {
+    function registerSftpOp(chatSessionId, sessionId, cancel) {
       if (!chatSessionId || typeof cancel !== "function") {
         return () => {};
       }
+      if (closingTerminalSessions?.has(sessionId)) {
+        try {
+          void Promise.resolve(cancel()).catch(() => {});
+        } catch {
+          // The session is already closing; a failed redundant cancellation is harmless.
+        }
+        return () => {};
+      }
       const opId = `sftp_${Date.now().toString(36)}_${(++activeSftpOpSeq).toString(36)}`;
-      activeSessionSftpOps.set(opId, { chatSessionId, cancel });
+      activeSessionSftpOps.set(opId, { chatSessionId, sessionId, cancel });
       return () => {
         activeSessionSftpOps.delete(opId);
       };
@@ -47,6 +99,34 @@ function createBackgroundJobApi(ctx) {
       if (pending.length) {
         await Promise.allSettled(pending);
       }
+    }
+
+    async function cancelSftpOpsForTerminalSession(sessionId) {
+      if (!sessionId) return;
+      const pending = [];
+      for (const [opId, entry] of activeSessionSftpOps) {
+        if (entry.sessionId !== sessionId) continue;
+        activeSessionSftpOps.delete(opId);
+        try {
+          pending.push(Promise.resolve(entry.cancel()));
+        } catch {
+          // Ignore cancellation failures for already-closed SFTP handles.
+        }
+      }
+      await waitForSessionCloseCleanup(pending);
+    }
+
+    function beginTerminalSessionClose(sessionId) {
+      if (!sessionId) return;
+      const current = closingTerminalSessions?.get(sessionId) || 0;
+      closingTerminalSessions?.set(sessionId, current + 1);
+    }
+
+    function endTerminalSessionClose(sessionId) {
+      if (!sessionId) return;
+      const current = closingTerminalSessions?.get(sessionId) || 0;
+      if (current <= 1) closingTerminalSessions?.delete(sessionId);
+      else closingTerminalSessions?.set(sessionId, current - 1);
     }
     
     function cancelAllSftpOps() {
@@ -246,8 +326,13 @@ function createBackgroundJobApi(ctx) {
     return {
       createBackgroundJobId,
       cancelBackgroundJobsForSession,
+      cancelBackgroundJobsForTerminalSession,
+      settleBackgroundJobsForTerminalSession,
       registerSftpOp,
       cancelSftpOpsForSession,
+      cancelSftpOpsForTerminalSession,
+      beginTerminalSessionClose,
+      endTerminalSessionClose,
       cancelAllSftpOps,
       readBackgroundJobSnapshot,
       createOutputWindow,

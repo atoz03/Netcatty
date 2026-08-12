@@ -28,6 +28,13 @@ export const zhCNCoreMessages: Messages = {
   'common.left': '左侧',
   'common.right': '右侧',
   'common.more': '更多',
+  'toolbar.layout.customize': '自定义工具栏',
+  'toolbar.layout.show': '显示',
+  'toolbar.layout.collapse': '折叠',
+  'toolbar.layout.hide': '隐藏',
+  'toolbar.layout.moveEarlier': '前移',
+  'toolbar.layout.moveLater': '后移',
+  'toolbar.layout.reset': '恢复默认',
   'common.selectAHost': '选择主机',
   'sort.manual': '手动顺序',
   'sort.az': 'A-z',
@@ -65,8 +72,12 @@ export const zhCNCoreMessages: Messages = {
   'settings.tab.appearance': '外观',
   'settings.tab.terminal': '终端',
   'settings.tab.shortcuts': '快捷键',
+  'settings.tab.ai': 'AI',
   'settings.tab.syncCloud': '同步与云',
   'settings.tab.system': '系统',
+  'settings.search.open': '搜索设置',
+  'settings.search.placeholder': '搜索设置项…',
+  'settings.search.noResults': '没有匹配的设置项',
   'settings.terminal.connection.verifyHostKeys': '校验 SSH 主机密钥',
   'settings.terminal.connection.verifyHostKeys.desc': '连接到新的或已变化的 SSH 主机密钥前先询问。只建议在可信内网中关闭。',
   'settings.terminal.section.sidePanel': '侧边栏',
@@ -103,6 +114,21 @@ export const zhCNCoreMessages: Messages = {
   'settings.system.credentials.unknown': '未知（当前环境不支持）',
   'settings.system.credentials.unavailableHint': '在其他用户或机器上加密的凭据无法在此处解密。请在当前设备重新输入并保存凭据。',
   'settings.system.credentials.portabilityHint': '云同步可跨设备，因为使用主密钥加密；本地 safeStorage 加密仅绑定当前系统用户/设备。',
+
+  // Settings > System > Network Proxy
+  'settings.system.networkProxy.title': '网络代理',
+  'settings.system.networkProxy.description': '用于云同步与 AI 服务商的 HTTP(S) 代理。与 SSH 的 ProxyJump / ProxyCommand 配置无关。',
+  'settings.system.networkProxy.mode': '代理模式',
+  'settings.system.networkProxy.mode.system': '系统代理',
+  'settings.system.networkProxy.mode.direct': '直连（不使用代理）',
+  'settings.system.networkProxy.mode.custom': '自定义代理',
+  'settings.system.networkProxy.url': '代理地址',
+  'settings.system.networkProxy.url.placeholder': 'http://127.0.0.1:7890',
+  'settings.system.networkProxy.url.desc': '支持 http://、https://、socks5:// 的 host:port 地址。代理 URL 中不支持账号密码。',
+  'settings.system.networkProxy.bypass': '绕过列表',
+  'settings.system.networkProxy.bypass.placeholder': '<local>,localhost,127.0.0.1',
+  'settings.system.networkProxy.bypass.desc': '逗号分隔、不走代理的主机。可用 <local> 表示本机与局域网名称。',
+  'settings.system.networkProxy.hint': '影响 Google Drive / OneDrive / GitHub 同步登录与 AI 服务商请求，不会改变 SSH 连接。',
 
   // Settings > System > Crash Logs
   'settings.system.crashLogs.title': '崩溃日志',
@@ -172,6 +198,9 @@ export const zhCNCoreMessages: Messages = {
   'settings.sessionLogs.timestamps': '添加时间戳',
   'settings.sessionLogs.timestampsDesc': '为纯文本和 HTML 日志的每一行添加本地时间。',
   'settings.sessionLogs.hint': '会话日志用于记录终端输出，便于故障排查和审计。',
+  'settings.sessionLogs.clearAll': '清空所有日志',
+  'settings.sessionLogs.clearAllDesc': '删除保存目录中所有会话日志文件及主机子目录。',
+  'settings.sessionLogs.clearConfirm': '此操作将永久删除保存目录中的所有会话日志文件，且无法撤销，是否继续？',
 
   // Settings > SSH Debug Logs
   'settings.sshDebugLogs.title': 'SSH 调试日志',
@@ -206,10 +235,12 @@ export const zhCNCoreMessages: Messages = {
   'tray.status.active': '已启用',
   'tray.status.inactive': '未启用',
   'tray.status.error': '错误',
+  'tray.status.unknown': '未知',
   'tray.recentHosts': '最近连接的主机',
   'tray.empty.title': '一切都很安静',
   'tray.empty.subtitle': '去连接个服务器吧，它们想念你了 🚀',
   'tray.quit': '退出 Netcatty',
+  'tray.closeSession': '关闭会话',
 
   // Vault Sidebar
   'vault.sidebar.collapse': '收起侧边栏',
@@ -231,12 +262,16 @@ export const zhCNCoreMessages: Messages = {
   'settings.vault.title': '主机库',
   'settings.vault.showRecentHosts': '显示最近连接的主机',
   'settings.vault.showRecentHostsDesc': '在主机列表顶部显示最近连接过的主机',
+  'settings.vault.selectBeforeConnect': '先选中再连接',
+  'settings.vault.selectBeforeConnectDesc': '单击选中主机（网格模式显示强调色边框），再次单击连接；分组同理。默认仍为单击直接连接。',
   'settings.vault.showOnlyUngroupedHostsInRoot': '根目录只显示未分组主机',
   'settings.vault.showOnlyUngroupedHostsInRootDesc': '开启后，主机库根目录的主机列表只显示没有分组的主机，已分组主机请从左侧分组进入查看。',
   'settings.vault.showSftpTab': '显示 SFTP 标签页',
   'settings.vault.showSftpTabDesc': '在顶部标签栏显示独立的 SFTP 视图。关闭后可改用会话内左侧的 SFTP 侧栏。',
   'settings.vault.showHostTreeSidebar': '显示主机列表侧栏',
   'settings.vault.showHostTreeSidebarDesc': '在终端和编辑器标签页显示主机列表侧栏及顶部开关。',
+  'settings.vault.autoImportSystemKnownHosts': '自动导入系统 known_hosts',
+  'settings.vault.autoImportSystemKnownHostsDesc': '打开主机库时静默导入 OpenSSH known_hosts 中的记录。关闭后，Netcatty 已知主机与系统信任库保持独立；仍可通过「扫描系统」手动导入。',
 
   // Update notifications
   'update.available.title': '发现新版本',
@@ -276,7 +311,125 @@ export const zhCNCoreMessages: Messages = {
   'settings.appearance.themeColor.dark': '深色主题',
   'settings.appearance.customCss': '自定义 CSS',
   'settings.appearance.customCss.desc':
-    '使用自定义 CSS 个性化界面，修改会立即生效。主要 UI 区块都暴露了 [data-section="..."] 属性供你定位，比如：snippets-panel、host-details-panel、group-details-panel、serial-host-details-panel、ai-chat-panel、vault-sidebar、vault-main、vault-hosts-header、vault-host-list、vault-view、terminal-workspace、terminal-workspace-sidebar（Focus 模式终端列表）、terminal-host-tree-sidebar、terminal-host-tree-sidebar-content、terminal-host-tree-sidebar-row、terminal-side-panel（SFTP/脚本/主题/AI 侧栏，打开时生效）、terminal-side-panel-tabs、terminal-side-panel-content、terminal-sftp-panel、terminal-sftp-host-header、terminal-sftp-pane、terminal-sftp-toolbar、terminal-sftp-path、terminal-sftp-filter-bar、terminal-sftp-list、terminal-sftp-list-header、terminal-sftp-list-row、terminal-sftp-tree、terminal-sftp-tree-row、terminal-sftp-transfer-queue、terminal-sftp-transfer-row、terminal-split-pane、terminal-split-resizer、top-tabs、top-tabs-host-tree-toggle、top-tabs-quick-switcher-toggle。',
+    '使用自定义 CSS 个性化界面，修改会立即生效。',
+  'settings.appearance.customCss.help.ariaLabel': '自定义 CSS 说明',
+  'settings.appearance.customCss.help.title': '自定义 CSS 说明',
+  'settings.appearance.customCss.help.body': `主要 UI 区块都暴露了 \`data-section\` 属性，供你用 CSS 定位。编辑后会立即生效。
+
+### 如何选择元素
+
+使用属性选择器：
+
+\`\`\`css
+[data-section="terminal-side-panel"] {
+  border: 2px solid #00c851 !important;
+  border-radius: 6px !important;
+}
+\`\`\`
+
+部分行 / 窗格还支持 \`[data-selected="true"]\`、\`[data-focused="true"]\` 等状态钩子。
+
+由于 Tailwind 工具类优先级较高，覆盖样式时通常需要使用 \`!important\`。
+
+### 顶部标签栏
+
+- \`top-tabs\`
+- \`top-tabs-toolbar-actions\` — 右侧菜单和工具栏
+- \`top-tabs-host-tree-toggle\`
+- \`top-tabs-quick-switcher-toggle\`
+
+### 保险库
+
+- \`vault-view\`
+- \`vault-sidebar\`
+- \`vault-main\`
+- \`vault-hosts-header\`
+- \`vault-host-list\`
+
+### 终端工作区
+
+- \`terminal-workspace\`
+- \`terminal-toolbar\` — 终端操作工具栏
+- \`terminal-toolbar-menu\` — 终端工具栏溢出菜单和子菜单
+- \`terminal-workspace-sidebar\` — Focus 模式终端列表
+- \`terminal-host-tree-sidebar\`
+- \`terminal-host-tree-sidebar-content\`
+- \`terminal-host-tree-sidebar-row\`
+- \`terminal-split-pane\`
+- \`terminal-split-resizer\`
+
+### 终端侧栏
+
+- \`terminal-side-panel\` — SFTP / 脚本 / 主题 / AI 侧栏（仅在打开时存在）
+- \`terminal-side-panel-tabs\`
+- \`terminal-side-panel-content\`
+
+### SFTP
+
+- \`terminal-sftp-panel\`
+- \`terminal-sftp-host-header\`
+- \`terminal-sftp-pane\`
+- \`terminal-sftp-toolbar\`
+- \`terminal-sftp-path\`
+- \`terminal-sftp-filter-bar\`
+- \`terminal-sftp-list\`
+- \`terminal-sftp-list-header\`
+- \`terminal-sftp-list-row\`
+- \`terminal-sftp-tree\`
+- \`terminal-sftp-tree-row\`
+- \`terminal-sftp-transfer-queue\`
+- \`terminal-sftp-transfer-row\`
+
+### 详情 / 工具面板
+
+- \`snippets-panel\`
+- \`host-details-panel\`
+- \`group-details-panel\`
+- \`serial-host-details-panel\`
+- \`ai-chat-panel\`
+
+### 示例
+
+放大菜单和工具栏图标：
+
+\`\`\`css
+[data-section="top-tabs-toolbar-actions"] button > svg,
+[data-section="terminal-toolbar"] button > svg,
+[data-section="terminal-toolbar-menu"] button > svg,
+[data-section="terminal-toolbar"] button [data-plugin-icon-kind="package"] {
+  width: 20px !important;
+  height: 20px !important;
+}
+\`\`\`
+
+隐藏顶部标签栏里的主机列表开关：
+
+\`\`\`css
+[data-section="top-tabs-host-tree-toggle"] {
+  width: 0 !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+\`\`\`
+
+修改选中的 SFTP 文件行：
+
+\`\`\`css
+[data-section="terminal-sftp-list-row"][data-selected="true"] {
+  background-color: #00c851 !important;
+  color: #001b10 !important;
+}
+\`\`\`
+
+高亮当前聚焦的分屏：
+
+\`\`\`css
+[data-section="terminal-split-pane"][data-focused="true"] {
+  outline: 2px solid hsl(var(--primary)) !important;
+  outline-offset: -2px;
+}
+\`\`\`
+`,
   'settings.appearance.customCss.placeholder':
     '/* 示例 — 由于 Tailwind 优先级较高，需要使用 !important */\n\n/* 隐藏顶部标签栏里的主机列表开关 */\n[data-section="top-tabs-host-tree-toggle"] {\n  width: 0 !important;\n  opacity: 0 !important;\n  pointer-events: none !important;\n}\n\n/* 隐藏打开快速切换器的加号按钮 */\n[data-section="top-tabs-quick-switcher-toggle"] {\n  display: none !important;\n}\n\n/* SFTP / 操作侧栏边框（关闭侧栏后不会残留） */\n[data-section="terminal-side-panel"] {\n  border: 2px solid #00c851 !important;\n  border-radius: 6px !important;\n}\n\n/* 修改整个操作侧栏背景，而不只是顶部标签 */\n[data-section="terminal-side-panel"],\n[data-section="terminal-side-panel-tabs"],\n[data-section="terminal-side-panel-content"],\n[data-section="terminal-sftp-panel"],\n[data-section="terminal-sftp-pane"],\n[data-section="terminal-sftp-list"],\n[data-section="terminal-sftp-tree"],\n[data-section="terminal-sftp-transfer-queue"] {\n  background-color: #1c384a !important;\n}\n\n/* 修改选中的 SFTP 文件行 */\n[data-section="terminal-sftp-list-row"][data-selected="true"] {\n  background-color: #00c851 !important;\n  color: #001b10 !important;\n}\n\n/* 加粗分屏分割线 */\n[data-section="terminal-split-resizer-bar"] {\n  background-color: hsl(var(--primary)) !important;\n  transform: scale(2) !important;\n}\n\n/* 高亮当前聚焦的分屏 */\n[data-section="terminal-split-pane"][data-focused="true"] {\n  outline: 2px solid hsl(var(--primary)) !important;\n  outline-offset: -2px;\n}\n\n/* 也可在 设置 → 终端 → 工作区聚焦指示 → 聚焦窗格显示边框 */',
   'settings.appearance.language': '语言',
@@ -426,6 +579,11 @@ export const zhCNCoreMessages: Messages = {
   'vault.groups.deleteDialog.desc': '这将永久删除该分组并将所有主机移动到根级别。',
   'vault.groups.deleteDialog.managedDesc': '这是一个托管的 SSH config 分组。删除后将同时删除所有主机并断开与源文件的连接。',
   'vault.groups.deleteDialog.deleteHosts': '同时删除该分组下的所有主机',
+  'vault.groups.deleteDialog.bulkTitle': '删除所选分组',
+  'vault.groups.deleteDialog.bulkDesc': '这将永久删除所选分组，并把其中的主机移动到根级别。',
+  'vault.groups.deleteDialog.bulkDeleteHosts': '同时删除所选分组下的所有主机',
+  'vault.groups.selectedCount': '已选择 {count} 个分组',
+  'vault.groups.deleteMultiple.success': '已删除 {count} 个所选项目',
   'vault.groups.ungrouped': '未分组',
   'vault.groups.field.name': '分组名称',
   'vault.groups.placeholder.example': '例如：Production',
@@ -476,6 +634,7 @@ export const zhCNCoreMessages: Messages = {
   'vault.hosts.export': '导出',
   'vault.hosts.export.toast.success': '已导出 {count} 个主机到 CSV',
   'vault.hosts.export.toast.successWithSkipped': '已导出 {count} 个主机到 CSV（跳过 {skipped} 个不支持的主机）',
+  'vault.hosts.export.toast.passphrasesSkipped': '有 {count} 个已保存的密钥口令无法读取，导出时已留空',
   'vault.hosts.export.toast.noHosts': '没有主机可导出',
   'vault.hosts.allHosts': '全部主机',
   'vault.hosts.pinned': '已置顶',
@@ -487,6 +646,7 @@ export const zhCNCoreMessages: Messages = {
   'vault.hosts.copyCredentials.toast.noPassword': '该主机未保存密码',
   'vault.hosts.multiSelect': '多选',
   'vault.hosts.selected': '已选择 {count} 项',
+  'vault.hosts.selectedSummary': '已选择 {hosts} 个主机和 {groups} 个分组',
   'vault.hosts.selectAll': '全选',
   'vault.hosts.deselectAll': '取消全选',
   'vault.hosts.deleteSelected': '删除 ({count})',
@@ -506,6 +666,25 @@ export const zhCNCoreMessages: Messages = {
   'vault.import.title': '添加数据到你的 Vault',
   'vault.import.desc': '从常见工具迁移连接信息。选择一种格式开始导入。',
   'vault.import.chooseFormat': '选择文件格式',
+  'vault.import.destination.title': '导入的主机放到哪里？',
+  'vault.import.destination.preserve': '保留原始分组',
+  'vault.import.destination.existing': '选择已有分组',
+  'vault.import.destination.new': '新建分组',
+  'vault.import.destination.noGroups': '暂无可选分组',
+  'vault.import.destination.newPlaceholder': '输入新分组名称',
+  'vault.import.destination.settings': '导入位置',
+  'vault.import.destination.settingsHint': '设置主机放到哪个分组',
+  'vault.import.destination.done': '完成',
+  'vault.import.securecrt.directoryHint': '请选择 SecureCRT 的 Sessions 文件夹。',
+  'vault.import.securecrt.chooseSource': '选择 SecureCRT 导入来源。',
+  'vault.import.securecrt.sourceQuestion': '你想导入哪些会话？',
+  'vault.import.securecrt.promptTitle': '从 SecureCRT 导入',
+  'vault.import.securecrt.promptDesc':
+    '请选择 SecureCRT 的 Sessions 文件夹以导入全部会话并保留目录结构，也可以只导入单个 .ini 会话文件。',
+  'vault.import.securecrt.folder': 'Sessions 文件夹',
+  'vault.import.securecrt.folderDesc': '一次导入全部会话，并保留目录结构。',
+  'vault.import.securecrt.file': '单个会话文件',
+  'vault.import.securecrt.fileDesc': '导入一个 SecureCRT .ini 会话。',
   'vault.import.csv.tip': '批量导入：可使用 CSV 模板填写后导入。',
   'vault.import.csv.downloadTemplate': '下载 CSV 模板',
   'vault.import.toast.start': '正在从 {format} 导入...',
@@ -515,12 +694,34 @@ export const zhCNCoreMessages: Messages = {
   'vault.import.toast.noNewHosts': '从 {format} 没有导入到新的主机。',
   'vault.import.toast.summary': '已导入 {count} 个主机（跳过 {skipped}，重复 {duplicates}）。',
   'vault.import.toast.firstIssue': '首个问题：{issue}',
+  'vault.import.progress.title': '正在导入主机',
+  'vault.import.progress.reading': '正在读取文件',
+  'vault.import.progress.parsing': '正在解析主机',
+  'vault.import.progress.preparing': '正在整理导入内容',
+  'vault.import.progress.saving': '正在保存主机',
+  'vault.import.progress.complete': '导入完成',
+  'vault.import.progress.failed': '导入失败',
+  'vault.import.progress.persistFailed': '导入的主机无法保存。请清理本地存储空间后重试。',
+  'vault.import.progress.rollbackFailed': '导入内容无法安全回退，可能仍有部分主机留在仓库中。请检查后再重试。',
+  'vault.import.progress.summary': '已导入 {count} 台主机；跳过 {skipped} 条；重复 {duplicates} 条。',
+  'vault.import.progress.keepOpen': '导入正在后台进行，请保持 Netcatty 开启。',
+  'vault.import.progress.fileSummary': '{name} · {count} 个文件',
+  'vault.import.progress.fileCount': '已处理 {completed}/{total} 个文件',
+  'vault.import.mobaxterm.chooseEncoding': '选择如何读取 MobaXterm 文件。',
+  'vault.import.mobaxterm.encodingQuestion': '这个文件使用哪种文字编码？',
+  'vault.import.mobaxterm.auto': '自动检测',
+  'vault.import.mobaxterm.autoDesc': '推荐。能按 UTF-8 读取时使用 UTF-8，否则使用中文 Windows 编码。',
+  'vault.import.mobaxterm.utf8': 'UTF-8',
+  'vault.import.mobaxterm.utf8Desc': '适用于已保存或转换为 UTF-8 的文件。',
+  'vault.import.mobaxterm.gb18030': '中文 Windows',
+  'vault.import.mobaxterm.gb18030Desc': '适用于中文 Windows 上导出的旧版文件。',
   'vault.import.sshConfig.chooseMode': '选择如何导入你的 SSH config 文件。',
   'vault.import.sshConfig.modeQuestion': '你希望如何导入？',
   'vault.import.sshConfig.importOnly': '仅导入',
   'vault.import.sshConfig.importOnlyDesc': '一次性导入，修改不会同步回文件。',
   'vault.import.sshConfig.managed': '托管同步',
   'vault.import.sshConfig.managedDesc': '保持同步，修改会自动保存回文件。',
+  'vault.import.sshConfig.managedDestinationHint': '托管同步会使用独立的托管分组；上方目标分组只用于一次性导入。',
   'vault.import.sshConfig.managedGroup': 'ssh config',
   'vault.import.sshConfig.managedSuccess': '已导入 {count} 个主机，文件已托管。',
   'vault.import.sshConfig.alreadyManaged': '该文件已被托管。',
@@ -604,10 +805,12 @@ export const zhCNCoreMessages: Messages = {
   'sftp.bookmark.addGlobalTooltip': '保存为全局收藏（所有主机共享）',
   'sftp.bookmark.empty': '暂无收藏路径',
   'sftp.columns.name': '名称',
+  'sftp.columns.configure': '选择显示的列',
   'sftp.columns.modified': '修改时间',
   'sftp.columns.size': '大小',
   'sftp.columns.kind': '类型',
   'sftp.columns.actions': '操作',
+  'sftp.sort.directoriesFirst': '目录置顶',
   'sftp.emptyDirectory': '空目录',
   'sftp.nav.up': '返回上层',
   'sftp.nav.home': '返回主目录',
@@ -627,6 +830,7 @@ export const zhCNCoreMessages: Messages = {
   'sftp.moveTo.pathNotFound': '目录不存在或无法访问',
   'sftp.context.download': '下载',
   'sftp.context.copyToOtherPane': '复制到另一侧',
+  'sftp.copyToOtherPane.unavailable': '请打开双栏 SFTP 文件管理，并连接目标侧后再复制文件。',
   'sftp.copyCurrentPath': '复制当前路径',
   'sftp.copyCurrentPath.success': '已复制当前路径',
   'sftp.copyCurrentPath.error': '无法复制当前路径',
@@ -664,6 +868,7 @@ export const zhCNCoreMessages: Messages = {
   'sftp.transfers.calculatingTotal': '正在统计总大小...',
   'sftp.transfers.filesCount': '{count} 个文件',
   'sftp.transfers.filesProgress': '{current}/{total} 个文件',
+  'sftp.transfers.filesDiscoveredProgress': '已完成 {completed} · 已发现 {discovered}',
   'sftp.transfers.expandChildren': '展开文件',
   'sftp.transfers.collapseChildren': '收起文件',
   'sftp.transfers.expandChildList': '展开详情',
@@ -675,10 +880,51 @@ export const zhCNCoreMessages: Messages = {
   'sftp.transfers.copyTargetPath': '复制目标路径',
   'sftp.transfers.copyTargetPathSuccess': '已复制目标路径',
   'sftp.transfers.copyTargetPathError': '无法复制目标路径',
+  'sftp.transfers.pathConflict.title': '无法开始传输',
+  'sftp.transfers.pathConflict.paused': '“{name}”已有传输任务处于暂停状态，请先继续或取消该任务。',
+  'sftp.transfers.pathConflict.inProgress': '“{name}”已有传输任务正在进行中。',
+  'sftp.transferCenter.title': '文件传输',
+  'sftp.transferCenter.quitConfirm': '还有 {count} 个文件传输任务未完成。退出后会保留进度，下次打开时需要手动继续。确定退出吗？',
+  'sftp.transferCenter.phase.scanning': '正在扫描',
+  'sftp.transferCenter.phase.compressing': '正在压缩',
+  'sftp.transferCenter.phase.uploading': '正在上传',
+  'sftp.transferCenter.phase.transferring': '传输中',
+  'sftp.transferCenter.phase.extracting': '正在解压',
+  'sftp.transferCenter.phase.verifying': '正在校验',
+  'sftp.transferCenter.bucket.active': '进行中',
+  'sftp.transferCenter.bucket.all': '全部',
+  'sftp.transferCenter.bucket.queued': '排队中',
+  'sftp.transferCenter.bucket.paused': '已暂停',
+  'sftp.transferCenter.bucket.failed': '失败',
+  'sftp.transferCenter.bucket.attention': '需要处理',
+  'sftp.transferCenter.bucket.completed': '已完成',
+  'sftp.transferCenter.status.pending': '准备中',
+  'sftp.transferCenter.status.resuming': '正在重新连接并续传…',
+  'sftp.transferCenter.status.queued': '排队中',
+  'sftp.transferCenter.status.transferring': '传输中',
+  'sftp.transferCenter.status.pausing': '正在暂停',
+  'sftp.transferCenter.status.paused': '已暂停',
+  'sftp.transferCenter.status.attention': '需要处理',
+  'sftp.transferCenter.status.interrupted': '已中断，请手动继续',
+  'sftp.transferCenter.status.completed': '已完成',
+  'sftp.transferCenter.status.failed': '失败',
+  'sftp.transferCenter.status.cancelled': '已取消',
+  'sftp.transferCenter.background': '后台',
+  'sftp.transferCenter.pause': '暂停',
+  'sftp.transferCenter.resume': '继续',
+  'sftp.transferCenter.prioritize': '优先传输',
+  'sftp.transferCenter.pauseAll': '全部暂停',
+  'sftp.transferCenter.resumeAll': '全部继续',
+  'sftp.transferCenter.empty': '当前分类没有传输任务',
+  'sftp.transferCenter.showBackground': '显示 {count} 个后台任务',
+  'sftp.transferCenter.hideBackground': '隐藏后台任务',
+  'sftp.transferCenter.clear': '清理记录',
+  'sftp.transferCenter.applyAll': '应用到全部',
   'sftp.transfers.resizeNameColumn': '调整文件名列宽',
   'sftp.transfers.dragToResize': '拖拽调整高度',
   'sftp.goUp': '上一级',
   'sftp.goToTerminalCwd': '定位到终端当前目录',
+  'sftp.locatePathInTerminal': '定位路径到终端',
   'sftp.followTerminalCwd': '追随终端目录',
   'sftp.followTerminalCwd.enable': '开启追随终端目录',
   'sftp.followTerminalCwd.disable': '关闭追随终端目录',
@@ -720,6 +966,9 @@ export const zhCNCoreMessages: Messages = {
   'sftp.picker.local.title': '本地文件系统',
   'sftp.picker.local.desc': '浏览本地文件',
   'sftp.picker.local.badge': '本地',
+  'sftp.picker.connected.section': '已连接',
+  'sftp.picker.connected.badge': '已连接',
+  'sftp.picker.connected.connecting': '连接中',
   'sftp.picker.noMatch': '没有匹配的主机',
   'sftp.permissions.title': '编辑权限',
   'sftp.permissions.owner': '所有者',
@@ -736,5 +985,36 @@ export const zhCNCoreMessages: Messages = {
   'qs.localTerminal': '本地终端',
   'qs.localShells': '本地 Shell',
   'qs.default': '默认',
+  'settings.tab.plugins': '插件',
+  'settings.plugins.title': '插件设置',
+  'settings.plugins.description': '由开发插件提供、经 Netcatty 原生组件验证的设置。',
+  'settings.plugins.loading': '正在加载插件设置…',
+  'settings.plugins.empty': '当前没有已启用插件提供设置。',
+  'settings.plugins.scopeContext': '请在对应的 {scope} 上下文中打开此设置。',
+  'settings.plugins.pressKeybinding': '请按下组合键',
+  'settings.plugins.validJsonArray': '请输入有效的 JSON 数组。',
+  'settings.plugins.browse': '浏览',
+  'settings.plugins.restartRequired': '需要重启',
+  'settings.plugins.saving': '正在保存…',
+  'settings.plugins.storedSecurely': '已安全存储',
+  'settings.plugins.configuredReplacement': '已配置 — 输入新值以替换',
+  'settings.plugins.moveItemUp': '将 {label} 的第 {index} 项上移',
+  'settings.plugins.moveItemDown': '将 {label} 的第 {index} 项下移',
+  'settings.plugins.addItem': '添加项目',
+  'settings.plugins.removeItem': '删除项目',
+  'settings.plugins.scopeTargets': '插件设置作用域',
+  'settings.plugins.scopeTarget': '{scope} 目标',
+  'settings.plugins.noScopeTargets': '暂无可用目标',
+  'settings.plugins.thisDevice': '此设备',
+  'plugins.authentication.description': '请在此 Netcatty 对话框中完成认证请求。',
+  'plugins.authentication.value': '值',
+  'plugins.authentication.password': '密码',
+  'plugins.authentication.code': '一次性验证码',
+  'plugins.authentication.deviceCode': '设备代码',
+  'plugins.authentication.openBrowser': '打开浏览器',
+  'plugins.authentication.invalidUrl': '认证提供程序返回了不安全或无效的网址。',
+  'plugins.authentication.responseFailed': '无法发送认证响应。请重试或取消此请求。',
+  'plugins.authentication.responseFailedWithMessage': '无法发送认证响应：{message}。请重试或取消此请求。',
+  'plugins.authentication.continue': '继续',
 
 };

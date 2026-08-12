@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { formatSdkAgentErrorForDisplay, runSdkAgentTurn } from './sdkAgentAdapter';
+import { formatSdkAgentErrorForDisplay, runSdkAgentTurn, steerSdkAgentTurn } from './sdkAgentAdapter';
 import type { SdkAgentCallbacks } from './sdkAgentAdapter';
 import type { ExternalAgentConfig } from './types';
 
@@ -24,6 +24,32 @@ const sdkConfig: ExternalAgentConfig = {
   enabled: true,
   sdkBackend: 'codex',
 };
+
+test('steerSdkAgentTurn forwards the active request and preserves typed outcomes', async () => {
+  const calls: unknown[][] = [];
+  const result = await steerSdkAgentTurn({
+    aiSdkAgentSteer: async (...args: unknown[]) => {
+      calls.push(args);
+      return { status: 'not-steerable', turnKind: 'review' };
+    },
+  }, 'request-1', 'chat-1', 'change direction', [{
+    base64Data: 'aGVsbG8=',
+    mediaType: 'image/png',
+    filename: 'image.png',
+  }], 'user-1');
+
+  assert.deepEqual(result, { status: 'not-steerable', turnKind: 'review' });
+  assert.deepEqual(calls[0], [
+    'request-1',
+    'chat-1',
+    'change direction',
+    [{ base64Data: 'aGVsbG8=', mediaType: 'image/png', filename: 'image.png' }],
+    'user-1',
+  ]);
+  assert.deepEqual(await steerSdkAgentTurn({}, 'request-1', 'chat-1', 'text', undefined, 'user-1'), {
+    status: 'unsupported',
+  });
+});
 
 test('formatSdkAgentErrorForDisplay preserves nested SDK agent error messages', () => {
   assert.equal(
@@ -114,7 +140,7 @@ test('runSdkAgentTurn forwards configured SDK agent environment', async () => {
     createCallbacks([]),
   );
 
-  assert.deepEqual(streamArgs.at(-2), {
+  assert.deepEqual(streamArgs[13], {
     CLAUDE_CODE_EXECUTABLE: '/opt/homebrew/bin/claude',
   });
   assert.equal(streamArgs[2], 'codex');
@@ -151,7 +177,7 @@ test('runSdkAgentTurn forwards the configured agent command path', async () => {
     createCallbacks([]),
   );
 
-  assert.equal(streamArgs.at(-1), '/opt/homebrew/bin/codex');
+  assert.equal(streamArgs[14], '/opt/homebrew/bin/codex');
 });
 
 test('runSdkAgentTurn does not forward auto-detected command paths', async () => {
@@ -185,7 +211,7 @@ test('runSdkAgentTurn does not forward auto-detected command paths', async () =>
     createCallbacks([]),
   );
 
-  assert.equal(streamArgs.at(-1), undefined);
+  assert.equal(streamArgs[14], undefined);
 });
 
 test('runSdkAgentTurn stores SDK session ids with backend and path metadata', async () => {
@@ -237,6 +263,7 @@ test('runSdkAgentTurn stores SDK session ids with backend and path metadata', as
     id: 'thread-1',
     backend: 'codex',
     binPath: '/opt/homebrew/bin/codex',
+    runtime: 'sdk',
   });
 });
 
@@ -274,10 +301,52 @@ test('runSdkAgentTurn forwards Cursor API key as agent environment', async () =>
     createCallbacks([]),
   );
 
-  assert.deepEqual(streamArgs.at(-2), {
+  assert.deepEqual(streamArgs[13], {
+    NETCATTY_CURSOR_AUTH_MODE: 'api-key',
     CURSOR_API_KEY: 'cur-test-key',
   });
   assert.equal(streamArgs[2], 'cursor');
+});
+
+test('runSdkAgentTurn in cursor cli-login mode does not inject CURSOR_API_KEY', async () => {
+  let streamArgs: unknown[] = [];
+  let done: (() => void) | null = null;
+  const bridge: Record<string, (...args: unknown[]) => unknown> = {
+    aiSdkAgentStream: async (...args: unknown[]) => {
+      streamArgs = args;
+      queueMicrotask(() => done?.());
+      return { ok: true };
+    },
+    aiSdkAgentCancel: async () => ({ ok: true }),
+    onAiSdkAgentEvent: () => () => {},
+    onAiSdkAgentDone: (_requestId: unknown, cb: unknown) => {
+      done = cb as () => void;
+      return () => {};
+    },
+    onAiSdkAgentError: () => () => {},
+  };
+
+  await runSdkAgentTurn(
+    bridge,
+    'request-cursor-cli',
+    'chat-cursor-cli',
+    {
+      id: 'cursor',
+      name: 'Cursor',
+      command: '/Users/me/.local/bin/agent',
+      enabled: true,
+      sdkBackend: 'cursor',
+      cursorAuthMode: 'cli-login',
+      apiKey: 'should-not-inject',
+    },
+    'hello',
+    createCallbacks([]),
+  );
+
+  assert.deepEqual(streamArgs[13], {
+    NETCATTY_CURSOR_AUTH_MODE: 'cli-login',
+    NETCATTY_CURSOR_CLI_BIN: '/Users/me/.local/bin/agent',
+  });
 });
 
 
@@ -354,4 +423,161 @@ test('runSdkAgentTurn formats structured stream error events', async () => {
   );
 
   assert.deepEqual(errors, ['Stream failed']);
+});
+
+test('runSdkAgentTurn forwards Codex activities and usage without treating warnings as fatal', async () => {
+  const activities: unknown[] = [];
+  const usages: unknown[] = [];
+  const errors: string[] = [];
+  let onEvent: ((event: unknown) => void) | null = null;
+  let done: (() => void) | null = null;
+  const bridge: Record<string, (...args: unknown[]) => unknown> = {
+    aiSdkAgentStream: async () => {
+      queueMicrotask(() => {
+        onEvent?.({
+          type: 'file-change',
+          itemId: 'patch-1',
+          status: 'completed',
+          changes: [{ path: 'src/app.ts', kind: 'update' }],
+        });
+        onEvent?.({
+          type: 'web-search',
+          itemId: 'search-1',
+          query: 'Codex SDK events',
+          status: 'completed',
+        });
+        onEvent?.({
+          type: 'plan-update',
+          itemId: 'plan-1',
+          items: [{ text: 'Map events', completed: true }],
+          status: 'completed',
+        });
+        onEvent?.({ type: 'warning', itemId: 'warning-1', message: 'Search result unavailable' });
+        onEvent?.({
+          type: 'usage',
+          inputTokens: 100,
+          cachedInputTokens: 40,
+          outputTokens: 25,
+          reasoningTokens: 10,
+          totalTokens: 125,
+        });
+        done?.();
+      });
+      return { ok: true };
+    },
+    aiSdkAgentCancel: async () => ({ ok: true }),
+    onAiSdkAgentEvent: (_requestId: unknown, cb: unknown) => {
+      onEvent = cb as (event: unknown) => void;
+      return () => {};
+    },
+    onAiSdkAgentDone: (_requestId: unknown, cb: unknown) => {
+      done = cb as () => void;
+      return () => {};
+    },
+    onAiSdkAgentError: () => () => {},
+  };
+
+  await runSdkAgentTurn(
+    bridge,
+    'request-events',
+    'chat-events',
+    sdkConfig,
+    'hello',
+    {
+      ...createCallbacks(errors),
+      onFileChange: (activity) => activities.push(activity),
+      onWebSearch: (activity) => activities.push(activity),
+      onPlanUpdate: (activity) => activities.push(activity),
+      onWarning: (activity) => activities.push(activity),
+      onUsage: (usage) => usages.push(usage),
+    },
+  );
+
+  assert.deepEqual((activities as Array<{ type: string }>).map((activity) => activity.type), [
+    'file_change',
+    'web_search',
+    'plan_update',
+    'warning',
+  ]);
+  assert.deepEqual(usages, [{
+    inputTokens: 100,
+    cachedInputTokens: 40,
+    outputTokens: 25,
+    reasoningTokens: 10,
+    totalTokens: 125,
+    estimated: false,
+  }]);
+  assert.deepEqual(errors, []);
+});
+
+test('runSdkAgentTurn forwards CodeBuddy options, hooks, and elicitation events', async () => {
+  const errors: string[] = [];
+  const hooks: unknown[] = [];
+  const elicitations: unknown[] = [];
+  let streamArgs: unknown[] = [];
+  let onEvent: ((event: unknown) => void) | null = null;
+  let done: (() => void) | null = null;
+  const bridge: Record<string, (...args: unknown[]) => unknown> = {
+    aiSdkAgentStream: async (...args: unknown[]) => {
+      streamArgs = args;
+      queueMicrotask(() => {
+        onEvent?.({ type: 'hook', hookEvent: 'PreToolUse', toolName: 'Bash' });
+        onEvent?.({
+          type: 'elicitation-create',
+          elicitationId: 'el-1',
+          request: { message: 'Confirm?' },
+        });
+        onEvent?.({
+          type: 'elicitation-complete',
+          notification: { elicitationId: 'el-1' },
+        });
+        done?.();
+      });
+      return { ok: true };
+    },
+    aiSdkAgentCancel: async () => ({ ok: true }),
+    onAiSdkAgentEvent: (_requestId: unknown, cb: unknown) => {
+      onEvent = cb as (event: unknown) => void;
+      return () => {};
+    },
+    onAiSdkAgentDone: (_requestId: unknown, cb: unknown) => {
+      done = cb as () => void;
+      return () => {};
+    },
+    onAiSdkAgentError: () => () => {},
+  };
+  const codebuddyConfig: ExternalAgentConfig = {
+    id: 'codebuddy',
+    name: 'CodeBuddy',
+    command: 'codebuddy',
+    enabled: true,
+    sdkBackend: 'codebuddy',
+    codebuddyOptions: { effort: 'high' },
+  };
+
+  await runSdkAgentTurn(
+    bridge,
+    'request-codebuddy',
+    'chat-codebuddy',
+    codebuddyConfig,
+    'hello',
+    {
+      ...createCallbacks(errors),
+      onHook: (hookEvent, payload) => hooks.push({ hookEvent, payload }),
+      onElicitationCreate: (elicitationId, request) => {
+        elicitations.push({ elicitationId, request });
+      },
+      onElicitationComplete: (notification) => {
+        elicitations.push({ notification });
+      },
+    },
+  );
+
+  assert.deepEqual(streamArgs[17], { effort: 'high' });
+  assert.equal((hooks[0] as { hookEvent: string }).hookEvent, 'PreToolUse');
+  assert.deepEqual(elicitations, [
+    { elicitationId: 'el-1', request: { message: 'Confirm?' } },
+    { notification: { elicitationId: 'el-1' } },
+  ]);
+  assert.deepEqual(errors, []);
 });

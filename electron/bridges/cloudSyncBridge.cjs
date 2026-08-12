@@ -8,8 +8,192 @@ const {
   GetObjectCommand,
   DeleteObjectCommand,
 } = require("@aws-sdk/client-s3");
+const {
+  resolveOutboundHttpAgent,
+} = require("./httpNetworkProxyAgent.cjs");
 
 const SYNC_FILE_NAME = "netcatty-vault.json";
+
+/**
+ * Some WebDAV servers (esp. lightweight / local ones) overwrite existing
+ * files without truncating when the new body is shorter. That leaves trailing
+ * non-whitespace bytes from the previous longer body and breaks JSON.parse
+ * (#2223).
+ *
+ * Strategy:
+ * 1) Prefer fixed-name temp PUT + MOVE (atomic, exact size) when supported.
+ * 2) Otherwise in-place PUT padded with spaces to at least the previous
+ *    length, then re-read and verify JSON. Retry with a larger pad if a
+ *    concurrent writer grew the file (stale-length race). JSON.parse
+ *    ignores trailing whitespace, so the canonical path never needs DELETE.
+ */
+const serializeSyncedFileBody = (syncedFile) =>
+  Buffer.from(JSON.stringify(syncedFile), "utf8");
+
+const safeDeleteWebdavPath = async (client, path) => {
+  try {
+    if (await client.exists(path)) {
+      await client.deleteFile(path);
+    }
+  } catch {
+    // Best-effort cleanup only (temp files).
+  }
+};
+
+/** Pad body with spaces so non-truncating PUTs cannot leave garbage. */
+const padBodyToAtLeast = (bodyBuffer, minLength) => {
+  if (!minLength || minLength <= bodyBuffer.length) return bodyBuffer;
+  return Buffer.concat([bodyBuffer, Buffer.alloc(minLength - bodyBuffer.length, 0x20)]);
+};
+
+/**
+ * Strict upload check: remote must be exactly the intended body, optionally
+ * followed only by whitespace. Do NOT use parseSyncedFileJson here — that
+ * helper intentionally recovers trailing garbage on download.
+ */
+const remoteMatchesUploadedBody = (remoteText, bodyBuffer) => {
+  const bodyText = bodyBuffer.toString("utf8");
+  if (!remoteText.startsWith(bodyText)) return false;
+  return /^\s*$/.test(remoteText.slice(bodyText.length));
+};
+
+const readExistingByteLengthStrict = async (client, path) => {
+  let exists = false;
+  try {
+    exists = await client.exists(path);
+  } catch (error) {
+    throw new Error(
+      `WebDAV replace aborted: could not check existing file (${
+        error instanceof Error ? error.message : String(error)
+      })`
+    );
+  }
+  if (!exists) return 0;
+  try {
+    const existing = await client.getFileContents(path, { format: "text" });
+    if (existing == null) return 0;
+    return Buffer.byteLength(String(existing), "utf8");
+  } catch (error) {
+    throw new Error(
+      `WebDAV replace aborted: could not read existing file length (${
+        error instanceof Error ? error.message : String(error)
+      })`
+    );
+  }
+};
+
+const readRemoteText = async (client, path) => {
+  const remote = await client.getFileContents(path, { format: "text" });
+  return String(remote ?? "");
+};
+
+const putWebdavFileReplacing = async (client, path, bodyBuffer) => {
+  // Fixed temp name so failed cleanups cannot accumulate one full vault per sync.
+  const tmpPath = `${path}.tmp`;
+
+  // Optional atomic path: pad temp (in case a stale non-truncated .tmp remains),
+  // MOVE into place, then strictly verify the destination.
+  try {
+    let tmpMinLen = 0;
+    try {
+      tmpMinLen = await readExistingByteLengthStrict(client, tmpPath);
+    } catch {
+      tmpMinLen = 0;
+    }
+    await client.putFileContents(tmpPath, padBodyToAtLeast(bodyBuffer, tmpMinLen), {
+      overwrite: true,
+    });
+    await client.moveFile(tmpPath, path, { overwrite: true });
+    const movedText = await readRemoteText(client, path);
+    if (remoteMatchesUploadedBody(movedText, bodyBuffer)) {
+      return;
+    }
+  } catch {
+    // fall through to padded in-place PUT
+  }
+  await safeDeleteWebdavPath(client, tmpPath);
+
+  // Keep the canonical path visible. Pad + strict verify so non-truncating
+  // servers and concurrent writers that grow the remote cannot leave garbage.
+  let minLen = await readExistingByteLengthStrict(client, path);
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const payload = padBodyToAtLeast(bodyBuffer, minLen);
+    await client.putFileContents(path, payload, { overwrite: true });
+    let remoteText = "";
+    try {
+      remoteText = await readRemoteText(client, path);
+    } catch (error) {
+      throw new Error(
+        `WebDAV upload verification failed: could not re-read file (${
+          error instanceof Error ? error.message : String(error)
+        })`
+      );
+    }
+    if (remoteMatchesUploadedBody(remoteText, bodyBuffer)) {
+      return;
+    }
+    minLen = Math.max(minLen, Buffer.byteLength(remoteText, "utf8"), bodyBuffer.length);
+  }
+  throw new Error(
+    "WebDAV upload verification failed: remote file still does not match uploaded body after padded PUT"
+  );
+};
+
+/**
+ * Recover from trailing garbage left by non-truncating WebDAV PUT overwrites.
+ * Node/V8 reports: "Unexpected non-whitespace character after JSON at position N".
+ */
+const parseSyncedFileJson = (raw) => {
+  const text = String(raw ?? "");
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const match = /Unexpected non-whitespace character after JSON at position (\d+)/i.exec(
+      message
+    );
+    if (match) {
+      const pos = Number(match[1]);
+      if (Number.isFinite(pos) && pos > 0 && pos <= text.length) {
+        return JSON.parse(text.slice(0, pos));
+      }
+    }
+    throw error;
+  }
+};
+
+let electronModuleRef = null;
+
+const isHttpsEndpoint = (endpoint) => {
+  try {
+    return new URL(endpoint).protocol === "https:";
+  } catch {
+    return true;
+  }
+};
+
+const resolveCloudSyncTransportAgent = async (targetUrl, allowInsecure = false) => {
+  const session = electronModuleRef?.session?.defaultSession || null;
+  const agent = await resolveOutboundHttpAgent(targetUrl, {
+    session,
+    rejectUnauthorized: allowInsecure ? false : undefined,
+  });
+  if (agent) return agent;
+  if (allowInsecure && isHttpsEndpoint(targetUrl)) {
+    return new https.Agent({ rejectUnauthorized: false });
+  }
+  return undefined;
+};
+
+const assignTransportAgent = (extraOpts, endpoint, agent) => {
+  if (!agent) return;
+  if (isHttpsEndpoint(endpoint)) {
+    extraOpts.httpsAgent = agent;
+  } else {
+    extraOpts.httpAgent = agent;
+  }
+};
 
 const normalizeEndpoint = (endpoint) => {
   const trimmed = String(endpoint || "").trim();
@@ -58,13 +242,12 @@ const buildBasicAuthHeader = (username, password) =>
   "Basic " +
   Buffer.from(`${username || ""}:${password || ""}`, "utf8").toString("base64");
 
-const buildWebdavClient = (config) => {
+const buildWebdavClient = async (config) => {
   if (!config) throw new Error("Missing WebDAV config");
   const endpoint = normalizeEndpoint(config.endpoint);
   const extraOpts = {};
-  if (config.allowInsecure) {
-    extraOpts.httpsAgent = new https.Agent({ rejectUnauthorized: false });
-  }
+  const agent = await resolveCloudSyncTransportAgent(endpoint, Boolean(config.allowInsecure));
+  assignTransportAgent(extraOpts, endpoint, agent);
   if (config.authType === "token") {
     return createClient(endpoint, {
       authType: AuthType.Token,
@@ -94,7 +277,7 @@ const buildWebdavClient = (config) => {
 
 const getWebdavPath = () => ensureLeadingSlash(SYNC_FILE_NAME);
 
-const buildS3Client = (config) => {
+const buildS3Client = async (config) => {
   const clientOptions = {
     region: config.region,
     endpoint: normalizeEndpoint(config.endpoint),
@@ -108,10 +291,13 @@ const buildS3Client = (config) => {
     },
   };
 
-  if (config.allowInsecure) {
-    clientOptions.requestHandler = new NodeHttpHandler({
-      httpsAgent: new https.Agent({ rejectUnauthorized: false }),
-    });
+  const endpoint = clientOptions.endpoint || "https://s3.amazonaws.com";
+  const agent = await resolveCloudSyncTransportAgent(endpoint, Boolean(config.allowInsecure));
+  if (agent) {
+    const handlerOpts = isHttpsEndpoint(endpoint)
+      ? { httpsAgent: agent }
+      : { httpAgent: agent };
+    clientOptions.requestHandler = new NodeHttpHandler(handlerOpts);
   }
 
   return new S3Client(clientOptions);
@@ -158,7 +344,7 @@ const wrapS3Error = (operation, error, config) => {
 
 const handleWebdavInitialize = async (config) => {
   try {
-    const client = buildWebdavClient(config);
+    const client = await buildWebdavClient(config);
     const path = getWebdavPath();
     await client.exists(path);
     return { resourceId: path };
@@ -169,9 +355,10 @@ const handleWebdavInitialize = async (config) => {
 
 const handleWebdavUpload = async (config, syncedFile) => {
   try {
-    const client = buildWebdavClient(config);
+    const client = await buildWebdavClient(config);
     const path = getWebdavPath();
-    await client.putFileContents(path, JSON.stringify(syncedFile), { overwrite: true });
+    const body = serializeSyncedFileBody(syncedFile);
+    await putWebdavFileReplacing(client, path, body);
     return { resourceId: path };
   } catch (error) {
     throw wrapWebdavError("upload", error, config);
@@ -180,13 +367,13 @@ const handleWebdavUpload = async (config, syncedFile) => {
 
 const handleWebdavDownload = async (config) => {
   try {
-    const client = buildWebdavClient(config);
+    const client = await buildWebdavClient(config);
     const path = getWebdavPath();
     const exists = await client.exists(path);
     if (!exists) return { syncedFile: null };
     const data = await client.getFileContents(path, { format: "text" });
     if (!data) return { syncedFile: null };
-    return { syncedFile: JSON.parse(String(data)) };
+    return { syncedFile: parseSyncedFileJson(data) };
   } catch (error) {
     throw wrapWebdavError("download", error, config);
   }
@@ -194,7 +381,7 @@ const handleWebdavDownload = async (config) => {
 
 const handleWebdavDelete = async (config) => {
   try {
-    const client = buildWebdavClient(config);
+    const client = await buildWebdavClient(config);
     const path = getWebdavPath();
     const exists = await client.exists(path);
     if (!exists) return { ok: true };
@@ -207,7 +394,7 @@ const handleWebdavDelete = async (config) => {
 
 const handleS3Initialize = async (config) => {
   if (!config) throw new Error("Missing S3 config");
-  const client = buildS3Client(config);
+  const client = await buildS3Client(config);
   const key = getS3ObjectKey(config);
   try {
     await client.send(new HeadObjectCommand({ Bucket: config.bucket, Key: key }));
@@ -233,7 +420,7 @@ const handleS3Initialize = async (config) => {
 
 const handleS3Upload = async (config, syncedFile) => {
   if (!config) throw new Error("Missing S3 config");
-  const client = buildS3Client(config);
+  const client = await buildS3Client(config);
   const key = getS3ObjectKey(config);
   try {
     await client.send(
@@ -252,7 +439,7 @@ const handleS3Upload = async (config, syncedFile) => {
 
 const handleS3Download = async (config) => {
   if (!config) throw new Error("Missing S3 config");
-  const client = buildS3Client(config);
+  const client = await buildS3Client(config);
   const key = getS3ObjectKey(config);
   try {
     const response = await client.send(
@@ -269,7 +456,7 @@ const handleS3Download = async (config) => {
 
 const handleS3Delete = async (config) => {
   if (!config) throw new Error("Missing S3 config");
-  const client = buildS3Client(config);
+  const client = await buildS3Client(config);
   const key = getS3ObjectKey(config);
   try {
     await client.send(new DeleteObjectCommand({ Bucket: config.bucket, Key: key }));
@@ -280,7 +467,8 @@ const handleS3Delete = async (config) => {
   return { ok: true };
 };
 
-const registerHandlers = (ipcMain) => {
+const registerHandlers = (ipcMain, electronModule) => {
+  electronModuleRef = electronModule || null;
   ipcMain.handle("netcatty:cloudSync:webdav:initialize", async (_event, payload) => {
     return handleWebdavInitialize(payload?.config);
   });
@@ -312,6 +500,10 @@ module.exports = {
   registerHandlers,
   // Exposed for tests
   handleWebdavInitialize,
+  handleWebdavUpload,
+  handleWebdavDownload,
+  parseSyncedFileJson,
+  putWebdavFileReplacing,
   buildBasicAuthHeader,
   buildS3Client,
 };

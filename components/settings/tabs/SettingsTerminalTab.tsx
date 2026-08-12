@@ -1,7 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { AlertCircle, Import, Minus, Palette, Pencil, Plus, Trash2 } from "lucide-react";
 import type {
+  AutocompleteHistoryScope,
   CursorShape,
+  HostInfoBarTitleMode,
+  PasswordPromptAssistMode,
   TerminalEmulationType,
   TerminalSettings,
 } from "../../../domain/models";
@@ -17,7 +20,7 @@ import { Button } from "../../ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../../ui/dialog";
 import { Input } from "../../ui/input";
 import { Select as ShadcnSelect, SelectContent, SelectItem, SelectTrigger, SelectValue } from "../../ui/select";
-import { SectionHeader, Select, SettingsTabContent, SettingRow, Toggle } from "../settings-ui";
+import { SectionHeader, Select, SettingsAnchor, SettingsTabContent, SettingRow, Toggle } from "../settings-ui";
 import { ThemeSelectModal } from "../ThemeSelectModal";
 import { TerminalFontSelect } from "../TerminalFontSelect";
 import { TerminalCjkFontSelect } from "../TerminalCjkFontSelect";
@@ -31,6 +34,14 @@ import {
   TERMINAL_SIDE_PANEL_AUTO_OPEN_TABS,
   type TerminalSidePanelAutoOpenTab,
 } from "../../../domain/terminalSidePanelAutoOpen";
+import {
+  TERMINAL_INLINE_IMAGE_MAX_MEGAPIXELS_MAX,
+  TERMINAL_INLINE_IMAGE_MAX_MEGAPIXELS_MIN,
+  TERMINAL_INLINE_IMAGE_SEQUENCE_LIMIT_MB_MAX,
+  TERMINAL_INLINE_IMAGE_SEQUENCE_LIMIT_MB_MIN,
+  TERMINAL_INLINE_IMAGE_STORAGE_LIMIT_MB_MAX,
+  TERMINAL_INLINE_IMAGE_STORAGE_LIMIT_MB_MIN,
+} from "../../../domain/terminalInlineImages";
 
 const FONT_WEIGHT_OPTIONS = [
   { value: "100", labelKey: "settings.terminal.font.weight.thin" },
@@ -359,6 +370,7 @@ function SettingsTerminalTab(props: {
       <SectionHeader title={t("settings.terminal.section.theme")} />
       <div className="rounded-lg border bg-card px-4">
         <SettingRow
+          anchorId="terminal-theme-follow-app"
           label={t("settings.terminal.theme.followApp")}
           description={t("settings.terminal.theme.followApp.desc")}
         >
@@ -494,6 +506,7 @@ function SettingsTerminalTab(props: {
       <SectionHeader title={t("settings.terminal.section.font")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
         <SettingRow
+          anchorId="terminal-font-family"
           label={t("settings.terminal.font.family")}
           description={t("settings.terminal.font.family.desc")}
         >
@@ -505,21 +518,21 @@ function SettingsTerminalTab(props: {
             fonts={availableFonts}
             onChange={(id) => setTerminalFontFamilyId(id)}
             className="w-48"
+            ariaLabel={t("settings.terminal.font.family")}
           />
         </SettingRow>
 
-        <SettingRow
-          label={t("settings.terminal.font.cjk")}
-          description={t("settings.terminal.font.cjk.desc")}
-        >
+        <SettingsAnchor anchorId="terminal-font-cjk">
           <TerminalCjkFontSelect
+            label={t("settings.terminal.font.cjk")}
+            description={t("settings.terminal.font.cjk.desc")}
             value={terminalSettings.fallbackFont ?? ""}
             onChange={(next) => updateTerminalSetting("fallbackFont", next)}
-            className="w-48"
           />
-        </SettingRow>
+        </SettingsAnchor>
 
         <SettingRow
+          anchorId="terminal-font-size"
           label={t("settings.terminal.font.size")}
           description={t("settings.terminal.font.size.desc")}
         >
@@ -545,6 +558,7 @@ function SettingsTerminalTab(props: {
         </SettingRow>
 
         <SettingRow
+          anchorId="terminal-font-weight"
           label={t("settings.terminal.font.weight")}
           description={t("settings.terminal.font.weight.desc")}
         >
@@ -557,6 +571,7 @@ function SettingsTerminalTab(props: {
         </SettingRow>
 
         <SettingRow
+          anchorId="terminal-font-weight-bold"
           label={t("settings.terminal.font.weightBold")}
           description={t("settings.terminal.font.weightBold.desc")}
         >
@@ -569,6 +584,7 @@ function SettingsTerminalTab(props: {
         </SettingRow>
 
         <SettingRow
+          anchorId="terminal-font-smoothing"
           label={t("settings.terminal.font.smoothing")}
           description={t("settings.terminal.font.smoothing.desc")}
         >
@@ -579,6 +595,7 @@ function SettingsTerminalTab(props: {
         </SettingRow>
 
         <SettingRow
+          anchorId="terminal-font-line-padding"
           label={t("settings.terminal.font.linePadding")}
           description={t("settings.terminal.font.linePadding.desc")}
         >
@@ -596,7 +613,7 @@ function SettingsTerminalTab(props: {
           </div>
         </SettingRow>
 
-        <SettingRow label={t("settings.terminal.font.emulationType")}>
+        <SettingRow anchorId="terminal-emulation-type" label={t("settings.terminal.font.emulationType")}>
           <Select
             value={terminalSettings.terminalEmulationType}
             options={[
@@ -614,7 +631,7 @@ function SettingsTerminalTab(props: {
 
       <SectionHeader title={t("settings.terminal.section.cursor")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
-        <SettingRow label={t("settings.terminal.cursor.style")}>
+        <SettingRow anchorId="terminal-cursor-style" label={t("settings.terminal.cursor.style")}>
           <Select
             value={terminalSettings.cursorShape}
             options={[
@@ -627,10 +644,21 @@ function SettingsTerminalTab(props: {
           />
         </SettingRow>
 
-        <SettingRow label={t("settings.terminal.cursor.blink")}>
+        <SettingRow anchorId="terminal-cursor-blink" label={t("settings.terminal.cursor.blink")}>
           <Toggle
             checked={terminalSettings.cursorBlink}
             onChange={(v) => updateTerminalSetting("cursorBlink", v)}
+          />
+        </SettingRow>
+
+        <SettingRow
+          anchorId="terminal-cursor-highlight-line"
+          label={t("settings.terminal.cursor.highlightLine")}
+          description={t("settings.terminal.cursor.highlightLine.desc")}
+        >
+          <Toggle
+            checked={terminalSettings.highlightCursorLine}
+            onChange={(v) => updateTerminalSetting("highlightCursorLine", v)}
           />
         </SettingRow>
       </div>
@@ -638,22 +666,35 @@ function SettingsTerminalTab(props: {
       <SectionHeader title={t("settings.terminal.section.keyboard")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
         <SettingRow
+          anchorId="terminal-alt-as-meta"
           label={t("settings.terminal.keyboard.altAsMeta")}
           description={t("settings.terminal.keyboard.altAsMeta.desc")}
         >
           <Toggle checked={terminalSettings.altAsMeta} onChange={(v) => updateTerminalSetting("altAsMeta", v)} />
         </SettingRow>
         <SettingRow
+          anchorId="terminal-option-arrow-word-jump"
           label={t("settings.terminal.keyboard.optionArrowWordJump")}
           description={t("settings.terminal.keyboard.optionArrowWordJump.desc")}
         >
           <Toggle checked={terminalSettings.optionArrowWordJump} onChange={(v) => updateTerminalSetting("optionArrowWordJump", v)} />
+        </SettingRow>
+        <SettingRow
+          anchorId="terminal-kitty-protocol"
+          label={t("settings.terminal.keyboard.kittyProtocol")}
+          description={t("settings.terminal.keyboard.kittyProtocol.desc")}
+        >
+          <Toggle
+            checked={terminalSettings.kittyKeyboardProtocolEnabled}
+            onChange={(v) => updateTerminalSetting("kittyKeyboardProtocolEnabled", v)}
+          />
         </SettingRow>
       </div>
 
       <SectionHeader title={t("settings.terminal.section.accessibility")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
         <SettingRow
+          anchorId="terminal-min-contrast"
           label={t("settings.terminal.accessibility.minimumContrastRatio")}
           description={t("settings.terminal.accessibility.minimumContrastRatio.desc")}
         >
@@ -685,6 +726,7 @@ function SettingsTerminalTab(props: {
       <SectionHeader title={t("settings.terminal.section.sidePanel")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
         <SettingRow
+          anchorId="terminal-side-panel-auto-open"
           label={t("settings.terminal.sidePanel.autoOpen")}
           description={t("settings.terminal.sidePanel.autoOpen.desc")}
         >
@@ -709,7 +751,7 @@ function SettingsTerminalTab(props: {
       </div>
 
       <SectionHeader title={t("settings.terminal.section.keywordHighlight")} />
-      <div className="rounded-lg border bg-card p-4">
+      <SettingsAnchor anchorId="terminal-keyword-highlight" className="rounded-lg border bg-card p-4">
         <div className="flex items-center justify-between mb-4">
           <span className="text-sm font-medium">
             {t("settings.terminal.keywordHighlight.title")}
@@ -725,11 +767,12 @@ function SettingsTerminalTab(props: {
             onChange={(rules) => updateTerminalSetting("keywordHighlightRules", rules)}
           />
         )}
-      </div>
+      </SettingsAnchor>
 
       <SectionHeader title={t("settings.terminal.section.localShell")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
         <SettingRow
+          anchorId="terminal-local-shell"
           label={t("settings.terminal.localShell.shell")}
           description={t("settings.terminal.localShell.shell.desc")}
         >
@@ -821,6 +864,7 @@ function SettingsTerminalTab(props: {
       <SectionHeader title={t("settings.terminal.section.connection")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
         <SettingRow
+          anchorId="terminal-verify-host-keys"
           label={t("settings.terminal.connection.verifyHostKeys")}
           description={t("settings.terminal.connection.verifyHostKeys.desc")}
         >
@@ -830,6 +874,7 @@ function SettingsTerminalTab(props: {
           />
         </SettingRow>
         <SettingRow
+          anchorId="terminal-ssh-auto-reconnect"
           label={t("settings.terminal.connection.sshAutoReconnectEnabled")}
           description={t("settings.terminal.connection.sshAutoReconnectEnabled.desc")}
         >
@@ -839,6 +884,7 @@ function SettingsTerminalTab(props: {
           />
         </SettingRow>
         <SettingRow
+          anchorId="terminal-keepalive-interval"
           label={t("settings.terminal.connection.keepaliveInterval")}
           description={t("settings.terminal.connection.keepaliveInterval.desc")}
         >
@@ -875,6 +921,7 @@ function SettingsTerminalTab(props: {
           />
         </SettingRow>
         <SettingRow
+          anchorId="terminal-x11-display"
           label={t("settings.terminal.connection.x11Display")}
           description={t("settings.terminal.connection.x11Display.desc")}
         >
@@ -890,6 +937,32 @@ function SettingsTerminalTab(props: {
       <SectionHeader title={t("settings.terminal.section.serverStats")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
         <SettingRow
+          label={t("settings.terminal.hostInfoBar.show")}
+          description={t("settings.terminal.hostInfoBar.show.desc")}
+        >
+          <Toggle
+            checked={terminalSettings.showHostInfoBar}
+            onChange={(v) => updateTerminalSetting("showHostInfoBar", v)}
+          />
+        </SettingRow>
+        {terminalSettings.showHostInfoBar && (
+          <SettingRow
+            label={t("settings.terminal.hostInfoBar.titleMode")}
+            description={t("settings.terminal.hostInfoBar.titleMode.desc")}
+          >
+            <Select
+              value={terminalSettings.hostInfoBarTitleMode ?? "address"}
+              options={[
+                { value: "address", label: t("settings.terminal.hostInfoBar.titleMode.address") },
+                { value: "label", label: t("settings.terminal.hostInfoBar.titleMode.label") },
+              ]}
+              onChange={(v) => updateTerminalSetting("hostInfoBarTitleMode", v as HostInfoBarTitleMode)}
+              className="w-44"
+            />
+          </SettingRow>
+        )}
+        <SettingRow
+          anchorId="terminal-server-stats-show"
           label={t("settings.terminal.serverStats.show")}
           description={t("settings.terminal.serverStats.show.desc")}
         >
@@ -1015,6 +1088,7 @@ function SettingsTerminalTab(props: {
       <SectionHeader title={t("settings.terminal.section.rendering")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
         <SettingRow
+          anchorId="terminal-renderer"
           label={t("settings.terminal.rendering.renderer")}
           description={t("settings.terminal.rendering.renderer.desc")}
         >
@@ -1119,10 +1193,136 @@ function SettingsTerminalTab(props: {
           </>
         )}
       </div>
+
+      <SectionHeader title={t("settings.terminal.section.inlineImages")} />
+      <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
+        <SettingRow
+          anchorId="terminal-inline-images-enabled"
+          label={t("settings.terminal.inlineImages.enabled")}
+          description={t("settings.terminal.inlineImages.enabled.desc")}
+        >
+          <Toggle
+            checked={terminalSettings.inlineImagesEnabled}
+            onChange={(v) => updateTerminalSetting("inlineImagesEnabled", v)}
+          />
+        </SettingRow>
+        {terminalSettings.inlineImagesEnabled && (
+          <>
+          <SettingRow
+            label={t("settings.terminal.inlineImages.kitty")}
+            description={t("settings.terminal.inlineImages.kitty.desc")}
+          >
+            <Toggle
+              checked={terminalSettings.inlineImageKittyEnabled}
+              onChange={(v) => updateTerminalSetting("inlineImageKittyEnabled", v)}
+            />
+          </SettingRow>
+          <SettingRow
+            label={t("settings.terminal.inlineImages.sixel")}
+            description={t("settings.terminal.inlineImages.sixel.desc")}
+          >
+            <Toggle
+              checked={terminalSettings.inlineImageSixelEnabled}
+              onChange={(v) => updateTerminalSetting("inlineImageSixelEnabled", v)}
+            />
+          </SettingRow>
+          <SettingRow
+            label={t("settings.terminal.inlineImages.iip")}
+            description={t("settings.terminal.inlineImages.iip.desc")}
+          >
+            <Toggle
+              checked={terminalSettings.inlineImageIipEnabled}
+              onChange={(v) => updateTerminalSetting("inlineImageIipEnabled", v)}
+            />
+          </SettingRow>
+          <SettingRow
+            label={t("settings.terminal.inlineImages.storageLimit")}
+            description={t("settings.terminal.inlineImages.storageLimit.desc")}
+          >
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={TERMINAL_INLINE_IMAGE_STORAGE_LIMIT_MB_MIN}
+                max={TERMINAL_INLINE_IMAGE_STORAGE_LIMIT_MB_MAX}
+                value={terminalSettings.inlineImageStorageLimitMb}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value, 10);
+                  if (
+                    !Number.isNaN(val)
+                    && val >= TERMINAL_INLINE_IMAGE_STORAGE_LIMIT_MB_MIN
+                    && val <= TERMINAL_INLINE_IMAGE_STORAGE_LIMIT_MB_MAX
+                  ) {
+                    updateTerminalSetting("inlineImageStorageLimitMb", val);
+                  }
+                }}
+                className="w-20"
+              />
+              <span className="text-sm text-muted-foreground">{t("settings.terminal.inlineImages.unit.mb")}</span>
+            </div>
+          </SettingRow>
+          <SettingRow
+            label={t("settings.terminal.inlineImages.maxMegapixels")}
+            description={t("settings.terminal.inlineImages.maxMegapixels.desc")}
+          >
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={TERMINAL_INLINE_IMAGE_MAX_MEGAPIXELS_MIN}
+                max={TERMINAL_INLINE_IMAGE_MAX_MEGAPIXELS_MAX}
+                value={terminalSettings.inlineImageMaxMegapixels}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value, 10);
+                  if (
+                    !Number.isNaN(val)
+                    && val >= TERMINAL_INLINE_IMAGE_MAX_MEGAPIXELS_MIN
+                    && val <= TERMINAL_INLINE_IMAGE_MAX_MEGAPIXELS_MAX
+                  ) {
+                    updateTerminalSetting("inlineImageMaxMegapixels", val);
+                  }
+                }}
+                className="w-20"
+              />
+              <span className="text-sm text-muted-foreground">{t("settings.terminal.inlineImages.unit.megapixels")}</span>
+            </div>
+          </SettingRow>
+          <SettingRow
+            label={t("settings.terminal.inlineImages.sequenceLimit")}
+            description={t("settings.terminal.inlineImages.sequenceLimit.desc")}
+          >
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={TERMINAL_INLINE_IMAGE_SEQUENCE_LIMIT_MB_MIN}
+                max={TERMINAL_INLINE_IMAGE_SEQUENCE_LIMIT_MB_MAX}
+                value={terminalSettings.inlineImageSequenceLimitMb}
+                onChange={(e) => {
+                  const val = parseInt(e.target.value, 10);
+                  if (
+                    !Number.isNaN(val)
+                    && val >= TERMINAL_INLINE_IMAGE_SEQUENCE_LIMIT_MB_MIN
+                    && val <= TERMINAL_INLINE_IMAGE_SEQUENCE_LIMIT_MB_MAX
+                  ) {
+                    updateTerminalSetting("inlineImageSequenceLimitMb", val);
+                  }
+                }}
+                className="w-20"
+              />
+              <span className="text-sm text-muted-foreground">{t("settings.terminal.inlineImages.unit.mb")}</span>
+            </div>
+          </SettingRow>
+          {terminalSettings.hibernateHiddenTabs && (
+            <div className="py-3 text-xs text-muted-foreground">
+              {t("settings.terminal.inlineImages.hibernateNote")}
+            </div>
+          )}
+          </>
+        )}
+      </div>
       {/* Autocomplete */}
       <SectionHeader title={t("settings.terminal.section.workspaceFocus")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
         <SettingRow
+          anchorId="terminal-workspace-focus-style"
           label={t("settings.terminal.workspaceFocus.style")}
           description={t("settings.terminal.workspaceFocus.style.desc")}
         >
@@ -1141,6 +1341,7 @@ function SettingsTerminalTab(props: {
       <SectionHeader title={t("settings.terminal.section.autocomplete")} />
       <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
         <SettingRow
+          anchorId="terminal-autocomplete-enabled"
           label={t("settings.terminal.autocomplete.enabled")}
           description={t("settings.terminal.autocomplete.enabled.desc")}
         >
@@ -1167,6 +1368,54 @@ function SettingsTerminalTab(props: {
             checked={terminalSettings.autocompletePopupMenu}
             onChange={handleAutocompletePopupMenuChange}
             disabled={!terminalSettings.autocompleteEnabled}
+          />
+        </SettingRow>
+        <SettingRow
+          label={t("settings.terminal.autocomplete.historyScope")}
+          description={t("settings.terminal.autocomplete.historyScope.desc")}
+        >
+          <Select
+            value={terminalSettings.autocompleteHistoryScope ?? "host"}
+            onChange={(v) =>
+              updateTerminalSetting(
+                "autocompleteHistoryScope",
+                v as AutocompleteHistoryScope,
+              )
+            }
+            options={[
+              {
+                value: "host",
+                label: t("settings.terminal.autocomplete.historyScope.host"),
+              },
+              {
+                value: "global",
+                label: t("settings.terminal.autocomplete.historyScope.global"),
+              },
+            ]}
+            className="w-48"
+            disabled={!terminalSettings.autocompleteEnabled}
+          />
+        </SettingRow>
+      </div>
+
+      <SectionHeader title={t("settings.terminal.section.passwordPromptAssist")} />
+      <div className="space-y-0 divide-y divide-border rounded-lg border bg-card px-4">
+        <SettingRow
+          anchorId="terminal-password-prompt-assist"
+          label={t("settings.terminal.passwordPromptAssist.mode")}
+          description={t("settings.terminal.passwordPromptAssist.mode.desc")}
+        >
+          <Select
+            value={terminalSettings.passwordPromptAssist ?? "hint"}
+            onChange={(v) =>
+              updateTerminalSetting("passwordPromptAssist", v as PasswordPromptAssistMode)
+            }
+            options={[
+              { value: "off", label: t("settings.terminal.passwordPromptAssist.off") },
+              { value: "hint", label: t("settings.terminal.passwordPromptAssist.hint") },
+              { value: "picker", label: t("settings.terminal.passwordPromptAssist.picker") },
+            ]}
+            className="w-48"
           />
         </SettingRow>
       </div>

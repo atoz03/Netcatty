@@ -197,6 +197,11 @@ function formatCursorErrorForUser(message) {
   return text || "Cursor turn failed";
 }
 
+function isCursorAgentNotFoundError(error) {
+  const message = String(error?.message || error || "");
+  return /\bAgent\b.+\bnot found\b/i.test(message);
+}
+
 function translateCursorEvent(event, emitter, state = {}) {
   if (!event || typeof event !== "object") return;
 
@@ -316,9 +321,24 @@ async function runCursorTurn({
   try {
     const restoreCreateEnv = applyTemporaryProcessEnv(runtimeEnv);
     try {
-      const agentPromise = resumeSessionId && typeof Agent.resume === "function"
-        ? Agent.resume(resumeSessionId, agentOptions)
-        : Agent.create(agentOptions);
+      const createAgent = () => Agent.create(agentOptions);
+      let agentPromise;
+      if (resumeSessionId && typeof Agent.resume === "function") {
+        agentPromise = Agent.resume(resumeSessionId, agentOptions).catch((error) => {
+          // Stale Cursor agent IDs (expired local store, or a CLI session UUID
+          // resumed on the SDK path) should start a fresh agent instead of
+          // failing the whole turn with "Agent … not found".
+          if (!isCursorAgentNotFoundError(error)) throw error;
+          console.warn("[Cursor SDK] resume missed; creating a new agent", {
+            resumeSessionId,
+            message: error?.message || String(error),
+          });
+          sessionId = null;
+          return createAgent();
+        });
+      } else {
+        agentPromise = createAgent();
+      }
       agent = await abortable(agentPromise, signal, (lateAgent) => {
         try { lateAgent?.close?.(); } catch { /* best effort */ }
       });
@@ -429,15 +449,32 @@ function mapCursorModels(models) {
   return out;
 }
 
-async function listCursorModels({ apiKey, env, sdkModule } = {}) {
+async function listCursorModels({ apiKey, env, sdkModule, abortController, signal } = {}) {
+  const externalSignal = signal || abortController?.signal;
+  if (externalSignal?.aborted) return [];
   let resolvedModule = sdkModule;
   if (!resolvedModule) {
     try { resolvedModule = await import("@cursor/sdk"); } catch { return []; }
   }
   const effectiveApiKey = apiKey || env?.CURSOR_API_KEY || process.env.CURSOR_API_KEY;
   if (!effectiveApiKey) return [];
-  const models = await resolvedModule.Cursor.models.list({ apiKey: effectiveApiKey });
-  return mapCursorModels(models);
+  let abortHandler;
+  try {
+    const result = await Promise.race([
+      Promise.resolve(resolvedModule.Cursor.models.list({
+        apiKey: effectiveApiKey,
+        signal: externalSignal,
+      })).then((models) => ({ type: "models", models })),
+      new Promise((resolve) => {
+        if (externalSignal?.aborted) return resolve({ type: "aborted" });
+        abortHandler = () => resolve({ type: "aborted" });
+        externalSignal?.addEventListener("abort", abortHandler, { once: true });
+      }),
+    ]);
+    return result.type === "models" ? mapCursorModels(result.models) : [];
+  } finally {
+    if (abortHandler) externalSignal?.removeEventListener("abort", abortHandler);
+  }
 }
 
 module.exports = {
@@ -447,6 +484,7 @@ module.exports = {
   buildCursorAgentOptions,
   buildCursorSendMessage,
   formatCursorErrorForUser,
+  isCursorAgentNotFoundError,
   listCursorModels,
   mapCursorModels,
   parseCursorModelSelection,

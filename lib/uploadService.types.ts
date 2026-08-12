@@ -4,6 +4,12 @@ export interface UploadProgress {
   speed: number;
   /** Percentage (0-100) */
   percent: number;
+  phase?: import('../domain/models/sftp').TransferPhase;
+  /** Contiguous durable offset from the transfer bridge (may lag transferred). */
+  checkpointBytes?: number;
+  sourceFingerprint?: string;
+  resumable?: boolean;
+  pauseUnavailableReason?: string;
 }
 
 export interface UploadTaskInfo {
@@ -19,6 +25,9 @@ export interface UploadTaskInfo {
   speed: number;
   fileCount: number;
   completedCount: number;
+  sourcePath?: string;
+  /** Background job API used to control this task after its page closes. */
+  controlKind?: 'stream' | 'compressed-upload';
 }
 
 export interface UploadResult {
@@ -40,7 +49,14 @@ export interface UploadCallbacks {
   /** Called when a task is cancelled */
   onTaskCancelled?: (taskId: string) => void;
   /** Called when scanning starts (for showing placeholder) */
-  onScanningStart?: (taskId: string) => void;
+  onScanningStart?: (taskId: string, info?: { label?: string }) => void;
+  /** Live scan counters (file/dir totals) while enumerating a drop */
+  onScanningProgress?: (taskId: string, progress: {
+    fileCount: number;
+    directoryCount: number;
+    entryCount: number;
+    label?: string;
+  }) => void;
   /** Called when scanning ends */
   onScanningEnd?: (taskId: string) => void;
   /** Called when task name needs to be updated (for phase changes) */
@@ -48,24 +64,18 @@ export interface UploadCallbacks {
 }
 
 export interface UploadBridge {
+  /** Main-process transfer events own file progress and terminal lifecycle. */
+  managesTransferLifecycle?: boolean;
   writeLocalFile?: (path: string, data: ArrayBuffer) => Promise<void>;
   mkdirLocal?: (path: string) => Promise<void>;
   statLocal?: (path: string) => Promise<{ type: 'file' | 'directory' | 'symlink'; size: number; lastModified: number } | null>;
   deleteLocalFile?: (path: string) => Promise<void>;
+  stageUploadFile?: (file: File, taskId: string) => Promise<string>;
+  cancelStagedUploadFile?: (taskId: string) => Promise<unknown>;
+  deleteTempFile?: (path: string) => Promise<unknown>;
   mkdirSftp: (sftpId: string, path: string) => Promise<void>;
   statSftp?: (sftpId: string, path: string) => Promise<{ type: 'file' | 'directory' | 'symlink'; size: number; lastModified: number } | null>;
   deleteSftp?: (sftpId: string, path: string) => Promise<void>;
-  writeSftpBinary?: (sftpId: string, path: string, data: ArrayBuffer) => Promise<void>;
-  writeSftpBinaryWithProgress?: (
-    sftpId: string,
-    path: string,
-    data: ArrayBuffer,
-    taskId: string,
-    onProgress: (transferred: number, total: number, speed: number) => void,
-    onComplete?: () => void,
-    onError?: (error: string) => void
-  ) => Promise<{ success: boolean; cancelled?: boolean } | undefined>;
-  cancelSftpUpload?: (taskId: string) => Promise<unknown>;
   /** Stream transfer using local file path (avoids loading file into memory) */
   startStreamTransfer?: (
     options: {
@@ -76,11 +86,24 @@ export interface UploadBridge {
       targetType: 'local' | 'sftp';
       sourceSftpId?: string;
       targetSftpId?: string;
+      sourceHostId?: string;
+      targetHostId?: string;
       totalBytes?: number;
-    },
-    onProgress?: (transferred: number, total: number, speed: number) => void,
-    onComplete?: () => void,
-    onError?: (error: string) => void
+      sourceEncoding?: import('../domain/models/sftp').SftpFilenameEncoding;
+      targetEncoding?: import('../domain/models/sftp').SftpFilenameEncoding;
+      sameHost?: boolean;
+      resumable?: boolean;
+      checkpointBytes?: number;
+      resumeStage?: 'direct' | 'download' | 'upload';
+      downloadCheckpointBytes?: number;
+      uploadCheckpointBytes?: number;
+      sourceFingerprint?: string;
+      lifecycleEpoch?: number;
+      lifecycleState?: 'queued' | 'pausing' | 'paused' | 'transferring';
+      pauseUnavailableReason?: string;
+      globalConcurrency?: number;
+      skipAdmission?: boolean;
+    }
   ) => Promise<{ transferId: string; totalBytes?: number; error?: string; cancelled?: boolean }>;
   cancelTransfer?: (transferId: string) => Promise<void>;
 }
@@ -90,6 +113,8 @@ export interface UploadConfig {
   targetPath: string;
   /** SFTP session ID (null for local) */
   sftpId: string | null;
+  /** Stable target host ID, used to apply the concurrency limit per server. */
+  targetHostId?: string;
   /** Is this a local file system upload? */
   isLocal: boolean;
   /** The bridge for file operations */

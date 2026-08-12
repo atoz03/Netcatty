@@ -5,8 +5,16 @@ import { MAX_TERMINAL_WRITE_QUEUE_DRAIN_BYTES } from "./terminalFlowConstants";
 export const MAX_WRITE_QUEUE_ITEMS = 32;
 export const MAX_WRITE_QUEUE_BYTES = 512 * 1024;
 
+/**
+ * Soft wall-clock budget per event-loop turn of continuous write-queue drain.
+ * After this, yield with setTimeout(0) so input/Ctrl-C can run — similar to
+ * keeping the UI responsive without Tabby-style 4KB choppiness.
+ */
+export const WRITE_QUEUE_TURN_BUDGET_MS = 10;
+
 export type TerminalWriteQueueOptions = {
   onDropped?: (bytes: number) => void;
+  dropBytes?: number;
   deferStart?: boolean;
   yieldAfter?: boolean;
   maxDrainBytes?: number;
@@ -14,6 +22,7 @@ export type TerminalWriteQueueOptions = {
 
 type QueuedWrite = {
   bytes: number;
+  dropBytes: number;
   steps: QueuedWriteStep[];
   nextIndex: number;
   cancelled: boolean;
@@ -23,6 +32,7 @@ type QueuedWrite = {
 
 type QueuedWriteStep = {
   bytes: number;
+  dropBytes: number;
   write: (done: () => void) => void;
   yieldAfter: boolean;
 };
@@ -34,6 +44,7 @@ type TerminalWriteQueue = {
   pendingBytes: number;
   drainBytes: number;
   floodMode: boolean;
+  turnStartedAt: number;
   onDropped?: (bytes: number) => void;
   drainTimer?: ReturnType<typeof setTimeout>;
   stepTimer?: ReturnType<typeof setTimeout>;
@@ -52,11 +63,27 @@ const getOrCreateQueue = (term: XTerm): TerminalWriteQueue => {
       pendingBytes: 0,
       drainBytes: 0,
       floodMode: false,
+      turnStartedAt: 0,
       onDropped: terminalWriteQueueDropHandlers.get(term),
     };
     terminalWriteQueues.set(term, queue);
   }
   return queue;
+};
+
+const beginQueueTurn = (queue: TerminalWriteQueue): void => {
+  if (queue.turnStartedAt <= 0) {
+    queue.turnStartedAt = performance.now();
+  }
+};
+
+const endQueueTurn = (queue: TerminalWriteQueue): void => {
+  queue.turnStartedAt = 0;
+};
+
+const isQueueTurnBudgetExceeded = (queue: TerminalWriteQueue): boolean => {
+  if (queue.turnStartedAt <= 0) return false;
+  return performance.now() - queue.turnStartedAt >= WRITE_QUEUE_TURN_BUDGET_MS;
 };
 
 const scheduleQueueDrain = (
@@ -69,6 +96,7 @@ const scheduleQueueDrain = (
     scheduleNextTerminalWrite(term, queue);
     return;
   }
+  endQueueTurn(queue);
   queue.drainTimer = setTimeout(() => {
     queue.drainTimer = undefined;
     scheduleNextTerminalWrite(term, queue);
@@ -81,16 +109,25 @@ const scheduleNextTerminalWrite = (term: XTerm, queue: TerminalWriteQueue) => {
     queue.writing = false;
     queue.drainBytes = 0;
     queue.floodMode = false;
+    endQueueTurn(queue);
     if (terminalWriteQueues.get(term) === queue) {
       terminalWriteQueues.delete(term);
     }
     return;
   }
+  beginQueueTurn(queue);
   if (
     queue.drainBytes > 0
     && queue.drainBytes + next.bytes > next.maxDrainBytes
   ) {
     queue.drainBytes = 0;
+    queue.pending.unshift(next);
+    scheduleQueueDrain(term, queue, true);
+    return;
+  }
+  // Time-budget yield: continuous sync drains stay smooth like Tabby, but never
+  // pin the main thread for multi-frame bulk parses.
+  if (queue.drainBytes > 0 && isQueueTurnBudgetExceeded(queue)) {
     queue.pending.unshift(next);
     scheduleQueueDrain(term, queue, true);
     return;
@@ -111,8 +148,14 @@ const scheduleNextTerminalWrite = (term: XTerm, queue: TerminalWriteQueue) => {
     if (next.yieldAfter) {
       queue.drainBytes = 0;
     }
-    scheduleQueueDrain(term, queue, next.yieldAfter);
+    const shouldDefer = next.yieldAfter || isQueueTurnBudgetExceeded(queue);
+    if (shouldDefer && !next.yieldAfter) {
+      // Byte drain continues next turn; reset counter so a fresh budget applies.
+      queue.drainBytes = 0;
+    }
+    scheduleQueueDrain(term, queue, shouldDefer);
   }, (continuation) => {
+    endQueueTurn(queue);
     const timer = setTimeout(() => {
       if (terminalWriteQueues.get(term) !== queue || queue.stepTimer !== timer) {
         return;
@@ -132,6 +175,9 @@ const resolveMaxDrainBytes = (value?: number): number => (
     : MAX_TERMINAL_WRITE_QUEUE_DRAIN_BYTES
 );
 
+/** Max synchronous recursive step hops inside one merged flood item. */
+const MAX_SYNC_MERGED_STEPS_BEFORE_YIELD = 32;
+
 const runQueuedWrite = (
   item: QueuedWrite,
   done: () => void,
@@ -140,6 +186,17 @@ const runQueuedWrite = (
   let index = 0;
   let completed = false;
   let currentDrainBytes = 0;
+  let syncStepsSinceYield = 0;
+  let turnStartedAt = performance.now();
+
+  const deferAndResume = (): void => {
+    syncStepsSinceYield = 0;
+    currentDrainBytes = 0;
+    deferStep(() => {
+      turnStartedAt = performance.now();
+      runNext();
+    });
+  };
 
   const runNext = (): void => {
     if (completed) {
@@ -160,8 +217,7 @@ const runQueuedWrite = (
       currentDrainBytes > 0
       && currentDrainBytes + step.bytes > item.maxDrainBytes
     ) {
-      currentDrainBytes = 0;
-      deferStep(runNext);
+      deferAndResume();
       return;
     }
     index += 1;
@@ -171,10 +227,25 @@ const runQueuedWrite = (
     let insideWrite = true;
     const continueAfterStep = (): void => {
       currentDrainBytes += step.bytes;
-      if ((step.yieldAfter || item.yieldAfter) && index < item.steps.length) {
-        currentDrainBytes = 0;
-        deferStep(runNext);
+      // Inter-step yields honor per-step flags only. item.yieldAfter applies
+      // after the whole item finishes (see scheduleNextTerminalWrite), so that
+      // flood merges preserve writeLargeTerminalBatch drain-budget pacing
+      // instead of forcing a timer after every shard.
+      if (step.yieldAfter && index < item.steps.length) {
+        deferAndResume();
         return;
+      }
+      // Flood-merged items can hold thousands of tiny sync steps. Bound stack
+      // depth and wall-clock time so the main thread stays under the turn budget.
+      if (index < item.steps.length) {
+        syncStepsSinceYield += 1;
+        if (
+          syncStepsSinceYield >= MAX_SYNC_MERGED_STEPS_BEFORE_YIELD
+          || performance.now() - turnStartedAt >= WRITE_QUEUE_TURN_BUDGET_MS
+        ) {
+          deferAndResume();
+          return;
+        }
       }
       runNext();
     };
@@ -222,16 +293,26 @@ const mergePendingWrites = (queue: TerminalWriteQueue): void => {
 
   const steps: QueuedWriteStep[] = [];
   let bytes = 0;
+  let dropBytes = 0;
+  // Keep a post-item yield if any source item asked for one; inter-step yields
+  // come only from per-step yieldAfter / maxDrainBytes (not a forced every-step
+  // pause). writeLargeTerminalBatch sets yieldAfter only every drain budget.
+  let yieldAfterItem = false;
   for (const item of queue.pending) {
     bytes += item.bytes;
+    dropBytes += item.dropBytes;
+    if (item.yieldAfter) {
+      yieldAfterItem = true;
+    }
     steps.push(...item.steps.slice(item.nextIndex));
   }
   queue.pending = [{
     bytes,
+    dropBytes,
     steps,
     nextIndex: 0,
     cancelled: false,
-    yieldAfter: true,
+    yieldAfter: yieldAfterItem,
     maxDrainBytes: Math.min(...queue.pending.map((item) => item.maxDrainBytes)),
   }];
   queue.pendingBytes = bytes;
@@ -316,6 +397,9 @@ export const enqueueTerminalWrite = (
   options: TerminalWriteQueueOptions = {},
 ): void => {
   const queue = getOrCreateQueue(term);
+  const dropBytes = Number.isFinite(options.dropBytes)
+    ? Math.max(0, Number(options.dropBytes))
+    : bytes;
   if (options.onDropped) {
     queue.onDropped = options.onDropped;
   } else if (!queue.onDropped) {
@@ -326,7 +410,8 @@ export const enqueueTerminalWrite = (
 
   queue.pending.push({
     bytes,
-    steps: [{ bytes, write, yieldAfter: Boolean(options.yieldAfter) }],
+    dropBytes,
+    steps: [{ bytes, dropBytes, write, yieldAfter: Boolean(options.yieldAfter) }],
     nextIndex: 0,
     cancelled: false,
     yieldAfter: Boolean(options.yieldAfter),
@@ -354,18 +439,19 @@ export const abortTerminalWriteQueue = (
   const queue = terminalWriteQueues.get(term);
   if (!queue) return;
 
-  let droppedBytes = queue.pendingBytes;
+  let droppedBytes = queue.pending.reduce((sum, item) => sum + item.dropBytes, 0);
   if (queue.active) {
     queue.active.cancelled = true;
     droppedBytes += queue.active.steps
       .slice(queue.active.nextIndex)
-      .reduce((sum, step) => sum + step.bytes, 0);
+      .reduce((sum, step) => sum + step.dropBytes, 0);
   }
 
   queue.pending = [];
   queue.pendingBytes = 0;
   queue.writing = false;
   queue.floodMode = false;
+  queue.turnStartedAt = 0;
   queue.active = undefined;
   if (queue.drainTimer) {
     clearTimeout(queue.drainTimer);

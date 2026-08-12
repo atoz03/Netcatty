@@ -4,8 +4,11 @@ import { readFileSync } from "node:fs";
 
 import {
   getInitialTerminalStatus,
+  resolveTerminalVaultInitialized,
+  shouldSuppressHostStartupCommandOnReconnect,
   shouldStartTerminalBackend,
 } from "./restoredSessionGate.ts";
+import { setVaultInitialized } from "../../application/state/vaultInitStore.ts";
 
 test("restored disconnected sessions initialize as connecting", () => {
   assert.equal(
@@ -18,8 +21,45 @@ test("normal sessions initialize as connecting", () => {
   assert.equal(getInitialTerminalStatus(), "connecting");
 });
 
-test("restored disconnected sessions start terminal backend", () => {
+test("restored disconnected sessions start terminal backend only after vault hydration", () => {
+  setVaultInitialized(false);
+  assert.equal(shouldStartTerminalBackend(), false);
+  setVaultInitialized(true);
   assert.equal(shouldStartTerminalBackend(), true);
+});
+
+test("terminal boot waits for vaultInitialized before creating a backend session", () => {
+  const source = readFileSync(new URL("./useTerminalEffects.ts", import.meta.url), "utf8");
+  assert.match(
+    source,
+    /if \(!attachExistingSession && !vaultInitialized\) \{\s*\n\s*return;/,
+    "boot effect must wait for vault hydration before creating xterm/backend",
+  );
+  assert.match(
+    source,
+    /vaultInitialized,/,
+    "vaultInitialized must be in the boot effect dependency list",
+  );
+});
+
+test("terminal popup can supply its own completed vault hydration state", () => {
+  const terminalSource = readFileSync(new URL("../Terminal.tsx", import.meta.url), "utf8");
+  const popupSource = readFileSync(new URL("../TerminalPopupPage.tsx", import.meta.url), "utf8");
+
+  assert.match(
+    terminalSource,
+    /const vaultInitialized = resolveTerminalVaultInitialized\(\s*sharedVaultInitialized,\s*vaultInitializedOverride,\s*\);/,
+  );
+  assert.match(popupSource, /vaultInitializedOverride=\{vaultInitialized\}/);
+  assert.equal(resolveTerminalVaultInitialized(false, true), true);
+  assert.equal(resolveTerminalVaultInitialized(false), false);
+  assert.equal(resolveTerminalVaultInitialized(true, false), false);
+});
+
+test("host startup command policy distinguishes restored and automatic reconnects", () => {
+  assert.equal(shouldSuppressHostStartupCommandOnReconnect("restored"), false);
+  assert.equal(shouldSuppressHostStartupCommandOnReconnect("manual"), false);
+  assert.equal(shouldSuppressHostStartupCommandOnReconnect("automatic"), true);
 });
 
 test("restored disconnected sessions still create a terminal runtime before backend startup", () => {
@@ -85,6 +125,25 @@ test("manual reconnect captures restore cwd intent before clearing restored stat
   );
 });
 
+test("manual reconnect re-arms inherited cwd intent after a failed first connection", () => {
+  const source = readFileSync(new URL("../Terminal.tsx", import.meta.url), "utf8");
+  const reconnectIndex = source.indexOf("const startReconnect = ");
+  const manualBranchIndex = source.indexOf('if (mode === "manual")', reconnectIndex);
+  const manualPrepareIndex = source.indexOf("prepareRestoredReconnect();", manualBranchIndex);
+  const rearmIndex = source.indexOf("prepareInitialCwdIntent();", manualPrepareIndex);
+  const connectingIndex = source.indexOf('updateStatus("connecting")', manualPrepareIndex);
+
+  assert.notEqual(reconnectIndex, -1);
+  assert.notEqual(manualBranchIndex, -1);
+  assert.notEqual(manualPrepareIndex, -1);
+  assert.notEqual(rearmIndex, -1);
+  assert.notEqual(connectingIndex, -1);
+  assert.ok(
+    manualPrepareIndex < rearmIndex && rearmIndex < connectingIndex,
+    "a clone whose first connection fails must re-arm the inherited cwd on manual retry",
+  );
+});
+
 test("auto reconnect connected history ref is initialized after status state exists", () => {
   const source = readFileSync(new URL("../Terminal.tsx", import.meta.url), "utf8");
   const statusStateIndex = source.indexOf('const [status, setStatus] = useState<TerminalSession["status"]>');
@@ -98,20 +157,67 @@ test("auto reconnect connected history ref is initialized after status state exi
   );
 });
 
-test("auto reconnect wakes a hibernated terminal before requiring a terminal instance", () => {
+test("reconnect wakes a hibernated terminal before requiring a terminal instance", () => {
   const source = readFileSync(new URL("../Terminal.tsx", import.meta.url), "utf8");
+  const wakePromiseRefIndex = source.indexOf("const wakePromiseRef = useRef<Promise<boolean> | null>(null)");
+  const wakeGuardRefIndex = source.indexOf("const reconnectWakeInFlightRef = useRef(false)");
+  const wakeTokenRefIndex = source.indexOf("const reconnectWakeTokenRef = useRef<symbol | null>(null)");
+  const wakeInvalidateModeIndex = source.indexOf('const reconnectWakeInvalidateModeRef = useRef<"dispose" | "keep">("dispose")');
+  const wakeTokenCleanupIndex = source.indexOf("reconnectWakeTokenRef.current = null", wakeTokenRefIndex);
   const reconnectIndex = source.indexOf("const startReconnect = ");
-  const hibernatedAutoBranchIndex = source.indexOf('mode === "auto" && hibernatedRef.current', reconnectIndex);
-  const wakeCallIndex = source.indexOf("wakeHibernatedRuntimeForReconnectRef.current", hibernatedAutoBranchIndex);
+  const hibernatedBranchIndex = source.indexOf('!termRef.current && hibernatedRef.current', reconnectIndex);
+  const duplicateWakeGuardIndex = source.indexOf("if (reconnectWakeInFlightRef.current) return", hibernatedBranchIndex);
+  const markWakeInFlightIndex = source.indexOf("reconnectWakeInFlightRef.current = true", duplicateWakeGuardIndex);
+  const connectingIndex = source.indexOf('updateStatus("connecting")', markWakeInFlightIndex);
+  const wakeCallIndex = source.indexOf("wakeHibernatedRuntimeForReconnectRef.current", hibernatedBranchIndex);
+  const wakeInvocationIndex = source.indexOf("void wakeForReconnect()", wakeCallIndex);
+  const wakeJoinIndex = source.indexOf("return wakePromiseRef.current ?? false", source.indexOf("const wakeFromHibernateRuntime"));
+  const wakeTokenIndex = source.indexOf("const wakeToken = Symbol()", hibernatedBranchIndex);
+  const staleWakeGuardIndex = source.indexOf("reconnectWakeTokenRef.current !== wakeToken", wakeInvocationIndex);
+  const staleWakeDisposeGuardIndex = source.indexOf('reconnectWakeInvalidateModeRef.current === "dispose"', staleWakeGuardIndex);
+  const staleWakeDisposeIndex = source.indexOf("disposeRuntimeOnly();", staleWakeDisposeGuardIndex);
+  const disconnectKeepModeIndex = source.indexOf('reconnectWakeInvalidateModeRef.current = "keep"', source.indexOf("const handleDisconnect"));
   const missingTermReturnIndex = source.indexOf("if (!termRef.current) return;", reconnectIndex);
 
+  assert.notEqual(wakePromiseRefIndex, -1);
+  assert.notEqual(wakeGuardRefIndex, -1);
+  assert.notEqual(wakeTokenRefIndex, -1);
+  assert.notEqual(wakeInvalidateModeIndex, -1);
+  assert.notEqual(wakeTokenCleanupIndex, -1);
+  assert.ok(wakeTokenCleanupIndex < reconnectIndex);
   assert.notEqual(reconnectIndex, -1);
-  assert.notEqual(hibernatedAutoBranchIndex, -1);
+  assert.notEqual(hibernatedBranchIndex, -1);
+  assert.notEqual(duplicateWakeGuardIndex, -1);
+  assert.notEqual(markWakeInFlightIndex, -1);
+  assert.notEqual(connectingIndex, -1);
   assert.notEqual(wakeCallIndex, -1);
+  assert.notEqual(wakeInvocationIndex, -1);
+  assert.notEqual(wakeJoinIndex, -1);
+  assert.notEqual(wakeTokenIndex, -1);
+  assert.notEqual(staleWakeGuardIndex, -1);
+  assert.notEqual(staleWakeDisposeGuardIndex, -1);
+  assert.notEqual(staleWakeDisposeIndex, -1);
+  assert.notEqual(disconnectKeepModeIndex, -1);
   assert.notEqual(missingTermReturnIndex, -1);
   assert.ok(
-    hibernatedAutoBranchIndex < missingTermReturnIndex && wakeCallIndex < missingTermReturnIndex,
-    "auto reconnect must wake fully hibernated SSH sessions before the terminal guard can stop the retry",
+    hibernatedBranchIndex < missingTermReturnIndex && wakeCallIndex < missingTermReturnIndex,
+    "manual and auto reconnect must wake fully hibernated sessions before the terminal guard can stop the retry",
+  );
+  assert.ok(
+    duplicateWakeGuardIndex < markWakeInFlightIndex && markWakeInFlightIndex < connectingIndex,
+    "hibernated reconnect must block duplicate requests before beginning an asynchronous wake",
+  );
+  assert.ok(
+    wakeTokenIndex < wakeInvocationIndex && wakeInvocationIndex < staleWakeGuardIndex,
+    "closing a terminal must be able to invalidate a pending hibernated reconnect",
+  );
+  assert.ok(
+    staleWakeGuardIndex < staleWakeDisposeGuardIndex && staleWakeDisposeGuardIndex < staleWakeDisposeIndex,
+    "an invalidated hibernated wake must dispose any runtime created after unmount cleanup",
+  );
+  assert.ok(
+    disconnectKeepModeIndex !== -1,
+    "disconnect must keep a woken runtime so later reconnect still has a terminal instance",
   );
 });
 
@@ -129,6 +235,52 @@ test("dismissing the disconnected dialog returns focus to the terminal for enter
   assert.ok(
     dismissedIndex < focusIndex && focusIndex < closeSessionIndex,
     "dismissing the disconnected dialog should leave Enter routed back through the terminal",
+  );
+});
+
+test("disconnected connection dialog keeps an Enter-reconnect focus sink", () => {
+  const source = readFileSync(new URL("./TerminalConnectionDialog.tsx", import.meta.url), "utf8");
+  assert.match(source, /canEnterReconnectFromDialog/);
+  assert.match(source, /data-terminal-disconnected-dialog/);
+  assert.match(source, /shouldReconnectDisconnectedDialogOnEnterKey/);
+  assert.match(source, /shouldClaimDisconnectedDialogFocus/);
+  assert.match(source, /shouldRestoreDisconnectedDialogTerminalFocus/);
+  assert.match(source, /restoreTerminalFocusFromDisconnectedDialog/);
+  assert.match(source, /dialogFocusRef\.current\?\.focus/);
+  // Focus claim must key only on enter-reconnect mode, not showLogs/error,
+  // or toggling "Show logs" steals keyboard focus off the button.
+  const claimEffectIdx = source.indexOf("Claim focus only when Enter-reconnect mode turns on");
+  // Restore must run on overlay unmount — not when Enter-reconnect ends into
+  // auth/host-key while the dialog stays mounted.
+  const restoreEffectIdx = source.indexOf("Restore xterm focus only when this overlay unmounts");
+  assert.notEqual(claimEffectIdx, -1);
+  assert.notEqual(restoreEffectIdx, -1);
+  const claimDeps = source.indexOf("}, [canEnterReconnectFromDialog, isFocusedPane]);", claimEffectIdx);
+  const restoreDeps = source.indexOf("}, []);", restoreEffectIdx);
+  assert.notEqual(claimDeps, -1);
+  assert.notEqual(restoreDeps, -1);
+  assert.ok(claimDeps < restoreEffectIdx);
+  // Claim deps must not re-run on showLogs/error/status; restore is unmount-only.
+  assert.match(source.slice(claimDeps, claimDeps + 60), /^\}, \[canEnterReconnectFromDialog, isFocusedPane\]\);/);
+  assert.match(source.slice(restoreDeps, restoreDeps + 10), /^\}, \[\]\);/);
+  assert.equal(source.includes("}, [canEnterReconnectFromDialog, status, error, showLogs]"), false);
+  // Split unfocused panes pass isFocusedPane so document blur cannot steal focus.
+  assert.match(source, /isFocusedPane/);
+  assert.match(source, /shouldClaimDisconnectedDialogFocus\(\{[\s\S]*isFocusedPane/);
+  // Unmount restore must also honor isFocusedPane when focus lands on body/html.
+  assert.match(source, /restoreTerminalFocusFromDisconnectedDialog\(\{[\s\S]*isFocusedPane/);
+});
+
+test("open terminal search does not globally gate enter reconnect", () => {
+  const viewSource = readFileSync(new URL("./TerminalView.tsx", import.meta.url), "utf8");
+  const gateIndex = viewSource.indexOf("export function shouldReconnectTerminalOnEnterKey");
+  const bodyEnd = viewSource.indexOf("export function shouldBlockTerminalReconnectForTarget", gateIndex);
+  const gateBody = viewSource.slice(gateIndex, bodyEnd);
+  assert.equal(gateBody.includes("!isSearchOpen"), false);
+  assert.match(viewSource, /isTerminalSearchInput/);
+  assert.match(
+    readFileSync(new URL("./TerminalSearchBar.tsx", import.meta.url), "utf8"),
+    /data-terminal-search-input/,
   );
 });
 
@@ -177,7 +329,7 @@ test("restored cwd intent marks known cwd before initial backend pwd probe can p
   const callbackIndex = terminalSource.indexOf("onRestoreCwdIntentConsumed:");
   const knownAssignIndex = terminalSource.indexOf("knownCwdRef.current = cwd", callbackIndex);
   const backendProbeGuardIndex = effectsSource.indexOf("knownCwdRef.current");
-  const backendPwdWriteIndex = effectsSource.indexOf("onTerminalCwdChange?.(sessionId, cwd ?? null)", backendProbeGuardIndex);
+  const backendPwdWriteIndex = effectsSource.indexOf("onPluginRuntimeCwdChange(result.cwd)", backendProbeGuardIndex);
 
   assert.notEqual(callbackIndex, -1);
   assert.notEqual(knownAssignIndex, -1);
@@ -189,6 +341,6 @@ test("restored cwd intent marks known cwd before initial backend pwd probe can p
   );
   assert.ok(
     backendProbeGuardIndex < backendPwdWriteIndex,
-    "initial backend pwd probe must remain guarded by knownCwdRef before it writes restore metadata",
+    "initial backend pwd probe must remain guarded by knownCwdRef before it publishes the probed cwd",
   );
 });

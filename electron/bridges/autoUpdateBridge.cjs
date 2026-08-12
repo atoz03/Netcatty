@@ -5,9 +5,10 @@
  * install-on-quit. Designed around a "prompt" model: the renderer asks to
  * check, then explicitly triggers download and install.
  *
- * Platforms where auto-update is NOT supported (Linux deb/rpm/snap) get a
- * graceful { available: false, error } response so the renderer can fall back
- * to a manual "open GitHub releases" link.
+ * Linux packages use electron-updater's package-manager path when the
+ * electron-builder package-type marker is present. Unmarked Linux builds
+ * (including snap and development runs) get a graceful fallback so the
+ * renderer can offer a manual "open GitHub releases" link.
  */
 
 let _deps = null;
@@ -46,20 +47,36 @@ function writeAutoUpdatePreference(enabled) {
   }
 }
 
+const SUPPORTED_LINUX_PACKAGE_TYPES = new Set(["deb", "rpm", "pacman"]);
+
+/**
+ * Identify the Linux package format written by electron-builder into the
+ * packaged resources directory. AppImage does not have this marker; its
+ * runtime exposes the APPIMAGE environment variable instead.
+ */
+function getLinuxPackageType() {
+  if (process.env.APPIMAGE) return "AppImage";
+  if (typeof process.resourcesPath !== "string") return null;
+
+  try {
+    const fs = require("fs");
+    const path = require("path");
+    const packageType = fs.readFileSync(path.join(process.resourcesPath, "package-type"), "utf8").trim();
+    return SUPPORTED_LINUX_PACKAGE_TYPES.has(packageType) ? packageType : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Returns true when the current packaging format supports electron-updater
- * (macOS zip/dmg, Windows NSIS, Linux AppImage).
+ * (macOS zip/dmg, Windows NSIS, Linux AppImage/deb/rpm/pacman).
  */
 function isAutoUpdateSupported() {
   if (process.platform === "darwin" || process.platform === "win32") {
     return true;
   }
-  // Linux: only AppImage supports in-place update.
-  // The APPIMAGE env variable is set by the AppImage runtime.
-  if (process.platform === "linux" && process.env.APPIMAGE) {
-    return true;
-  }
-  return false;
+  return process.platform === "linux" && getLinuxPackageType() !== null;
 }
 
 /** Lazily resolved autoUpdater — avoids importing electron-updater in
@@ -71,6 +88,9 @@ let _listenersRegistered = false;
 
 /** Track whether a download is in progress to distinguish download errors from check errors */
 let _isDownloading = false;
+
+/** Track whether quitAndInstall has entered the package installation phase */
+let _isInstalling = false;
 
 /** Track whether a checkForUpdates call is in flight (set before call, cleared on result event) */
 let _isChecking = false;
@@ -151,13 +171,21 @@ function setupGlobalListeners() {
     _isChecking = false;
     // Only broadcast download-phase errors; check-phase errors (e.g. network failures
     // during checkForUpdates) are not download failures and must not set autoDownloadStatus.
-    if (!_isDownloading) {
+    // Install errors are also broadcast: Linux package managers report a cancelled
+    // elevation prompt or a failed command after update-downloaded has already
+    // cleared _isDownloading.
+    if (!_isDownloading && !_isInstalling) {
       _lastStatus = { ..._lastStatus, isChecking: false };
       console.warn("[AutoUpdate] Check-phase error (not broadcast to renderer):", err?.message || err);
       return;
     }
     _isDownloading = false;
     const errorMsg = err?.message || "Unknown update error";
+    if (_isInstalling) {
+      _isInstalling = false;
+      cancelQuittingForUpdateWatchdog();
+      setQuittingForUpdate(false);
+    }
     _lastStatus = { ..._lastStatus, status: 'error', error: errorMsg };
     broadcastToAllWindows("netcatty:update:error", {
       error: errorMsg,
@@ -169,7 +197,8 @@ function setupGlobalListeners() {
 
 /**
  * Trigger an automatic update check after a delay.
- * No-op on platforms that don't support auto-update (Linux deb/rpm/snap).
+ * No-op on platforms that don't support auto-update (for example Linux snap
+ * or an unmarked development build).
  * Called from main process after the main window is created.
  *
  * @param {number} delayMs - Milliseconds to wait before checking (default: 5000)
@@ -237,17 +266,17 @@ function setQuittingForUpdate(enabled) {
 }
 
 /**
- * The webContents for usable app-content windows. Used by the install handler to ask
- * every renderer that can own editor tabs about unsaved work before committing
- * to a quit. Targets registered app-content windows specifically (not
+ * The webContents for usable dirty-editor windows. Used by the install handler
+ * to ask every renderer that can own editor tabs about unsaved work before
+ * committing to a quit. Targets registered editor owners specifically (not
  * getAllWindows()[0]) so we never query tray/settings windows, whose renderers
  * don't participate in the dirty-editor protocol.
  */
-function getAppContentWebContentsList() {
+function getDirtyEditorWebContentsList() {
   try {
     const windowManager = require("./windowManager.cjs");
-    const windows = typeof windowManager.getAppContentWindows === "function"
-      ? windowManager.getAppContentWindows()
+    const windows = typeof windowManager.getDirtyEditorWindows === "function"
+      ? windowManager.getDirtyEditorWindows()
       : typeof windowManager.getMainWindows === "function"
         ? windowManager.getMainWindows()
         : [windowManager.getMainWindow?.()].filter(Boolean);
@@ -317,12 +346,20 @@ function queryDirtyEditorsSafe(webContents, ipcMain) {
 let _quittingForUpdateWatchdog = null;
 const QUITTING_FOR_UPDATE_WATCHDOG_MS = 60000;
 
+function cancelQuittingForUpdateWatchdog() {
+  if (_quittingForUpdateWatchdog) {
+    clearTimeout(_quittingForUpdateWatchdog);
+    _quittingForUpdateWatchdog = null;
+  }
+}
+
 function scheduleQuittingForUpdateWatchdog() {
   if (_quittingForUpdateWatchdog) {
     clearTimeout(_quittingForUpdateWatchdog);
   }
   _quittingForUpdateWatchdog = setTimeout(() => {
     _quittingForUpdateWatchdog = null;
+    _isInstalling = false;
     // Still alive after the grace period — the install did not quit the app.
     console.warn("[AutoUpdate] App still running after quitAndInstall; clearing quitting-for-update state");
     setQuittingForUpdate(false);
@@ -332,6 +369,18 @@ function scheduleQuittingForUpdateWatchdog() {
   if (typeof _quittingForUpdateWatchdog.unref === "function") {
     _quittingForUpdateWatchdog.unref();
   }
+}
+
+/**
+ * Cancel an install after the main quit guard finds unsaved editor changes.
+ * The main process owns the dirty-editor decision, but the install lifecycle
+ * state lives here and must be released together with the window-manager flag.
+ */
+function cancelPendingInstall() {
+  if (!_isInstalling) return;
+  _isInstalling = false;
+  cancelQuittingForUpdateWatchdog();
+  setQuittingForUpdate(false);
 }
 
 function init(deps) {
@@ -478,6 +527,7 @@ function registerHandlers(ipcMain) {
   ipcMain.handle("netcatty:update:install", async () => {
     const updater = getAutoUpdater();
     if (!updater) return;
+    if (_isInstalling) return;
 
     // Check for unsaved editors BEFORE committing to a quit (#1215 review).
     //
@@ -494,10 +544,10 @@ function registerHandlers(ipcMain) {
     // afterwards. If no main window is reachable (no window / crashed
     // renderer) there's no user to ask, so we install directly — matching the
     // before-quit fail-open path.
-    const mainWebContents = getAppContentWebContentsList();
-    if (mainWebContents.length > 0) {
+    const editorWebContents = getDirtyEditorWebContentsList();
+    if (editorWebContents.length > 0) {
       const dirtyResults = await Promise.all(
-        mainWebContents.map((webContents) => queryDirtyEditorsSafe(webContents, ipcMain)),
+        editorWebContents.map((webContents) => queryDirtyEditorsSafe(webContents, ipcMain)),
       );
       if (dirtyResults.some(Boolean)) {
         // Broadcast so the notice reaches whichever window the user clicked
@@ -507,6 +557,10 @@ function registerHandlers(ipcMain) {
       }
     }
 
+    // Another request may have completed its dirty-editor check while this
+    // request was waiting. Only one request may commit the app to a quit.
+    if (_isInstalling) return;
+
     // Commit the app to a real quit BEFORE quitAndInstall fires app.quit().
     // Without this the in-place install silently fails (#1215): the main-window
     // close handler hides to tray when close-to-tray is on, so the process
@@ -514,17 +568,20 @@ function registerHandlers(ipcMain) {
     // PID to die before swapping the bundle — ends up in launchd "pending
     // spawn" limbo and never installs. setQuittingForUpdate(true) sets
     // isQuitting so close-to-tray is bypassed and the window actually closes.
+    _isInstalling = true;
     setQuittingForUpdate(true);
 
     // On macOS, the system tray keeps the app process alive even after all
     // windows are closed, which prevents quitAndInstall from completing.
     // Destroy the tray (and its panel window) before quitting so the app
     // can exit cleanly and the installer can proceed.
-    try {
-      const globalShortcutBridge = require("./globalShortcutBridge.cjs");
-      globalShortcutBridge.cleanup();
-    } catch {
-      // ignore — bridge may not be available
+    if (process.platform === "darwin") {
+      try {
+        const globalShortcutBridge = require("./globalShortcutBridge.cjs");
+        globalShortcutBridge.cleanup();
+      } catch {
+        // ignore — bridge may not be available
+      }
     }
 
     try {
@@ -535,9 +592,16 @@ function registerHandlers(ipcMain) {
       // instead of permanently bypassing close-to-tray + the dirty-editor
       // guard (#1215 review).
       console.error("[AutoUpdate] quitAndInstall failed:", err?.message || err);
+      _isInstalling = false;
+      cancelQuittingForUpdateWatchdog();
       setQuittingForUpdate(false);
       return;
     }
+
+    // Linux package-manager failures emit the updater error synchronously from
+    // quitAndInstall(). The error listener clears _isInstalling in that case,
+    // so do not install a watchdog after the failure has already been handled.
+    if (!_isInstalling) return;
 
     // quitAndInstall can also fail to quit asynchronously (e.g. Squirrel.Mac's
     // follow-up check errors, or a stale/missing downloaded file) — it returns
@@ -578,4 +642,10 @@ function registerHandlers(ipcMain) {
   console.log("[AutoUpdate] Handlers registered");
 }
 
-module.exports = { init, registerHandlers, isAutoUpdateSupported, startAutoCheck };
+module.exports = {
+  init,
+  registerHandlers,
+  isAutoUpdateSupported,
+  startAutoCheck,
+  cancelPendingInstall,
+};

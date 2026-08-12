@@ -41,12 +41,12 @@ export const UnsavedChangesProvider: React.FC<{
     [],
   );
 
-  // Register the prompt function as the module-level singleton so it can be
-  // called from outside the React tree (e.g. useSftpViewPaneActions).
-  useEffect(() => {
-    promptSingleton = prompt;
-    return () => { promptSingleton = null; };
-  }, [prompt]);
+  // Keep the singleton current during render so AppView close handlers and
+  // hotkeys never race the post-commit useEffect registration window.
+  promptSingleton = prompt;
+  useEffect(() => () => {
+    promptSingleton = null;
+  }, []);
 
   // On unmount, resolve any in-flight prompt as "cancel" so awaiting callers don't leak.
   useEffect(() => () => {

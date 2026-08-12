@@ -1,3 +1,27 @@
+import { RE2JS } from 're2js';
+
+export type NonEmptyRangeVisitor = (start: number, length: number) => boolean | void;
+
+export function compileRe2RangeMatcher(pattern: string): (text: string, onMatch: NonEmptyRangeVisitor) => void {
+  const compiled = RE2JS.compile(pattern, RE2JS.CASE_INSENSITIVE);
+  return (text, onMatch) => {
+    const matcher = compiled.matcher(text);
+    while (matcher.find()) {
+      const start = matcher.start();
+      const end = matcher.end();
+      if (end > start && onMatch(start, end - start) === false) break;
+    }
+  };
+}
+
+export function forEachNonEmptyRe2Match(
+  pattern: string,
+  text: string,
+  onMatch: NonEmptyRangeVisitor,
+): void {
+  compileRe2RangeMatcher(pattern)(text, onMatch);
+}
+
 export function forEachNonEmptyRegexMatch(
   regex: RegExp,
   text: string,

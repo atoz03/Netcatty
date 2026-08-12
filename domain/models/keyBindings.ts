@@ -35,11 +35,23 @@ const PHYSICAL_SHORTCUT_KEY_NAMES: Record<string, string> = {
   Slash: '/',
 };
 
-const physicalShortcutKeyName = (e: KeyboardEvent): string | null => {
+const physicalShortcutKeyName = (e: Pick<KeyboardEvent, 'code'>): string | null => {
   const code = e.code;
   if (/^Key[A-Z]$/.test(code)) return code.slice(3);
   if (/^Digit[0-9]$/.test(code)) return code.slice(5);
   return PHYSICAL_SHORTCUT_KEY_NAMES[code] ?? null;
+};
+
+/**
+ * Resolve the 1-9 tab shortcut digit from a key event.
+ * Prefer the physical Digit code so Shift+[1...9] still works when e.key is "!" etc.
+ */
+export const tabShortcutDigitFromEvent = (
+  e: Pick<KeyboardEvent, 'key' | 'code'>,
+): number | null => {
+  const key = physicalShortcutKeyName(e) ?? e.key;
+  if (!/^[1-9]$/.test(key)) return null;
+  return Number.parseInt(key, 10);
 };
 
 const LATIN_SHORTCUT_KEY_PATTERN = /^\p{Script=Latin}$/u;
@@ -104,8 +116,9 @@ export const matchesKeyBinding = (e: KeyboardEvent, keyStr: string, isMac: boole
   // Handle range patterns like "[1...9]"
   if (keyStr.includes('[1...9]')) {
     const basePattern = keyStr.replace('[1...9]', '');
-    const key = physicalShortcutKeyName(e) ?? shortcutEventKey(e);
-    if (!/^[1-9]$/.test(key)) return false;
+    const digit = tabShortcutDigitFromEvent(e);
+    if (digit === null) return false;
+    const key = String(digit);
     // Check modifiers match the base pattern
     const testStr = basePattern + key;
     const physicalDigitEvent = {

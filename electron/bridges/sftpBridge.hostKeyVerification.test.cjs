@@ -37,6 +37,10 @@ function loadSftpBridgeWithMockedClients(t) {
       this.connectOpts = null;
       this.ended = false;
       this.hostVerifierCalls = 0;
+      this.socketTimeouts = [];
+      this._sock = {
+        setTimeout: (value) => this.socketTimeouts.push(value),
+      };
     }
 
     connect(opts) {
@@ -44,7 +48,12 @@ function loadSftpBridgeWithMockedClients(t) {
       const rawKey = MockJumpClient.hostKeysByHost.get(opts.host) || MockJumpClient.defaultHostKey;
       setImmediate(() => {
         const accept = () => {
+          this.emit("connect");
           this.emit("handshake");
+          if (MockJumpClient.closeBeforeReady) {
+            this.emit("close");
+            return;
+          }
           this.emit("ready");
         };
         if (typeof opts.hostVerifier !== "function") {
@@ -80,6 +89,7 @@ function loadSftpBridgeWithMockedClients(t) {
     }
   }
   MockJumpClient.instances = [];
+  MockJumpClient.closeBeforeReady = false;
   MockJumpClient.hostKeysByHost = new Map();
   MockJumpClient.defaultHostKey = makeRawPublicKey("ssh-ed25519", "default untrusted jump key");
 
@@ -91,6 +101,10 @@ function loadSftpBridgeWithMockedClients(t) {
       this.client = new EventEmitter();
       this.client.setMaxListeners = () => {};
       this.client.connectOpts = null;
+      this.client.socketTimeouts = [];
+      this.client._sock = {
+        setTimeout: (value) => this.client.socketTimeouts.push(value),
+      };
       this.client.connect = (opts) => {
         this.client.connectOpts = opts;
         const rawKey = MockSftpClient.hostKeysByHost.get(opts.host)
@@ -98,6 +112,7 @@ function loadSftpBridgeWithMockedClients(t) {
           || MockSftpClient.defaultHostKey;
         setImmediate(() => {
           const accept = () => {
+            this.client.emit("connect");
             this.client.emit("handshake");
             this.client.emit("ready");
           };
@@ -165,7 +180,7 @@ function makeSender({ rejectHostKeyPrompts = false } = {}) {
       if (rejectHostKeyPrompts && channel === "netcatty:host-key:verify") {
         const { handleResponse } = require("./hostKeyVerifier.cjs");
         queueMicrotask(() => {
-          handleResponse(null, {
+          handleResponse({ sender: { id: this.id } }, {
             requestId: payload.requestId,
             accept: false,
           });
@@ -189,12 +204,17 @@ test("SFTP direct connections verify target host keys against known hosts", asyn
       hostname: "target.example.com",
       port: 22,
       username: "alice",
+      sshTcpConnectTimeoutMs: 45_000,
+      sshAuthReadyTimeoutMs: 300_000,
       knownHosts: [makeKnownHost("kh-target", "target.example.com", rawTargetKey)],
     },
   );
 
   const connectOpts = MockSftpClient.instances[0].client.connectOpts;
   assert.equal(typeof connectOpts.hostVerifier, "function");
+  assert.equal(connectOpts.timeout, 45_000);
+  assert.equal(connectOpts.readyTimeout, 0);
+  assert.deepEqual(MockSftpClient.instances[0].client.socketTimeouts, [0]);
   assert.equal(MockSftpClient.instances[0].hostVerifierCalls, 1);
   assert.deepEqual(
     sender.sent.filter((message) => message.channel === "netcatty:host-key:verify"),
@@ -218,6 +238,8 @@ test("SFTP jump-host chains verify hop and target host keys against known hosts"
       hostname: "target.example.com",
       port: 22,
       username: "alice",
+      sshTcpConnectTimeoutMs: 45_000,
+      sshAuthReadyTimeoutMs: 300_000,
       knownHosts: [
         makeKnownHost("kh-jump", "bastion.example.com", rawJumpKey),
         makeKnownHost("kh-target", "target.example.com", rawTargetKey),
@@ -228,16 +250,24 @@ test("SFTP jump-host chains verify hop and target host keys against known hosts"
         username: "jump",
         password: "secret",
         label: "Bastion",
+        sshTcpConnectTimeoutMs: 75_000,
+        sshAuthReadyTimeoutMs: 360_000,
       }],
     },
   );
 
   const jumpConnectOpts = MockJumpClient.instances[0].connectOpts;
   assert.equal(typeof jumpConnectOpts.hostVerifier, "function");
+  assert.equal(jumpConnectOpts.timeout, 75_000);
+  assert.equal(jumpConnectOpts.readyTimeout, 0);
+  assert.deepEqual(MockJumpClient.instances[0].socketTimeouts, [0]);
   assert.equal(MockJumpClient.instances[0].hostVerifierCalls, 1);
 
   const targetConnectOpts = MockSftpClient.instances[0].client.connectOpts;
   assert.equal(typeof targetConnectOpts.hostVerifier, "function");
+  assert.equal(targetConnectOpts.timeout, 45_000);
+  assert.equal(targetConnectOpts.readyTimeout, 0);
+  assert.deepEqual(MockSftpClient.instances[0].client.socketTimeouts, [0]);
   assert.equal(MockSftpClient.instances[0].hostVerifierCalls, 1);
   assert.deepEqual(
     sender.sent.filter((message) => message.channel === "netcatty:host-key:verify"),
@@ -309,5 +339,34 @@ test("SFTP jump-host chains stop when hop host keys are rejected", async (t) => 
   assert.equal(
     sender.sent.filter((message) => message.channel === "netcatty:host-key:verify").length,
     1,
+  );
+});
+
+test("SFTP jump-host chains reject when a hop closes during authentication", async (t) => {
+  const { bridge, MockJumpClient } = loadSftpBridgeWithMockedClients(t);
+  const rawJumpKey = makeRawPublicKey("ssh-ed25519", "closing sftp jump key");
+  MockJumpClient.hostKeysByHost.set("bastion.example.com", rawJumpKey);
+  MockJumpClient.closeBeforeReady = true;
+
+  bridge.init({ sftpClients: new Map(), sessions: new Map(), electronModule: {} });
+  await assert.rejects(
+    bridge.openSftp(
+      { sender: makeSender() },
+      {
+        sessionId: "sftp-chain-auth-close",
+        hostname: "target.example.com",
+        port: 22,
+        username: "alice",
+        knownHosts: [makeKnownHost("kh-closing-jump", "bastion.example.com", rawJumpKey)],
+        jumpHosts: [{
+          hostname: "bastion.example.com",
+          port: 22,
+          username: "jump",
+          password: "secret",
+          label: "Bastion",
+        }],
+      },
+    ),
+    /Connection closed before authentication completed for Bastion/,
   );
 });

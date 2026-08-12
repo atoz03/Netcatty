@@ -1,26 +1,52 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { memo, useCallback, useSyncExternalStore } from 'react';
+import { createPortal } from 'react-dom';
 
-import { activeTabStore, useIsTabActive } from '../../application/state/activeTabStore';
+import { activeTabStore } from '../../application/state/activeTabStore';
 import { getSftpCurrentPathMemoryKey } from '../../application/state/sftp/sftpReopenLocation';
 import {
   getSidePanelLiveSnapshot,
   subscribeSidePanelLiveSnapshot,
 } from '../../application/state/sidePanelLiveStore';
+import {
+  getEmptyNotesSnapshot,
+  getNotesSnapshot,
+  subscribeNotes,
+  subscribeNotesNoop,
+  useNotesStore,
+} from '../../application/state/notesStore';
+import {
+  getShellHistorySnapshot,
+  subscribeShellHistory,
+} from '../../application/state/shellHistoryStore';
+import { useScriptExecution } from '../../application/state/useScriptExecution';
+import { useRemoteHistoryState } from '../../application/state/useRemoteHistoryState';
+import { resolveSystemSidebarSession } from '../../domain/systemManager/resolveSystemSession';
+import { shouldKeepTerminalBackgroundWorkActive } from '../../domain/terminalHibernate';
 import { resolveTerminalFontFamilyId } from '../../infrastructure/config/fonts';
-import type { Host } from '../../types';
+import type { Host, TerminalSession, Workspace } from '../../types';
 import { SystemManagerSidePanel } from '../systemManager/SystemManagerSidePanel';
 import { resolveSftpFollowTerminalCwdTargetHost } from '../sftp/sftpFollowTerminalCwd';
 import { AI_PANEL_FORCE_HIDE_SHELL } from '../ai/aiPanelDiagnostics';
 import type { SidePanelTab } from './TerminalLayerSupport';
+import {
+  collectSidePanelPanes,
+  sidePanelLayoutHasTool,
+  type SidePanelLayout,
+} from '../../domain/sidePanelLayout';
 import { sidePanelHiddenNotesPanelClassName, sidePanelHiddenPanelClassName } from './terminalLayerSidePanelHiddenWrapper';
+import { shouldKeepSftpBrowseSessionInteractive } from './sftpPanelLifecycle';
 
-type SidePanelStableContext = Record<string, any>;
+type SidePanelStableContext = Record<string, any> & {
+  sftpPaneClosedTabIdsRef: React.MutableRefObject<Set<string>>;
+};
 const navigatorPlatform = typeof navigator !== 'undefined' ? navigator.platform : '';
-
-function useSidePanelTabType(tabId: string, sidePanelOpenTabs: Map<string, SidePanelTab>): SidePanelTab | null {
-  return sidePanelOpenTabs.get(tabId) ?? null;
-}
+const EMPTY_VAULT_NOTES: never[] = [];
+const EMPTY_VAULT_HOSTS: never[] = [];
+const EMPTY_VAULT_SNIPPETS: never[] = [];
+const EMPTY_SHELL_HISTORY = Object.freeze([]) as readonly never[];
+const subscribeShellHistoryNoop = () => () => {};
+const getEmptyShellHistorySnapshot = () => EMPTY_SHELL_HISTORY;
 
 function useSidePanelLiveSnapshotForTab(tabId: string, subscribe: boolean) {
   const getSnapshot = useCallback(
@@ -37,20 +63,22 @@ function useSidePanelLiveSnapshotForTab(tabId: string, subscribe: boolean) {
 function SidePanelSftpSlotInner({
   tabId,
   ctx,
+  isVisible,
+  ownerPanelOpen,
 }: {
   tabId: string;
   ctx: SidePanelStableContext;
+  isVisible: boolean;
+  /** Side panel still open for this tab (may be showing another tool). */
+  ownerPanelOpen: boolean;
 }) {
-  const isTabActive = useIsTabActive(tabId);
-  const sidePanelOpenTabs = ctx.sidePanelOpenTabs as Map<string, SidePanelTab>;
-  const sidePanelTab = useSidePanelTabType(tabId, sidePanelOpenTabs);
-  const isVisible = isTabActive && sidePanelTab === 'sftp';
   const live = useSidePanelLiveSnapshotForTab(tabId, isVisible);
 
   const {
     SftpSidePanel,
     effectiveHosts,
     hosts,
+    sessions,
     keys,
     identities,
     knownHosts,
@@ -62,6 +90,8 @@ function SidePanelSftpSlotInner({
     sftpPendingUploadsForTab,
     handleSftpInitialLocationApplied,
     handleSftpCurrentPathChange,
+    handleSftpActiveTransfersChange,
+    handleSftpActiveExternalEditsChange,
     handlePendingUploadHandled,
     sftpDoubleClickBehavior,
     sftpAutoSync,
@@ -134,11 +164,27 @@ function SidePanelSftpSlotInner({
     [handleSftpCurrentPathChange, live.activeTerminalSessionIdForSftp, live.focusedSessionId, tabId],
   );
 
+  const handleActiveTransfersChange = useCallback(
+    (count: number) => {
+      handleSftpActiveTransfersChange(tabId, count);
+    },
+    [handleSftpActiveTransfersChange, tabId],
+  );
+
+  const handleActiveExternalEditsChange = useCallback(
+    (count: number) => {
+      handleSftpActiveExternalEditsChange(tabId, count);
+    },
+    [handleSftpActiveExternalEditsChange, tabId],
+  );
+
   return (
     <div className={sidePanelHiddenPanelClassName(!isVisible)}>
       <SftpSidePanel
+        transferOwnerId={`terminal:${tabId}`}
         hosts={effectiveHosts}
         writableHosts={hosts}
+        sessions={sessions}
         keys={keys}
         identities={identities}
         knownHosts={knownHosts}
@@ -147,11 +193,15 @@ function SidePanelSftpSlotInner({
         sftpDefaultViewMode={sftpDefaultViewMode}
         activeHost={panelActiveHost}
         activeSessionId={isVisible ? live.activeTerminalSessionIdForSftp : null}
+        focusedSessionId={isVisible ? live.focusedSessionId : null}
         initialLocation={isVisible ? (sftpInitialLocationForTab.get(tabId) ?? null) : null}
         onInitialLocationApplied={handleInitialLocationApplied}
         onCurrentPathChange={handleCurrentPathChange}
+        onActiveTransfersChange={handleActiveTransfersChange}
+        onActiveExternalEditsChange={handleActiveExternalEditsChange}
         showWorkspaceHostHeader={isVisible && !!live.activeWorkspace}
         isVisible={isVisible}
+        ownerPanelOpen={ownerPanelOpen}
         renderOverlays={isVisible}
         pendingUpload={sftpPendingUploadsForTab.get(tabId) ?? null}
         onPendingUploadHandled={handlePendingUploadHandledForTab}
@@ -180,15 +230,41 @@ SidePanelSftpSlot.displayName = 'SidePanelSftpSlot';
 function SidePanelSystemSlotInner({
   tabId,
   ctx,
+  isTabActive,
+  isVisible,
+  isSelected,
 }: {
   tabId: string;
   ctx: SidePanelStableContext;
+  isTabActive: boolean;
+  isVisible: boolean;
+  isSelected: boolean;
 }) {
-  const isTabActive = useIsTabActive(tabId);
-  const sidePanelOpenTabs = ctx.sidePanelOpenTabs as Map<string, SidePanelTab>;
-  const sidePanelTab = useSidePanelTabType(tabId, sidePanelOpenTabs);
-  const isVisible = isTabActive && sidePanelTab === 'system';
-  const live = useSidePanelLiveSnapshotForTab(tabId, isTabActive);
+  // When this tab is active, prefer live store so focus changes do not require
+  // workspaceById identity churn through the stable side-panel ctx.
+  const live = useSidePanelLiveSnapshotForTab(tabId, isVisible);
+  const sessions = ctx.sessions as TerminalSession[];
+  const sessionHostsMap = ctx.sessionHostsMap as Map<string, Host>;
+  const workspace = (ctx.workspaceById as Map<string, Workspace>).get(tabId);
+  const standaloneSession = sessions.find((session) => session.id === tabId);
+  const resolvedSession = resolveSystemSidebarSession(
+    sessions,
+    workspace,
+    workspace?.focusedSessionId,
+    standaloneSession,
+  );
+  const systemSession = (isVisible
+    ? (live.activeTerminalSessionForSystem ?? resolvedSession)
+    : resolvedSession) ?? null;
+  const systemHost = (isVisible && live.activeSystemSessionHost)
+    ? live.activeSystemSessionHost
+    : (systemSession ? sessionHostsMap.get(systemSession.id) ?? null : null);
+  const keepSystemWorkActive = isSelected
+    && shouldKeepTerminalBackgroundWorkActive(
+      ctx.terminalSettings,
+      systemHost?.protocol,
+      isTabActive,
+    );
 
   const {
     onOpenManagedTerminal,
@@ -200,11 +276,11 @@ function SidePanelSystemSlotInner({
   return (
     <div className={sidePanelHiddenPanelClassName(!isVisible)}>
       <SystemManagerSidePanel
-        key={live.activeTerminalSessionForSystem?.id ?? 'system-none'}
-        session={live.activeTerminalSessionForSystem ?? null}
-        sessionHost={live.activeSystemSessionHost ?? null}
-        showWorkspaceHostHeader={isVisible && !!live.activeWorkspace}
-        isVisible={isVisible}
+        key={systemSession?.id ?? 'system-none'}
+        session={systemSession ?? null}
+        sessionHost={systemHost}
+        showWorkspaceHostHeader={isVisible && !!workspace}
+        isVisible={keepSystemWorkActive}
         terminalSettings={terminalSettings}
         snippets={snippets}
         onOpenManagedTerminal={onOpenManagedTerminal}
@@ -220,15 +296,15 @@ SidePanelSystemSlot.displayName = 'SidePanelSystemSlot';
 function SidePanelScriptsSlotInner({
   tabId,
   ctx,
+  isVisible,
 }: {
   tabId: string;
   ctx: SidePanelStableContext;
+  isVisible: boolean;
 }) {
-  const isTabActive = useIsTabActive(tabId);
-  const sidePanelOpenTabs = ctx.sidePanelOpenTabs as Map<string, SidePanelTab>;
-  const sidePanelTab = useSidePanelTabType(tabId, sidePanelOpenTabs);
-  const isVisible = isTabActive && sidePanelTab === 'scripts';
   const live = useSidePanelLiveSnapshotForTab(tabId, isVisible);
+  // Subscribe only while visible so retained scripts slots skip log thrash.
+  const { runs: scriptRuns } = useScriptExecution({ enabled: isVisible });
 
   const {
     ScriptsSidePanel,
@@ -240,7 +316,6 @@ function SidePanelScriptsSlotInner({
     handleRunScriptFromPanel,
     handleRunScriptOnWorkspace,
     handleStartRecordingFromPanel,
-    scriptRuns,
     handleStopScriptRun,
     handlePauseScriptRun,
     handleResumeScriptRun,
@@ -257,7 +332,7 @@ function SidePanelScriptsSlotInner({
         onRunScript={handleRunScriptFromPanel}
         onRunScriptOnWorkspace={handleRunScriptOnWorkspace}
         onStartRecording={handleStartRecordingFromPanel}
-        runs={scriptRuns}
+        runs={scriptRuns as import('@/types/global/netcatty-bridge-script.d.ts').ScriptRun[]}
         onStopRun={handleStopScriptRun}
         onPauseRun={handlePauseScriptRun}
         onResumeRun={handleResumeScriptRun}
@@ -274,15 +349,15 @@ SidePanelScriptsSlot.displayName = 'SidePanelScriptsSlot';
 function SidePanelThemeSlotInner({
   tabId,
   ctx,
+  isVisible,
 }: {
   tabId: string;
   ctx: SidePanelStableContext;
+  isVisible: boolean;
 }) {
-  const isTabActive = useIsTabActive(tabId);
-  const sidePanelOpenTabs = ctx.sidePanelOpenTabs as Map<string, SidePanelTab>;
-  const sidePanelTab = useSidePanelTabType(tabId, sidePanelOpenTabs);
-  const isVisible = isTabActive && sidePanelTab === 'theme';
-  const live = useSidePanelLiveSnapshotForTab(tabId, isTabActive);
+  // Only subscribe while the theme panel is visible — not merely tab-active —
+  // so cwd/focus live ticks do not thrash a retained ThemeSidePanel.
+  const live = useSidePanelLiveSnapshotForTab(tabId, isVisible);
 
   const {
     ThemeSidePanel,
@@ -334,23 +409,25 @@ SidePanelThemeSlot.displayName = 'SidePanelThemeSlot';
 function SidePanelNotesSlotInner({
   tabId,
   ctx,
+  isVisible,
 }: {
   tabId: string;
   ctx: SidePanelStableContext;
+  isVisible: boolean;
 }) {
-  const isTabActive = useIsTabActive(tabId);
-  const sidePanelOpenTabs = ctx.sidePanelOpenTabs as Map<string, SidePanelTab>;
-  const sidePanelTab = useSidePanelTabType(tabId, sidePanelOpenTabs);
-  const isVisible = isTabActive && sidePanelTab === 'notes';
   const openNoteRequest = (ctx.notesOpenNoteByTab as Map<string, { noteId: string; requestId: number }>).get(tabId) ?? null;
+  // Gate subscription while Notes is hidden so vault edits (and the full-page
+  // notebook) do not re-render this retained side-panel mount.
+  const {
+    notes,
+    noteGroups,
+    updateNotes,
+    updateNoteGroups,
+  } = useNotesStore({ enabled: isVisible });
 
   const {
     NotesManager,
-    notes,
-    noteGroups,
     hosts,
-    updateNotes,
-    updateNoteGroups,
     handleOpenHostFromNotes,
   } = ctx;
 
@@ -367,6 +444,7 @@ function SidePanelNotesSlotInner({
         onUpdateNoteGroups={updateNoteGroups}
         onOpenHost={handleOpenHostFromNotes}
         displayMode="sidebar"
+        isActive={isVisible}
         openNoteId={openNoteRequest?.noteId ?? null}
         openNoteRequestId={openNoteRequest?.requestId ?? null}
       />
@@ -377,22 +455,30 @@ function SidePanelNotesSlotInner({
 export const SidePanelNotesSlot = memo(SidePanelNotesSlotInner);
 SidePanelNotesSlot.displayName = 'SidePanelNotesSlot';
 
-function SidePanelHistorySlotInner({ ctx }: { ctx: SidePanelStableContext }) {
-  const activeTabId = useSyncExternalStore(
-    activeTabStore.subscribe,
-    activeTabStore.getActiveTabId,
-    activeTabStore.getActiveTabId,
-  );
-  const sidePanelOpenTabs = ctx.sidePanelOpenTabs as Map<string, SidePanelTab>;
-  const sidePanelTab = activeTabId ? sidePanelOpenTabs.get(activeTabId) ?? null : null;
-  const isVisible = sidePanelTab === 'history';
+function SidePanelHistorySlotInner({
+  activeTabId,
+  ctx,
+  isVisible,
+}: {
+  activeTabId: string | null;
+  ctx: SidePanelStableContext;
+  isVisible: boolean;
+}) {
   const live = useSidePanelLiveSnapshotForTab(activeTabId ?? '', isVisible);
+  // Own remote-history state here so fetch/loading does not re-render TerminalLayer.
+  const remoteHistory = useRemoteHistoryState();
+  // Gate store subscription while History is hidden so command appends do not
+  // re-render this retained mount (panel still mounts for fast reopen).
+  const shellHistory = useSyncExternalStore(
+    isVisible ? subscribeShellHistory : subscribeShellHistoryNoop,
+    isVisible ? getShellHistorySnapshot : getEmptyShellHistorySnapshot,
+    isVisible ? getShellHistorySnapshot : getEmptyShellHistorySnapshot,
+  );
 
   const {
     HistorySidePanel,
-    remoteHistory,
-    shellHistory,
     handleHistoryPaste,
+    handleHistoryDelete,
     handleHistoryRun,
   } = ctx;
 
@@ -404,8 +490,9 @@ function SidePanelHistorySlotInner({ ctx }: { ctx: SidePanelStableContext }) {
         focusedHost={live.focusedHost}
         focusedSessionId={live.historySessionId}
         state={remoteHistory.getState(live.focusedHost?.id, live.historySessionId)}
-        globalEntries={shellHistory}
+        globalEntries={shellHistory as import('../../domain/models').ShellHistoryEntry[]}
         onFetch={remoteHistory.fetch}
+        onDeleteGlobalEntry={handleHistoryDelete}
         onPasteToTerminal={handleHistoryPaste}
         onRunInTerminal={handleHistoryRun}
         isVisible
@@ -417,15 +504,15 @@ function SidePanelHistorySlotInner({ ctx }: { ctx: SidePanelStableContext }) {
 export const SidePanelHistorySlot = memo(SidePanelHistorySlotInner);
 SidePanelHistorySlot.displayName = 'SidePanelHistorySlot';
 
-function SidePanelAiSlotInner({ ctx }: { ctx: SidePanelStableContext }) {
-  const activeTabId = useSyncExternalStore(
-    activeTabStore.subscribe,
-    activeTabStore.getActiveTabId,
-    activeTabStore.getActiveTabId,
-  );
-  const sidePanelOpenTabs = ctx.sidePanelOpenTabs as Map<string, SidePanelTab>;
-  const activeSidePanelTab = activeTabId ? sidePanelOpenTabs.get(activeTabId) ?? null : null;
-
+function SidePanelAiSlotInner({
+  activeTabId,
+  ctx,
+  isVisible,
+}: {
+  activeTabId: string | null;
+  ctx: SidePanelStableContext;
+  isVisible: boolean;
+}) {
   const {
     AIChatPanelsHost,
     AISidePanelStateRoot,
@@ -434,7 +521,6 @@ function SidePanelAiSlotInner({ ctx }: { ctx: SidePanelStableContext }) {
     resolveAIExecutorContext,
     pendingTerminalSelectionForAI,
     handlePendingTerminalSelectionConsumed,
-    notes,
     hosts,
     snippets,
     onOpenVaultNoteFromChat,
@@ -443,23 +529,61 @@ function SidePanelAiSlotInner({ ctx }: { ctx: SidePanelStableContext }) {
     onOpenVaultSnippetFromChat,
     validAIScopeTargetIds,
   } = ctx;
+  const workspaces = ctx.workspaces as Workspace[];
 
-  if (mountedAiTabIds.length === 0) return null;
-  if (AI_PANEL_FORCE_HIDE_SHELL && activeSidePanelTab === 'ai') return null;
+  // Gate notes subscription while AI is hidden so note edits do not re-render
+  // retained AI mounts (panel still mounts for fast reopen).
+  const notesSnapshot = useSyncExternalStore(
+    isVisible ? subscribeNotes : subscribeNotesNoop,
+    isVisible ? getNotesSnapshot : getEmptyNotesSnapshot,
+    isVisible ? getNotesSnapshot : getEmptyNotesSnapshot,
+  );
+
+  const activeLayout = activeTabId
+    ? (ctx.sidePanelLayouts as Map<string, SidePanelLayout>).get(activeTabId)
+    : null;
+  const hideVisibleShell = (
+    AI_PANEL_FORCE_HIDE_SHELL
+    && isVisible
+    && (!activeLayout || collectSidePanelPanes(activeLayout.root).length <= 1)
+  );
+
+  // Keep the AI state root mounted even with zero panel hosts so workspace
+  // merge/detach can seed and hand off scoped chats before orphan cleanup.
+  if (mountedAiTabIds.length === 0 || hideVisibleShell) {
+    return (
+      <AISidePanelStateRoot
+        validAIScopeTargetIds={validAIScopeTargetIds}
+        workspaces={workspaces}
+      >
+        {null}
+      </AISidePanelStateRoot>
+    );
+  }
+
+  // Only the visible AI panel needs vault catalogs for artifact navigation.
+  // Hidden retained panels keep session state without re-binding huge hosts/notes.
+  const injectVaultCatalog = isVisible;
+  const notes = injectVaultCatalog
+    ? (notesSnapshot.notes as import('../../domain/models').VaultNote[])
+    : EMPTY_VAULT_NOTES;
 
   return (
-    <AISidePanelStateRoot validAIScopeTargetIds={validAIScopeTargetIds}>
+    <AISidePanelStateRoot
+      validAIScopeTargetIds={validAIScopeTargetIds}
+      workspaces={workspaces}
+    >
       <AIChatPanelsHost
         mountedTabIds={mountedAiTabIds}
         activeTabId={activeTabId}
-        activeSidePanelTab={activeSidePanelTab}
+        activeSidePanelTab={isVisible ? 'ai' : null}
         contextsByTabId={aiContextsByTabId}
         resolveExecutorContext={resolveAIExecutorContext}
         pendingTerminalSelection={pendingTerminalSelectionForAI}
         onPendingTerminalSelectionConsumed={handlePendingTerminalSelectionConsumed}
         notes={notes}
-        hosts={hosts}
-        snippets={snippets}
+        hosts={injectVaultCatalog ? hosts : EMPTY_VAULT_HOSTS}
+        snippets={injectVaultCatalog ? snippets : EMPTY_VAULT_SNIPPETS}
         onOpenVaultNoteFromChat={onOpenVaultNoteFromChat}
         onOpenVaultHostFromChat={onOpenVaultHostFromChat}
         onOpenVaultSectionFromChat={onOpenVaultSectionFromChat}
@@ -472,7 +596,54 @@ function SidePanelAiSlotInner({ ctx }: { ctx: SidePanelStableContext }) {
 export const SidePanelAiSlot = memo(SidePanelAiSlotInner);
 SidePanelAiSlot.displayName = 'SidePanelAiSlot';
 
-export function SidePanelMountedContent({ ctx }: { ctx: SidePanelStableContext }) {
+function PersistentSidePanelPortal({
+  portalKey,
+  target,
+  children,
+}: {
+  portalKey: string;
+  target: HTMLElement | null;
+  children: React.ReactNode;
+}) {
+  const [mountNode] = React.useState(() => {
+    const node = document.createElement('div');
+    node.className = 'absolute inset-0 overflow-hidden';
+    node.dataset.sidePanelPortal = portalKey;
+    return node;
+  });
+
+  // The React portal always targets the same detached node. Moving that node
+  // between a pane host and the hidden parking host preserves the mounted
+  // subtree (including active SFTP/AI state) instead of remounting it whenever
+  // the focused pane changes.
+  React.useLayoutEffect(() => {
+    if (!target) return;
+    target.appendChild(mountNode);
+    return () => {
+      if (mountNode.parentNode === target) mountNode.remove();
+    };
+  }, [mountNode, target]);
+
+  return createPortal(children, mountNode, portalKey);
+}
+
+export function resolveSidePanelPortalTarget<T>(
+  isVisible: boolean,
+  paneHost: T | null | undefined,
+  parkingHost: T | null,
+): T | null {
+  return isVisible ? (paneHost ?? parkingHost) : parkingHost;
+}
+
+export function SidePanelMountedContent({
+  ctx,
+  paneHosts,
+  parkingHost,
+}: {
+  ctx: SidePanelStableContext;
+  paneHosts: ReadonlyMap<SidePanelTab, HTMLElement>;
+  parkingHost: HTMLElement | null;
+}) {
   const {
     mountedSftpTabIds,
     systemMountedTabIds,
@@ -480,26 +651,106 @@ export function SidePanelMountedContent({ ctx }: { ctx: SidePanelStableContext }
     themeMountedTabIds,
     notesMountedTabIds,
   } = ctx;
+  const activeTabId = useSyncExternalStore(
+    activeTabStore.subscribe,
+    activeTabStore.getActiveTabId,
+    activeTabStore.getActiveTabId,
+  );
+  const layouts = ctx.sidePanelLayouts as Map<string, SidePanelLayout>;
+  const openTabs = ctx.sidePanelOpenTabs as Map<string, SidePanelTab>;
+  const retainedAfterCloseTabIdsRef = ctx.sftpRetainedAfterCloseTabIdsRef as
+    | React.MutableRefObject<ReadonlySet<string>>
+    | undefined;
+  const sftpPaneClosedTabIdsRef = ctx.sftpPaneClosedTabIdsRef;
+  const isSftpOwnerPanelOpen = (tabId: string) => shouldKeepSftpBrowseSessionInteractive({
+    sidePanelOpen: openTabs.has(tabId),
+    retainedAfterClose: retainedAfterCloseTabIdsRef?.current.has(tabId) ?? false,
+    sftpPaneClosed: sftpPaneClosedTabIdsRef.current.has(tabId),
+  });
+  const isToolVisible = (tabId: string, tool: SidePanelTab) => (
+    activeTabId === tabId && sidePanelLayoutHasTool(layouts.get(tabId), tool)
+  );
+  const portalTarget = (tabId: string, tool: SidePanelTab) => (
+    resolveSidePanelPortalTarget(isToolVisible(tabId, tool), paneHosts.get(tool), parkingHost)
+  );
+  const activeLayout = activeTabId ? layouts.get(activeTabId) : undefined;
+  const historyVisible = !!activeTabId && sidePanelLayoutHasTool(activeLayout, 'history');
+  const aiVisible = !!activeTabId && sidePanelLayoutHasTool(activeLayout, 'ai');
 
   return (
     <>
       {mountedSftpTabIds.map((tabId: string) => (
-        <SidePanelSftpSlot key={tabId} tabId={tabId} ctx={ctx} />
+        <PersistentSidePanelPortal
+          key={`sftp-${tabId}`}
+          portalKey={`sftp-${tabId}`}
+          target={portalTarget(tabId, 'sftp')}
+        >
+          <SidePanelSftpSlot
+            tabId={tabId}
+            ctx={ctx}
+            isVisible={isToolVisible(tabId, 'sftp')}
+            ownerPanelOpen={isSftpOwnerPanelOpen(tabId)}
+          />
+        </PersistentSidePanelPortal>
       ))}
-      {systemMountedTabIds.map((tabId: string) => (
-        <SidePanelSystemSlot key={`system-${tabId}`} tabId={tabId} ctx={ctx} />
-      ))}
+      {systemMountedTabIds.map((tabId: string) => {
+        const isSelected = sidePanelLayoutHasTool(layouts.get(tabId), 'system');
+        const isVisible = activeTabId === tabId && isSelected;
+        return (
+          <PersistentSidePanelPortal
+            key={`system-${tabId}`}
+            portalKey={`system-${tabId}`}
+            target={resolveSidePanelPortalTarget(isVisible, paneHosts.get('system'), parkingHost)}
+          >
+            <SidePanelSystemSlot
+              tabId={tabId}
+              ctx={ctx}
+              isTabActive={activeTabId === tabId}
+              isVisible={isVisible}
+              isSelected={isSelected}
+            />
+          </PersistentSidePanelPortal>
+        );
+      })}
       {scriptsMountedTabIds.map((tabId: string) => (
-        <SidePanelScriptsSlot key={`scripts-${tabId}`} tabId={tabId} ctx={ctx} />
+        <PersistentSidePanelPortal
+          key={`scripts-${tabId}`}
+          portalKey={`scripts-${tabId}`}
+          target={portalTarget(tabId, 'scripts')}
+        >
+          <SidePanelScriptsSlot tabId={tabId} ctx={ctx} isVisible={isToolVisible(tabId, 'scripts')} />
+        </PersistentSidePanelPortal>
       ))}
-      <SidePanelHistorySlot ctx={ctx} />
+      <PersistentSidePanelPortal
+        portalKey="history-active"
+        target={resolveSidePanelPortalTarget(historyVisible, paneHosts.get('history'), parkingHost)}
+      >
+        <SidePanelHistorySlot activeTabId={activeTabId} ctx={ctx} isVisible={historyVisible} />
+      </PersistentSidePanelPortal>
       {themeMountedTabIds.map((tabId: string) => (
-        <SidePanelThemeSlot key={`theme-${tabId}`} tabId={tabId} ctx={ctx} />
+        <PersistentSidePanelPortal
+          key={`theme-${tabId}`}
+          portalKey={`theme-${tabId}`}
+          target={portalTarget(tabId, 'theme')}
+        >
+          <SidePanelThemeSlot tabId={tabId} ctx={ctx} isVisible={isToolVisible(tabId, 'theme')} />
+        </PersistentSidePanelPortal>
       ))}
       {notesMountedTabIds.map((tabId: string) => (
-        <SidePanelNotesSlot key={`notes-${tabId}`} tabId={tabId} ctx={ctx} />
+        <PersistentSidePanelPortal
+          key={`notes-${tabId}`}
+          portalKey={`notes-${tabId}`}
+          target={portalTarget(tabId, 'notes')}
+        >
+          <SidePanelNotesSlot tabId={tabId} ctx={ctx} isVisible={isToolVisible(tabId, 'notes')} />
+        </PersistentSidePanelPortal>
       ))}
-      <SidePanelAiSlot ctx={ctx} />
+      <PersistentSidePanelPortal
+        portalKey="ai-host"
+        target={resolveSidePanelPortalTarget(aiVisible, paneHosts.get('ai'), parkingHost)}
+      >
+        <SidePanelAiSlot activeTabId={activeTabId} ctx={ctx} isVisible={aiVisible} />
+      </PersistentSidePanelPortal>
     </>
   );
 }

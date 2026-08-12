@@ -64,6 +64,7 @@ const TextEditorModalUnavailable: React.FC<{
 
 interface SftpOverlaysProps {
   hosts: Host[];
+  connectedHosts?: import("../../domain/sftpConnectedHosts").SftpConnectedHostEntry[];
   sftp: SftpState;
   visibleTransfers: SftpState["transfers"];
   showTransferQueue?: boolean;
@@ -79,8 +80,8 @@ interface SftpOverlaysProps {
   setShowHostPickerRight: (open: boolean) => void;
   setHostSearchLeft: (value: string) => void;
   setHostSearchRight: (value: string) => void;
-  handleHostSelectLeft: (host: Host | "local") => void;
-  handleHostSelectRight: (host: Host | "local") => void;
+  handleHostSelectLeft: (host: Host | "local", options?: { sourceSessionId?: string }) => void;
+  handleHostSelectRight: (host: Host | "local", options?: { sourceSessionId?: string }) => void;
   permissionsState: { file: SftpFileEntry; side: "left" | "right"; fullPath: string } | null;
   setPermissionsState: (state: { file: SftpFileEntry; side: "left" | "right"; fullPath: string } | null) => void;
   showTextEditor: boolean;
@@ -106,6 +107,7 @@ interface SftpOverlaysProps {
 
 export const SftpOverlays: React.FC<SftpOverlaysProps> = React.memo(({
   hosts,
+  connectedHosts = [],
   sftp,
   visibleTransfers,
   showTransferQueue = true,
@@ -160,6 +162,7 @@ export const SftpOverlays: React.FC<SftpOverlaysProps> = React.memo(({
         open={showHostPickerLeft}
         onOpenChange={setShowHostPickerLeft}
         hosts={hosts}
+        connectedHosts={connectedHosts}
         side="left"
         hostSearch={hostSearchLeft}
         onHostSearchChange={setHostSearchLeft}
@@ -170,6 +173,7 @@ export const SftpOverlays: React.FC<SftpOverlaysProps> = React.memo(({
         open={showHostPickerRight}
         onOpenChange={setShowHostPickerRight}
         hosts={hosts}
+        connectedHosts={connectedHosts}
         side="right"
         hostSearch={hostSearchRight}
         onHostSearchChange={setHostSearchRight}

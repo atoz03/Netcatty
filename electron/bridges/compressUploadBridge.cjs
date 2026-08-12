@@ -6,8 +6,11 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { createHash } = require("node:crypto");
 const { spawn } = require("node:child_process");
+const { StringDecoder } = require("node:string_decoder");
 const { getTempFilePath } = require("./tempDirBridge.cjs");
+const { invalidateSshTransport } = require("./sshTransportInvalidation.cjs");
 
 /**
  * Escape shell arguments to prevent injection attacks
@@ -18,12 +21,371 @@ function escapeShellArg(arg) {
   return "'" + arg.replace(/'/g, "'\\''") + "'";
 }
 
+function buildAtomicRemoteExtractionCommand({
+  compressionId,
+  archivePath,
+  targetDir,
+  folderName,
+}) {
+  const normalizedFolderName = path.posix.basename(String(folderName || "").replace(/\\/g, "/"));
+  if (!normalizedFolderName || normalizedFolderName === "." || normalizedFolderName === "..") {
+    throw new Error("Invalid compressed upload folder name");
+  }
+  // Recovery artifacts are stable for one destination, not one attempt. A
+  // failed post-commit cleanup is therefore reconciled by the next upload
+  // instead of leaving one new backup per compression id.
+  const suffix = createHash("sha256")
+    .update(`${targetDir}\0${normalizedFolderName}`)
+    .digest("hex")
+    .slice(0, 16);
+  const stageDir = path.posix.join(targetDir, `.netcatty-compress-${suffix}.stage`);
+  const backupDir = path.posix.join(targetDir, `.netcatty-compress-${suffix}.backup`);
+  const finalDir = path.posix.join(targetDir, normalizedFolderName);
+  const stagedFinalDir = path.posix.join(stageDir, normalizedFolderName);
+
+  return [
+    "set -e",
+    `archive=${escapeShellArg(archivePath)}`,
+    `stage=${escapeShellArg(stageDir)}`,
+    `backup=${escapeShellArg(backupDir)}`,
+    `final=${escapeShellArg(finalDir)}`,
+    `staged_final=${escapeShellArg(stagedFinalDir)}`,
+    "rollback_compressed_upload() {",
+    "  status=$1",
+    "  trap - EXIT HUP INT TERM",
+    "  if [ ! -e \"$final\" ] && [ ! -L \"$final\" ] && { [ -e \"$backup\" ] || [ -L \"$backup\" ]; }; then",
+    "    mv -- \"$backup\" \"$final\" 2>/dev/null || true",
+    "  fi",
+    "  make_tree_writable \"$stage\"",
+    "  rm -rf -- \"$stage\"",
+    "  rm -f -- \"$archive\"",
+    "  exit \"$status\"",
+    "}",
+    "make_tree_writable() {",
+    "  candidate=$1",
+    "  if [ -d \"$candidate\" ] && [ ! -L \"$candidate\" ]; then chmod -R u+w -- \"$candidate\" 2>/dev/null || true; fi",
+    "}",
+    "trap 'rollback_compressed_upload $?' EXIT",
+    "trap 'rollback_compressed_upload 129' HUP",
+    "trap 'rollback_compressed_upload 130' INT",
+    "trap 'rollback_compressed_upload 143' TERM",
+    // Recover a prior interrupted promotion before touching either artifact.
+    "if [ ! -e \"$final\" ] && [ ! -L \"$final\" ] && { [ -e \"$backup\" ] || [ -L \"$backup\" ]; }; then mv -- \"$backup\" \"$final\"; fi",
+    "if [ -L \"$final\" ]; then echo 'Refusing to replace a symlink target' >&2; exit 1; fi",
+    "if [ -e \"$backup\" ] || [ -L \"$backup\" ]; then make_tree_writable \"$backup\"; rm -rf -- \"$backup\"; fi",
+    "make_tree_writable \"$stage\"",
+    "rm -rf -- \"$stage\"",
+    "mkdir -p -- \"$stage\"",
+    // Preserve merge semantics without exposing the live destination to tar.
+    "if [ -e \"$final\" ]; then",
+    "  if ! cp -a -- \"$final\" \"$staged_final\" 2>/dev/null; then",
+    "    rm -rf -- \"$staged_final\"",
+    "    cp -Rp -- \"$final\" \"$staged_final\"",
+    "  fi",
+    "fi",
+    "tar -xzf \"$archive\" -C \"$stage\" --exclude='._*' --exclude='.DS_Store'",
+    "if [ ! -d \"$staged_final\" ]; then echo 'Compressed archive did not contain the expected folder' >&2; exit 1; fi",
+    "if [ -e \"$final\" ]; then mv -- \"$final\" \"$backup\"; fi",
+    "mv -- \"$staged_final\" \"$final\"",
+    "make_tree_writable \"$backup\"",
+    "make_tree_writable \"$stage\"",
+    "rm -rf -- \"$backup\" \"$stage\"",
+    "rm -f -- \"$archive\"",
+    "trap - EXIT HUP INT TERM",
+  ].join("\n");
+}
+
 // Shared references
 let sftpClients = null;
 let transferBridge = null;
 
 // Active compress operations
 const activeCompressions = new Map();
+const workerCompressionLifecycleEpochs = new Map();
+const compressionSupportCache = new Map();
+const compressionTargetLocks = new Map();
+const COMPRESSION_SUPPORT_CACHE_TTL_MS = 10_000;
+const MAX_COMPRESSION_SUPPORT_CACHE_ENTRIES = 64;
+const REMOTE_TAR_PROBE_TIMEOUT_MS = 15_000;
+const REMOTE_CLEANUP_TIMEOUT_MS = 15_000;
+const LOCAL_TAR_PROBE_TIMEOUT_MS = 10_000;
+const LOCAL_TAR_KILL_GRACE_MS = 750;
+const MAX_REMOTE_EXEC_STDERR_BYTES = 64 * 1024;
+const MAX_LOCAL_TAR_STDERR_BYTES = 64 * 1024;
+
+async function runWithCompressionTargetLock(targetKey, signal, operation) {
+  const predecessor = compressionTargetLocks.get(targetKey) || Promise.resolve();
+  let release;
+  const ownGate = new Promise((resolve) => { release = resolve; });
+  const ownTail = predecessor.catch(() => {}).then(() => ownGate);
+  compressionTargetLocks.set(targetKey, ownTail);
+
+  let removeAbortListener = () => {};
+  try {
+    if (signal) {
+      const aborted = new Promise((_, reject) => {
+        const onAbort = () => reject(
+          signal.reason instanceof Error ? signal.reason : new Error("Upload cancelled"),
+        );
+        if (signal.aborted) onAbort();
+        else {
+          signal.addEventListener("abort", onAbort, { once: true });
+          removeAbortListener = () => signal.removeEventListener("abort", onAbort);
+        }
+      });
+      await Promise.race([predecessor.catch(() => {}), aborted]);
+    } else {
+      await predecessor.catch(() => {});
+    }
+    if (signal?.aborted) {
+      throw signal.reason instanceof Error ? signal.reason : new Error("Upload cancelled");
+    }
+    return await operation();
+  } finally {
+    removeAbortListener();
+    release();
+    void ownTail.finally(() => {
+      if (compressionTargetLocks.get(targetKey) === ownTail) {
+        compressionTargetLocks.delete(targetKey);
+      }
+    });
+  }
+}
+
+function buildCompressionTargetKey(connectionIdentity, targetPath, folderName) {
+  if (!connectionIdentity) {
+    throw new Error("SFTP connection identity unavailable for compressed upload");
+  }
+  const normalizedFolderName = path.posix.basename(String(folderName || "").replace(/\\/g, "/"));
+  if (!normalizedFolderName || normalizedFolderName === "." || normalizedFolderName === "..") {
+    throw new Error("Invalid compressed upload folder name");
+  }
+  const normalizedTarget = path.posix.normalize(path.posix.join(
+    String(targetPath || ".").replace(/\\/g, "/"),
+    normalizedFolderName,
+  ));
+  return `${connectionIdentity}\0${normalizedTarget}`;
+}
+
+function resolveCompressionTargetKey(sftpId, targetPath, folderName) {
+  const client = sftpClients?.get?.(sftpId);
+  const connectionIdentity = client?.__netcattyEndpointKey
+    || client?.__netcattyRefHolder?.connRef?.endpointKey;
+  return buildCompressionTargetKey(connectionIdentity, targetPath, folderName);
+}
+
+function createBoundedUtf8Collector(maxBytes) {
+  const limit = Math.max(1, Number(maxBytes) || 1);
+  const decoder = new StringDecoder("utf8");
+  let text = "";
+  let bytes = 0;
+  let truncated = false;
+  let ended = false;
+  return {
+    append(chunk) {
+      if (ended) return;
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
+      const remaining = Math.max(0, limit - bytes);
+      const accepted = buffer.length <= remaining ? buffer : buffer.subarray(0, remaining);
+      if (accepted.length > 0) text += decoder.write(accepted);
+      bytes += accepted.length;
+      if (accepted.length < buffer.length) truncated = true;
+    },
+    end() {
+      if (ended) return text;
+      ended = true;
+      // If the byte cap cut through a code point, discard the held prefix
+      // instead of turning it into a replacement character in diagnostics.
+      if (!truncated || decoder.lastNeed === 0) text += decoder.end();
+      return text;
+    },
+    value() {
+      return text;
+    },
+  };
+}
+
+function terminateRemoteExecStream(stream) {
+  if (!stream) return;
+  try { stream.once?.('error', () => {}); } catch { /* ignore */ }
+  try { stream.stderr?.once?.('error', () => {}); } catch { /* ignore */ }
+  try { stream.close?.(); } catch { /* ignore */ }
+  try { stream.end?.(); } catch { /* ignore */ }
+  try { stream.destroy?.(); } catch { /* ignore */ }
+}
+
+function runRemoteExec(sshClient, command, options = {}) {
+  const timeoutMs = Math.max(1, Number(options.timeoutMs) || REMOTE_CLEANUP_TIMEOUT_MS);
+  const signal = options.signal;
+  return new Promise((resolve, reject) => {
+    let stream = null;
+    let settled = false;
+    const stderr = createBoundedUtf8Collector(MAX_REMOTE_EXEC_STDERR_BYTES);
+    let hasOutput = false;
+
+    const cleanup = () => {
+      clearTimeout(timeout);
+      signal?.removeEventListener?.('abort', onAbort);
+    };
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) {
+        terminateRemoteExecStream(stream);
+        reject(error);
+      } else {
+        resolve(result);
+      }
+    };
+    const onAbort = () => {
+      finish(signal?.reason instanceof Error ? signal.reason : new Error('Remote command cancelled'));
+      if (!stream) invalidateSshTransport(sshClient);
+    };
+    const timeout = setTimeout(() => {
+      finish(new Error(`Remote command timed out after ${timeoutMs / 1000} seconds`));
+      if (!stream) invalidateSshTransport(sshClient);
+    }, timeoutMs);
+
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+
+    try {
+      sshClient.exec(command, (error, nextStream) => {
+        if (settled) {
+          terminateRemoteExecStream(nextStream);
+          return;
+        }
+        if (error) {
+          finish(error);
+          return;
+        }
+        stream = nextStream;
+        stream.on('data', () => { hasOutput = true; });
+        stream.stderr?.on?.('data', (data) => {
+          stderr.append(data);
+        });
+        stream.stderr?.once?.('error', (streamError) => finish(streamError));
+        stream.once('close', (code) => finish(null, { code, hasOutput, stderr: stderr.end() }));
+        stream.once('error', (streamError) => finish(streamError));
+      });
+    } catch (error) {
+      finish(error);
+    }
+  });
+}
+
+function broadcastCompressionEvent(payload) {
+  if (!payload?.transferId) return;
+  try {
+    transferBridge?.broadcastGlobalTransferEvent?.(payload);
+  } catch {
+    // Global UI fanout is best-effort; the job itself must keep running.
+  }
+}
+
+function settleCompressionTerminal(compression, type, payload = {}) {
+  if (!compression || compression.terminalState) return false;
+  compression.terminalState = type;
+  broadcastCompressionEvent({
+    type,
+    transferId: compression.compressionId,
+    endedAt: Date.now(),
+    ...payload,
+  });
+  return true;
+}
+
+function getCachedCompressionSupport(sftpId) {
+  const entry = compressionSupportCache.get(sftpId);
+  if (!entry) return null;
+  if (entry.expiresAt <= Date.now()) {
+    compressionSupportCache.delete(sftpId);
+    return null;
+  }
+  compressionSupportCache.delete(sftpId);
+  compressionSupportCache.set(sftpId, entry);
+  return entry.value;
+}
+
+function cacheCompressionSupport(sftpId, value) {
+  compressionSupportCache.delete(sftpId);
+  compressionSupportCache.set(sftpId, {
+    value,
+    expiresAt: Date.now() + COMPRESSION_SUPPORT_CACHE_TTL_MS,
+  });
+  while (compressionSupportCache.size > MAX_COMPRESSION_SUPPORT_CACHE_ENTRIES) {
+    compressionSupportCache.delete(compressionSupportCache.keys().next().value);
+  }
+  return value;
+}
+
+async function resolveCompressedUploadSupport(sftpId, signal) {
+  const cached = getCachedCompressionSupport(sftpId);
+  if (cached) return cached;
+  const localTar = await checkTarAvailable(signal);
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Upload cancelled');
+  const remoteTar = localTar ? await checkRemoteTarAvailable(sftpId, signal) : false;
+  if (signal?.aborted) throw signal.reason instanceof Error ? signal.reason : new Error('Upload cancelled');
+  return cacheCompressionSupport(sftpId, {
+    supported: localTar && remoteTar,
+    localTar,
+    remoteTar,
+  });
+}
+
+function buildRemoteArchivePath(targetPath, folderName, compressionId) {
+  const base = path.posix.basename(String(folderName || 'folder').replace(/\\/g, '/'))
+    .replace(/[^A-Za-z0-9._-]/g, '_') || 'folder';
+  const suffix = createHash('sha256')
+    .update(String(compressionId || 'compression'))
+    .digest('hex')
+    .slice(0, 16);
+  return path.posix.join(targetPath, `.${base}.netcatty-${suffix}.tar.gz`);
+}
+
+function waitWhilePaused(compression) {
+  if (!compression.paused || compression.cancelled) return Promise.resolve();
+  broadcastCompressionEvent({
+    type: 'paused',
+    transferId: compression.compressionId,
+    phase: compression.phase,
+    lifecycleEpoch: compression.lifecycleEpoch,
+    lifecycleState: 'paused',
+  });
+  return new Promise((resolve) => compression.resumeWaiters.push(resolve));
+}
+
+function releasePausedCompression(compression) {
+  compression.paused = false;
+  const waiters = compression.resumeWaiters.splice(0);
+  for (const resolve of waiters) resolve();
+}
+
+function clearCompressionProcess(compression, processHandle) {
+  if (compression.process !== processHandle) return;
+  compression.process = null;
+  if (compression.processKillTimer) {
+    clearTimeout(compression.processKillTimer);
+    compression.processKillTimer = null;
+  }
+}
+
+function terminateCompressionProcess(compression) {
+  const processHandle = compression?.process;
+  if (!processHandle) return;
+  try { processHandle.kill('SIGTERM'); } catch { /* already exited */ }
+  if (compression.processKillTimer) clearTimeout(compression.processKillTimer);
+  compression.processKillTimer = setTimeout(() => {
+    compression.processKillTimer = null;
+    if (compression.process !== processHandle) return;
+    try { processHandle.kill('SIGKILL'); } catch { /* already exited */ }
+  }, LOCAL_TAR_KILL_GRACE_MS);
+  compression.processKillTimer.unref?.();
+}
 
 /**
  * Initialize the compress upload bridge with dependencies
@@ -36,14 +398,48 @@ function init(deps) {
 /**
  * Check if tar command is available on the system
  */
-async function checkTarAvailable() {
+async function checkTarAvailable(signal) {
   return new Promise((resolve) => {
     const tar = spawn('tar', ['--version'], { stdio: 'ignore' });
+    let settled = false;
+    let childClosed = false;
+    let forceKillTimer = null;
+    const finish = (available) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      signal?.removeEventListener?.('abort', onAbort);
+      resolve(available);
+    };
+    const stop = () => {
+      try { tar.kill('SIGTERM'); } catch { /* ignore */ }
+      if (!childClosed) {
+        forceKillTimer = setTimeout(() => {
+          forceKillTimer = null;
+          if (!childClosed) {
+            try { tar.kill('SIGKILL'); } catch { /* ignore */ }
+          }
+        }, LOCAL_TAR_KILL_GRACE_MS);
+        forceKillTimer.unref?.();
+      }
+      finish(false);
+    };
+    const onAbort = () => stop();
+    const timeout = setTimeout(stop, LOCAL_TAR_PROBE_TIMEOUT_MS);
+    if (signal?.aborted) {
+      stop();
+      return;
+    }
+    signal?.addEventListener?.('abort', onAbort, { once: true });
     tar.on('close', (code) => {
-      resolve(code === 0);
+      childClosed = true;
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      finish(code === 0);
     });
     tar.on('error', () => {
-      resolve(false);
+      childClosed = true;
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      finish(false);
     });
   });
 }
@@ -51,7 +447,7 @@ async function checkTarAvailable() {
 /**
  * Check if tar command is available on remote server
  */
-async function checkRemoteTarAvailable(sftpId) {
+async function checkRemoteTarAvailable(sftpId, signal) {
   try {
     const client = sftpClients.get(sftpId);
     if (!client) throw new Error("SFTP session not found");
@@ -60,27 +456,11 @@ async function checkRemoteTarAvailable(sftpId) {
     const sshClient = client.client; // Get underlying SSH2 client
     if (!sshClient) throw new Error("SSH client not available");
     
-    return new Promise((resolve) => {
-      sshClient.exec('tar --version', (err, stream) => {
-        if (err) {
-          resolve(false);
-          return;
-        }
-        
-        let hasOutput = false;
-        stream.on('data', () => {
-          hasOutput = true;
-        });
-        
-        stream.on('close', (code) => {
-          resolve(code === 0 && hasOutput);
-        });
-        
-        stream.on('error', () => {
-          resolve(false);
-        });
-      });
+    const result = await runRemoteExec(sshClient, 'tar --version', {
+      timeoutMs: REMOTE_TAR_PROBE_TIMEOUT_MS,
+      signal,
     });
+    return result.code === 0 && result.hasOutput;
   } catch {
     return false;
   }
@@ -118,7 +498,7 @@ async function compressFolder(folderPath, outputPath, compressionId, sendProgres
     });
 
     compression.process = tar;
-    let stderr = '';
+    const stderr = createBoundedUtf8Collector(MAX_LOCAL_TAR_STDERR_BYTES);
 
     // Monitor progress by checking output file size periodically
     const progressInterval = setInterval(async () => {
@@ -137,11 +517,12 @@ async function compressFolder(folderPath, outputPath, compressionId, sendProgres
     }, 500);
 
     tar.stderr.on('data', (data) => {
-      stderr += data.toString();
+      stderr.append(data);
     });
 
     tar.on('close', (code) => {
       clearInterval(progressInterval);
+      clearCompressionProcess(compression, tar);
       
       if (compression.cancelled) {
         // Clean up output file if cancelled
@@ -153,12 +534,13 @@ async function compressFolder(folderPath, outputPath, compressionId, sendProgres
       if (code === 0) {
         resolve();
       } else {
-        reject(new Error(`Tar compression failed: ${stderr}`));
+        reject(new Error(`Tar compression failed: ${stderr.end()}`));
       }
     });
 
     tar.on('error', (err) => {
       clearInterval(progressInterval);
+      clearCompressionProcess(compression, tar);
       reject(new Error(`Failed to start tar: ${err.message}`));
     });
   });
@@ -171,7 +553,15 @@ async function compressFolder(folderPath, outputPath, compressionId, sendProgres
  * @param {string} targetDir - Target directory for extraction
  * @param {number} [archiveSize] - Size of the archive in bytes (optional, for timeout calculation)
  */
-async function extractRemoteArchive(sftpId, archivePath, targetDir, archiveSize) {
+async function extractRemoteArchive(
+  sftpId,
+  archivePath,
+  targetDir,
+  folderName,
+  compressionId,
+  archiveSize,
+  signal,
+) {
   const client = sftpClients.get(sftpId);
   if (!client) throw new Error("SFTP session not found");
 
@@ -187,75 +577,29 @@ async function extractRemoteArchive(sftpId, archivePath, targetDir, archiveSize)
   const sizeBasedTimeout = archiveSize ? Math.ceil(archiveSize / (10 * 1024 * 1024)) * 30000 : 0;
   const extractionTimeout = Math.min(maxTimeout, Math.max(baseTimeout, baseTimeout + sizeBasedTimeout));
 
-  return new Promise((resolve, reject) => {
-    // Create target directory, extract, then always clean up the archive
-    // Use && for tar success, then always try cleanup regardless of tar result
-    // Also exclude any ._* files that might have been included despite our compression exclusions
-    // Properly escape shell arguments to prevent injection attacks
-    const escapedTargetDir = escapeShellArg(targetDir);
-    const escapedArchivePath = escapeShellArg(archivePath);
-    const command = `mkdir -p ${escapedTargetDir} && cd ${escapedTargetDir} && tar -xzf ${escapedArchivePath} --exclude='._*' --exclude='.DS_Store' && rm -f ${escapedArchivePath} || (rm -f ${escapedArchivePath}; exit 1)`;
-
-    sshClient.exec(command, (err, stream) => {
-      if (err) {
-        reject(new Error(`Failed to execute extraction command: ${err.message}`));
-        return;
-      }
-
-      let stderr = '';
-      let resolved = false;
-
-      stream.on('data', () => {
-        // stdout not needed, just consume the data
-      });
-
-      stream.stderr.on('data', (data) => {
-        stderr += data.toString();
-      });
-      
-      stream.on('close', (code) => {
-        if (resolved) return;
-        resolved = true;
-
-        clearTimeout(timeout);
-
-        // The command uses `;` and `||` so cleanup should always run
-        // We only care about the tar extraction success (first part of command)
-        // The rm commands are just cleanup and their failure doesn't matter
-
-        // For most cases, code 0 means success
-        // If code is not 0, check if it's just cleanup failure
-        if (code === 0) {
-          resolve();
-        } else {
-          // Check if the error is from tar extraction or just cleanup
-          // If stderr contains tar errors, it's a real extraction failure
-          if (stderr.includes('tar:') || stderr.includes('gzip:') || stderr.includes('Cannot open:') || stderr.includes('not found in archive')) {
-            reject(new Error(`Remote extraction failed: ${stderr || 'Tar extraction error'}`));
-          } else {
-            // Likely just cleanup failure - consider it successful if no tar-specific errors
-            resolve();
-          }
-        }
-      });
-      
-      stream.on('error', (err) => {
-        if (resolved) return;
-        resolved = true;
-
-        clearTimeout(timeout);
-        reject(new Error(`Stream error: ${err.message}`));
-      });
-
-      // Add timeout to prevent hanging (uses dynamic timeout based on archive size)
-      const timeout = setTimeout(() => {
-        if (resolved) return;
-        resolved = true;
-
-        reject(new Error(`Remote extraction timed out after ${extractionTimeout / 1000} seconds`));
-      }, extractionTimeout);
-    });
+  // Extract into a sibling staging directory, then atomically swap the complete
+  // folder into place. Existing directory contents are copied into the stage so
+  // compressed upload keeps its historical merge semantics.
+  const command = buildAtomicRemoteExtractionCommand({
+    compressionId,
+    archivePath,
+    targetDir,
+    folderName,
   });
+  let result;
+  try {
+    result = await runRemoteExec(sshClient, command, {
+      timeoutMs: extractionTimeout,
+      signal,
+    });
+  } catch (error) {
+    if (/timed out/i.test(error?.message || '')) {
+      throw new Error(`Remote extraction timed out after ${extractionTimeout / 1000} seconds`);
+    }
+    throw new Error(`Remote extraction failed: ${error?.message || String(error)}`);
+  }
+  if (result.code === 0) return;
+  throw new Error(`Remote extraction failed: ${result.stderr || `exit code ${result.code}`}`);
 }
 
 /**
@@ -267,62 +611,139 @@ async function startCompressedUpload(event, payload) {
     folderPath,
     targetPath,
     sftpId,
-    folderName
+    folderName,
+    totalBytes = 0,
   } = payload;
+  if (activeCompressions.has(compressionId)) {
+    throw new Error(`Compressed upload is already active: ${compressionId}`);
+  }
   const sender = event.sender;
-
   // Register compression for cancellation
-  const compression = { cancelled: false, process: null };
+  const compression = {
+    compressionId,
+    cancelled: false,
+    process: null,
+    processKillTimer: null,
+    phase: 'preparing',
+    paused: false,
+    lifecycleEpoch: Math.max(0, Number(payload.lifecycleEpoch) || 0),
+    lifecycleState: 'transferring',
+    terminalState: null,
+    resumeWaiters: [],
+    remoteExecAbortController: new AbortController(),
+  };
   activeCompressions.set(compressionId, compression);
+
+  broadcastCompressionEvent({
+    type: 'started',
+    transferId: compressionId,
+    direction: 'upload',
+    fileName: `${folderName} (compressed)`,
+    sourcePath: folderPath,
+    targetPath: `${targetPath}/${folderName}`,
+    totalBytes,
+    isDirectory: true,
+    controlKind: 'compressed-upload',
+    phase: 'compressing',
+    startedAt: Date.now(),
+    lifecycleEpoch: compression.lifecycleEpoch,
+    lifecycleState: compression.lifecycleState,
+  });
 
   const sendProgress = (phase, transferred, total) => {
     if (compression.cancelled) return;
-    sender.send("netcatty:compress:progress", { 
-      compressionId, 
-      phase, 
-      transferred, 
-      total 
+    const ratio = total > 0 ? Math.max(0, Math.min(1, transferred / total)) : 0;
+    const transferredBytes = Math.floor(ratio * totalBytes);
+    sender.send("netcatty:compress:progress", {
+      compressionId,
+      phase,
+      transferred,
+      total,
+      transferredBytes,
+      totalBytes,
+      fileName: `${folderName} (compressed)`,
+      sourcePath: folderPath,
+      targetPath: `${targetPath}/${folderName}`,
+      lifecycleEpoch: compression.lifecycleEpoch,
+      lifecycleState: compression.lifecycleState,
+    });
+    broadcastCompressionEvent({
+      type: 'progress',
+      transferId: compressionId,
+      transferred: transferredBytes,
+      totalBytes,
+      speed: 0,
+      phase,
+      lifecycleEpoch: compression.lifecycleEpoch,
+      lifecycleState: compression.lifecycleState,
     });
   };
 
   const sendComplete = () => {
+    if (compression.terminalState) return;
     // Send final 100% progress before completion
     if (!compression.cancelled) {
-      sender.send("netcatty:compress:progress", {
-        compressionId,
-        phase: 'extracting',
-        transferred: 100,
-        total: 100
-      });
+      sendProgress('extracting', 100, 100);
     }
-    activeCompressions.delete(compressionId);
+    if (!settleCompressionTerminal(compression, 'completed', {
+      transferred: totalBytes,
+      totalBytes,
+    })) return;
     sender.send("netcatty:compress:complete", { compressionId });
   };
 
   const sendError = (error) => {
-    activeCompressions.delete(compressionId);
-    sender.send("netcatty:compress:error", { 
-      compressionId, 
-      error: error.message || String(error) 
+    if (!settleCompressionTerminal(compression, 'failed', {
+      error: error.message || String(error),
+    })) return;
+    sender.send("netcatty:compress:error", {
+      compressionId,
+      error: error.message || String(error),
     });
+  };
+
+  const sendCancelled = () => {
+    if (!settleCompressionTerminal(compression, 'cancelled')) return;
+    sender.send("netcatty:compress:cancelled", { compressionId });
   };
 
   // Declare tempArchivePath in outer scope for cleanup access
   let tempArchivePath = null;
+  const lifecycleLeaseId = `compress-lifecycle:${compressionId}`;
+  let lifecycleLeasedSftpIds = [];
 
   try {
-    // Check if tar is available locally and remotely
-    const localTarAvailable = await checkTarAvailable();
-    if (!localTarAvailable) {
+    if (
+      !transferBridge?.acquireTransferSessionLeases
+      || !transferBridge?.releaseTransferSessionLeases
+    ) {
+      throw new Error("Transfer runtime session leasing is unavailable");
+    }
+    // The archive upload has its own short-lived transfer lease, but probe,
+    // compression, extraction and cleanup also use this SFTP/SSH handle. Hold
+    // one outer lease so closing the browse tab soft-closes instead of tearing
+    // down the connection halfway through the operation.
+    lifecycleLeasedSftpIds = transferBridge.acquireTransferSessionLeases(
+      lifecycleLeaseId,
+      { targetSftpId: sftpId },
+    );
+
+    // Reuse the short-lived result produced by the renderer's support check.
+    // A cache miss still performs one bounded, cancellable probe here.
+    const support = await resolveCompressedUploadSupport(
+      sftpId,
+      compression.remoteExecAbortController.signal,
+    );
+    if (!support.localTar) {
       throw new Error("tar command not available on local system. Please install tar.");
     }
-
-    const remoteTarAvailable = await checkRemoteTarAvailable(sftpId);
-    if (!remoteTarAvailable) {
+    if (!support.remoteTar) {
       throw new Error("tar command not available on remote server. Please install tar on the remote system.");
     }
 
     // Phase 1: Compression (0-30%)
+    compression.phase = 'compressing';
+    await waitWhilePaused(compression);
     sendProgress('compressing', 0, 100);
     
     tempArchivePath = getTempFilePath(`${folderName}.tar.gz`);
@@ -348,9 +769,11 @@ async function startCompressedUpload(event, payload) {
     sendProgress('compressing', 30, 100);
 
     // Phase 2: Upload (30-90%)
+    compression.phase = 'uploading';
+    await waitWhilePaused(compression);
     sendProgress('uploading', 30, 100);
 
-    const remoteArchivePath = `${targetPath}/${folderName}.tar.gz`;
+    const remoteArchivePath = buildRemoteArchivePath(targetPath, folderName, compressionId);
 
     // Use existing transfer bridge for upload with progress
     const transferId = `compress-${compressionId}`;
@@ -358,20 +781,26 @@ async function startCompressedUpload(event, payload) {
     // Progress callback to map upload progress to 30-90%
     const onUploadProgress = (transferred, total, _speed) => {
       if (compression.cancelled) return;
+      compression.checkpointBytes = transferred;
       const uploadProgress = Math.min(60, (transferred / total) * 60);
       sendProgress('uploading', 30 + uploadProgress, 100);
     };
 
     // Start the transfer with progress callback
-    await transferBridge.startTransfer(event, {
+    const uploadResult = await transferBridge.startInternalTransfer(event, {
       transferId,
       sourcePath: tempArchivePath,
       targetPath: remoteArchivePath,
       sourceType: 'local',
       targetType: 'sftp',
       targetSftpId: sftpId,
-      totalBytes: compressedSize
+      totalBytes: compressedSize,
+      resumable: true,
+      checkpointBytes: compression.checkpointBytes || 0,
     }, onUploadProgress);
+    if (uploadResult?.error) {
+      throw new Error(uploadResult.error);
+    }
 
     if (compression.cancelled) {
       await fs.promises.unlink(tempArchivePath).catch(() => {});
@@ -382,65 +811,46 @@ async function startCompressedUpload(event, payload) {
     sendProgress('uploading', 90, 100);
 
     // Phase 3: Extraction (90-100%)
+    compression.phase = 'extracting';
+    await waitWhilePaused(compression);
     sendProgress('extracting', 90, 100);
 
-    await extractRemoteArchive(sftpId, remoteArchivePath, targetPath, compressedSize);
+    await runWithCompressionTargetLock(
+      resolveCompressionTargetKey(sftpId, targetPath, folderName),
+      compression.remoteExecAbortController.signal,
+      () => extractRemoteArchive(
+        sftpId,
+        remoteArchivePath,
+        targetPath,
+        folderName,
+        compressionId,
+        compressedSize,
+        compression.remoteExecAbortController.signal,
+      ),
+    );
+
+    // Extraction is an atomic remote step. A pause requested during extraction
+    // takes effect here, before completion is published.
+    await waitWhilePaused(compression);
 
     // Update progress to 95% after extraction
     sendProgress('extracting', 95, 100);
 
-    // Perform cleanup operations asynchronously without blocking completion
-    // Note: These cleanup operations are best-effort; if the SFTP session closes before
-    // cleanup completes, errors will be silently ignored
-    setImmediate(async () => {
-      // Additional cleanup: remove any ._* files that might have been extracted
-      try {
-        const client = sftpClients.get(sftpId);
-        // Check both that client exists and connection is still open
-        if (client && client.client && client.client.writable !== false) {
-          const cleanupCommand = `find ${escapeShellArg(targetPath)} -name "._*" -type f -delete 2>/dev/null || true`;
-          client.client.exec(cleanupCommand, (err, stream) => {
-            if (err) {
-              // Silently ignore - session may have closed
-              return;
-            }
-
-            stream.on('close', () => {
-              // Cleanup completed
-            });
-
-            stream.on('error', () => {
-              // Silently ignore cleanup errors
-            });
-          });
-        }
-      } catch {
-        // Silently ignore cleanup errors
+    // Keep the outer SFTP lease until best-effort archive cleanup settles.
+    // The extraction command already excludes macOS AppleDouble files. Never
+    // run a parent-directory-wide find/delete here: that can remove unrelated,
+    // pre-existing files whose names happen to begin with "._".
+    try {
+      const client = sftpClients.get(sftpId);
+      if (client && client.client && client.client.writable !== false) {
+        await runRemoteExec(client.client, `rm -f ${escapeShellArg(remoteArchivePath)}`, {
+          timeoutMs: REMOTE_CLEANUP_TIMEOUT_MS,
+          signal: compression.remoteExecAbortController.signal,
+        });
       }
-
-      // Additional cleanup attempt - ensure remote archive is removed
-      try {
-        const client = sftpClients.get(sftpId);
-        if (client && client.client && client.client.writable !== false) {
-          client.client.exec(`rm -f ${escapeShellArg(remoteArchivePath)}`, (err, stream) => {
-            if (err) {
-              // Silently ignore - session may have closed
-              return;
-            }
-
-            stream.on('close', () => {
-              // Cleanup completed
-            });
-
-            stream.on('error', () => {
-              // Silently ignore cleanup errors
-            });
-          });
-        }
-      } catch {
-        // Silently ignore cleanup errors
-      }
-    });
+    } catch {
+      // Cleanup is best-effort; staging/promotion already committed atomically.
+    }
 
     // Clean up local temp file
     try {
@@ -451,7 +861,7 @@ async function startCompressedUpload(event, payload) {
 
     // Check if cancelled during extraction before reporting completion
     if (compression.cancelled) {
-      sender.send("netcatty:compress:cancelled", { compressionId });
+      sendCancelled();
       return { compressionId, cancelled: true };
     }
 
@@ -469,15 +879,26 @@ async function startCompressedUpload(event, payload) {
     }
 
     if (err.message === 'Upload cancelled' || err.message === 'Compression cancelled' || err.message === 'Transfer cancelled') {
-      activeCompressions.delete(compressionId);
-      sender.send("netcatty:compress:cancelled", { compressionId });
+      sendCancelled();
     } else {
       sendError(err.message || 'Unknown error occurred');
     }
     return { compressionId, error: err.message };
   } finally {
     // Always clean up the active compression entry
-    activeCompressions.delete(compressionId);
+    try {
+      compression.remoteExecAbortController.abort(new Error('Compression finished'));
+    } catch { /* ignore */ }
+    if (lifecycleLeasedSftpIds.length > 0) {
+      transferBridge.releaseTransferSessionLeases(
+        lifecycleLeaseId,
+        lifecycleLeasedSftpIds,
+      );
+      lifecycleLeasedSftpIds = [];
+    }
+    if (activeCompressions.get(compressionId) === compression) {
+      activeCompressions.delete(compressionId);
+    }
   }
 }
 
@@ -488,17 +909,16 @@ async function cancelCompression(event, payload) {
   const { compressionId } = payload;
   const compression = activeCompressions.get(compressionId);
 
-  if (compression) {
+  if (compression && !compression.terminalState) {
     compression.cancelled = true;
+    settleCompressionTerminal(compression, 'cancelled');
+    event?.sender?.send?.("netcatty:compress:cancelled", { compressionId });
+    releasePausedCompression(compression);
+    try {
+      compression.remoteExecAbortController?.abort(new Error('Upload cancelled'));
+    } catch { /* ignore */ }
 
-    // Kill the tar process if running
-    if (compression.process) {
-      try {
-        compression.process.kill('SIGTERM');
-      } catch {
-        // Ignore errors when killing process
-      }
-    }
+    terminateCompressionProcess(compression);
 
     // Cancel the associated transfer if it's running
     const transferId = `compress-${compressionId}`;
@@ -511,7 +931,88 @@ async function cancelCompression(event, payload) {
     }
   }
 
-  return { success: true };
+  return compression
+    ? { success: true }
+    : { success: false, reason: 'Compression is not active' };
+}
+
+async function pauseCompression(event, payload) {
+  const { compressionId } = payload;
+  const compression = activeCompressions.get(compressionId);
+  if (!compression || compression.cancelled) {
+    return { success: false, reason: 'Compression is not active' };
+  }
+
+  if (compression.paused) return { success: true, deferred: compression.phase === 'extracting' };
+  compression.paused = true;
+  compression.lifecycleEpoch += 1;
+  compression.lifecycleState = 'pausing';
+
+  if (compression.phase === 'compressing' && compression.process && process.platform !== 'win32') {
+    try {
+      compression.process.kill('SIGSTOP');
+    } catch {
+      // The process may have completed between the phase check and signal.
+    }
+  }
+  if (compression.phase === 'uploading' && transferBridge?.pauseTransfer) {
+    const result = await transferBridge.pauseTransfer(event, { transferId: `compress-${compressionId}` });
+    if (!result?.success) {
+      compression.paused = false;
+      compression.lifecycleEpoch += 1;
+      compression.lifecycleState = 'transferring';
+      broadcastCompressionEvent({
+        type: 'resumed',
+        transferId: compressionId,
+        phase: compression.phase,
+        lifecycleEpoch: compression.lifecycleEpoch,
+        lifecycleState: compression.lifecycleState,
+      });
+      return result || { success: false, reason: 'Upload pause is unavailable' };
+    }
+  }
+
+  const deferred = compression.phase === 'extracting' || (compression.phase === 'compressing' && process.platform === 'win32');
+  compression.lifecycleState = deferred ? 'pausing' : 'paused';
+  broadcastCompressionEvent({
+    type: deferred ? 'pausing' : 'paused',
+    transferId: compressionId,
+    phase: compression.phase,
+    lifecycleEpoch: compression.lifecycleEpoch,
+    lifecycleState: compression.lifecycleState,
+  });
+  return { success: true, deferred, lifecycleEpoch: compression.lifecycleEpoch };
+}
+
+async function resumeCompression(event, payload) {
+  const { compressionId } = payload;
+  const compression = activeCompressions.get(compressionId);
+  if (!compression || compression.cancelled) {
+    return { success: false, reason: 'Compression is not active' };
+  }
+
+  if (compression.phase === 'compressing' && compression.process && process.platform !== 'win32') {
+    try {
+      compression.process.kill('SIGCONT');
+    } catch {
+      // The process may have completed while the request was in flight.
+    }
+  }
+  if (compression.phase === 'uploading' && transferBridge?.resumeTransfer) {
+    const result = await transferBridge.resumeTransfer(event, { transferId: `compress-${compressionId}` });
+    if (!result?.success) return result || { success: false, reason: 'Upload resume is unavailable' };
+  }
+  compression.lifecycleEpoch += 1;
+  compression.lifecycleState = 'transferring';
+  releasePausedCompression(compression);
+  broadcastCompressionEvent({
+    type: 'resumed',
+    transferId: compressionId,
+    phase: compression.phase,
+    lifecycleEpoch: compression.lifecycleEpoch,
+    lifecycleState: compression.lifecycleState,
+  });
+  return { success: true, lifecycleEpoch: compression.lifecycleEpoch };
 }
 
 /**
@@ -521,14 +1022,7 @@ async function checkCompressedUploadSupport(event, payload) {
   const { sftpId } = payload;
   
   try {
-    const localSupport = await checkTarAvailable();
-    const remoteSupport = await checkRemoteTarAvailable(sftpId);
-    
-    return {
-      supported: localSupport && remoteSupport,
-      localTar: localSupport,
-      remoteTar: remoteSupport
-    };
+    return await resolveCompressedUploadSupport(sftpId);
   } catch (err) {
     return {
       supported: false,
@@ -551,8 +1045,94 @@ function registerWorkerHandle(ipcMain, terminalWorkerManager, channel) {
 function registerHandlers(ipcMain, options = {}) {
   const terminalWorkerManager = options.terminalWorkerManager || null;
   if (terminalWorkerManager) {
+    const workerRequest = (event, channel, payload) => terminalWorkerManager.request(channel, payload, {
+      webContentsId: event?.sender?.id,
+    });
+    const nextEpoch = (compressionId, suggestedEpoch) => {
+      const entry = workerCompressionLifecycleEpochs.get(compressionId);
+      const current = Math.max(0, Number(entry?.epoch) || 0);
+      const suggested = Number(suggestedEpoch);
+      const next = Number.isFinite(suggested) && suggested > current ? suggested : current + 1;
+      if (entry) entry.epoch = next;
+      return next;
+    };
+    ipcMain.handle("netcatty:compress:start", (event, payload) => {
+      let lifecycleEntry = null;
+      if (payload?.compressionId) {
+        lifecycleEntry = {
+          epoch: Math.max(0, Number(payload.lifecycleEpoch) || 0),
+        };
+        workerCompressionLifecycleEpochs.set(payload.compressionId, lifecycleEntry);
+      }
+      const releaseLifecycleEntry = () => {
+        if (
+          payload?.compressionId
+          && workerCompressionLifecycleEpochs.get(payload.compressionId) === lifecycleEntry
+        ) {
+          workerCompressionLifecycleEpochs.delete(payload.compressionId);
+        }
+      };
+      try {
+        return Promise.resolve(workerRequest(event, "netcatty:compress:start", payload))
+          .finally(releaseLifecycleEntry);
+      } catch (error) {
+        releaseLifecycleEntry();
+        throw error;
+      }
+    });
+    ipcMain.handle("netcatty:compress:pause", async (event, payload) => {
+      const lifecycleEpoch = nextEpoch(payload?.compressionId);
+      broadcastCompressionEvent({
+        type: 'pausing',
+        transferId: payload?.compressionId,
+        lifecycleEpoch,
+        lifecycleState: 'pausing',
+      });
+      try {
+        const result = await workerRequest(event, "netcatty:compress:pause", payload);
+        if (!result?.success) {
+          const rollbackEpoch = nextEpoch(payload?.compressionId);
+          broadcastCompressionEvent({
+            type: 'resumed',
+            transferId: payload?.compressionId,
+            lifecycleEpoch: rollbackEpoch,
+            lifecycleState: 'transferring',
+          });
+          return result;
+        }
+        const lifecycleState = result.deferred ? 'pausing' : 'paused';
+        broadcastCompressionEvent({
+          type: lifecycleState,
+          transferId: payload?.compressionId,
+          lifecycleEpoch,
+          lifecycleState,
+        });
+        return result;
+      } catch (error) {
+        const rollbackEpoch = nextEpoch(payload?.compressionId);
+        broadcastCompressionEvent({
+          type: 'resumed',
+          transferId: payload?.compressionId,
+          lifecycleEpoch: rollbackEpoch,
+          lifecycleState: 'transferring',
+        });
+        throw error;
+      }
+    });
+    ipcMain.handle("netcatty:compress:resume", async (event, payload) => {
+      const result = await workerRequest(event, "netcatty:compress:resume", payload);
+      if (result?.success) {
+        const lifecycleEpoch = nextEpoch(payload?.compressionId, result.lifecycleEpoch);
+        broadcastCompressionEvent({
+          type: 'resumed',
+          transferId: payload?.compressionId,
+          lifecycleEpoch,
+          lifecycleState: 'transferring',
+        });
+      }
+      return result;
+    });
     [
-      "netcatty:compress:start",
       "netcatty:compress:cancel",
       "netcatty:compress:checkSupport",
     ].forEach((channel) => registerWorkerHandle(ipcMain, terminalWorkerManager, channel));
@@ -560,10 +1140,25 @@ function registerHandlers(ipcMain, options = {}) {
   }
   ipcMain.handle("netcatty:compress:start", startCompressedUpload);
   ipcMain.handle("netcatty:compress:cancel", cancelCompression);
+  ipcMain.handle("netcatty:compress:pause", pauseCompression);
+  ipcMain.handle("netcatty:compress:resume", resumeCompression);
   ipcMain.handle("netcatty:compress:checkSupport", checkCompressedUploadSupport);
 }
 
 module.exports = {
   init,
   registerHandlers,
+  pauseCompression,
+  resumeCompression,
+  _runRemoteExecForTests: runRemoteExec,
+  _buildAtomicRemoteExtractionCommandForTests: buildAtomicRemoteExtractionCommand,
+  _buildRemoteArchivePathForTests: buildRemoteArchivePath,
+  _createBoundedUtf8CollectorForTests: createBoundedUtf8Collector,
+  _getActiveCompressionCountForTests: () => activeCompressions.size,
+  _getWorkerCompressionLifecycleEpochCountForTests: () => workerCompressionLifecycleEpochs.size,
+  _resetCompressionSupportCacheForTests: () => compressionSupportCache.clear(),
+  _runWithCompressionTargetLockForTests: runWithCompressionTargetLock,
+  _buildCompressionTargetKeyForTests: buildCompressionTargetKey,
+  _resolveCompressionTargetKeyForTests: resolveCompressionTargetKey,
+  _getCompressionTargetLockCountForTests: () => compressionTargetLocks.size,
 };

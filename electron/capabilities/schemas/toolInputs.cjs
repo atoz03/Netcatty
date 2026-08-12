@@ -21,6 +21,9 @@ const TOOL_INPUT_FIELDS = Object.freeze({
     jobId: { type: "string", description: "The background job ID returned by terminal_start." },
   },
   "session.environment": {},
+  "session.close": {
+    sessionId: { type: "string", description: "The session ID returned by host_open." },
+  },
   "attachment.list": {},
   "attachment.read": {
     filePath: { type: "string", optional: true, description: "Exact local attachment path." },
@@ -78,11 +81,14 @@ const TOOL_INPUT_FIELDS = Object.freeze({
     hostId: { type: "string", description: "Vault host ID." },
   },
   "vault.host.list": {},
+  "vault.host.open": {
+    hostId: { type: "string", description: "Vault host ID to open. Use vault_hosts_list / host_get to resolve id from label or hostname." },
+  },
   "vault.hosts.create": {
     hosts: {
       type: "string",
       description:
-        "JSON array of host objects you extracted from the user's text. Each object: hostname (required), label, port, username, password, group, tags (array or comma-separated string), notes (Host Details remarks — NOT Vault sidebar Notes), protocol (ssh|telnet|local).",
+        "JSON array of host objects you extracted from the user's text. Each object: hostname (required; host/ip aliases accepted), label (name alias accepted), port, username, password, keyPath or keypath (local private-key file path), passphrase (saved passphrase for that key path), group, tags (array or comma-separated string), notes (Host Details remarks — NOT Vault sidebar Notes), protocol (ssh|telnet|local).",
     },
     dryRun: {
       type: "string",
@@ -94,6 +100,39 @@ const TOOL_INPUT_FIELDS = Object.freeze({
       optional: true,
       description: "Set to false to create even when a matching host already exists (default true).",
     },
+  },
+  "vault.host.update": {
+    hostId: { type: "string", description: "Vault host ID from vault_hosts_list." },
+    label: { type: "string", optional: true, description: "New display name." },
+    name: { type: "string", optional: true, description: "Alias for label." },
+    hostname: { type: "string", optional: true, description: "New hostname or IP address." },
+    host: { type: "string", optional: true, description: "Alias for hostname." },
+    ip: { type: "string", optional: true, description: "Alias for hostname." },
+    port: { type: "number", optional: true, description: "New connection port (1-65535)." },
+    username: { type: "string", optional: true, description: "New login username. Clears any reusable identity binding so this value takes effect." },
+    password: { type: "string", optional: true, description: "New password without changing key-based login. Password identities are detached so the new value takes effect. Empty string clears it and blocks inherited saved passwords. Pair with keyPath set to an empty string to switch from key login to password login." },
+    savePassword: { type: "string", optional: true, description: "Set to true or false to enable or disable saved passwords. Pass true when setting a new password after clearing one." },
+    keyPath: { type: "string", optional: true, description: "Local private-key file path. Empty string clears and blocks an inherited path." },
+    keypath: { type: "string", optional: true, description: "Alias for keyPath." },
+    passphrase: { type: "string", optional: true, description: "Saved passphrase for the host's local private-key path. Empty string clears the saved passphrase." },
+    group: { type: "string", optional: true, description: "New group path. Empty string moves the host to the root." },
+    tags: { type: "string", optional: true, description: "JSON array or comma-separated tag names. Empty string clears tags." },
+    notes: { type: "string", optional: true, description: "Host Details remarks. Empty string clears notes." },
+    protocol: { type: "string", optional: true, description: "New protocol: ssh, telnet, local, or serial." },
+    identityId: { type: "string", optional: true, description: "Reusable identity ID from vault_identities_list. Empty string detaches the identity." },
+    jumpHostIds: { type: "string", optional: true, description: "JSON array of vault host IDs in jump order. Empty array clears the chain." },
+    proxyProfileId: { type: "string", optional: true, description: "Reusable proxy ID from vault_proxy_profiles_list. Empty string clears it." },
+    startupCommand: { type: "string", optional: true, description: "Command to run after connecting. Empty string clears it." },
+    startupCommandRunMode: { type: "string", optional: true, description: "paste or lineDelay." },
+    environmentVariables: { type: "string", optional: true, description: "JSON object or array of {name,value} entries. Empty object clears them." },
+    moshEnabled: { type: "string", optional: true, description: "true or false." },
+    moshServerPath: { type: "string", optional: true, description: "Optional mosh-server path." },
+    etEnabled: { type: "string", optional: true, description: "true or false." },
+    etPort: { type: "number", optional: true, description: "Eternal Terminal server port." },
+    serialConfig: { type: "string", optional: true, description: "JSON object for serial connections: path, baudRate, and optional dataBits, stopBits, parity, flowControl, localEcho, lineMode, backspaceBehavior (default or ctrl-h). Existing backspaceBehavior is preserved when omitted." },
+  },
+  "vault.host.delete": {
+    hostId: { type: "string", description: "Vault host ID from vault_hosts_list." },
   },
   "vault.host.import": {
     format: {
@@ -142,6 +181,25 @@ const TOOL_INPUT_FIELDS = Object.freeze({
     group: { type: "string", optional: true, description: "New folder path." },
     linkedHostIds: { type: "string", optional: true, description: "Optional JSON array of vault host IDs to link." },
     tags: { type: "string", optional: true, description: "Optional JSON array of tag strings." },
+  },
+  "vault.note.delete": {
+    noteId: { type: "string", description: "Vault note ID to delete." },
+  },
+  "vault.identity.list": {},
+  "vault.proxyProfile.list": {},
+  "vault.group.list": {},
+  "vault.group.create": {
+    path: { type: "string", description: "New group path, for example prod/web." },
+    defaults: { type: "string", optional: true, description: "JSON object of group defaults: username, identityId, proxyProfileId, jumpHostIds, startupCommand, environmentVariables, moshEnabled, moshServerPath, etEnabled, etPort." },
+  },
+  "vault.group.update": {
+    path: { type: "string", description: "Existing group path." },
+    newPath: { type: "string", optional: true, description: "Optional replacement path to rename or move the group and descendants." },
+    defaults: { type: "string", optional: true, description: "JSON object containing only group defaults to change." },
+  },
+  "vault.group.delete": {
+    path: { type: "string", description: "Group path to delete, including descendants." },
+    deleteHosts: { type: "string", optional: true, description: "Set true to delete hosts in the group; default moves them to the root." },
   },
   "vault.snippets.list": {},
   "vault.snippets.get": {
@@ -250,6 +308,33 @@ const TOOL_INPUT_FIELDS = Object.freeze({
     scriptIds: { type: "string", description: "JSON array of onConnect script IDs in run order." },
   },
   "portforward.rules.list": {},
+  "portforward.rules.create": {
+    label: { type: "string", optional: true, description: "Rule label." },
+    type: { type: "string", description: "local, remote, or dynamic." },
+    localPort: { type: "number", description: "Local listening port (1-65535)." },
+    bindAddress: { type: "string", optional: true, description: "Bind address; default 127.0.0.1." },
+    remoteHost: { type: "string", optional: true, description: "Required except for dynamic forwarding." },
+    remotePort: { type: "number", optional: true, description: "Required except for dynamic forwarding." },
+    hostId: { type: "string", description: "Vault host ID used for the tunnel." },
+    autoStart: { type: "string", optional: true, description: "true or false." },
+  },
+  "portforward.rules.update": {
+    ruleId: { type: "string", description: "Port forwarding rule ID." },
+    label: { type: "string", optional: true, description: "New rule label." },
+    type: { type: "string", optional: true, description: "local, remote, or dynamic." },
+    localPort: { type: "number", optional: true, description: "Local listening port." },
+    bindAddress: { type: "string", optional: true, description: "Bind address." },
+    remoteHost: { type: "string", optional: true, description: "Remote host." },
+    remotePort: { type: "number", optional: true, description: "Remote port." },
+    hostId: { type: "string", optional: true, description: "Vault host ID used for the tunnel." },
+    autoStart: { type: "string", optional: true, description: "true or false." },
+  },
+  "portforward.rules.duplicate": {
+    ruleId: { type: "string", description: "Port forwarding rule ID to copy." },
+  },
+  "portforward.rules.delete": {
+    ruleId: { type: "string", description: "Port forwarding rule ID to delete." },
+  },
   "portforward.tunnels.list": {},
   "portforward.start": {
     ruleId: { type: "string", description: "Port forwarding rule ID." },
@@ -259,8 +344,10 @@ const TOOL_INPUT_FIELDS = Object.freeze({
   },
   "harness.tool_output.read": {
     handleId: { type: "string", description: "Tool output handle id from a prior truncated result." },
-    mode: { type: "string", optional: true, description: "Which portion to read: head, tail, or full." },
-    maxChars: { type: "number", optional: true, description: "Maximum characters to return." },
+    mode: { type: "string", optional: true, description: "Which portion to read: head, tail, range, search, or bounded full." },
+    maxChars: { type: "number", optional: true, description: "Requested characters to return. The service enforces a hard upper bound." },
+    offset: { type: "number", optional: true, description: "Zero-based character offset for range reads or search continuation." },
+    query: { type: "string", optional: true, description: "Case-insensitive search text when mode is search." },
   },
   "harness.workspace.get_info": {},
   "harness.workspace.get_session_info": {
@@ -294,10 +381,16 @@ const MODEL_DESCRIPTION_HINTS = Object.freeze({
     "Host metadata notes on a saved host — not Vault → Notes sidebar entries.",
   "vault.host.notes.set":
     "Host metadata notes on a saved host — not Vault → Notes sidebar entries. Prefer vault_notes_create/update when the user wants vault notes they can open in the Notes sidebar.",
+  "vault.host.open":
+    "Opens a terminal tab for a saved vault host (same as clicking the host in Netcatty). Connection may still be establishing when the tool returns — use get_environment or wait briefly before terminal_execute if needed. Call session_close with the returned sessionId when the task is finished. Auth prompts (passphrase / keyboard-interactive) still require the user in the Netcatty UI.",
   "vault.host.import":
     "Only for text in known export formats (PuTTY reg, MobaXterm ini, CSV template, SecureCRT, ssh_config). If attached host text is unknown or auto-detection fails, use read_attachment content, extract fields yourself, and call vault_hosts_create.",
   "vault.hosts.create":
-    "Use when the user wants to add/create a host in Vault → Hosts (创建主机、SSH 连接凭据). NOT for Vault → Notes sidebar docs. Put SSH password in password field; long remarks/admin tables in host notes field. Never fall back to vault_notes_create if this fails.",
+    "Use when the user wants to add/create a host in Vault → Hosts (创建主机、SSH 连接凭据). NOT for Vault → Notes sidebar docs. Put SSH password in password, or a local private-key file path in keyPath. If that key is encrypted and the user supplied its passphrase, put it in passphrase so later connections do not prompt. Put long remarks/admin tables in host notes. Never fall back to vault_notes_create if this fails.",
+  "vault.host.update":
+    "Update only fields the user requested. Use vault_hosts_list first to resolve hostId. Empty group, tags, notes, password, keyPath, or passphrase values clear those fields or saved credentials.",
+  "vault.host.delete":
+    "Permanently deletes one saved host. Use vault_hosts_list first to resolve hostId and rely on the normal write approval flow before deleting.",
   "vault.note.create":
     "Use ONLY when the user wants markdown documentation in Vault → Notes sidebar (保险箱笔记). Do NOT use when the user asked to create/add a host — use vault_hosts_create instead.",
   "vault.note.update":

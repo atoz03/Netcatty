@@ -9,6 +9,8 @@ import { cn } from "../lib/utils";
 import { ConnectionLog, TerminalTheme } from "../types";
 import { TERMINAL_THEMES } from "../infrastructure/config/terminalThemes";
 import { useCustomThemes } from "../application/state/customThemeStore";
+import { useAppearanceChromeStore } from "../application/state/appearanceChromeStore";
+import { applyCustomAccentToTerminalTheme } from "../domain/terminalAppearance";
 import { Button } from "./ui/button";
 import ThemeCustomizeModal from "./terminal/ThemeCustomizeModal";
 
@@ -40,6 +42,10 @@ const LogViewComponent: React.FC<LogViewProps> = ({
 
     // Subscribe to custom theme changes so editing triggers re-render
     const customThemes = useCustomThemes();
+    // Leaf accent: published defaultTerminalTheme is the stable base catalog
+    // theme; apply live custom accent here so log replay matches terminal chrome
+    // without thrashing AppShell on every HSL tick.
+    const { accentMode, customAccent } = useAppearanceChromeStore();
     const explicitThemeId = useMemo(() => {
         if (!log.themeId) return undefined;
         const exists = TERMINAL_THEMES.some((theme) => theme.id === log.themeId)
@@ -58,13 +64,13 @@ const LogViewComponent: React.FC<LogViewProps> = ({
         if (previewTheme) {
             return previewTheme;
         }
-        if (explicitThemeId) {
-            return TERMINAL_THEMES.find(t => t.id === explicitThemeId)
+        const baseTheme = explicitThemeId
+            ? (TERMINAL_THEMES.find(t => t.id === explicitThemeId)
                 || customThemes.find(t => t.id === explicitThemeId)
-                || defaultTerminalTheme;
-        }
-        return defaultTerminalTheme;
-    }, [customThemes, defaultTerminalTheme, explicitThemeId, previewTheme]);
+                || defaultTerminalTheme)
+            : defaultTerminalTheme;
+        return applyCustomAccentToTerminalTheme(baseTheme, accentMode, customAccent);
+    }, [accentMode, customAccent, customThemes, defaultTerminalTheme, explicitThemeId, previewTheme]);
 
     const currentFontSize = log.fontSize ?? defaultFontSize;
 
@@ -155,7 +161,7 @@ const LogViewComponent: React.FC<LogViewProps> = ({
         }
 
         // Fit terminal
-        setTimeout(() => {
+        const initialFitTimer = setTimeout(() => {
             try {
                 fitAddon.fit();
             } catch {
@@ -186,6 +192,7 @@ const LogViewComponent: React.FC<LogViewProps> = ({
 
         // Cleanup
         return () => {
+            clearTimeout(initialFitTimer);
             term.dispose();
             termRef.current = null;
             fitAddonRef.current = null;
@@ -205,17 +212,17 @@ const LogViewComponent: React.FC<LogViewProps> = ({
 
     // Update font size instantly without recreating terminal
     useEffect(() => {
-        if (termRef.current && isReady) {
-            termRef.current.options.fontSize = currentFontSize;
-            // Refit after font size change
-            setTimeout(() => {
-                try {
-                    fitAddonRef.current?.fit();
-                } catch {
-                    // Ignore fit errors
-                }
-            }, 10);
-        }
+        if (!termRef.current || !isReady) return;
+        termRef.current.options.fontSize = currentFontSize;
+        // Refit after font size change
+        const refitTimer = setTimeout(() => {
+            try {
+                fitAddonRef.current?.fit();
+            } catch {
+                // Ignore fit errors
+            }
+        }, 10);
+        return () => clearTimeout(refitTimer);
     }, [currentFontSize, isReady]);
 
     // Handle resize
@@ -260,10 +267,10 @@ const LogViewComponent: React.FC<LogViewProps> = ({
                         <FileText size={14} />
                     </div>
                     <div className="flex min-w-0 flex-1 items-baseline gap-2">
-                        <div className="min-w-0 text-sm font-medium leading-none truncate">
+                        <div className="min-w-0 text-sm font-medium leading-5 truncate">
                             {isLocal ? t("logs.localTerminal") : log.hostname}
                         </div>
-                        <div className="text-xs leading-none text-muted-foreground truncate">
+                        <div className="text-xs leading-4 truncate text-muted-foreground">
                             {formattedDate} • {log.localUsername}@{log.localHostname}
                         </div>
                     </div>

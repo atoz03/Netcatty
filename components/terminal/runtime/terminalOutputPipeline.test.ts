@@ -280,7 +280,8 @@ test("ordinary input priority preserves a pending coalesced backlog above the pr
     flushTerminalWriteCoalescer(term);
 
     assert.equal(written.join(""), payload);
-    assert.ok(written.length > 1);
+    // Payload is under the Tabby-sized unbroken shard (~128KB), so flush is one write.
+    assert.equal(written.length, 1);
     assert.equal(flow.pendingBytes(), 0);
   } finally {
     resetTerminalWriteCoalescer(term);

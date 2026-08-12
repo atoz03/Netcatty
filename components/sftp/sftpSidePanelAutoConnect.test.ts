@@ -2,8 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { SftpPane } from "../../application/state/sftp/types";
 import {
+  connectionKeyMatchesHost,
   findReusableSftpSidePanelTab,
   isRemoteSftpTabHealthy,
+  shouldAcceptPendingSftpUpload,
   shouldResetSftpSidePanelSourceSession,
   shouldSkipSftpSidePanelAutoConnect,
 } from "./sftpSidePanelAutoConnect";
@@ -54,8 +56,68 @@ test("isRemoteSftpTabHealthy rejects connecting tabs", () => {
 test("shouldSkipSftpSidePanelAutoConnect returns false for stale connected keys", () => {
   const tab = remoteConnectedTab({ loading: true });
   assert.equal(
-    shouldSkipSftpSidePanelAutoConnect("host-key", "host-key", tab, true),
+    shouldSkipSftpSidePanelAutoConnect("host-key", "host-key", tab, true, "host-key"),
     false,
+  );
+});
+
+test("shouldSkipSftpSidePanelAutoConnect rejects a healthy tab mapped to another endpoint", () => {
+  const tab = remoteConnectedTab();
+  assert.equal(
+    shouldSkipSftpSidePanelAutoConnect("host-a-key", "host-a-key", tab, true, "host-b-key"),
+    false,
+  );
+});
+
+test("shouldSkipSftpSidePanelAutoConnect rejects when the active tab has no endpoint map", () => {
+  const tab = remoteConnectedTab();
+  assert.equal(
+    shouldSkipSftpSidePanelAutoConnect("host-a-key", "host-a-key", tab, true, null),
+    false,
+  );
+});
+
+test("connectionKeyMatchesHost accepts host-id prefix keys", () => {
+  assert.equal(connectionKeyMatchesHost("host-1:server:22:ssh::root", "host-1"), true);
+  assert.equal(connectionKeyMatchesHost("host-2:server:22:ssh::root", "host-1"), false);
+  assert.equal(connectionKeyMatchesHost(null, "host-1"), false);
+});
+
+test("shouldAcceptPendingSftpUpload waits until the pane endpoint matches the drop", () => {
+  const connected = {
+    hostId: "host-1",
+    isLocal: false,
+    status: "connected",
+  };
+  assert.equal(
+    shouldAcceptPendingSftpUpload({
+      pendingHostId: "host-1",
+      pendingConnectionKey: "host-1:b.example:22:ssh::root",
+      activeHostId: "host-1",
+      connection: connected,
+      paneConnectionKey: "host-1:a.example:22:ssh::root",
+    }),
+    false,
+  );
+  assert.equal(
+    shouldAcceptPendingSftpUpload({
+      pendingHostId: "host-1",
+      pendingConnectionKey: "host-1:b.example:22:ssh::root",
+      activeHostId: "host-1",
+      connection: connected,
+      paneConnectionKey: null,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldAcceptPendingSftpUpload({
+      pendingHostId: "host-1",
+      pendingConnectionKey: "host-1:b.example:22:ssh::root",
+      activeHostId: "host-1",
+      connection: connected,
+      paneConnectionKey: "host-1:b.example:22:ssh::root",
+    }),
+    true,
   );
 });
 
@@ -84,15 +146,26 @@ test("shouldResetSftpSidePanelSourceSession detects terminal session changes", (
   assert.equal(shouldResetSftpSidePanelSourceSession("sess-a", null), false);
 });
 
-test("shouldSkipSftpSidePanelAutoConnect returns false after terminal session changes", () => {
+test("session change still requires rebind even when the endpoint key matches", () => {
   const tab = remoteConnectedTab();
+  // Callers must not skip auto-connect solely because the tab is healthy —
+  // a new focused terminal may share host/port/user while proxy/jump differs.
+  // Path stickiness is handled by remembered initialPath on reconnect.
+  assert.equal(shouldResetSftpSidePanelSourceSession("sess-a", "sess-b"), true);
   assert.equal(
-    shouldSkipSftpSidePanelAutoConnect("host-key", "host-key", tab, true),
+    shouldSkipSftpSidePanelAutoConnect("host-key", "host-key", tab, true, "host-key"),
     true,
   );
-  // Caller gates on sessionChanged before invoking skip — stale reuse must not win.
+  // Reuse lookup still finds the tab, but callers pass sessionChanged and skip
+  // it so connect rebinds with the new sourceSessionId.
   assert.equal(
-    shouldResetSftpSidePanelSourceSession("sess-a", "sess-b"),
-    true,
+    findReusableSftpSidePanelTab(
+      [tab],
+      "host-1",
+      "host-key",
+      new Map([[tab.id, "host-key"]]),
+      () => true,
+    ),
+    tab,
   );
 });

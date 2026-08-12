@@ -25,27 +25,88 @@ export interface KeyboardInteractivePrompt {
 export interface KeyboardInteractiveRequest {
   requestId: string;
   sessionId?: string;
+  hostId?: string;
   scope?: "terminal" | "external";
   name: string;
   instructions: string;
   prompts: KeyboardInteractivePrompt[];
   hostname?: string;
   savedPassword?: string | null;
+  /** When false, hide save-password UI (second-factor / EDR challenges). Default true. */
+  allowSavePassword?: boolean;
+}
+
+type KeyboardInteractiveServerPromptInput = Pick<
+  KeyboardInteractiveRequest,
+  "name" | "instructions" | "prompts" | "hostname"
+>;
+
+/** Formats the server-supplied keyboard-interactive prompt block for display. */
+export function formatKeyboardInteractiveServerPrompt(request: KeyboardInteractiveServerPromptInput): string {
+  const lines: string[] = [];
+  const name = request.name?.trim();
+  const hostname = request.hostname?.trim();
+  const instructions = request.instructions?.trim();
+  const hasServerText = !!instructions || !!(name && name !== hostname);
+  if (!hasServerText) return "";
+  if (name && name !== hostname) {
+    lines.push(name.endsWith(":") ? name : `${name}:`);
+  }
+  if (instructions) {
+    for (const line of instructions.split(/\r?\n/).map((part) => part.trim()).filter(Boolean)) {
+      lines.push(`| ${line}`);
+    }
+  }
+  for (const prompt of request.prompts || []) {
+    const promptText = prompt.prompt?.trim();
+    if (promptText) {
+      lines.push(`| ${promptText}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 const isAPasswordPrompt = (prompt: KeyboardInteractivePrompt) => {
   if (prompt.echo) return false;
   const lower = prompt.prompt.toLowerCase();
-  if (!lower.includes("password")) return false;
-  // Exclude OTP / one-time password / verification code prompts
-  if (lower.includes("one-time") || lower.includes("otp") || lower.includes("verification") || lower.includes("token") || lower.includes("code")) return false;
+  if (!lower.includes("password") && !lower.includes("passwd")) return false;
+  // Keep aligned with electron/bridges/sshAuthHelper.cjs OTP_PROMPT_PATTERN so
+  // the modal never prefills the host login password into a second-factor field
+  // (#2150). Backend also omits savedPassword for those challenges; this is
+  // defense in depth if a caller still passes it.
+  if (
+    lower.includes("one-time") ||
+    lower.includes("otp") ||
+    lower.includes("verification") ||
+    lower.includes("token") ||
+    lower.includes("code") ||
+    lower.includes("passcode") ||
+    lower.includes("2fa") ||
+    lower.includes("mfa") ||
+    lower.includes("two-factor") ||
+    lower.includes("two factor") ||
+    lower.includes("multi-factor") ||
+    lower.includes("multi factor") ||
+    lower.includes("second factor") ||
+    lower.includes("secondary password") ||
+    lower.includes("secondary authentication") ||
+    lower.includes("second password") ||
+    lower.includes("additional password") ||
+    lower.includes("re-enter password") ||
+    lower.includes("reenter password") ||
+    lower.includes("confirm password") ||
+    lower.includes("edr") ||
+    lower.includes("duo")
+  ) {
+    return false;
+  }
   return true;
 };
 
 interface KeyboardInteractiveModalProps {
   request: KeyboardInteractiveRequest | null;
-  onSubmit: (requestId: string, responses: string[], savePassword?: string) => void;
-  onCancel: (requestId: string) => void;
+  onSubmit: (requestId: string, responses: string[], savePassword?: string) => boolean | Promise<boolean>;
+  onCancel: (requestId: string) => boolean | Promise<boolean>;
 }
 
 export const KeyboardInteractiveModal: React.FC<KeyboardInteractiveModalProps> = ({
@@ -96,25 +157,39 @@ export const KeyboardInteractiveModal: React.FC<KeyboardInteractiveModalProps> =
     });
   }, []);
 
-  const handleSubmit = useCallback(() => {
+  const canSavePassword = request?.allowSavePassword !== false;
+
+  const handleSubmit = useCallback(async () => {
     if (!request || isSubmitting) return;
     setIsSubmitting(true);
-    const passwordToSave = savePassword && passwordPromptIndex >= 0
-      ? responses[passwordPromptIndex]
-      : undefined;
-    onSubmit(request.requestId, responses, passwordToSave);
-  }, [request, responses, onSubmit, isSubmitting, savePassword, passwordPromptIndex]);
+    const passwordToSave =
+      canSavePassword && savePassword && passwordPromptIndex >= 0
+        ? responses[passwordPromptIndex]
+        : undefined;
+    try {
+      const submitted = await onSubmit(request.requestId, responses, passwordToSave);
+      if (!submitted) setIsSubmitting(false);
+    } catch {
+      setIsSubmitting(false);
+    }
+  }, [request, responses, onSubmit, isSubmitting, savePassword, passwordPromptIndex, canSavePassword]);
 
-  const handleCancel = useCallback(() => {
-    if (!request) return;
-    onCancel(request.requestId);
-  }, [request, onCancel]);
+  const handleCancel = useCallback(async () => {
+    if (!request || isSubmitting) return;
+    setIsSubmitting(true);
+    try {
+      const cancelled = await onCancel(request.requestId);
+      if (!cancelled) setIsSubmitting(false);
+    } catch {
+      setIsSubmitting(false);
+    }
+  }, [request, onCancel, isSubmitting]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === "Enter" && !isSubmitting) {
         e.preventDefault();
-        handleSubmit();
+        void handleSubmit();
       }
     },
     [handleSubmit, isSubmitting]
@@ -122,16 +197,21 @@ export const KeyboardInteractiveModal: React.FC<KeyboardInteractiveModalProps> =
 
   if (!request) return null;
 
-  const title = request.name?.trim() || t("keyboard.interactive.title");
+  const serverPromptText = formatKeyboardInteractiveServerPrompt(request);
+  const title = t("keyboard.interactive.title");
   const description =
-    request.instructions?.trim() ||
-    (request.hostname
+    request.hostname
       ? t("keyboard.interactive.descWithHost", { hostname: request.hostname })
-      : t("keyboard.interactive.desc"));
+      : t("keyboard.interactive.desc");
 
   return (
-    <Dialog open={!!request} onOpenChange={(open) => !open && handleCancel()}>
-      <DialogContent className="sm:max-w-[425px]" hideCloseButton>
+    <Dialog open={!!request} onOpenChange={() => {/* intentionally non-dismissable */}}>
+      <DialogContent
+        className="sm:max-w-[425px]"
+        hideCloseButton
+        onInteractOutside={(e) => e.preventDefault()}
+        onEscapeKeyDown={(e) => e.preventDefault()}
+      >
         <DialogHeader>
           <div className="flex items-center gap-3 mb-2">
             <div className="h-10 w-10 rounded-full bg-primary/10 flex items-center justify-center">
@@ -147,17 +227,26 @@ export const KeyboardInteractiveModal: React.FC<KeyboardInteractiveModalProps> =
         </DialogHeader>
 
         <div className="space-y-4 py-2">
+          {serverPromptText && (
+            <pre className="max-h-36 overflow-auto rounded-md border border-border/60 bg-muted/45 px-3 py-2 text-xs leading-relaxed text-foreground whitespace-pre-wrap [overflow-wrap:anywhere]">
+              {serverPromptText}
+            </pre>
+          )}
+
           {request.prompts.map((prompt, index) => {
             const isPassword = !prompt.echo;
             const showPassword = showPasswords[index];
+            const showPromptLabel = !(serverPromptText && request.prompts.length === 1);
             // Clean up prompt text (remove trailing colon and whitespace)
             const promptLabel = prompt.prompt.replace(/:\s*$/, "").trim();
 
             return (
               <div key={index} className="space-y-2">
-                <Label htmlFor={`ki-prompt-${index}`}>
-                  {promptLabel || t("keyboard.interactive.response")}
-                </Label>
+                {showPromptLabel && (
+                  <Label htmlFor={`ki-prompt-${index}`}>
+                    {promptLabel || t("keyboard.interactive.response")}
+                  </Label>
+                )}
                 <div className="relative">
                   <Input
                     id={`ki-prompt-${index}`}
@@ -181,8 +270,8 @@ export const KeyboardInteractiveModal: React.FC<KeyboardInteractiveModalProps> =
                     </button>
                   )}
                 </div>
-                {/* Save password checkbox - shown only for the first password prompt */}
-                {index === passwordPromptIndex && (
+                {/* Save password checkbox - first-factor password prompts only */}
+                {canSavePassword && index === passwordPromptIndex && (
                   <label className="flex items-center gap-2 cursor-pointer select-none">
                     <input
                       type="checkbox"
@@ -199,7 +288,7 @@ export const KeyboardInteractiveModal: React.FC<KeyboardInteractiveModalProps> =
               </div>
             );
           })}
-        </div>
+</div>
 
         <div className="flex items-center justify-between pt-2">
           <Button

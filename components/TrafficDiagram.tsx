@@ -70,7 +70,7 @@ export const TrafficDiagram: React.FC<TrafficDiagramProps> = ({ type, isAnimatin
         <div className="relative w-full h-48 flex items-center justify-center overflow-hidden rounded-xl bg-secondary/60 border border-border/50">
             {/* ========== LOCAL FORWARDING ========== */}
             {type === 'local' && (
-                <div className="relative w-full h-full">
+                <div className="relative w-[300px] max-w-full aspect-[300/170]">
                     {/* App Logo - left (same line as firewall) */}
                     <div className={`absolute left-6 top-5 z-10 transition-opacity duration-300 ${getOpacity('app')}`}>
                         <AppLogo className="h-12 w-12" />
@@ -95,21 +95,21 @@ export const TrafficDiagram: React.FC<TrafficDiagramProps> = ({ type, isAnimatin
                     </div>
 
                     {/* SVG Lines */}
-                    <svg className="absolute inset-0 w-full h-full" style={{ zIndex: 1 }}>
+                    <svg className="absolute inset-0 w-full h-full" viewBox="0 0 300 170" preserveAspectRatio="none" style={{ zIndex: 1 }}>
                         {/* App to Firewall - blocked red line (with gap) */}
-                        <AnimatedLine x1={78} y1={40} x2={127} y2={40} isAnimating={false} isBlocked />
+                        <AnimatedLine x1={78} y1={44} x2={122} y2={44} isAnimating={false} isBlocked />
                         {/* App to SSH Server - blue animated (with gap) */}
-                        <AnimatedLine x1={78} y1={58} x2={145} y2={138} isAnimating={isAnimating} />
+                        <AnimatedLine x1={76} y1={64} x2={126} y2={110} isAnimating={isAnimating} />
                         {/* SSH Server to targets - blue animated (with gap) */}
-                        <AnimatedLine x1={178} y1={148} x2={238} y2={58} isAnimating={isAnimating} />
-                        <AnimatedLine x1={178} y1={152} x2={238} y2={88} isAnimating={isAnimating} />
+                        <AnimatedLine x1={174} y1={112} x2={242} y2={28} isAnimating={isAnimating} />
+                        <AnimatedLine x1={178} y1={120} x2={242} y2={68} isAnimating={isAnimating} />
                     </svg>
                 </div>
             )}
 
             {/* ========== REMOTE FORWARDING ========== */}
             {type === 'remote' && (
-                <div className="relative w-full h-full">
+                <div className="relative w-[300px] max-w-full aspect-[300/170]">
                     {/* Left Server - the remote SSH server where port will be opened */}
                     <div className={`absolute left-6 top-5 z-10 transition-opacity duration-300 ${getOpacity('ssh-server')}`}>
                         <ServerIcon className="h-10 w-10" />
@@ -131,20 +131,20 @@ export const TrafficDiagram: React.FC<TrafficDiagramProps> = ({ type, isAnimatin
                     </div>
 
                     {/* SVG Lines */}
-                    <svg className="absolute inset-0 w-full h-full" style={{ zIndex: 1 }}>
+                    <svg className="absolute inset-0 w-full h-full" viewBox="0 0 300 170" preserveAspectRatio="none" style={{ zIndex: 1 }}>
                         {/* Left server to Firewall - blocked (with gap) */}
-                        <AnimatedLine x1={68} y1={38} x2={128} y2={38} isAnimating={false} isBlocked />
+                        <AnimatedLine x1={70} y1={40} x2={122} y2={40} isAnimating={false} isBlocked />
                         {/* Left server to App - blue animated (with gap) */}
-                        <AnimatedLine x1={58} y1={58} x2={145} y2={135} isAnimating={isAnimating} />
+                        <AnimatedLine x1={68} y1={58} x2={124} y2={128} isAnimating={isAnimating} />
                         {/* Right server to App - blue animated (with gap) */}
-                        <AnimatedLine x1={262} y1={58} x2={175} y2={135} isAnimating={isAnimating} reverse />
+                        <AnimatedLine x1={250} y1={58} x2={176} y2={128} isAnimating={isAnimating} reverse />
                     </svg>
                 </div>
             )}
 
             {/* ========== DYNAMIC FORWARDING ========== */}
             {type === 'dynamic' && (
-                <div className="relative w-full h-full">
+                <div className="relative w-[300px] max-w-full aspect-[300/170]">
                     {/* App Logo - left (same line as firewall) */}
                     <div className={`absolute left-6 top-5 z-10 transition-opacity duration-300 ${getOpacity('app')}`}>
                         <AppLogo className="h-12 w-12" />
@@ -175,15 +175,16 @@ export const TrafficDiagram: React.FC<TrafficDiagramProps> = ({ type, isAnimatin
                     </div>
 
                     {/* SVG Lines */}
-                    <svg className="absolute inset-0 w-full h-full" style={{ zIndex: 1 }}>
+                    <svg className="absolute inset-0 w-full h-full" viewBox="0 0 300 170" preserveAspectRatio="none" style={{ zIndex: 1 }}>
                         {/* App to Firewall - blocked (with gap) */}
-                        <AnimatedLine x1={78} y1={42} x2={128} y2={42} isAnimating={false} isBlocked />
+                        <AnimatedLine x1={78} y1={44} x2={122} y2={44} isAnimating={false} isBlocked />
                         {/* App to SSH Server - blue animated (with gap) */}
-                        <AnimatedLine x1={78} y1={58} x2={145} y2={138} isAnimating={isAnimating} />
+                        <AnimatedLine x1={76} y1={64} x2={126} y2={110} isAnimating={isAnimating} />
                         {/* SSH Server to clouds - blue animated (with gap) */}
-                        <AnimatedLine x1={178} y1={142} x2={238} y2={42} isAnimating={isAnimating} />
-                        <AnimatedLine x1={178} y1={148} x2={238} y2={72} isAnimating={isAnimating} />
-                        <AnimatedLine x1={178} y1={155} x2={238} y2={148} isAnimating={isAnimating} />
+                        <AnimatedLine x1={174} y1={112} x2={246} y2={26} isAnimating={isAnimating} />
+                        <AnimatedLine x1={178} y1={120} x2={246} y2={58} isAnimating={isAnimating} />
+                        <AnimatedLine x1={178} y1={128} x2={246} y2={90} isAnimating={isAnimating} />
+                        <AnimatedLine x1={174} y1={128} x2={234} y2={130} isAnimating={isAnimating} />
                     </svg>
                 </div>
             )}

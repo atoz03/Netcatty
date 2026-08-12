@@ -15,6 +15,7 @@ export const terminalPropsAreEqual = (
   && prev.snippetPackages === next.snippetPackages
   && prev.compactToolbar === next.compactToolbar
   && prev.lineTimestampsAvailable === next.lineTimestampsAvailable
+  && prev.onDeleteSnippets === next.onDeleteSnippets
   && prev.chainHosts === next.chainHosts
   && themeFingerprint(prev.appearanceTheme ?? prev.terminalTheme) === themeFingerprint(next.appearanceTheme ?? next.terminalTheme)
   && prev.knownHosts === next.knownHosts
@@ -27,14 +28,15 @@ export const terminalPropsAreEqual = (
   && prev.isResizing === next.isResizing
   && prev.isFocusMode === next.isFocusMode
   && prev.isFocused === next.isFocused
+  && prev.isFocusedPane === next.isFocusedPane
   && prev.fontFamilyId === next.fontFamilyId
   && prev.fontSize === next.fontSize
   && prev.followAppTerminalTheme === next.followAppTerminalTheme
-  && prev.accentMode === next.accentMode
-  && prev.customAccent === next.customAccent
+  // accentMode / customAccent intentionally omitted — Terminal reads appearanceChromeStore.
   && prev.terminalSettings === next.terminalSettings
   && prev.sessionId === next.sessionId
   && prev.restoreState === next.restoreState
+  && prev.vaultInitializedOverride === next.vaultInitializedOverride
   && prev.shellType === next.shellType
   && prev.lastCwd === next.lastCwd
   && prev.restoreTerminalCwd === next.restoreTerminalCwd
@@ -44,6 +46,7 @@ export const terminalPropsAreEqual = (
   && prev.pendingScriptId === next.pendingScriptId
   && prev.pendingScript === next.pendingScript
   && prev.reuseConnectionFromSessionId === next.reuseConnectionFromSessionId
+  && prev.attachExistingSession === next.attachExistingSession
   && prev.serialConfig === next.serialConfig
   && prev.hotkeyScheme === next.hotkeyScheme
   && prev.disableTerminalFontZoom === next.disableTerminalFontZoom
@@ -53,6 +56,7 @@ export const terminalPropsAreEqual = (
   && prev.sessionLog === next.sessionLog
   && prev.sshDebugLogEnabled === next.sshDebugLogEnabled
   && prev.sudoAutofillPassword === next.sudoAutofillPassword
+  && prev.sudoAutofillCandidates === next.sudoAutofillCandidates
   && prev.showSelectionAIAction === next.showSelectionAIAction
   && prev.onHotkeyAction === next.onHotkeyAction
   && prev.onTerminalFontSizeChange === next.onTerminalFontSizeChange

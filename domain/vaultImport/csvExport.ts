@@ -1,19 +1,41 @@
 import type { Host } from '../models';
+import { isPluginHostProtocol } from '../pluginConnection';
+import { encodeCsvKeyPath, encodeCsvPassphrase } from './csvCredentialFields';
+
+const UTF8_BOM = "\uFEFF";
 
 export interface VaultCsvTemplateOptions {
   includeExampleRows?: boolean;
 }
 
+export interface VaultCsvExportOptions {
+  keyPassphrases?: ReadonlyMap<string, string>;
+  keyPassphrasesById?: ReadonlyMap<string, string>;
+  keyPathsById?: ReadonlyMap<string, string>;
+}
+
+export const resolveVaultCsvHostKeyPath = (
+  host: Host,
+  options: VaultCsvExportOptions = {},
+): string => {
+  const referencedPath = host.identityFileId
+    ? options.keyPathsById?.get(host.identityFileId)?.trim()
+    : undefined;
+  return referencedPath
+    || host.identityFilePaths?.find((path) => path.trim())?.trim()
+    || "";
+};
+
 export const getVaultCsvTemplate = (
   opts: VaultCsvTemplateOptions = {},
 ): string => {
   const includeExampleRows = opts.includeExampleRows !== false;
-  const header = ["Groups", "Label", "Tags", "Notes", "Hostname/IP", "Protocol", "Port", "Username", "Password"];
+  const header = ["Groups", "Label", "Tags", "Notes", "Hostname/IP", "Protocol", "Port", "Username", "Password", "KeyPath", "Passphrase"];
   const rows: string[][] = [header];
   if (includeExampleRows) {
-    rows.push(["Project/Dev", "Web Server (dev)", "dev,web", "Dev web tier", "192.168.1.10", "ssh", "22", "root", ""]);
-    rows.push(["Project/Prod", "Web Server (prod)", "prod,web", "Production", "server-a.example.com", "ssh", "22", "ubuntu", ""]);
-    rows.push(["Database", "DB", "db,mysql", "MySQL primary", "db.example.com", "ssh", "4567", "admin", ""]);
+    rows.push(["Project/Dev", "Web Server (dev)", "dev,web", "Dev web tier", "192.168.1.10", "ssh", "22", "root", "", "~/.ssh/id_ed25519", ""]);
+    rows.push(["Project/Prod", "Web Server (prod)", "prod,web", "Production", "server-a.example.com", "ssh", "22", "ubuntu", "", "", ""]);
+    rows.push(["Database", "DB", "db,mysql", "MySQL primary", "db.example.com", "ssh", "4567", "admin", "", "", ""]);
   }
 
   const escapeCsv = (value: string) => {
@@ -25,8 +47,8 @@ export const getVaultCsvTemplate = (
   return rows.map((r) => r.map((c) => escapeCsv(c)).join(",")).join("\r\n") + "\r\n";
 };
 
-const exportHostsToCsv = (hosts: Host[]): string => {
-  const header = ["Groups", "Label", "Tags", "Notes", "Hostname/IP", "Protocol", "Port", "Username", "Password"];
+const exportHostsToCsv = (hosts: Host[], options: VaultCsvExportOptions): string => {
+  const header = ["Groups", "Label", "Tags", "Notes", "Hostname/IP", "Protocol", "Port", "Username", "Password", "KeyPath", "Passphrase"];
   const rows: string[][] = [header];
 
   const escapeCsv = (value: string, skipFormulaGuard = false) => {
@@ -41,10 +63,11 @@ const exportHostsToCsv = (hosts: Host[]): string => {
     return value;
   };
 
-  // Filter out serial hosts - CSV format doesn't support serial port configuration
+  // Filter out transports the legacy CSV format cannot represent without
+  // silently discarding protocol-owned configuration.
   // Note: mosh-enabled hosts are exported as SSH (losing mosh flag) rather than being skipped,
   // since exporting partial data is better than losing the entire host entry
-  const isUnsupported = (h: Host) => h.protocol === "serial";
+  const isUnsupported = (h: Host) => h.protocol === "serial" || isPluginHostProtocol(h.protocol);
   const exportableHosts = hosts.filter((h) => !isUnsupported(h));
 
   // Helper to bracket IPv6 addresses for CSV export
@@ -66,6 +89,14 @@ const exportHostsToCsv = (hosts: Host[]): string => {
     const effectiveUsername = isTelnet
       ? (host.telnetUsername ?? host.username ?? "")
       : (host.username ?? "");
+    const keyPath = resolveVaultCsvHostKeyPath(host, options);
+    const passphrase = keyPath
+      ? (
+          host.identityFileId
+            ? (options.keyPassphrasesById?.get(host.identityFileId) ?? "")
+            : (options.keyPassphrases?.get(keyPath) ?? "")
+        )
+      : "";
 
     rows.push([
       host.group ?? "",
@@ -77,11 +108,18 @@ const exportHostsToCsv = (hosts: Host[]): string => {
       String(effectivePort),
       effectiveUsername,
       host.password ?? "",
+      encodeCsvKeyPath(keyPath),
+      encodeCsvPassphrase(passphrase),
     ]);
   }
 
   const passwordColIdx = header.indexOf("Password");
-  return rows.map((r, rowIdx) => r.map((c, i) => escapeCsv(c, rowIdx > 0 && i === passwordColIdx)).join(",")).join("\r\n") + "\r\n";
+  const keyPathColIdx = header.indexOf("KeyPath");
+  const passphraseColIdx = header.indexOf("Passphrase");
+  return rows.map((r, rowIdx) => r.map((c, i) => escapeCsv(
+    c,
+    rowIdx > 0 && (i === passwordColIdx || i === keyPathColIdx || i === passphraseColIdx),
+  )).join(",")).join("\r\n") + "\r\n";
 };
 
 interface ExportHostsResult {
@@ -90,14 +128,18 @@ interface ExportHostsResult {
   skippedCount: number;
 }
 
-export const exportHostsToCsvWithStats = (hosts: Host[]): ExportHostsResult => {
-  // Only serial hosts are truly unsupported - mosh hosts are exported as SSH
-  const isUnsupported = (h: Host) => h.protocol === "serial";
+export const exportHostsToCsvWithStats = (
+  hosts: Host[],
+  options: VaultCsvExportOptions = {},
+): ExportHostsResult => {
+  // Mosh hosts intentionally degrade to SSH, but namespaced plugin protocols
+  // must be skipped because CSV has no field for their opaque configuration.
+  const isUnsupported = (h: Host) => h.protocol === "serial" || isPluginHostProtocol(h.protocol);
   const skippedHosts = hosts.filter((h) => isUnsupported(h));
   const exportableHosts = hosts.filter((h) => !isUnsupported(h));
 
   return {
-    csv: exportHostsToCsv(hosts),
+    csv: UTF8_BOM + exportHostsToCsv(exportableHosts, options),
     exportedCount: exportableHosts.length,
     skippedCount: skippedHosts.length,
   };

@@ -1,5 +1,5 @@
 import ReactDOM from "react-dom";
-import type { ComponentProps, RefObject } from "react";
+import { useCallback, type ComponentProps, type RefObject } from "react";
 import type { Terminal as XTerm } from "@xterm/xterm";
 import {
   useTerminalAutocomplete,
@@ -8,6 +8,9 @@ import {
 } from "./autocomplete";
 import type { Snippet } from "../../domain/models";
 import { usePaneVisible } from "./paneVisibilityStore";
+import { getWindowPluginTerminalProviderRegistry } from "../../application/state/pluginTerminalProviderRegistry";
+import { provideTerminalCompletions } from "./autocomplete/terminalCompletionProviders";
+import { shouldUsePluginTerminalCompletionProvider } from "../../domain/terminalPromptSecurity";
 
 type PopupProps = ComponentProps<typeof AutocompletePopup>;
 
@@ -21,6 +24,10 @@ interface TerminalAutocompleteProps {
   hostOs: "linux" | "windows" | "macos";
   settings?: Partial<AutocompleteSettings>;
   protocol?: string;
+  workspaceId?: string;
+  status?: "connecting" | "connected" | "disconnected";
+  /** Pane visibility fallback when paneVisibilityStore has no entry (popup terminals). */
+  isVisible?: boolean;
   getCwd?: () => string | undefined;
   onAcceptText: (text: string) => void;
   snippets?: Snippet[];
@@ -35,6 +42,9 @@ interface TerminalAutocompleteProps {
   closeRef: HandlerRef<() => void>;
   sudoHintRef: HandlerRef<(active: boolean) => boolean>;
   sudoHintText: string;
+  isPluginCompletionProviderAvailable?: () => boolean;
+  sensitiveInputActiveRef: RefObject<boolean>;
+  allowHostStyleGreaterThanPrompt?: boolean;
 }
 
 /**
@@ -56,6 +66,9 @@ export function TerminalAutocomplete({
   hostOs,
   settings,
   protocol,
+  workspaceId,
+  status = "connected",
+  isVisible = true,
   getCwd,
   onAcceptText,
   snippets,
@@ -69,10 +82,51 @@ export function TerminalAutocomplete({
   closeRef,
   sudoHintRef,
   sudoHintText,
+  isPluginCompletionProviderAvailable,
+  sensitiveInputActiveRef,
+  allowHostStyleGreaterThanPrompt = false,
 }: TerminalAutocompleteProps) {
   // Self-subscribe to this pane's visibility so toggling it doesn't have to
-  // flow through (and re-render) the TerminalView ctx.
-  const visible = usePaneVisible(sessionId);
+  // flow through (and re-render) the TerminalView ctx. Popup / standalone
+  // Terminal mounts never publish the store — fall back to the isVisible prop
+  // (same contract as hibernate).
+  const visible = usePaneVisible(sessionId, isVisible);
+  const provideCompletions = useCallback(async (
+    input: string,
+    options: Parameters<typeof import("./autocomplete/completionEngine").getCompletions>[1] & {
+      promptText: string;
+      signal?: AbortSignal;
+    },
+  ) => {
+    const normalizedProtocol: NetcattyTerminalSessionSnapshot['protocol'] = protocol ?? "ssh";
+    const pluginRegistry = isPluginCompletionProviderAvailable?.() === false
+      || options.allowExternalProviders === false
+      || !shouldUsePluginTerminalCompletionProvider({
+        sensitiveInputActive: sensitiveInputActiveRef.current === true,
+        promptText: options.promptText,
+        allowHostStyleGreaterThan: allowHostStyleGreaterThanPrompt,
+      })
+      ? null
+      : getWindowPluginTerminalProviderRegistry();
+    return provideTerminalCompletions(pluginRegistry, {
+      input,
+      session: {
+        sessionId,
+        ...(hostId ? { hostId } : {}),
+        ...(workspaceId ? { workspaceId } : {}),
+        protocol: normalizedProtocol,
+        status,
+        ...(options.cwd ? { cwd: options.cwd } : {}),
+      },
+      hostOs,
+      cwdSource: options.cwdSource,
+      snippets: options.snippets,
+      maximum: options.maxResults ?? 15,
+      historyScope: options.historyScope ?? settings?.historyScope,
+      signal: options.signal,
+      onLatePathSuggestions: options.onLatePathSuggestions,
+    });
+  }, [allowHostStyleGreaterThanPrompt, hostId, hostOs, isPluginCompletionProviderAvailable, protocol, sensitiveInputActiveRef, sessionId, settings?.historyScope, status, workspaceId]);
   const autocomplete = useTerminalAutocomplete({
     termRef,
     containerRef,
@@ -85,6 +139,8 @@ export function TerminalAutocomplete({
     onAcceptSnippet,
     protocol,
     getCwd,
+    sensitiveInputActiveRef,
+    provideCompletions,
   });
 
   // Surface the handlers for runtime wiring. They have stable identities

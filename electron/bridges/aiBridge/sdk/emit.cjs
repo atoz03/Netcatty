@@ -10,6 +10,11 @@
  *   { type: 'reasoning-end' }
  *   { type: 'tool-call', toolName, args, toolCallId }
  *   { type: 'tool-result', toolCallId, output, toolName }
+ *   { type: 'file-change', itemId, changes, status }
+ *   { type: 'web-search', itemId, query, status }
+ *   { type: 'plan-update', itemId, items, status }
+ *   { type: 'warning', itemId, message }
+ *   { type: 'usage', inputTokens, cachedInputTokens, outputTokens, reasoningTokens, totalTokens }
  *   { type: 'status', message }
  *   { type: 'session-id', sessionId }
  *   { type: 'error', error }
@@ -40,6 +45,21 @@ function createStreamEmitter({ safeSend, sender, requestId }) {
     },
     toolResult(toolCallId, output, toolName) {
       emitEvent({ type: "tool-result", toolCallId: toolCallId || "", output, toolName });
+    },
+    fileChange(itemId, changes, status) {
+      emitEvent({ type: "file-change", itemId: itemId || "", changes: changes || [], status });
+    },
+    webSearch(itemId, query, status) {
+      emitEvent({ type: "web-search", itemId: itemId || "", query: query || "", status });
+    },
+    planUpdate(itemId, items, status) {
+      emitEvent({ type: "plan-update", itemId: itemId || "", items: items || [], status });
+    },
+    warning(itemId, message) {
+      if (message) emitEvent({ type: "warning", itemId: itemId || "", message });
+    },
+    usage(usage) {
+      if (usage) emitEvent({ type: "usage", ...usage });
     },
     status(message) {
       if (message) emitEvent({ type: "status", message });

@@ -25,12 +25,17 @@ export const ConversationContent = ({ className, ...props }: ConversationContent
   />
 );
 
-export const ConversationScrollButton = ({ className, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) => {
+export const ConversationScrollButton = ({
+  className,
+  onClick,
+  ...props
+}: React.ButtonHTMLAttributes<HTMLButtonElement>) => {
   const { isAtBottom, scrollToBottom } = useStickToBottomContext();
 
-  const handleClick = useCallback(() => {
+  const handleClick = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    onClick?.(event);
     scrollToBottom();
-  }, [scrollToBottom]);
+  }, [onClick, scrollToBottom]);
 
   if (isAtBottom) return null;
 

@@ -3,9 +3,15 @@ import test from "node:test";
 
 import { getSessionLogInitialLine } from "./sessionLogInitialLine.ts";
 
-const makeTerm = (rows: Array<{ text: string; isWrapped?: boolean }>, cursorY: number, cursorX: number) => ({
+const makeTerm = (
+  rows: Array<{ text: string; isWrapped?: boolean }>,
+  cursorY: number,
+  cursorX: number,
+  options: { type?: "normal" | "alternate" } = {},
+) => ({
   buffer: {
     active: {
+      type: options.type ?? "normal",
       baseY: 0,
       cursorY,
       cursorX,
@@ -36,4 +42,18 @@ test("getSessionLogInitialLine falls back to nearest trusted prompt line", () =>
   ], 1, "command output".length);
 
   assert.equal(getSessionLogInitialLine(term), "root@MyNAS:~# ");
+});
+
+test("getSessionLogInitialLine skips alternate-screen vim tilde rows", () => {
+  const term = makeTerm(
+    [
+      { text: "~" },
+      { text: "\"file.txt\" 0L, 0B" },
+    ],
+    0,
+    1,
+    { type: "alternate" },
+  );
+
+  assert.equal(getSessionLogInitialLine(term), "");
 });

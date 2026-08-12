@@ -1,7 +1,71 @@
 "use strict";
 
-const vm = require("node:vm");
+const path = require("node:path");
+const { AsyncLocalStorage } = require("node:async_hooks");
+const { Worker } = require("node:worker_threads");
 const { shellPromptPatterns } = require("./shellPromptPatterns.cjs");
+
+const SCRIPT_SYNC_EXECUTION_TIMEOUT_MS = 1_000;
+const SCRIPT_WORKER_START_TIMEOUT_MS = 10_000;
+const SCRIPT_WORKER_MAX_OLD_GENERATION_MB = 64;
+const SCRIPT_WORKER_MAX_YOUNG_GENERATION_MB = 16;
+const SCRIPT_WORKER_MAX_PENDING_HOST_REQUESTS = 128;
+const SCRIPT_WORKER_MAX_LOG_NOTIFICATIONS = 512;
+const SCRIPT_WORKER_MAX_TOTAL_NOTIFICATIONS = 20_000;
+const SCRIPT_WORKER_IMMEDIATE_PROGRESS_NOTIFICATIONS = 64;
+const SCRIPT_WORKER_PROGRESS_THROTTLE_MS = 50;
+const activeScriptWorkers = new Set();
+const activeScriptHostRequests = new Set();
+let prewarmedScriptWorker = null;
+
+function createScriptWorkerHandle() {
+  const worker = new Worker(path.join(__dirname, "scriptExecutionWorker.cjs"), {
+    resourceLimits: {
+      maxOldGenerationSizeMb: SCRIPT_WORKER_MAX_OLD_GENERATION_MB,
+      maxYoungGenerationSizeMb: SCRIPT_WORKER_MAX_YOUNG_GENERATION_MB,
+      stackSizeMb: 4,
+    },
+  });
+  worker.unref();
+  let resolveReady;
+  let rejectReady;
+  const readyPromise = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+  const onMessage = (message) => {
+    if (message?.type !== "ready") return;
+    worker.removeListener("message", onMessage);
+    worker.removeListener("error", onStartupError);
+    resolveReady();
+  };
+  const onStartupError = (error) => {
+    worker.removeListener("message", onMessage);
+    rejectReady(error);
+  };
+  worker.on("message", onMessage);
+  worker.once("error", onStartupError);
+  void readyPromise.catch(() => {});
+  return { worker, readyPromise };
+}
+
+function ensurePrewarmedScriptWorker() {
+  if (prewarmedScriptWorker) return prewarmedScriptWorker;
+  const handle = createScriptWorkerHandle();
+  prewarmedScriptWorker = handle;
+  void handle.readyPromise.catch(() => {
+    if (prewarmedScriptWorker === handle) prewarmedScriptWorker = null;
+  });
+  return handle;
+}
+
+function acquireScriptWorker() {
+  const handle = prewarmedScriptWorker || createScriptWorkerHandle();
+  if (prewarmedScriptWorker === handle) prewarmedScriptWorker = null;
+  handle.worker.ref();
+  ensurePrewarmedScriptWorker();
+  return handle;
+}
 
 function wrapScriptSource(source) {
   const trimmed = String(source || "").trim();
@@ -23,6 +87,374 @@ function wrapScriptSource(source) {
   }
 
   return `(async () => {\n${trimmed}\n})();`;
+}
+
+function serializeWorkerError(error) {
+  return {
+    name: error?.name || "Error",
+    message: error?.message || String(error),
+    stack: typeof error?.stack === "string" ? error.stack : undefined,
+  };
+}
+
+function reviveWorkerError(value) {
+  const error = new Error(value?.message || "Script worker failed");
+  error.name = value?.name || "Error";
+  if (typeof value?.stack === "string") error.stack = value.stack;
+  return error;
+}
+
+function readRuntimeSnapshot(nct) {
+  return {
+    session: {
+      connected: Boolean(nct.session.connected),
+      name: String(nct.session.name || ""),
+      hostname: String(nct.session.hostname || ""),
+      username: String(nct.session.username || ""),
+    },
+    screen: {
+      currentRow: Number(nct.screen.currentRow) || 0,
+      rows: Number(nct.screen.rows) || 24,
+      cols: Number(nct.screen.cols) || 80,
+    },
+  };
+}
+
+const WORKER_RPC_METHODS = new Set([
+  "session.sleep",
+  "session.startLog",
+  "session.stopLog",
+  "session.disconnect",
+  "screen.send",
+  "screen.sendLine",
+  "screen.waitFor",
+  "screen.waitForText",
+  "screen.waitForRegex",
+  "screen.waitForPrompt",
+  "screen.waitForAny",
+  "screen.getText",
+  "screen.clear",
+  "dialog.alert",
+  "dialog.confirm",
+  "dialog.prompt",
+  "dialog.form",
+  "dialog.select",
+  "dialog.radio",
+  "dialog.checkbox",
+]);
+
+function invokeWorkerRpc(nct, method, args) {
+  if (!WORKER_RPC_METHODS.has(method)) {
+    throw new Error(`Unsupported script API method: ${method}`);
+  }
+  const [namespace, methodName] = method.split(".");
+  const target = nct[namespace];
+  const fn = target?.[methodName];
+  if (typeof fn !== "function") {
+    throw new Error(`Script API method unavailable: ${method}`);
+  }
+  return fn.apply(target, Array.isArray(args) ? args : []);
+}
+
+function handleWorkerNotification({ nct, appendLog, runId }, method, args) {
+  if (method === "log") {
+    nct.log(args?.[0]);
+    return;
+  }
+  if (method === "console.log") {
+    appendLog(runId, String(args?.[0] ?? ""));
+    return;
+  }
+  if (method.startsWith("progress.")) {
+    const methodName = method.slice("progress.".length);
+    const fn = nct.progress?.[methodName];
+    if (typeof fn !== "function") throw new Error(`Unsupported script notification: ${method}`);
+    fn.apply(nct.progress, Array.isArray(args) ? args : []);
+    return;
+  }
+  throw new Error(`Unsupported script notification: ${method}`);
+}
+
+function executeInScriptWorker({
+  source,
+  runId,
+  nct,
+  appendLog,
+  isAborted,
+  syncExecutionTimeoutMs,
+  registerStop,
+  executionContext,
+  executionToken,
+}) {
+  const heartbeatIntervalMs = Math.max(
+    2,
+    Math.min(50, Math.floor(syncExecutionTimeoutMs / 4) || 2),
+  );
+  const heartbeatBuffer = new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT);
+  const heartbeat = new BigInt64Array(heartbeatBuffer);
+  Atomics.store(heartbeat, 0, BigInt(Date.now()));
+  const workerHandle = acquireScriptWorker();
+  const { worker } = workerHandle;
+  activeScriptWorkers.add(worker);
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let ready = false;
+    let watchdog = null;
+    const pendingHostRequests = new Set();
+    let notificationCount = 0;
+    let logNotificationCount = 0;
+    let progressNotificationCount = 0;
+    let pendingProgressNotification = null;
+    let progressTimer = null;
+    let progressCurrent = 0;
+    let progressTotal = 1;
+    let rejectHostRequests;
+    const hostRequestsClosed = new Promise((_, rejectClosed) => {
+      rejectHostRequests = rejectClosed;
+    });
+    void hostRequestsClosed.catch(() => {});
+
+    const cleanup = () => {
+      clearTimeout(startTimer);
+      if (watchdog) clearInterval(watchdog);
+      if (progressTimer) clearTimeout(progressTimer);
+      watchdog = null;
+      progressTimer = null;
+      pendingProgressNotification = null;
+      worker.removeAllListeners();
+      registerStop?.(() => {});
+    };
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      executionToken.closed = true;
+      rejectHostRequests?.(error || new Error("Script execution finished"));
+      const pendingDrain = Promise.allSettled([...pendingHostRequests]);
+      cleanup();
+      void Promise.all([
+        worker.terminate().catch(() => {}),
+        pendingDrain,
+      ]).then(() => {
+        pendingHostRequests.clear();
+        activeScriptWorkers.delete(worker);
+        if (error) reject(error);
+        else resolve(undefined);
+      });
+    };
+    registerStop?.((reason) => {
+      finish(reason instanceof Error ? reason : new Error("Script stopped"));
+    });
+    const postSnapshot = () => {
+      if (settled) return;
+      try {
+        worker.postMessage({ type: "snapshot", snapshot: readRuntimeSnapshot(nct) });
+      } catch {
+        // Worker may have crossed its terminal boundary between the checks.
+      }
+    };
+    const deliverNotification = (message) => {
+      executionContext.run(executionToken, () => {
+        handleWorkerNotification({ nct, appendLog, runId }, message.method, message.args);
+      });
+    };
+    const flushPendingProgress = () => {
+      if (progressTimer) clearTimeout(progressTimer);
+      progressTimer = null;
+      const pending = pendingProgressNotification;
+      pendingProgressNotification = null;
+      if (!pending || settled) return;
+      deliverNotification(pending);
+    };
+    const scheduleProgressFlush = () => {
+      if (progressTimer || settled) return;
+      progressTimer = setTimeout(() => {
+        progressTimer = null;
+        try {
+          flushPendingProgress();
+        } catch (error) {
+          finish(error);
+        }
+      }, SCRIPT_WORKER_PROGRESS_THROTTLE_MS);
+      progressTimer.unref?.();
+    };
+    const handleProgressNotification = (message) => {
+      const methodName = message.method.slice("progress.".length);
+      if (methodName === "start") {
+        flushPendingProgress();
+        progressCurrent = 0;
+        progressTotal = Math.max(1, Number(message.args?.[1]) || 1);
+      } else if (methodName === "set") {
+        progressCurrent = Math.max(0, Math.min(progressTotal, Number(message.args?.[0]) || 0));
+      } else if (methodName === "step") {
+        progressCurrent = Math.min(progressTotal, progressCurrent + 1);
+      } else if (methodName === "done") {
+        flushPendingProgress();
+      }
+
+      progressNotificationCount += 1;
+      if (
+        progressNotificationCount <= SCRIPT_WORKER_IMMEDIATE_PROGRESS_NOTIFICATIONS
+        || methodName === "start"
+        || methodName === "done"
+      ) {
+        deliverNotification(message);
+        return;
+      }
+      pendingProgressNotification = {
+        type: "notify",
+        method: "progress.set",
+        args: [progressCurrent, message.args?.[1] ?? message.args?.[0]],
+      };
+      scheduleProgressFlush();
+    };
+    const startTimer = setTimeout(() => {
+      finish(new Error(`Script worker failed to start after ${SCRIPT_WORKER_START_TIMEOUT_MS}ms`));
+    }, SCRIPT_WORKER_START_TIMEOUT_MS);
+    startTimer.unref?.();
+
+    const startWatchdog = () => {
+      if (watchdog || settled) return;
+      const checkIntervalMs = Math.max(2, Math.min(25, heartbeatIntervalMs));
+      watchdog = setInterval(() => {
+        if (isAborted?.()) {
+          finish(new Error("Script stopped"));
+          return;
+        }
+        const lastHeartbeat = Number(Atomics.load(heartbeat, 0));
+        if (Date.now() - lastHeartbeat > syncExecutionTimeoutMs + heartbeatIntervalMs) {
+          finish(new Error(`Script execution timed out after ${syncExecutionTimeoutMs}ms`));
+          return;
+        }
+        postSnapshot();
+      }, checkIntervalMs);
+      watchdog.unref?.();
+    };
+
+    worker.on("message", (message) => {
+      if (settled) return;
+      if (message?.type === "notify") {
+        try {
+          notificationCount += 1;
+          if (notificationCount > SCRIPT_WORKER_MAX_TOTAL_NOTIFICATIONS) {
+            finish(new Error(
+              `Script exceeded the ${SCRIPT_WORKER_MAX_TOTAL_NOTIFICATIONS} notification limit`,
+            ));
+            return;
+          }
+          if (message.method === "log" || message.method === "console.log") {
+            flushPendingProgress();
+            logNotificationCount += 1;
+            if (logNotificationCount > SCRIPT_WORKER_MAX_LOG_NOTIFICATIONS) {
+              finish(new Error(
+                `Script exceeded the ${SCRIPT_WORKER_MAX_LOG_NOTIFICATIONS} log notification limit`,
+              ));
+              return;
+            }
+            deliverNotification(message);
+            return;
+          }
+          if (message.method?.startsWith("progress.")) {
+            handleProgressNotification(message);
+            return;
+          }
+          flushPendingProgress();
+          deliverNotification(message);
+        } catch (error) {
+          finish(error);
+        }
+        return;
+      }
+      if (message?.type === "rpc") {
+        if (pendingHostRequests.size >= SCRIPT_WORKER_MAX_PENDING_HOST_REQUESTS) {
+          finish(new Error(
+            `Script exceeded the ${SCRIPT_WORKER_MAX_PENDING_HOST_REQUESTS} pending host request limit`,
+          ));
+          return;
+        }
+        const hostRequest = executionContext.run(executionToken, () => (
+          Promise.resolve().then(() => invokeWorkerRpc(nct, message.method, message.args))
+        ));
+        // The underlying API observes executionToken and normally stops itself.
+        // Race it as well so one misbehaving host API cannot keep bookkeeping,
+        // timers, or the script completion promise alive after worker teardown.
+        void hostRequest.catch(() => {});
+        const request = Promise.race([hostRequest, hostRequestsClosed]);
+        pendingHostRequests.add(request);
+        activeScriptHostRequests.add(request);
+        void request.then(
+          (value) => {
+            if (settled) return;
+            worker.postMessage({
+              type: "rpc-result",
+              requestId: message.requestId,
+              ok: true,
+              value,
+              snapshot: readRuntimeSnapshot(nct),
+            });
+          },
+          (error) => {
+            if (settled) return;
+            worker.postMessage({
+              type: "rpc-result",
+              requestId: message.requestId,
+              ok: false,
+              error: serializeWorkerError(error),
+              snapshot: readRuntimeSnapshot(nct),
+            });
+          },
+        ).finally(() => {
+          pendingHostRequests.delete(request);
+          activeScriptHostRequests.delete(request);
+        }).catch((error) => {
+          if (!settled) finish(error);
+        });
+        return;
+      }
+      if (message?.type === "completed") {
+        try { flushPendingProgress(); } catch (error) {
+          finish(error);
+          return;
+        }
+        finish();
+        return;
+      }
+      if (message?.type === "failed") {
+        finish(reviveWorkerError(message.error));
+      }
+    });
+    worker.once("error", (error) => finish(error));
+    worker.once("exit", (code) => {
+      if (!settled) {
+        finish(new Error(
+          ready
+            ? `Script worker exited before completion (code ${code})`
+            : `Script worker failed to start (code ${code})`,
+        ));
+      }
+    });
+    void workerHandle.readyPromise.then(() => {
+      if (settled) return;
+      ready = true;
+      clearTimeout(startTimer);
+      Atomics.store(heartbeat, 0, BigInt(Date.now()));
+      worker.postMessage({
+        type: "start",
+        config: {
+          source,
+          filename: `script-${runId}.js`,
+          version: nct.version,
+          snapshot: readRuntimeSnapshot(nct),
+          heartbeatBuffer,
+          heartbeatIntervalMs,
+          maxPendingHostRequests: SCRIPT_WORKER_MAX_PENDING_HOST_REQUESTS,
+          maxLogNotifications: SCRIPT_WORKER_MAX_LOG_NOTIFICATIONS,
+          maxTotalNotifications: SCRIPT_WORKER_MAX_TOTAL_NOTIFICATIONS,
+        },
+      });
+      startWatchdog();
+    }, (error) => finish(error));
+  });
 }
 
 function truncateActivityLabel(value, max = 80) {
@@ -254,6 +686,7 @@ function normalizeDialogFormSpec(spec) {
 }
 
 function createScriptRuntime(deps) {
+  ensurePrewarmedScriptWorker();
   const {
     sessionId,
     runId,
@@ -278,6 +711,8 @@ function createScriptRuntime(deps) {
   let progressLabel;
   let progressCurrent = 0;
   let progressTotal = 0;
+  let stopActiveExecution = () => {};
+  const executionContext = new AsyncLocalStorage();
 
   let screenSnapshot = {
     rows: 24,
@@ -285,6 +720,66 @@ function createScriptRuntime(deps) {
     currentRow: 0,
     lines: [],
   };
+
+  function isExecutionAborted() {
+    return Boolean(executionContext.getStore()?.closed || deps.isAborted?.());
+  }
+
+  function assertNotAborted() {
+    if (isExecutionAborted()) {
+      throw new Error("Script stopped");
+    }
+  }
+
+  function abortable(promise) {
+    assertNotAborted();
+    return new Promise((resolve, reject) => {
+      let settled = false;
+      const finish = (callback, value) => {
+        if (settled) return;
+        settled = true;
+        clearInterval(timer);
+        callback(value);
+      };
+      const timer = setInterval(() => {
+        if (!isExecutionAborted()) return;
+        finish(reject, new Error("Script stopped"));
+      }, 50);
+      Promise.resolve(promise).then(
+        (value) => {
+          if (isExecutionAborted()) {
+            finish(reject, new Error("Script stopped"));
+            return;
+          }
+          finish(resolve, value);
+        },
+        (err) => {
+          if (isExecutionAborted()) {
+            finish(reject, new Error("Script stopped"));
+            return;
+          }
+          finish(reject, err);
+        },
+      );
+    });
+  }
+
+  function markHandled(promise) {
+    const observed = Promise.resolve(promise);
+    observed.catch(() => {});
+    return promise;
+  }
+
+  async function ignoreIfStopped(task) {
+    try {
+      return await task();
+    } catch (err) {
+      if (isExecutionAborted() && err?.message === "Script stopped") {
+        return undefined;
+      }
+      throw err;
+    }
+  }
 
   function emitStatus(patch = {}) {
     onStatusChange?.(runId, {
@@ -305,6 +800,7 @@ function createScriptRuntime(deps) {
   }
 
   async function trackStep(label) {
+    assertNotAborted();
     stepIndex += 1;
     const activityLabel = truncateActivityLabel(label);
     emitStatus({
@@ -314,20 +810,22 @@ function createScriptRuntime(deps) {
   }
 
   async function refreshScreenSnapshot() {
+    assertNotAborted();
     if (typeof getScreenSnapshot === "function") {
       try {
-        screenSnapshot = await getScreenSnapshot(sessionId);
+        screenSnapshot = await abortable(getScreenSnapshot(sessionId));
       } catch {
         // fall back to output buffer text
       }
     }
+    assertNotAborted();
     return screenSnapshot;
   }
 
   async function waitForPromptWithRecovery(timeoutMs = 60000) {
     let stepTracked = false;
     while (true) {
-      if (deps.isAborted?.()) {
+      if (isExecutionAborted()) {
         throw new Error("Script stopped");
       }
       if (!stepTracked) {
@@ -339,7 +837,7 @@ function createScriptRuntime(deps) {
         return await getOutputBuffer(sessionId).waitForAny(
           shellPromptPatterns(),
           timeoutMs,
-          () => Boolean(deps.isAborted?.()),
+          isExecutionAborted,
           { allowPreservedTailMatch: true },
         );
       } catch (err) {
@@ -347,7 +845,8 @@ function createScriptRuntime(deps) {
           throw err;
         }
         onStatusChange?.(runId, { status: "paused", waitingFor: "shell prompt", elapsedMs: Math.max(0, Date.now() - startedAt) });
-        const action = await showWaitForTimeoutDialog?.("shell prompt", timeoutMs);
+        assertNotAborted();
+        const action = await abortable(showWaitForTimeoutDialog?.("shell prompt", timeoutMs));
         onStatusChange?.(runId, { status: "running" });
         if (action === "retry") {
           continue;
@@ -368,7 +867,7 @@ function createScriptRuntime(deps) {
       : String(patterns);
     let stepTracked = false;
     while (true) {
-      if (deps.isAborted?.()) {
+      if (isExecutionAborted()) {
         throw new Error("Script stopped");
       }
       if (!stepTracked) {
@@ -380,14 +879,15 @@ function createScriptRuntime(deps) {
         return await getOutputBuffer(sessionId).waitForAny(
           patterns,
           timeoutMs,
-          () => Boolean(deps.isAborted?.()),
+          isExecutionAborted,
         );
       } catch (err) {
         if (!String(err?.message || err).includes("timed out")) {
           throw err;
         }
         onStatusChange?.(runId, { status: "paused", waitingFor: label, elapsedMs: Math.max(0, Date.now() - startedAt) });
-        const action = await showWaitForTimeoutDialog?.(label, timeoutMs);
+        assertNotAborted();
+        const action = await abortable(showWaitForTimeoutDialog?.(label, timeoutMs));
         onStatusChange?.(runId, { status: "running" });
         if (action === "retry") {
           continue;
@@ -408,7 +908,7 @@ function createScriptRuntime(deps) {
     const patternLabel = pattern instanceof RegExp ? pattern.source : String(pattern);
     let stepTracked = false;
     while (true) {
-      if (deps.isAborted?.()) {
+      if (isExecutionAborted()) {
         throw new Error("Script stopped");
       }
       if (!stepTracked) {
@@ -420,14 +920,15 @@ function createScriptRuntime(deps) {
         return await getOutputBuffer(sessionId)[waitMethod](
           pattern,
           timeoutMs,
-          () => Boolean(deps.isAborted?.()),
+          isExecutionAborted,
         );
       } catch (err) {
         if (!String(err?.message || err).includes("timed out")) {
           throw err;
         }
         onStatusChange?.(runId, { status: "paused", waitingFor: patternLabel, elapsedMs: Math.max(0, Date.now() - startedAt) });
-        const action = await showWaitForTimeoutDialog?.(patternLabel, timeoutMs);
+        assertNotAborted();
+        const action = await abortable(showWaitForTimeoutDialog?.(patternLabel, timeoutMs));
         onStatusChange?.(runId, { status: "running" });
         if (action === "retry") {
           continue;
@@ -508,6 +1009,9 @@ function createScriptRuntime(deps) {
       const meta = getSessionMeta?.(sessionId);
       return Boolean(meta?.connected);
     },
+    get name() {
+      return getSessionMeta?.(sessionId)?.name || "";
+    },
     get hostname() {
       return getSessionMeta?.(sessionId)?.hostname || "";
     },
@@ -516,71 +1020,115 @@ function createScriptRuntime(deps) {
     },
     sleep(ms) {
       const delay = Math.max(0, Number(ms) || 0);
-      return trackStep(`sleep ${delay}ms`).then(() => interruptibleSleep(delay, deps.isAborted));
+      return markHandled(trackStep(`sleep ${delay}ms`).then(() => interruptibleSleep(delay, isExecutionAborted)));
     },
-    async startLog(path) {
-      assertWriteAllowed("session.startLog");
-      await trackStep("startLog");
-      await startSessionLog?.(sessionId, path);
+    startLog(path) {
+      return markHandled(ignoreIfStopped(async () => {
+        if (isExecutionAborted()) return;
+        assertWriteAllowed("session.startLog");
+        await trackStep("startLog");
+        if (isExecutionAborted()) return;
+        await startSessionLog?.(sessionId, path);
+      }));
     },
-    async stopLog() {
-      await trackStep("stopLog");
-      await stopSessionLog?.(sessionId);
+    stopLog() {
+      return markHandled((async () => {
+        await stopSessionLog?.(sessionId);
+      })());
     },
-    async disconnect() {
-      assertWriteAllowed("session.disconnect");
-      await trackStep("disconnect");
-      await disconnectSession?.(sessionId);
+    disconnect() {
+      return markHandled(ignoreIfStopped(async () => {
+        if (isExecutionAborted()) return;
+        assertWriteAllowed("session.disconnect");
+        await trackStep("disconnect");
+        if (isExecutionAborted()) return;
+        await disconnectSession?.(sessionId);
+      }));
     },
   };
 
   const screenApi = {
-    async send(text) {
-      assertWriteAllowed("screen.send");
-      await waitIfPaused();
-      const payload = String(text ?? "");
-      await trackStep(`send: ${truncateActivityLabel(formatScriptInputForLog(payload), 60)}`);
-      appendLog(runId, `→ ${formatScriptInputForLog(payload)}`);
-      writeToSession(sessionId, payload, { automated: true });
+    send(text, options = {}) {
+      return markHandled(ignoreIfStopped(async () => {
+        if (isExecutionAborted()) return;
+        assertWriteAllowed("screen.send");
+        await waitIfPaused();
+        const payload = String(text ?? "");
+        const sensitive = options?.sensitive === true;
+        const visiblePayload = sensitive ? "[sensitive]" : formatScriptInputForLog(payload);
+        await trackStep(`send: ${truncateActivityLabel(visiblePayload, 60)}`);
+        if (isExecutionAborted()) return;
+        appendLog(runId, `→ ${visiblePayload}`);
+        writeToSession(sessionId, payload, { automated: true, sensitive });
+      }));
     },
-    async sendLine(text) {
-      assertWriteAllowed("screen.sendLine");
-      await waitIfPaused();
-      const line = String(text ?? "");
-      await trackStep(`sendLine: ${truncateActivityLabel(line, 60)}`);
-      appendLog(runId, `→ ${line}`);
-      writeToSession(sessionId, `${line}\r`, { automated: true });
+    sendLine(text, options = {}) {
+      return markHandled(ignoreIfStopped(async () => {
+        if (isExecutionAborted()) return;
+        assertWriteAllowed("screen.sendLine");
+        await waitIfPaused();
+        const line = String(text ?? "");
+        const sensitive = options?.sensitive === true;
+        const visibleLine = sensitive ? "[sensitive]" : line;
+        await trackStep(`sendLine: ${truncateActivityLabel(visibleLine, 60)}`);
+        if (isExecutionAborted()) return;
+        appendLog(runId, `→ ${visibleLine}`);
+        // Bastion menus can ignore a single "line\r" packet even when
+        // stream.write succeeds. Match xterm: body, then Enter (#1960).
+        // Consume only pre-send buffer length so prompts that arrive between
+        // body and CR stay waitable for the next step.
+        const buffer = getOutputBuffer(sessionId);
+        const lengthBeforeSend = buffer.getText().length;
+        if (line.length > 0) {
+          writeToSession(sessionId, line, {
+            automated: true,
+            sensitive,
+            invalidateStartupSeed: false,
+          });
+          await interruptibleSleep(30, isExecutionAborted);
+          if (isExecutionAborted()) return;
+        }
+        writeToSession(sessionId, "\r", {
+          automated: true,
+          sensitive,
+          invalidateStartupSeed: false,
+        });
+        buffer.consumeThroughAbsolute(lengthBeforeSend);
+      }));
     },
     waitFor(pattern, timeoutMs = 30000) {
-      return waitForWithRecovery(pattern, timeoutMs);
+      return markHandled(waitForWithRecovery(pattern, timeoutMs));
     },
     waitForText(text, timeoutMs = 30000) {
-      return waitForWithRecovery(text, timeoutMs, {
+      return markHandled(waitForWithRecovery(text, timeoutMs, {
         waitMethod: "waitForText",
         operationLabel: "waitForText",
-      });
+      }));
     },
     waitForRegex(pattern, timeoutMs = 30000) {
-      return waitForWithRecovery(pattern, timeoutMs, {
+      return markHandled(waitForWithRecovery(pattern, timeoutMs, {
         waitMethod: "waitForRegex",
         operationLabel: "waitForRegex",
-      });
+      }));
     },
     waitForPrompt(timeoutMs = 60000) {
-      return waitForPromptWithRecovery(timeoutMs);
+      return markHandled(waitForPromptWithRecovery(timeoutMs));
     },
-    async waitForAny(patterns, timeoutMs = 30000) {
-      return waitForAnyWithRecovery(patterns, timeoutMs);
+    waitForAny(patterns, timeoutMs = 30000) {
+      return markHandled(waitForAnyWithRecovery(patterns, timeoutMs));
     },
-    async getText(startRow, endRow) {
-      await refreshScreenSnapshot();
-      const lines = screenSnapshot.lines || [];
-      const start = typeof startRow === "number" ? Math.max(0, startRow) : 0;
-      const end = typeof endRow === "number" ? Math.min(lines.length - 1, endRow) : lines.length - 1;
-      if (lines.length === 0) {
-        return getOutputBuffer(sessionId).getText();
-      }
-      return lines.slice(start, end + 1).join("\n");
+    getText(startRow, endRow) {
+      return markHandled((async () => {
+        await refreshScreenSnapshot();
+        assertNotAborted();
+        const lines = screenSnapshot.lines || [];
+        const start = typeof startRow === "number" ? Math.max(0, startRow) : 0;
+        const end = typeof endRow === "number" ? Math.min(lines.length - 1, endRow) : lines.length - 1;
+        if (lines.length === 0) {
+          return getOutputBuffer(sessionId).getText();
+        }
+        return lines.slice(start, end + 1).join("\n");
+      })());
     },
     get currentRow() {
       return screenSnapshot.currentRow ?? 0;
@@ -591,64 +1139,83 @@ function createScriptRuntime(deps) {
     get cols() {
       return screenSnapshot.cols ?? 80;
     },
-    async clear() {
-      assertWriteAllowed("screen.clear");
-      await trackStep("clear");
-      writeToSession(sessionId, "\x1b[2J\x1b[H", { automated: true });
+    clear() {
+      return markHandled(ignoreIfStopped(async () => {
+        if (isExecutionAborted()) return;
+        assertWriteAllowed("screen.clear");
+        await trackStep("clear");
+        if (isExecutionAborted()) return;
+        writeToSession(sessionId, "\x1b[2J\x1b[H", { automated: true });
+      }));
     },
   };
 
   const dialogApi = {
     alert(message) {
-      return showDialog("alert", String(message ?? ""));
+      assertNotAborted();
+      return markHandled(abortable(showDialog("alert", String(message ?? ""))));
     },
     confirm(message) {
-      return showDialog("confirm", String(message ?? ""));
+      assertNotAborted();
+      return markHandled(abortable(showDialog("confirm", String(message ?? ""))));
     },
-    prompt(message, defaultValue = "") {
-      return showDialog("prompt", String(message ?? ""), String(defaultValue ?? ""));
+    prompt(message, defaultValue = "", options = {}) {
+      assertNotAborted();
+      return markHandled(abortable(showDialog(
+        "prompt",
+        String(message ?? ""),
+        String(defaultValue ?? ""),
+        { sensitive: options?.sensitive === true },
+      )));
     },
     form(spec) {
+      assertNotAborted();
       const form = normalizeDialogFormSpec(spec);
-      return showDialog("form", form.message, undefined, { form });
+      return markHandled(abortable(showDialog("form", form.message, undefined, { form })));
     },
-    async select(message, options, defaultValue) {
-      const values = await dialogApi.form({
-        message,
-        fields: [{
-          type: "select",
-          name: "value",
-          label: message,
-          options,
-          defaultValue,
-        }],
-      });
-      return String(values?.value ?? "");
+    select(message, options, defaultValue) {
+      return markHandled((async () => {
+        const values = await dialogApi.form({
+          message,
+          fields: [{
+            type: "select",
+            name: "value",
+            label: message,
+            options,
+            defaultValue,
+          }],
+        });
+        return String(values?.value ?? "");
+      })());
     },
-    async radio(message, options, defaultValue) {
-      const values = await dialogApi.form({
-        message,
-        fields: [{
-          type: "radio",
-          name: "value",
-          label: message,
-          options,
-          defaultValue,
-        }],
-      });
-      return String(values?.value ?? "");
+    radio(message, options, defaultValue) {
+      return markHandled((async () => {
+        const values = await dialogApi.form({
+          message,
+          fields: [{
+            type: "radio",
+            name: "value",
+            label: message,
+            options,
+            defaultValue,
+          }],
+        });
+        return String(values?.value ?? "");
+      })());
     },
-    async checkbox(message, defaultChecked = false) {
-      const values = await dialogApi.form({
-        message,
-        fields: [{
-          type: "checkbox",
-          name: "value",
-          label: message,
-          defaultValue: defaultChecked,
-        }],
-      });
-      return Boolean(values?.value);
+    checkbox(message, defaultChecked = false) {
+      return markHandled((async () => {
+        const values = await dialogApi.form({
+          message,
+          fields: [{
+            type: "checkbox",
+            name: "value",
+            label: message,
+            defaultValue: defaultChecked,
+          }],
+        });
+        return Boolean(values?.value);
+      })());
     },
   };
 
@@ -660,6 +1227,8 @@ function createScriptRuntime(deps) {
     version: deps.appVersion || "0.0.0",
     sleep: sessionApi.sleep.bind(sessionApi),
     log(message) {
+      if (isExecutionAborted()) return;
+      assertNotAborted();
       stepIndex += 1;
       emitStatus({
         activityLabel: "log",
@@ -670,38 +1239,44 @@ function createScriptRuntime(deps) {
   };
 
   async function waitIfPaused() {
+    assertNotAborted();
     while (isPaused?.()) {
-      if (deps.isAborted?.()) {
-        throw new Error("Script stopped");
-      }
+      assertNotAborted();
       onStatusChange?.(runId, { status: "paused", elapsedMs: Math.max(0, Date.now() - startedAt) });
-      await interruptibleSleep(100, deps.isAborted);
+      await interruptibleSleep(100, isExecutionAborted);
     }
+    assertNotAborted();
     onStatusChange?.(runId, { status: "running", elapsedMs: Math.max(0, Date.now() - startedAt) });
   }
 
   async function execute(source) {
-    if (deps.isAborted?.()) {
-      throw new Error("Script stopped");
-    }
-    const wrapped = wrapScriptSource(source);
-    const sandbox = {
+    assertNotAborted();
+    const executionToken = { closed: false };
+    const configuredSyncTimeoutMs = Number(deps.syncExecutionTimeoutMs);
+    const syncExecutionTimeoutMs = Number.isFinite(configuredSyncTimeoutMs) && configuredSyncTimeoutMs > 0
+      ? Math.floor(configuredSyncTimeoutMs)
+      : SCRIPT_SYNC_EXECUTION_TIMEOUT_MS;
+    await executeInScriptWorker({
+      source: wrapScriptSource(source),
+      runId,
       nct,
-      console: {
-        log: (...args) => {
-          appendLog(runId, args.map((arg) => String(arg)).join(" "));
-        },
-      },
-    };
-    vm.createContext(sandbox);
-    const script = new vm.Script(wrapped, { filename: `script-${runId}.js` });
-    const result = script.runInContext(sandbox, { displayErrors: true });
-    if (result && typeof result.then === "function") {
-      await result;
-    }
+      appendLog,
+      isAborted: () => executionToken.closed || Boolean(deps.isAborted?.()),
+      syncExecutionTimeoutMs,
+      registerStop: (stop) => { stopActiveExecution = stop; },
+      executionContext,
+      executionToken,
+    });
+    assertNotAborted();
   }
 
-  return { execute, nct };
+  return {
+    execute,
+    nct,
+    stop(reason = new Error("Script stopped")) {
+      stopActiveExecution(reason);
+    },
+  };
 }
 
 function interruptibleSleep(ms, isAborted) {
@@ -734,9 +1309,16 @@ function formatScriptInputForLog(data) {
 }
 
 module.exports = {
+  SCRIPT_WORKER_MAX_PENDING_HOST_REQUESTS,
+  SCRIPT_WORKER_MAX_LOG_NOTIFICATIONS,
+  SCRIPT_WORKER_MAX_TOTAL_NOTIFICATIONS,
+  SCRIPT_WORKER_IMMEDIATE_PROGRESS_NOTIFICATIONS,
+  SCRIPT_SYNC_EXECUTION_TIMEOUT_MS,
   createScriptRuntime,
   wrapScriptSource,
   interruptibleSleep,
   formatScriptInputForLog,
   normalizeDialogFormSpec,
+  _getActiveScriptWorkerCountForTests: () => activeScriptWorkers.size,
+  _getActiveScriptHostRequestCountForTests: () => activeScriptHostRequests.size,
 };

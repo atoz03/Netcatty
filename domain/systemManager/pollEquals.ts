@@ -1,6 +1,8 @@
 import type {
   DockerContainerInfo,
   DockerImageInfo,
+  ListeningPortInfo,
+  SystemdUnitInfo,
   SystemProcessInfo,
   TmuxSessionInfo,
   ZellijSessionInfo,
@@ -51,4 +53,22 @@ export function dockerImageInfoEqual(a: DockerImageInfo, b: DockerImageInfo): bo
     && a.name === b.name
     && a.size === b.size
     && a.createdAt === b.createdAt;
+}
+
+export function listeningPortInfoEqual(a: ListeningPortInfo, b: ListeningPortInfo): boolean {
+  return a.id === b.id
+    && a.protocol === b.protocol
+    && a.address === b.address
+    && a.port === b.port
+    && a.pid === b.pid
+    && a.processName === b.processName;
+}
+
+export function systemdUnitInfoEqual(a: SystemdUnitInfo, b: SystemdUnitInfo): boolean {
+  return a.name === b.name
+    && a.loadState === b.loadState
+    && a.activeState === b.activeState
+    && a.subState === b.subState
+    && a.description === b.description
+    && a.scope === b.scope;
 }

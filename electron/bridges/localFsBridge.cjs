@@ -10,6 +10,41 @@ const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
 
 const execFileAsync = promisify(execFile);
+const MAX_LOCAL_TREE_DIRECTORIES = 50_000;
+const MAX_LOCAL_TREE_ENTRIES = 200_000;
+const WINDOWS_ATTRIB_TIMEOUT_MS = 15_000;
+
+function normalizeLocalTreeLimit(value, fallback) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
+}
+
+function createLocalTreeTraversalBudget(limits = {}) {
+  return {
+    directories: 0,
+    entries: 0,
+    maxDirectories: normalizeLocalTreeLimit(limits.maxDirectories, MAX_LOCAL_TREE_DIRECTORIES),
+    maxEntries: normalizeLocalTreeLimit(limits.maxEntries, MAX_LOCAL_TREE_ENTRIES),
+  };
+}
+
+function claimLocalTreeDirectory(budget) {
+  if (budget.directories >= budget.maxDirectories) {
+    throw new Error(
+      `Local directory traversal directory limit exceeded (${budget.maxDirectories}). Select a smaller folder to upload.`,
+    );
+  }
+  budget.directories += 1;
+}
+
+function accountLocalTreeEntries(budget, count) {
+  const next = budget.entries + Math.max(0, Number(count) || 0);
+  if (next > budget.maxEntries) {
+    throw new Error(
+      `Local directory traversal entry limit exceeded (${budget.maxEntries}). Select a smaller folder to upload.`,
+    );
+  }
+  budget.entries = next;
+}
 
 /**
  * Parse the output of `attrib.exe <dir>\*` into a set of basenames whose
@@ -72,6 +107,7 @@ async function listWindowsHiddenBasenames(dirPath) {
     // that passed each entry's full path directly).
     const { stdout } = await execFileAsync("attrib.exe", [pattern, "/d"], {
       maxBuffer: 64 * 1024 * 1024,
+      timeout: WINDOWS_ATTRIB_TIMEOUT_MS,
       windowsHide: true,
     });
     return parseAttribOutput(stdout);
@@ -271,52 +307,225 @@ async function statLocal(event, payload) {
   };
 }
 
-async function collectLocalTreeEntries(rootPath) {
+function throwIfLocalTreeCancelled(isCancelled) {
+  if (typeof isCancelled === "function" && isCancelled()) {
+    const error = new Error("Local directory traversal cancelled");
+    error.code = "ERR_LOCAL_TREE_CANCELLED";
+    throw error;
+  }
+}
+
+const LOCAL_TREE_ENTRY_BATCH_SIZE = 64;
+
+async function collectLocalTreeEntries(rootPath, limits = {}, onProgress, isCancelled, onEntries) {
   const rootStat = await fs.promises.stat(rootPath);
   if (!rootStat.isDirectory()) {
     throw new Error("Selected path is not a directory");
   }
+  throwIfLocalTreeCancelled(isCancelled);
 
+  const traversalBudget = createLocalTreeTraversalBudget(limits);
+  claimLocalTreeDirectory(traversalBudget);
   const rootName = path.basename(rootPath);
-  const entries = [{
+  const rootRealPath = await fs.promises.realpath(rootPath);
+  const rootEntry = {
     localPath: rootPath,
     relativePath: rootName,
     type: "directory",
     size: rootStat.size,
     lastModified: rootStat.mtime.getTime(),
-  }];
-  const queue = [{ localPath: rootPath, relativePath: rootName }];
+  };
+  // When streaming batches, avoid retaining the full tree in memory for 100k+
+  // drops. Callers that only need the complete array still get it below.
+  const retainAll = typeof onEntries !== "function";
+  const entries = retainAll ? [rootEntry] : null;
+  let pendingBatch = [rootEntry];
+  const flushBatch = (force = false) => {
+    if (typeof onEntries !== "function") return;
+    if (!force && pendingBatch.length < LOCAL_TREE_ENTRY_BATCH_SIZE) return;
+    if (pendingBatch.length === 0) return;
+    const batch = pendingBatch;
+    pendingBatch = [];
+    onEntries(batch);
+  };
+  flushBatch(true);
 
-  while (queue.length > 0) {
-    const current = queue.shift();
+  const queue = [{
+    localPath: rootPath,
+    relativePath: rootName,
+    ancestorRealPaths: new Set([rootRealPath]),
+  }];
+  let queueIndex = 0;
+  let fileCount = 0;
+  let directoryCount = 1;
+  let lastReportedTotal = 0;
+  const reportProgress = (force = false) => {
+    if (typeof onProgress !== "function") return;
+    const entryCount = fileCount + directoryCount;
+    if (!force && entryCount - lastReportedTotal < 32) return;
+    lastReportedTotal = entryCount;
+    onProgress({ fileCount, directoryCount, entryCount });
+  };
+  reportProgress(true);
+
+  while (queueIndex < queue.length) {
+    throwIfLocalTreeCancelled(isCancelled);
+    const current = queue[queueIndex++];
     const children = await fs.promises.readdir(current.localPath, { withFileTypes: true });
+    accountLocalTreeEntries(traversalBudget, children.length);
     children.sort((a, b) => a.name.localeCompare(b.name));
 
-    for (const child of children) {
-      const childPath = path.join(current.localPath, child.name);
-      const childRelativePath = `${current.relativePath}/${child.name}`;
-      const stat = await fs.promises.stat(childPath);
-      const isDirectory = stat.isDirectory();
+    const metadataConcurrency = 32;
+    for (let start = 0; start < children.length; start += metadataConcurrency) {
+      throwIfLocalTreeCancelled(isCancelled);
+      const inspected = (await Promise.all(
+        children.slice(start, start + metadataConcurrency).map(async (child) => {
+          const childPath = path.join(current.localPath, child.name);
+          const childRelativePath = `${current.relativePath}/${child.name}`;
+          try {
+            // Use lstat to distinguish links, then stat the target. Directory
+            // links retain the established folder-upload behavior, while the
+            // real-path ancestor chain prevents junction/symlink cycles.
+            const linkStat = await fs.promises.lstat(childPath);
+            const stat = linkStat.isSymbolicLink()
+              ? await fs.promises.stat(childPath).catch(() => linkStat)
+              : linkStat;
+            const isDirectory = stat.isDirectory();
+            const realPath = isDirectory
+              ? await fs.promises.realpath(childPath)
+              : null;
+            const isCycle = !!realPath && current.ancestorRealPaths.has(realPath);
+            const ancestorRealPaths = realPath
+              ? new Set([...current.ancestorRealPaths, realPath])
+              : current.ancestorRealPaths;
+            return {
+              childPath,
+              childRelativePath,
+              stat,
+              isDirectory,
+              isCycle,
+              ancestorRealPaths,
+            };
+          } catch (error) {
+            // A folder can change while it is being scanned. Match the
+            // tolerant browser traversal and skip entries that disappear or
+            // become inaccessible instead of aborting the whole drop.
+            console.warn(`Could not inspect ${childPath}:`, error.message);
+            return null;
+          }
+        }),
+      )).filter(Boolean);
 
-      entries.push({
-        localPath: childPath,
-        relativePath: childRelativePath,
-        type: isDirectory ? "directory" : "file",
-        size: stat.size,
-        lastModified: stat.mtime.getTime(),
-      });
-
-      if (isDirectory) {
-        queue.push({ localPath: childPath, relativePath: childRelativePath });
+      // Promise.all preserves the sorted child order, so restart manifests stay
+      // deterministic while metadata I/O is parallelized.
+      for (const child of inspected) {
+        // Count every directory-shaped alias before cycle suppression. Otherwise
+        // a non-cyclic symlink fan-out can expand one real tree thousands of
+        // times without consuming the global directory budget.
+        if (child.isDirectory) claimLocalTreeDirectory(traversalBudget);
+        // Cyclic links cannot be represented by a finite copied tree. Skip the
+        // loop itself instead of misreporting it as a file that later fails.
+        if (child.isCycle) continue;
+        const row = {
+          localPath: child.childPath,
+          relativePath: child.childRelativePath,
+          type: child.isDirectory ? "directory" : "file",
+          size: child.stat.size,
+          lastModified: child.stat.mtime.getTime(),
+        };
+        if (retainAll) entries.push(row);
+        pendingBatch.push(row);
+        if (child.isDirectory) {
+          directoryCount += 1;
+          queue.push({
+            localPath: child.childPath,
+            relativePath: child.childRelativePath,
+            ancestorRealPaths: child.ancestorRealPaths,
+          });
+        } else {
+          fileCount += 1;
+        }
       }
+      flushBatch();
+      reportProgress();
     }
   }
 
-  return entries;
+  throwIfLocalTreeCancelled(isCancelled);
+  flushBatch(true);
+  reportProgress(true);
+  return retainAll ? entries : [];
 }
 
 async function listLocalTree(event, payload) {
-  return collectLocalTreeEntries(payload.path);
+  const progressChannel = typeof payload?.progressChannel === "string" && payload.progressChannel
+    ? payload.progressChannel
+    : null;
+  const cancelChannel = typeof payload?.cancelChannel === "string" && payload.cancelChannel
+    ? payload.cancelChannel
+    : null;
+  let cancelled = false;
+  const onCancel = () => {
+    cancelled = true;
+  };
+  // Lazy-require so unit tests can import collectLocalTreeEntries without a
+  // full Electron binary (top-level require("electron") breaks node --test).
+  let electronIpcMain = null;
+  if (cancelChannel) {
+    try {
+      electronIpcMain = require("electron").ipcMain;
+      electronIpcMain.on(cancelChannel, onCancel);
+    } catch {
+      electronIpcMain = null;
+    }
+  }
+  const onProgress = progressChannel
+    ? (stats) => {
+      try {
+        event.sender.send(progressChannel, stats);
+      } catch {
+        // Renderer may have gone away mid-scan.
+      }
+    }
+    : undefined;
+  const entriesChannel = typeof payload?.entriesChannel === "string" && payload.entriesChannel
+    ? payload.entriesChannel
+    : null;
+  const onEntries = entriesChannel
+    ? (batch) => {
+      try {
+        // Always send plain arrays for entry batches. The stream end marker is
+        // a separate object so the preload can keep its listener until every
+        // nested batch has been delivered (invoke reply races with send).
+        event.sender.send(entriesChannel, batch);
+      } catch {
+        // Renderer may have gone away mid-scan.
+      }
+    }
+    : undefined;
+  try {
+    return await collectLocalTreeEntries(
+      payload.path,
+      payload.limits || {},
+      onProgress,
+      () => cancelled,
+      onEntries,
+    );
+  } finally {
+    // Must be sent after the last entry batch and before the invoke resolves
+    // is not enough alone — preload must wait for this marker before removing
+    // its listener, otherwise deep nested files (discovered late) are dropped.
+    if (entriesChannel) {
+      try {
+        event.sender.send(entriesChannel, { type: "tree-end" });
+      } catch {
+        // Renderer may have gone away mid-scan.
+      }
+    }
+    if (cancelChannel && electronIpcMain) {
+      electronIpcMain.removeListener(cancelChannel, onCancel);
+    }
+  }
 }
 
 /**
@@ -403,6 +612,7 @@ function registerHandlers(ipcMain) {
 }
 
 module.exports = {
+  WINDOWS_ATTRIB_TIMEOUT_MS,
   registerHandlers,
   listLocalDir,
   readLocalFile,
@@ -412,6 +622,9 @@ module.exports = {
   mkdirLocal,
   statLocal,
   collectLocalTreeEntries,
+  createLocalTreeTraversalBudget,
+  MAX_LOCAL_TREE_DIRECTORIES,
+  MAX_LOCAL_TREE_ENTRIES,
   listLocalTree,
   getHomeDir,
   listDrives,

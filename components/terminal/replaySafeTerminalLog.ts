@@ -13,6 +13,11 @@ const MAX_PENDING_ESCAPE_CHARS = 4096;
 
 type ControlStringMode = "osc" | "string";
 
+export type ReplaySafeTerminalLogSanitizerOptions = {
+  /** Seed when attaching mid-TUI so live redraws stay omitted until leave. */
+  alternateScreenActive?: boolean;
+};
+
 export interface ReplaySafeTerminalLogSanitizer {
   append(input: string): string;
   finish(): string;
@@ -175,8 +180,13 @@ class ReplaySafeTerminalLogSanitizerImpl implements ReplaySafeTerminalLogSanitiz
   private discardingCsi = false;
   private inClearCluster = false;
   private protectingClearedHistory = false;
+  private alternateScreenActive: boolean;
   private hasOutput = false;
   private lastOutputChar = "";
+
+  constructor(options: ReplaySafeTerminalLogSanitizerOptions = {}) {
+    this.alternateScreenActive = options.alternateScreenActive === true;
+  }
 
   append(input: string): string {
     let output = "";
@@ -191,7 +201,8 @@ class ReplaySafeTerminalLogSanitizerImpl implements ReplaySafeTerminalLogSanitiz
     };
 
     if (
-      !this.pendingCursorHome
+      !this.alternateScreenActive
+      && !this.pendingCursorHome
       && !this.discardingCsi
       && !this.controlStringMode
       && !hasReplayControlCandidate(data)
@@ -260,9 +271,18 @@ class ReplaySafeTerminalLogSanitizerImpl implements ReplaySafeTerminalLogSanitiz
       if (sequence) {
         const alternateScreenMode = getAlternateScreenMode(sequence);
         if (alternateScreenMode) {
+          this.alternateScreenActive = alternateScreenMode === "enter";
           if (alternateScreenMode === "enter") {
-            emitClearSeparator(false);
+            this.pendingCursorHome = "";
+            this.pendingAfterCursorHome = "";
+            this.replaySafePendingAfterCursorHome = "";
+            this.pendingAfterCursorHomeOverflowed = false;
           }
+          i = sequence.end;
+          continue;
+        }
+
+        if (this.alternateScreenActive) {
           i = sequence.end;
           continue;
         }
@@ -319,6 +339,25 @@ class ReplaySafeTerminalLogSanitizerImpl implements ReplaySafeTerminalLogSanitiz
         continue;
       }
 
+      if (this.alternateScreenActive) {
+        if (data[i] === ESC && i + 1 >= data.length) {
+          this.setPendingEscapeInput(data.slice(i));
+          break;
+        }
+        // RIS (ESC c) fully resets the terminal, including leaving the
+        // alternate screen. Process it before the omit-scan skip so later
+        // shell output is not dropped from the connection log.
+        if (data[i] === ESC && data[i + 1] === "c") {
+          this.alternateScreenActive = false;
+          emitClearSeparator(false);
+          i += 2;
+          continue;
+        }
+        const nextControl = nextReplayControlCandidate(data, i + 1);
+        i = nextControl === -1 ? data.length : nextControl;
+        continue;
+      }
+
       if (data[i] === ESC) {
         if (i + 1 >= data.length) {
           this.setPendingEscapeInput(data.slice(i));
@@ -326,6 +365,7 @@ class ReplaySafeTerminalLogSanitizerImpl implements ReplaySafeTerminalLogSanitiz
         }
 
         if (data[i + 1] === "c") {
+          this.alternateScreenActive = false;
           emitClearSeparator(false);
           i += 2;
           continue;
@@ -448,8 +488,10 @@ class ReplaySafeTerminalLogSanitizerImpl implements ReplaySafeTerminalLogSanitiz
   }
 }
 
-export const createReplaySafeTerminalLogSanitizer = (): ReplaySafeTerminalLogSanitizer =>
-  new ReplaySafeTerminalLogSanitizerImpl();
+export const createReplaySafeTerminalLogSanitizer = (
+  options: ReplaySafeTerminalLogSanitizerOptions = {},
+): ReplaySafeTerminalLogSanitizer =>
+  new ReplaySafeTerminalLogSanitizerImpl(options);
 
 /**
  * Convert terminal output into a form that can be replayed in LogView without

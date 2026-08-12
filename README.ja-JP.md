@@ -128,6 +128,7 @@ Catty Agent にサーバーの健全性チェックを依頼すると、適切�
 ### 🖥️ ターミナルワークスペース
 - **分割ペイン** — 水平・垂直分割でマルチタスク
 - **セッション管理** — 複数の接続を並行して扱う
+- **インライン画像** — リモートプログラムが出力する Kitty グラフィックス、SIXEL、iTerm インライン画像を描画
 
 ### 📁 SFTP + 内蔵エディタ
 - **ファイル作業** — ドラッグ＆ドロップでアップロード/ダウンロード
@@ -204,6 +205,18 @@ Netcatty は接続したホストの OS を検出し、ホスト一覧でアイ�
 | **Linux** | x64 / arm64 |
 
 または [GitHub Releases](https://github.com/binaricat/Netcatty/releases) ですべてのリリースを参照してください。
+
+### コード署名とプライバシー
+
+Netcatty は SignPath Foundation のオープンソースプログラムに申請中です。
+承認後、対象となる Windows リリース成果物には **Free code signing provided by SignPath.io, certificate by SignPath Foundation** が使用されます。詳細は
+[コード署名ポリシー](CODE_SIGNING_POLICY.md)と
+[プライバシーポリシー](PRIVACY.md)をご覧ください。申請と導入が完了するまで、
+Windows リリースは未署名の場合があります。
+
+> **Windows のポータブルデータ：** Netcatty を終了し、`Netcatty.exe`（zip 版）またはポータブル版ランチャーと同じ場所に `data` フォルダーを作成してください。次回起動時から、Netcatty はデータをこのフォルダーに保存します。保存済みのパスワードと秘密鍵は、作成した Windows ユーザーによって引き続き保護されます。別のコンピューターまたは Windows ユーザーへ移動した場合は、これらの機密情報を再入力する必要があります。
+
+> **Windows でフォルダーを Netcatty で開く：** インストール版では、エクスプローラーのフォルダーおよびフォルダー背景のコンテキストメニューに **Open in Netcatty** が追加されます。選択すると、そのフォルダーでローカルターミナルが開きます。Windows 11 では、先に **その他のオプションを表示** を選択してください。**設定 → システム → Windows Explorer** からメニューの表示／非表示を切り替えられます。ZIP 版とポータブル版では、既定ではこのメニューは追加されません。
 
 > **macOS ユーザーへ：** 現在のリリースはコード署名と notarization が行われている想定です。Gatekeeper の警告が出る場合は、GitHub Releases から最新版の公式ビルドを取得しているか確認してください。
 
@@ -307,11 +320,11 @@ npm run pack:linux   # Linux (AppImage + DEB + RPM)
 <a name="star-履歴"></a>
 # Star 履歴
 
-<a href="https://star-history.com/#binaricat/Netcatty&Date">
+<a href="https://www.star-history.com/#binaricat/Netcatty&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=binaricat/Netcatty&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=binaricat/Netcatty&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=binaricat/Netcatty&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/star-history/star-history-dark.svg" />
+   <source media="(prefers-color-scheme: light)" srcset="docs/assets/star-history/star-history-light.svg" />
+   <img alt="Star History Chart" src="docs/assets/star-history/star-history-light.svg" />
  </picture>
 </a>
 

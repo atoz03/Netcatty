@@ -62,6 +62,7 @@ const SOURCE_LABELS: Record<SuggestionSource, { label: string; fullLabel: string
   arg: { label: "a", fullLabel: "Argument", fallbackColor: "#F87171" },
   path: { label: "p", fullLabel: "Path", fallbackColor: "#38BDF8" },
   snippet: { label: "{}", fullLabel: "Snippet", fallbackColor: "#C084FC" },
+  plugin: { label: "P", fullLabel: "Plugin", fallbackColor: "#F472B6" },
 };
 
 /** Lucide icon components for file types in path suggestions */
@@ -416,6 +417,9 @@ const AutocompletePopup: React.FC<AutocompletePopupProps> = ({
                 <FileTypeIcon fileType={suggestion.fileType} />
               ) : (
                 <span
+                  role="img"
+                  aria-label={sourceInfo.fullLabel}
+                  title={sourceInfo.fullLabel}
                   style={{
                     width: "18px",
                     height: "18px",

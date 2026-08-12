@@ -193,7 +193,7 @@ test("prepareProxyProfileForSave rejects unreadable proxy identity passwords", (
           identityId: proxyIdentity.id,
         },
       },
-      [{ ...proxyIdentity, password: "enc:v1:djEwAAAA" }],
+      [{ ...proxyIdentity, password: "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==" }],
     ).error,
     "unreadableIdentity",
   );

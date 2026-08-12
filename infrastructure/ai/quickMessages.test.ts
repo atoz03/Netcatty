@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   buildSlashCommandItems,
   filterQuickMessages,
+  getSystemSlashCommand,
   isValidQuickMessageSlug,
   normalizeQuickMessageSlug,
   sanitizeQuickMessages,
@@ -64,6 +65,45 @@ test('buildSlashCommandItems excludes skills whose slug matches any quick messag
     'label',
   );
   assert.equal(items.length, 0);
+});
+
+test('buildSlashCommandItems includes built-in commands for the composer picker', () => {
+  const items = buildSlashCommandItems([], [], 'com', true);
+  assert.deepEqual(items.map((item) => item.kind === 'system' ? item.command.slug : item.kind), ['compact']);
+});
+
+test('getSystemSlashCommand recognizes /compact and /stop only', () => {
+  assert.equal(getSystemSlashCommand('/compact'), 'compact');
+  assert.equal(getSystemSlashCommand('  /Compact  '), 'compact');
+  assert.equal(getSystemSlashCommand('/compact now'), null);
+  assert.equal(getSystemSlashCommand('/stop'), 'stop');
+  assert.equal(getSystemSlashCommand('/stop please'), 'stop');
+  assert.equal(getSystemSlashCommand('/stopx'), null);
+  assert.equal(getSystemSlashCommand('/clear'), null);
+  assert.equal(getSystemSlashCommand('/compress'), null);
+});
+
+test('buildSlashCommandItems reserves system slugs over quick messages and skills', () => {
+  const emptyQuery = buildSlashCommandItems([], [], '', true);
+  assert.deepEqual(
+    emptyQuery.filter((item) => item.kind === 'system').map((item) => item.kind === 'system' ? item.command.slug : ''),
+    ['compact', 'stop'],
+  );
+
+  const withCollision = buildSlashCommandItems(
+    [{ id: '1', name: 'User compact', slug: 'compact', content: 'do not run' }],
+    [{ id: 's1', slug: 'stop', name: 'Stop skill', description: '' }],
+    '',
+    true,
+  );
+  assert.deepEqual(
+    withCollision.map((item) => (
+      item.kind === 'system' ? `sys:${item.command.slug}`
+        : item.kind === 'quickMessage' ? `qm:${item.message.slug}`
+          : `sk:${item.skill.slug}`
+    )),
+    ['sys:compact', 'sys:stop'],
+  );
 });
 
 test('sanitizeQuickMessages returns empty array for non-array input', () => {

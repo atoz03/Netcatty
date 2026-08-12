@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { extractRootPathsFromDropEntries } from './terminalHelpers.ts';
 
 // Inline copy of extractRootPathsFromClipboardFiles for standalone test
 function extractRootPathsFromClipboardFiles(
@@ -93,6 +94,33 @@ describe('extractRootPathsFromClipboardFiles', () => {
         { path: '/home/user/c d.txt', name: 'c d.txt', isDirectory: false, size: 20 },
       ]),
       ['"/home/user/a b.txt"', '"/home/user/c d.txt"'],
+    );
+  });
+});
+
+describe('extractRootPathsFromDropEntries', () => {
+  it('uses a reconstructed DropEntry local path when File.path is unavailable', () => {
+    const fileWithoutPath = { name: 'child.txt' } as File;
+    assert.deepEqual(
+      extractRootPathsFromDropEntries([{
+        file: fileWithoutPath,
+        localPath: '/home/user/folder/child.txt',
+        relativePath: 'folder/child.txt',
+        isDirectory: false,
+      }]),
+      ['/home/user/folder'],
+    );
+  });
+
+  it('uses native path-only entries from a folder scan', () => {
+    assert.deepEqual(
+      extractRootPathsFromDropEntries([{
+        file: null,
+        localPath: '/home/user/folder/src/main.ts',
+        relativePath: 'folder/src/main.ts',
+        isDirectory: false,
+      }]),
+      ['/home/user/folder'],
     );
   });
 });

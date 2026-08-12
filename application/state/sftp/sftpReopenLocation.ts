@@ -48,3 +48,19 @@ export function resolveSftpOpenLocation(params: {
 
   return terminalCwd && terminalCwd.length > 0 ? terminalCwd : undefined;
 }
+
+/**
+ * Path used when the side panel auto-connects / rebinds (not a user open).
+ * Prefer an explicit open target, then the last browsed path for this endpoint.
+ * Terminal cwd is intentionally omitted here so "follow off" stays sticky;
+ * follow mode navigates after connect via the follow sync effect.
+ */
+export function resolveSftpAutoConnectPath(params: {
+  explicitPath?: string | null;
+  rememberedPath?: string | null;
+}): string | undefined {
+  const explicit = params.explicitPath?.length ? params.explicitPath : undefined;
+  if (explicit) return explicit;
+  const remembered = params.rememberedPath?.length ? params.rememberedPath : undefined;
+  return remembered;
+}

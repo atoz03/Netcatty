@@ -4,13 +4,31 @@ import type { AgentBackend, AgentEvent, AgentEventListener } from './types';
 import { ToolOutputStore } from './toolOutputStore';
 import { ToolResultDedup } from './toolResultDedup';
 import { SessionStateStore } from './sessionState';
-import type { TurnDriver, TurnInput, TurnResult } from './turnDrivers/types';
+import type {
+  TurnDriver,
+  TurnInput,
+  TurnResult,
+  TurnSteerInput,
+  TurnSteerResult,
+} from './turnDrivers/types';
+import { globalTwoPassCompactionCache } from './twoPassCompaction';
+import { redactSecretsForModel, redactSecretsInValueForModel } from './modelSecretRedaction';
+import { globalTerminalMonitorGuard } from './terminalMonitorGuard';
 
 let turnCounter = 0;
 
 function nextTurnId(): string {
   turnCounter += 1;
   return `turn-${Date.now()}-${turnCounter}`;
+}
+
+function isFailedToolResult(result: string): boolean {
+  try {
+    const parsed = JSON.parse(result) as Record<string, unknown>;
+    return parsed?.ok === false || typeof parsed?.error === 'string';
+  } catch {
+    return false;
+  }
 }
 
 interface ActiveTurn {
@@ -30,7 +48,7 @@ export class AgentRuntime {
   private readonly listeners = new Set<AgentEventListener>();
   private readonly activeTurns = new Map<string, ActiveTurn>();
   private readonly activeTurnPromises = new Map<string, Promise<TurnResult>>();
-  private readonly toolOutputStores = new Map<string, ToolOutputStore>();
+  private readonly toolOutputStore = new ToolOutputStore();
   private readonly sessionStateStore: SessionStateStore;
   private readonly traceStore: typeof globalTraceStore;
 
@@ -43,12 +61,8 @@ export class AgentRuntime {
   }
 
   getToolOutputStore(chatSessionId: string): ToolOutputStore {
-    let store = this.toolOutputStores.get(chatSessionId);
-    if (!store) {
-      store = new ToolOutputStore();
-      this.toolOutputStores.set(chatSessionId, store);
-    }
-    return store;
+    void chatSessionId;
+    return this.toolOutputStore;
   }
 
   getSessionStateStore(): SessionStateStore {
@@ -56,9 +70,15 @@ export class AgentRuntime {
   }
 
   clearChatSession(chatSessionId: string): void {
-    this.toolOutputStores.get(chatSessionId)?.prune(chatSessionId);
-    this.toolOutputStores.delete(chatSessionId);
+    this.toolOutputStore.prune(chatSessionId);
     this.sessionStateStore.clear(chatSessionId);
+    this.traceStore.clear(chatSessionId);
+    globalTwoPassCompactionCache.clear(chatSessionId);
+    globalTerminalMonitorGuard.clearPrefix(`${chatSessionId}:`);
+  }
+
+  clearTerminalSession(terminalSessionId: string): void {
+    this.toolOutputStore.pruneTerminalSessionEverywhere(terminalSessionId);
   }
 
   async waitForActiveTurn(chatSessionId: string): Promise<void> {
@@ -79,9 +99,10 @@ export class AgentRuntime {
     }
 
     const chatSessionId = input.chatSessionId;
-    const priorTurn = this.activeTurnPromises.get(chatSessionId);
-    if (priorTurn) {
-      await priorTurn.catch(() => {});
+    if (this.activeTurnPromises.has(chatSessionId)) {
+      const error = new Error(`Agent turn already in progress for session ${chatSessionId}`);
+      (error as Error & { code?: string }).code = 'AGENT_TURN_BUSY';
+      throw error;
     }
 
     const turnPromise = this.runTurnInternal(input, driver);
@@ -119,7 +140,7 @@ export class AgentRuntime {
       partial: Omit<AgentEvent, 'turnId' | 'sessionId' | 'chatSessionId' | 'backend' | 'timestamp'>
         & Partial<Pick<AgentEvent, 'turnId' | 'sessionId' | 'chatSessionId' | 'backend' | 'timestamp'>>,
     ) => {
-      const event = {
+      let event = {
         id: partial.id,
         type: partial.type,
         sessionId: partial.sessionId ?? chatSessionId,
@@ -130,13 +151,25 @@ export class AgentRuntime {
         ...partial,
       } as AgentEvent;
 
+      if (event.type === 'tool_result') {
+        event = {
+          ...event,
+          result: redactSecretsForModel(event.result),
+        };
+      }
+
       if (event.type === 'tool_call') {
+        event = {
+          ...event,
+          args: redactSecretsInValueForModel(event.args),
+        };
         toolCallMeta.set(event.toolCallId, {
           toolName: event.toolName,
           args: event.args,
         });
       }
       if (event.type === 'tool_result') {
+        const toolResultIsError = event.isError || isFailedToolResult(event.result);
         const meta = toolCallMeta.get(event.toolCallId);
         const toolName = event.toolName ?? meta?.toolName;
         if (toolName) {
@@ -145,12 +178,28 @@ export class AgentRuntime {
             toolName,
             meta?.args,
             event.result,
-            event.isError,
+            toolResultIsError,
           );
+          if (
+            !toolResultIsError
+            && (toolName === 'session_close' || toolName === 'session.close')
+            && typeof meta?.args.sessionId === 'string'
+          ) {
+            toolOutputStore.pruneTerminalSessionEverywhere(meta.args.sessionId);
+          }
         }
       }
       if (event.type === 'model_delta' && event.text) {
         sessionStateStore.mergeFromAssistantContent(chatSessionId, event.text);
+      }
+      if (event.type === 'file_change' && event.status === 'completed') {
+        sessionStateStore.mergeFileChanges(
+          chatSessionId,
+          event.changes.map(change => change.path),
+        );
+      }
+      if (event.type === 'plan_update') {
+        sessionStateStore.mergePlan(chatSessionId, event.items);
       }
 
       this.traceStore.append(event);
@@ -214,5 +263,12 @@ export class AgentRuntime {
       backend: active?.backend ?? 'catty',
     });
     await this.waitForActiveTurn(chatSessionId);
+  }
+
+  async steerTurn(input: TurnSteerInput): Promise<TurnSteerResult> {
+    const active = this.activeTurns.get(input.chatSessionId);
+    if (!active) return { status: 'inactive' };
+    if (!active.driver.steer) return { status: 'unsupported' };
+    return active.driver.steer(input);
   }
 }

@@ -18,12 +18,24 @@ import type {
   SyncPayload,
   WebDAVConfig,
 } from '../../../domain/sync';
+import { normalizeDurablePluginSyncCredentialRef } from '../../../domain/sync';
+import { isPluginCloudProviderId } from '../../../domain/cloudProviderIds';
 import type {
   ProviderSyncAnchor,
   StartProviderAuthResult,
 } from '../CloudSyncManager';
+import {
+  registerPluginProviderIdImpl,
+  unregisterPluginProviderIdImpl,
+} from './stateAndSecurityMethods';
 
 const SYNC_REMOTE_ANCHOR_STORAGE_KEY = 'netcatty_sync_remote_anchor_v1';
+
+export function clearProviderMergeStateImpl(this: any, provider: CloudProvider): void {
+  this.removeFromStorage(this.syncBaseKey(provider));
+  this.removeFromStorage(this.convergentProviderBaselineKey(provider));
+  this.clearSyncAnchor(provider);
+}
 
 export async function startProviderAuthImpl(this: any,
   provider: CloudProvider,
@@ -145,8 +157,7 @@ export async function completeGitHubAuthImpl(this: any,
       const previousId = this.loadProviderAccountId('github') ?? previousAccount?.id ?? null;
       const sameAccount = newId !== null && previousId !== null && newId === previousId;
       if (!sameAccount) {
-        this.removeFromStorage(this.syncBaseKey('github'));
-        this.clearSyncAnchor('github');
+        clearProviderMergeStateImpl.call(this, 'github');
       }
       if (newId) {
         this.saveProviderAccountId('github', newId);
@@ -244,8 +255,7 @@ export async function completePKCEAuthImpl(this: any,
       const previousId = this.loadProviderAccountId(provider) ?? previousAccount?.id ?? null;
       const sameAccount = newId !== null && previousId !== null && newId === previousId;
       if (!sameAccount) {
-        this.removeFromStorage(this.syncBaseKey(provider));
-        this.clearSyncAnchor(provider);
+        clearProviderMergeStateImpl.call(this, provider);
       }
       if (newId) {
         this.saveProviderAccountId(provider, newId);
@@ -292,9 +302,8 @@ export async function connectConfigProviderImpl(this: any,
       };
 
       await this.saveProviderConnection(provider, this.state.providers[provider]);
-      // Clear merge base when (re)configuring to a different endpoint/bucket
-      this.removeFromStorage(this.syncBaseKey(provider));
-      this.clearSyncAnchor(provider);
+      // Clear all trusted merge state when changing endpoint or bucket.
+      clearProviderMergeStateImpl.call(this, provider);
       this.emit({
         type: 'AUTH_COMPLETED',
         provider,
@@ -305,6 +314,141 @@ export async function connectConfigProviderImpl(this: any,
       throw error;
     }
   }
+
+/**
+ * Connect a namespaced plugin sync Provider. Configuration is opaque plugin-
+ * owned JSON; Netcatty still owns encryption and only forwards encrypted objects.
+ */
+export async function connectPluginProviderImpl(
+  this: any,
+  providerId: string,
+  configuration: unknown = {},
+  credential?: unknown,
+): Promise<void> {
+  if (!isPluginCloudProviderId(providerId)) {
+    throw new Error(`Invalid plugin sync provider ID: ${providerId}`);
+  }
+  // Initialize sequence counters before the first status write so cross-window
+  // handlers never see NaN and discard every later update.
+  if (this.providerWriteSeq[providerId] == null || Number.isNaN(this.providerWriteSeq[providerId])) {
+    this.providerWriteSeq[providerId] = 0;
+  }
+  if (this.providerDecryptSeq[providerId] == null || Number.isNaN(this.providerDecryptSeq[providerId])) {
+    this.providerDecryptSeq[providerId] = 0;
+  }
+  if (this.providerDecrypted[providerId] == null) this.providerDecrypted[providerId] = true;
+  if (this.providerAuthAttemptSeq[providerId] == null || Number.isNaN(this.providerAuthAttemptSeq[providerId])) {
+    this.providerAuthAttemptSeq[providerId] = 0;
+  }
+  this.updateProviderStatus(providerId, 'connecting');
+  try {
+    const createPluginStorage = async (id: string) => {
+      if (typeof this.createPluginStorage === 'function') {
+        return this.createPluginStorage(id, {
+          provider: id,
+          status: 'connecting',
+          config: configuration as ProviderConnection['config'],
+        });
+      }
+      const { createPluginSyncIpcHost, isPluginSyncIpcAvailable } = await import(
+        '../adapters/pluginSyncIpcHost'
+      );
+      const { createPluginSyncObjectStorage } = await import('../adapters/pluginSyncObjectStorage');
+      if (!isPluginSyncIpcAvailable()) {
+        throw new Error(`Plugin sync provider ${id} is unavailable (plugin host not enabled)`);
+      }
+      return createPluginSyncObjectStorage({
+        providerId: id,
+        host: createPluginSyncIpcHost(),
+        configuration,
+        credential: credential as import('../adapters/pluginSyncObjectStorage').PluginSyncCredentialRef | undefined,
+      });
+    };
+    const adapter = await createAdapter(
+      providerId,
+      undefined,
+      undefined,
+      undefined,
+      { createPluginStorage },
+    );
+    // Only cache after initializeSync succeeds so a rejected reconnect cannot
+    // leave a half-authenticated adapter pinned for later auto-sync.
+    let resourceId: string | null;
+    try {
+      resourceId = await adapter.initializeSync();
+    } catch (error) {
+      try { adapter.signOut(); } catch { /* ignore */ }
+      this.adapters.delete(providerId);
+      throw error;
+    }
+    this.adapters.set(providerId, adapter);
+    const account = adapter.accountInfo ?? { id: providerId };
+    if (this.providerDecryptSeq[providerId] == null) this.providerDecryptSeq[providerId] = 0;
+    if (this.providerWriteSeq[providerId] == null) this.providerWriteSeq[providerId] = 0;
+    if (this.providerDecrypted[providerId] == null) this.providerDecrypted[providerId] = true;
+    ++this.providerDecryptSeq[providerId];
+    // Capture pre-connect identity before overwriting state.
+    const previous = this.state.providers[providerId];
+    const previousAccountId = previous?.account?.id ?? null;
+    const previousResource = previous?.resourceId ?? null;
+    const configFingerprint = (value: unknown): string => {
+      const normalize = (input: unknown): unknown => {
+        if (Array.isArray(input)) return input.map(normalize);
+        if (input && typeof input === 'object') {
+          return Object.fromEntries(
+            Object.keys(input as Record<string, unknown>)
+              .sort()
+              .map((key) => [key, normalize((input as Record<string, unknown>)[key])]),
+          );
+        }
+        return input;
+      };
+      try {
+        return JSON.stringify(normalize(value ?? null));
+      } catch {
+        return String(value);
+      }
+    };
+    const previousConfigFp = configFingerprint(previous?.config ?? null);
+    const nextAccountId = account?.id ?? null;
+    const nextResource = resourceId || null;
+    const nextConfigFp = configFingerprint(configuration ?? null);
+    this.state.providers[providerId] = {
+      provider: providerId,
+      status: 'connected',
+      config: configuration as ProviderConnection['config'],
+      ...((() => {
+        const ref = normalizeDurablePluginSyncCredentialRef(credential);
+        return ref ? { credential: ref } : {};
+      })()),
+      account,
+      resourceId: resourceId || undefined,
+    };
+    registerPluginProviderIdImpl.call(this, providerId);
+    await this.saveProviderConnection(providerId, this.state.providers[providerId]);
+    // Preserve merge base / anchors when reconnecting the same account+resource
+    // and configuration; clear when backend identity or config changes.
+    const previousCredentialFp = `${previous?.credential?.kind ?? ''}\0${previous?.credential?.id ?? ''}\0${previous?.credential?.key ?? ''}`;
+    const nextCredentialFp = `${this.state.providers[providerId].credential?.kind ?? ''}\0${this.state.providers[providerId].credential?.id ?? ''}\0${this.state.providers[providerId].credential?.key ?? ''}`;
+    if (
+      previousAccountId !== nextAccountId
+      || previousResource !== nextResource
+      || previousConfigFp !== nextConfigFp
+      || previousCredentialFp !== nextCredentialFp
+    ) {
+      clearProviderMergeStateImpl.call(this, providerId);
+    }
+    this.emit({
+      type: 'AUTH_COMPLETED',
+      provider: providerId,
+      account,
+    });
+    this.notifyStateChange();
+  } catch (error) {
+    this.updateProviderStatus(providerId, 'error', String(error));
+    throw error;
+  }
+}
 
 export function resetProviderStatusImpl(this: any,provider: CloudProvider, authAttemptId?: number): void {
     const restoreState = this.providerAuthRestoreState[provider];
@@ -387,11 +531,22 @@ export async function disconnectProviderImpl(this: any,provider: CloudProvider):
     };
 
     await this.saveProviderConnection(provider, this.state.providers[provider]);
-    // Clear the merge base for this provider so reconnecting to a different
-    // account/resource doesn't reuse an unrelated snapshot
-    this.removeFromStorage(this.syncBaseKey(provider));
-    this.clearSyncAnchor(provider);
+    // Explicit disconnect removes the dynamic provider from the restart registry.
+    // Missing plugins with preserved config remain registered and are not coerced away.
+    unregisterPluginProviderIdImpl.call(this, provider);
+    // Clear all trusted merge state so a later account/resource cannot reuse
+    // an unrelated snapshot or convergent baseline.
+    clearProviderMergeStateImpl.call(this, provider);
     this.removeFromStorage(this.providerAccountIdKey(provider));
+    // Drop OS-backed sync secrets so disconnect does not leave reusable passwords.
+    if (isPluginCloudProviderId(provider)) {
+      try {
+        const { deletePluginSyncSecrets } = await import('../adapters/pluginSyncIpcHost');
+        await deletePluginSyncSecrets({ providerId: provider });
+      } catch {
+        /* best-effort; disconnect still succeeds */
+      }
+    }
     // Reset BLOCKED state if it was present — disconnect implicitly resolves
     // any pending shrink-block warning since there's no provider to push to.
     this.exitBlockedState();
@@ -464,7 +619,18 @@ export function clearSyncAnchorImpl(this: any,provider?: CloudProvider): void {
       this.removeFromStorage(this.syncAnchorKey(provider));
       return;
     }
-    for (const p of ['github', 'google', 'onedrive', 'webdav', 's3'] as const) {
+    const providers = new Set<CloudProvider>([
+      'github', 'google', 'onedrive', 'webdav', 's3',
+    ]);
+    for (const id of Object.keys(this.state?.providers ?? {})) {
+      providers.add(id as CloudProvider);
+    }
+    if (typeof this.listRegisteredPluginProviderIds === 'function') {
+      for (const id of this.listRegisteredPluginProviderIds()) {
+        providers.add(id as CloudProvider);
+      }
+    }
+    for (const p of providers) {
       this.removeFromStorage(this.syncAnchorKey(p));
     }
   }

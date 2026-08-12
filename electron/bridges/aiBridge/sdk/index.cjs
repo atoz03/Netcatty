@@ -13,8 +13,22 @@ const claude = require("./claudeDriver.cjs");
 const codex = require("./codexDriver.cjs");
 const copilot = require("./copilotDriver.cjs");
 const cursor = require("./cursorDriver.cjs");
+const cursorCli = require("./cursorCliDriver.cjs");
 const codebuddy = require("./codebuddyDriver.cjs");
 const opencode = require("./opencodeDriver.cjs");
+const grok = require("./grokDriver.cjs");
+const grokAcp = require("./grokAcpDriver.cjs");
+const { codebuddySessionManager } = require("./codebuddySessionManager.cjs");
+
+function hasCodebuddyQueryOnlyOptions(options) {
+  return Boolean(
+    options.maxBudgetUsd ||
+    options.sandbox?.enabled === true ||
+    options.fallbackModel ||
+    options.enableFileCheckpointing === true ||
+    options.outputFormat,
+  );
+}
 
 const DRIVER_REGISTRY = {
   claude: {
@@ -33,7 +47,12 @@ const DRIVER_REGISTRY = {
       return claude.runClaudeTurn({ prompt: ctx.prompt, attachments: ctx.attachments, options, emitter: ctx.emitter });
     },
     async listModels(ctx) {
-      return claude.listClaudeModels({ pathToClaudeCodeExecutable: ctx.binPath, env: ctx.env });
+      return claude.listClaudeModels({
+        pathToClaudeCodeExecutable: ctx.binPath,
+        env: ctx.env,
+        abortController: ctx.abortController,
+        signal: ctx.signal,
+      });
     },
   },
   codex: {
@@ -80,11 +99,32 @@ const DRIVER_REGISTRY = {
       });
     },
     async listModels(ctx) {
-      return copilot.listCopilotModels({ cliPath: ctx.binPath });
+      return copilot.listCopilotModels({
+        cliPath: ctx.binPath,
+        abortController: ctx.abortController,
+        signal: ctx.signal,
+      });
     },
   },
   cursor: {
     async runTurn(ctx) {
+      const authMode = ctx.cursorAuthMode === "cli-login" ? "cli-login" : "api-key";
+      if (authMode === "cli-login") {
+        return cursorCli.runCursorCliTurn({
+          prompt: ctx.prompt,
+          binPath: ctx.cursorCliBinPath || ctx.binPath,
+          cwd: ctx.cwd,
+          chatSessionId: ctx.chatSessionId,
+          getTempDir: ctx.getTempDir,
+          model: ctx.model,
+          env: ctx.env,
+          permissionMode: ctx.permissionMode,
+          resumeSessionId: ctx.resumeSessionId,
+          injectedMcpServers: ctx.injectedMcpServers,
+          emitter: ctx.emitter,
+          signal: ctx.signal,
+        });
+      }
       const agentOptions = cursor.buildCursorAgentOptions({
         apiKey: ctx.apiKey,
         env: ctx.env,
@@ -103,11 +143,40 @@ const DRIVER_REGISTRY = {
       });
     },
     async listModels(ctx) {
-      return cursor.listCursorModels({ env: ctx.env });
+      if (ctx.cursorAuthMode === "cli-login") {
+        return cursorCli.listCursorCliModels({
+          binPath: ctx.cursorCliBinPath || ctx.binPath,
+          env: ctx.env,
+          abortController: ctx.abortController,
+          signal: ctx.signal,
+        });
+      }
+      return cursor.listCursorModels({
+        env: ctx.env,
+        abortController: ctx.abortController,
+        signal: ctx.signal,
+      });
     },
   },
   codebuddy: {
     async runTurn(ctx) {
+      // Build the permission handler: when the CLI hits a security restriction,
+      // auto-confirm (auto mode) or prompt the user (confirm mode) instead of
+      // throwing an error.
+      const canUseTool = codebuddy.buildCodebuddyCanUseTool({
+        permissionMode: ctx.permissionMode,
+        chatSessionId: ctx.chatSessionId,
+        requestApproval: ctx.requestApprovalFromRenderer,
+      });
+      // Build the elicitation handler: forwards create/complete events to the
+      // renderer and waits for the user's decision via the session manager's
+      // pending-response map (resolved by the elicitation-response IPC).
+      // chatSessionId lets closeForChat cancel pendings when the chat closes.
+      const elicitation = codebuddy.buildCodebuddyElicitation(
+        ctx.emitter,
+        codebuddySessionManager.elicitationPending,
+        { chatSessionId: ctx.chatSessionId },
+      );
       const options = codebuddy.buildCodebuddyQueryOptions({
         cwd: ctx.cwd,
         model: ctx.model,
@@ -117,7 +186,77 @@ const DRIVER_REGISTRY = {
         resume: ctx.resumeSessionId,
         pathToCodebuddyCode: ctx.binPath,
         toolIntegrationMode: ctx.toolIntegrationMode,
+        // SDK 0.3.230 options
+        systemPrompt: ctx.systemPrompt,
+        effort: ctx.effort,
+        maxTurns: ctx.maxTurns,
+        maxBudgetUsd: ctx.maxBudgetUsd,
+        fallbackModel: ctx.fallbackModel,
+        sandbox: ctx.sandbox,
+        agents: ctx.agents,
+        outputFormat: ctx.outputFormat,
+        enableFileCheckpointing: ctx.enableFileCheckpointing,
+        traceId: ctx.traceId,
+        parentSpanId: ctx.parentSpanId,
+        hooks: codebuddy.buildCodebuddyHooks(ctx.emitter, {
+          toolIntegrationMode: ctx.toolIntegrationMode,
+          additionalHooks: ctx.hooks,
+          allowedCliCommandPrefix: ctx.skillsCliCommandPrefix,
+        }),
+        elicitation,
+        canUseTool,
       });
+
+      const sessionKey = [
+        String(ctx.chatSessionId || ""),
+        "codebuddy",
+        String(ctx.binPath || ""),
+        "sdk",
+      ].join("\u0000");
+
+      // Try V2 Session API first (persistent multi-turn), falling back to
+      // query() only for fields that SessionOptions does not support.
+      const hasQueryOnlyOptions = hasCodebuddyQueryOnlyOptions(options);
+
+      if (!hasQueryOnlyOptions) {
+        const sessionOptions = {
+          cwd: options.cwd,
+          model: options.model,
+          env: options.env,
+          pathToCodebuddyCode: options.pathToCodebuddyCode,
+          mcpServers: options.mcpServers,
+          permissionMode: options.permissionMode,
+          extraArgs: options.extraArgs,
+          systemPrompt: options.systemPrompt,
+          hooks: options.hooks,
+          elicitation: options.elicitation,
+          canUseTool: options.canUseTool,
+          includePartialMessages: true,
+          tools: options.tools,
+          disallowedTools: options.disallowedTools,
+          settingSources: options.settingSources,
+          maxTurns: options.maxTurns,
+          agents: options.agents,
+          thinking: options.thinking,
+          effort: options.effort,
+        };
+        const v2Result = await codebuddySessionManager.runTurn({
+          sessionKey,
+          prompt: ctx.prompt,
+          attachments: ctx.attachments,
+          options,
+          emitter: ctx.emitter,
+          sessionOptions,
+          resumeSessionId: ctx.resumeSessionId,
+        });
+        if (v2Result) return v2Result;
+      } else {
+        // Do not leave a warm V2 process with stale context while query() is
+        // resuming and advancing the same persisted conversation.
+        codebuddySessionManager.closeSession(sessionKey);
+      }
+
+      // Fallback: legacy query() per-turn (supports all Options fields).
       return codebuddy.runCodebuddyTurn({
         prompt: ctx.prompt,
         attachments: ctx.attachments,
@@ -125,8 +264,26 @@ const DRIVER_REGISTRY = {
         emitter: ctx.emitter,
       });
     },
+    async steerTurn(ctx) {
+      const sessionKey = [
+        String(ctx.chatSessionId || ""),
+        "codebuddy",
+        String(ctx.binPath || ""),
+        "sdk",
+      ].join("\u0000");
+      return codebuddySessionManager.steer({
+        sessionKey,
+        prompt: ctx.prompt,
+        attachments: ctx.attachments,
+      });
+    },
     async listModels(ctx) {
-      return codebuddy.listCodebuddyModels({ pathToCodebuddyCode: ctx.binPath, env: ctx.env });
+      return codebuddy.listCodebuddyModels({
+        pathToCodebuddyCode: ctx.binPath,
+        env: ctx.env,
+        abortController: ctx.abortController,
+        signal: ctx.signal,
+      });
     },
   },
   opencode: {
@@ -148,7 +305,65 @@ const DRIVER_REGISTRY = {
       });
     },
     async listModels(ctx) {
-      return opencode.listOpenCodeModels({ env: ctx.env, binPath: ctx.binPath });
+      return opencode.listOpenCodeModels({
+        env: ctx.env,
+        binPath: ctx.binPath,
+        abortController: ctx.abortController,
+        signal: ctx.abortController?.signal || ctx.signal,
+      });
+    },
+  },
+  grok: {
+    async runTurn(ctx) {
+      // Default: ACP (`grok agent stdio`) with session-level mcpServers.
+      // Explicit fallback: NETCATTY_GROK_RUNTIME=streaming-json or ctx.grokRuntime.
+      const runtime = String(
+        ctx.grokRuntime
+        || ctx.env?.NETCATTY_GROK_RUNTIME
+        || process.env.NETCATTY_GROK_RUNTIME
+        || "acp",
+      ).toLowerCase();
+      if (runtime === "streaming-json" || runtime === "cli" || runtime === "headless") {
+        // Headless cannot know if -r restored history before the prompt is sent.
+        // Prefer native -r without seed (common success path). Stale-id fallback
+        // is handled on ACP (default runtime) via historySeed + session/new.
+        return grok.runGrokTurn({
+          prompt: ctx.prompt,
+          binPath: ctx.binPath,
+          cwd: ctx.cwd,
+          model: ctx.model,
+          env: ctx.env,
+          permissionMode: ctx.permissionMode,
+          toolIntegrationMode: ctx.toolIntegrationMode,
+          resumeSessionId: ctx.resumeSessionId,
+          injectedMcpServers: ctx.injectedMcpServers,
+          emitter: ctx.emitter,
+          signal: ctx.signal || ctx.abortController?.signal,
+        });
+      }
+      return grokAcp.runGrokAcpTurn({
+        prompt: ctx.prompt,
+        systemPrompt: ctx.systemPrompt,
+        binPath: ctx.binPath,
+        cwd: ctx.cwd,
+        model: ctx.model,
+        env: ctx.env,
+        permissionMode: ctx.permissionMode,
+        toolIntegrationMode: ctx.toolIntegrationMode,
+        resumeSessionId: ctx.resumeSessionId,
+        historySeed: ctx.historySeed,
+        injectedMcpServers: ctx.injectedMcpServers,
+        emitter: ctx.emitter,
+        signal: ctx.signal || ctx.abortController?.signal,
+      });
+    },
+    async listModels(ctx) {
+      return grok.listGrokModels({
+        binPath: ctx.binPath,
+        env: ctx.env,
+        abortController: ctx.abortController,
+        signal: ctx.signal || ctx.abortController?.signal,
+      });
     },
   },
 };
@@ -162,4 +377,9 @@ function listBackends() {
   return Object.keys(DRIVER_REGISTRY);
 }
 
-module.exports = { DRIVER_REGISTRY, getDriver, listBackends };
+module.exports = {
+  DRIVER_REGISTRY,
+  getDriver,
+  listBackends,
+  hasCodebuddyQueryOnlyOptions,
+};

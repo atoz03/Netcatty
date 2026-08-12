@@ -37,7 +37,7 @@ import {
   type ToolErrorChunk,
   type ToolOutputDeniedChunk,
   type ToolResultChunk,
-} from '../../../../components/ai/hooks/aiChatStreamingSupport';
+} from '../../aiChatStreamingSupport';
 import type { ChatMessage } from '../../types';
 
 export type CattyModel = ReturnType<typeof createModelFromConfig>;

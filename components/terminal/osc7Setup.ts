@@ -254,59 +254,224 @@ __netcatty_osc7_url_path() {
 
 mkdir -p "$(dirname "$config")"
 touch "$config"
-if grep -F "$marker" "$config" >/dev/null 2>&1; then
-  :
-else
+# Snippet v2: guarded prompt entry + unexport PROMPT_COMMAND so su without
+# login does not inherit a bare osc7_cwd call into another user's shell.
+snippet_version_marker="netcatty-osc7-version: 2"
+end_marker="# <<< Netcatty OSC 7 cwd tracking <<<"
+# Returns 0 when every start marker is closed by a matching end marker.
+# Markers must be whole lines (optional indent) so an echo of the marker text
+# does not count as a block boundary.
+netcatty_osc7_markers_balanced() {
+  awk -v start="$marker" -v end="$end_marker" '
+    function trim(s) {
+      sub(/^[ \t]+/, "", s)
+      sub(/[ \t]+$/, "", s)
+      return s
+    }
+    {
+      t = trim($0)
+      if (t == start) {
+        if (skip) incomplete = 1
+        else skip = 1
+        next
+      }
+      if (t == end) {
+        if (!skip) incomplete = 1
+        else skip = 0
+        next
+      }
+    }
+    END {
+      if (skip) incomplete = 1
+      exit incomplete ? 1 : 0
+    }
+  ' "$1"
+}
+
+# Returns 0 when at least one contiguous start..end region contains the v2
+# version marker line. Older malformed markers outside that region are ignored
+# so recovery appends stay idempotent.
+netcatty_osc7_has_complete_v2_block() {
+  awk -v start="$marker" -v end="$end_marker" -v ver_line="# $snippet_version_marker" '
+    function trim(s) {
+      sub(/^[ \t]+/, "", s)
+      sub(/[ \t]+$/, "", s)
+      return s
+    }
+    {
+      t = trim($0)
+      if (t == start) {
+        skip = 1
+        has_ver = 0
+        next
+      }
+      if (skip && t == ver_line) has_ver = 1
+      if (t == end) {
+        if (skip && has_ver) found = 1
+        skip = 0
+        has_ver = 0
+        next
+      }
+    }
+    END { exit found ? 0 : 1 }
+  ' "$1"
+}
+
+# Resolve config to a real path so upgrades rewrite the final target of a
+# symlink chain without replacing intermediate links.
+netcatty_osc7_resolve_path() {
+  _path="$1"
+  if command -v realpath >/dev/null 2>&1; then
+    _resolved=$(realpath "$_path" 2>/dev/null || true)
+    if [ -n "$_resolved" ]; then
+      printf '%s\n' "$_resolved"
+      return 0
+    fi
+  fi
+  _depth=0
+  while [ -L "$_path" ] && [ "$_depth" -lt 32 ]; do
+    _link=$(readlink "$_path" 2>/dev/null || true)
+    [ -n "$_link" ] || break
+    case "$_link" in
+      /*) _path="$_link" ;;
+      *) _path="$(dirname "$_path")/$_link" ;;
+    esac
+    _depth=$((_depth + 1))
+  done
+  printf '%s\n' "$_path"
+}
+
+# Best-effort portable mode bits for chmod after atomic replace.
+netcatty_osc7_file_mode() {
+  if stat -c '%a' "$1" >/dev/null 2>&1; then
+    stat -c '%a' "$1"
+  elif stat -f '%OLp' "$1" >/dev/null 2>&1; then
+    stat -f '%OLp' "$1"
+  fi
+}
+
+# Best-effort portable owner:group for chown after atomic replace.
+netcatty_osc7_file_owner() {
+  if stat -c '%u:%g' "$1" >/dev/null 2>&1; then
+    stat -c '%u:%g' "$1"
+  elif stat -f '%u:%g' "$1" >/dev/null 2>&1; then
+    stat -f '%u:%g' "$1"
+  fi
+}
+
+# Append the v2 snippet to the given file path ($1).
+netcatty_osc7_append_v2() {
+  __netcatty_osc7_dest="$1"
   case "$shell_name" in
     bash)
-      cat >> "$config" <<'NETCATTY_OSC7_BASH'
+      cat >> "$__netcatty_osc7_dest" <<'NETCATTY_OSC7_BASH'
 
 # >>> Netcatty OSC 7 cwd tracking >>>
+# netcatty-osc7-version: 2
 __netcatty_osc7_url_path() {
   printf "%s" "$1" | LC_ALL=C awk '${URL_PATH_AWK_SCRIPT}'
 }
 osc7_cwd() {
   printf '\033]7;file://%s%s\a' "${DOLLAR}{HOSTNAME:-localhost}" "$(__netcatty_osc7_url_path "$PWD")"
 }
-case "${DOLLAR}{PROMPT_COMMAND:-}" in
-  *osc7_cwd*) ;;
-  *)
-    if [ -n "${DOLLAR}{PROMPT_COMMAND:-}" ]; then
-      PROMPT_COMMAND="${DOLLAR}{PROMPT_COMMAND}
-osc7_cwd"
+# Safe prompt hook: no-op when helpers are missing (PROMPT_COMMAND string may
+# be inherited across su without this rc file).
+__netcatty_osc7_prompt() {
+  if declare -F osc7_cwd >/dev/null 2>&1; then
+    osc7_cwd
+  fi
+}
+# Install/dedupe the guarded prompt hook for both scalar and array PROMPT_COMMAND.
+__netcatty_osc7_hook='declare -F __netcatty_osc7_prompt >/dev/null 2>&1 && __netcatty_osc7_prompt'
+# Match declare -a / -ax / -ar etc. (array flag may appear with other flags).
+if declare -p PROMPT_COMMAND 2>/dev/null | grep -Eq 'declare -[A-Za-z]*a'; then
+  __netcatty_osc7_new=()
+  __netcatty_osc7_has_hook=0
+  for __netcatty_osc7_el in "${DOLLAR}{PROMPT_COMMAND[@]}"; do
+    case "${DOLLAR}{__netcatty_osc7_el}" in
+      osc7_cwd|__netcatty_osc7_prompt) continue ;;
+      *'declare -F __netcatty_osc7_prompt'*)
+        if [ "${DOLLAR}{__netcatty_osc7_has_hook}" -eq 0 ]; then
+          __netcatty_osc7_new+=("${DOLLAR}{__netcatty_osc7_hook}")
+          __netcatty_osc7_has_hook=1
+        fi
+        ;;
+      *) __netcatty_osc7_new+=("${DOLLAR}{__netcatty_osc7_el}") ;;
+    esac
+  done
+  if [ "${DOLLAR}{__netcatty_osc7_has_hook}" -eq 0 ]; then
+    __netcatty_osc7_new+=("${DOLLAR}{__netcatty_osc7_hook}")
+  fi
+  PROMPT_COMMAND=("${DOLLAR}{__netcatty_osc7_new[@]}")
+  unset __netcatty_osc7_new __netcatty_osc7_has_hook __netcatty_osc7_el 2>/dev/null || true
+else
+  if [ -n "${DOLLAR}{PROMPT_COMMAND+x}" ]; then
+    __netcatty_osc7_pc=""
+    __netcatty_osc7_sep=""
+    while IFS= read -r __netcatty_osc7_line || [ -n "${DOLLAR}{__netcatty_osc7_line}" ]; do
+      case "${DOLLAR}{__netcatty_osc7_line}" in
+        osc7_cwd|__netcatty_osc7_prompt) continue ;;
+        *'declare -F __netcatty_osc7_prompt'*) continue ;;
+        *)
+          __netcatty_osc7_pc="${DOLLAR}{__netcatty_osc7_pc}${DOLLAR}{__netcatty_osc7_sep}${DOLLAR}{__netcatty_osc7_line}"
+          __netcatty_osc7_sep="
+"
+          ;;
+      esac
+    done <<EOF
+${DOLLAR}{PROMPT_COMMAND-}
+EOF
+    if [ -n "${DOLLAR}{__netcatty_osc7_pc}" ]; then
+      PROMPT_COMMAND="${DOLLAR}{__netcatty_osc7_pc}
+${DOLLAR}{__netcatty_osc7_hook}"
     else
-      PROMPT_COMMAND="osc7_cwd"
+      PROMPT_COMMAND="${DOLLAR}{__netcatty_osc7_hook}"
     fi
-    ;;
-esac
+    unset __netcatty_osc7_pc __netcatty_osc7_sep __netcatty_osc7_line 2>/dev/null || true
+  else
+    PROMPT_COMMAND="${DOLLAR}{__netcatty_osc7_hook}"
+  fi
+fi
+unset __netcatty_osc7_hook 2>/dev/null || true
+# Do not force-unexport PROMPT_COMMAND: the guarded hook is safe if inherited
+# across non-login su (declare -F fails quietly), and users may intentionally
+# export PROMPT_COMMAND for child shells.
 # <<< Netcatty OSC 7 cwd tracking <<<
 NETCATTY_OSC7_BASH
       ;;
     zsh)
-      cat >> "$config" <<'NETCATTY_OSC7_ZSH'
+      cat >> "$__netcatty_osc7_dest" <<'NETCATTY_OSC7_ZSH'
 
 # >>> Netcatty OSC 7 cwd tracking >>>
+# netcatty-osc7-version: 2
 __netcatty_osc7_url_path() {
   printf "%s" "$1" | LC_ALL=C awk '${URL_PATH_AWK_SCRIPT}'
 }
 osc7_cwd() {
   printf '\033]7;file://%s%s\a' "${DOLLAR}{HOST:-${DOLLAR}{HOSTNAME:-localhost}}" "$(__netcatty_osc7_url_path "$PWD")"
 }
+__netcatty_osc7_prompt() {
+  if typeset -f osc7_cwd >/dev/null 2>&1; then
+    osc7_cwd
+  fi
+}
 if (( ${DOLLAR}{+precmd_functions} )); then
+  precmd_functions=(${DOLLAR}{precmd_functions:#osc7_cwd})
   case " ${DOLLAR}{precmd_functions[*]} " in
-    *" osc7_cwd "*) ;;
-    *) precmd_functions+=(osc7_cwd) ;;
+    *" __netcatty_osc7_prompt "*) ;;
+    *) precmd_functions+=(__netcatty_osc7_prompt) ;;
   esac
 else
-  precmd_functions=(osc7_cwd)
+  precmd_functions=(__netcatty_osc7_prompt)
 fi
 # <<< Netcatty OSC 7 cwd tracking <<<
 NETCATTY_OSC7_ZSH
       ;;
     fish)
-      cat >> "$config" <<'NETCATTY_OSC7_FISH'
+      cat >> "$__netcatty_osc7_dest" <<'NETCATTY_OSC7_FISH'
 
 # >>> Netcatty OSC 7 cwd tracking >>>
+# netcatty-osc7-version: 2
 function __netcatty_osc7_url_path
     printf "%s" "$argv[1]" | LC_ALL=C awk '${URL_PATH_AWK_SCRIPT}'
 end
@@ -317,6 +482,91 @@ end
 NETCATTY_OSC7_FISH
       ;;
   esac
+}
+
+need_write=1
+# Whole-line marker presence only (not substring matches inside echo etc.).
+if awk -v start="$marker" '
+  function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+  trim($0) == start { found = 1; exit }
+  END { exit found ? 0 : 1 }
+' "$config"; then
+  if netcatty_osc7_has_complete_v2_block "$config"; then
+    # At least one complete v2 block exists (even if older junk markers remain).
+    need_write=0
+  elif netcatty_osc7_markers_balanced "$config"; then
+    # Complete balanced block without v2 (legacy). Replace the marked region
+    # in place (not strip-then-append-at-EOF) so surrounding control flow such
+    # as if/then/fi wrappers stay valid. Build the full file in a temp, then
+    # atomically replace so read-only modes cannot lose the block without the
+    # replacement.
+    __netcatty_osc7_target=$(netcatty_osc7_resolve_path "$config")
+    __netcatty_osc7_dir=$(dirname "$__netcatty_osc7_target")
+    __netcatty_osc7_mode=$(netcatty_osc7_file_mode "$__netcatty_osc7_target" || true)
+    __netcatty_osc7_owner=$(netcatty_osc7_file_owner "$__netcatty_osc7_target" || true)
+    # Prefer same-dir atomic replace. If the directory is not writable
+    # (managed homes), fall back to append without aborting setup.
+    __netcatty_osc7_tmp=$(mktemp "$__netcatty_osc7_dir/.netcatty-osc7.XXXXXX" 2>/dev/null || true)
+    __netcatty_osc7_snip=$(mktemp "$__netcatty_osc7_dir/.netcatty-osc7-snip.XXXXXX" 2>/dev/null || true)
+    if [ -z "${DOLLAR}{__netcatty_osc7_tmp:-}" ] || [ -z "${DOLLAR}{__netcatty_osc7_snip:-}" ]; then
+      rm -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_snip" 2>/dev/null || true
+      need_write=1
+    else
+    : > "$__netcatty_osc7_snip"
+    netcatty_osc7_append_v2 "$__netcatty_osc7_snip"
+    if awk -v start="$marker" -v end="$end_marker" -v snip="$__netcatty_osc7_snip" '
+      function trim(s) {
+        sub(/^[ \t]+/, "", s)
+        sub(/[ \t]+$/, "", s)
+        return s
+      }
+      {
+        t = trim($0)
+        if (t == start) {
+          while ((getline line < snip) > 0) print line
+          close(snip)
+          skip = 1
+          next
+        }
+        if (t == end) {
+          skip = 0
+          next
+        }
+        if (!skip) print
+      }
+    ' "$config" > "$__netcatty_osc7_tmp"
+    then
+      rm -f "$__netcatty_osc7_snip"
+      if [ -n "${DOLLAR}{__netcatty_osc7_mode:-}" ]; then
+        chmod "$__netcatty_osc7_mode" "$__netcatty_osc7_tmp" 2>/dev/null || true
+      fi
+      if [ -n "${DOLLAR}{__netcatty_osc7_owner:-}" ]; then
+        # If we cannot restore ownership, leave the original file untouched.
+        if ! chown "$__netcatty_osc7_owner" "$__netcatty_osc7_tmp" 2>/dev/null; then
+          rm -f "$__netcatty_osc7_tmp"
+          need_write=1
+        else
+          mv -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_target"
+          need_write=0
+        fi
+      else
+        mv -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_target"
+        need_write=0
+      fi
+    else
+      rm -f "$__netcatty_osc7_tmp" "$__netcatty_osc7_snip"
+      need_write=1
+    fi
+    fi
+  else
+    # Incomplete or unbalanced markers and no complete v2 yet.
+    # Never rewrite/truncate: append a complete v2 block only.
+    need_write=1
+  fi
+fi
+
+if [ "$need_write" = 1 ]; then
+  netcatty_osc7_append_v2 "$config"
 fi
 
 if [ -z "$forced_shell" ]; then

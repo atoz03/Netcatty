@@ -1,6 +1,7 @@
 import type { GroupConfig, Host, ProxyProfile, TerminalSession } from "./models";
 import { applyGroupDefaults, resolveGroupDefaults } from "./groupConfig";
 import { materializeHostProxyProfile } from "./proxyProfiles";
+import { sanitizePluginConnection } from "./pluginConnection";
 
 type LocalOs = Host["os"];
 
@@ -26,6 +27,14 @@ interface ResolveTerminalChainHostsOptions {
   proxyProfiles: ProxyProfile[];
   validProxyProfileIds?: ReadonlySet<string>;
 }
+
+const resolveSerialBackspaceBehavior = (
+  serialConfig: Host["serialConfig"],
+): Host["backspaceBehavior"] | null => {
+  if (serialConfig?.backspaceBehavior === "ctrl-h") return "ctrl-h";
+  if (serialConfig?.backspaceBehavior === "default") return undefined;
+  return null;
+};
 
 export function resolveEffectiveTerminalHost({
   host,
@@ -63,10 +72,12 @@ function buildFallbackHostFromSession(
     group: "",
     tags: [],
     protocol: fallbackProtocol,
+    pluginConnection: sanitizePluginConnection(session.pluginConnection, fallbackProtocol),
     moshEnabled: session.moshEnabled,
     etEnabled: session.etEnabled,
     charset: session.charset,
     serialConfig: session.serialConfig,
+    backspaceBehavior: session.serialConfig?.backspaceBehavior === "ctrl-h" ? "ctrl-h" : undefined,
     localShell: session.localShell,
     localShellArgs: session.localShellArgs,
     localShellName: session.localShellName,
@@ -92,15 +103,28 @@ export function resolveTerminalSessionHost({
   });
 
   const protocol = session.protocol ?? existingHost.protocol;
+  const pluginConnection = sanitizePluginConnection(session.pluginConnection, protocol)
+    ?? sanitizePluginConnection(existingHost.pluginConnection, protocol);
   const port = session.port ?? existingHost.port;
   const moshEnabled = session.moshEnabled ?? existingHost.moshEnabled;
   const etEnabled = session.etEnabled ?? existingHost.etEnabled;
+  const sessionSerialBackspace = resolveSerialBackspaceBehavior(session.serialConfig);
+  const hostSerialBackspace = resolveSerialBackspaceBehavior(existingHost.serialConfig);
+  const backspaceBehavior = protocol === "serial"
+    ? sessionSerialBackspace !== null
+      ? sessionSerialBackspace
+      : hostSerialBackspace !== null
+        ? hostSerialBackspace
+        : existingHost.backspaceBehavior
+    : existingHost.backspaceBehavior;
 
   if (
     protocol === existingHost.protocol &&
     port === existingHost.port &&
     moshEnabled === existingHost.moshEnabled &&
-    etEnabled === existingHost.etEnabled
+    etEnabled === existingHost.etEnabled &&
+    JSON.stringify(pluginConnection) === JSON.stringify(existingHost.pluginConnection) &&
+    backspaceBehavior === existingHost.backspaceBehavior
   ) {
     return suppressDeviceTypeForShellTransport(existingHost);
   }
@@ -111,6 +135,8 @@ export function resolveTerminalSessionHost({
     port,
     moshEnabled,
     etEnabled,
+    pluginConnection,
+    backspaceBehavior,
   });
 }
 

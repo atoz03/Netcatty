@@ -1,11 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import { I18nProvider } from "../../application/i18n/I18nProvider.tsx";
 import type { Host } from "../../types.ts";
 import { TerminalToolbar } from "./TerminalToolbar.tsx";
+
+const toolbarSource = readFileSync(new URL("./TerminalToolbar.tsx", import.meta.url), "utf8");
 
 const sshHost: Host = {
   id: "host-1",
@@ -25,6 +28,14 @@ const serialHost: Host = {
   protocol: "serial",
 };
 
+const pluginHost: Host = {
+  ...sshHost,
+  id: "plugin-1",
+  label: "Plugin",
+  hostname: "com.example.transport.connection",
+  protocol: "plugin:com.example.transport.connection",
+};
+
 const renderToolbar = (
   host: Host,
   status: "connecting" | "connected" | "disconnected" = "connected",
@@ -35,6 +46,7 @@ const renderToolbar = (
       I18nProvider,
       { locale: "en" },
       React.createElement(TerminalToolbar, {
+        sessionId: 'session-1',
         status,
         host,
         onOpenSFTP: () => {},
@@ -106,6 +118,14 @@ test("hides SFTP for local terminal sessions", () => {
   assert.equal(markup.includes('aria-label="Open SFTP"'), false);
 });
 
+test("hides SSH history for plugin terminal sessions", () => {
+  const markup = renderToolbar(pluginHost, "connected", {
+    onOpenHistory: () => {},
+  });
+
+  assert.equal(markup.includes('aria-label="Command history"'), false);
+});
+
 test("shows YMODEM send only for connected serial sessions", () => {
   const connectedSerial = renderToolbar(serialHost, "connected", {
     onSendYmodem: () => {},
@@ -150,5 +170,25 @@ test("uses the terminal active button color for pressed toolbar actions", () => 
   assert.match(
     markup,
     /aria-label="Search terminal"[^>]*style="background-color:var\(--terminal-toolbar-btn-active\)"/,
+  );
+});
+
+test("compact scripts popover hosts bulk-delete confirm outside the popover", () => {
+  // Dialog focus leaves PopoverContent; if confirm stays inside ScriptsSidePanel,
+  // the popover closes, isVisible clears pendingDeleteIds, and the prompt dies.
+  assert.match(toolbarSource, /onBulkDeleteRequest=\{setPendingScriptDeleteIds\}/);
+  assert.match(toolbarSource, /<VaultDeleteConfirmDialog/);
+  // Popup vault mutation goes through the prop; the event only clears popover selection.
+  assert.match(toolbarSource, /onDeleteSnippets\?\.\(new Set\(ids\)\)/);
+  assert.match(toolbarSource, /netcatty:snippets:delete/);
+  const scriptsPopoverIdx = toolbarSource.indexOf("open={scriptsPopoverOpen}");
+  const popoverEndIdx = toolbarSource.indexOf("</Popover>", scriptsPopoverIdx);
+  const dialogIdx = toolbarSource.indexOf("<VaultDeleteConfirmDialog", popoverEndIdx);
+  assert.ok(scriptsPopoverIdx >= 0, "scripts popover open binding");
+  assert.ok(popoverEndIdx > scriptsPopoverIdx, "scripts popover closes");
+  assert.ok(dialogIdx > popoverEndIdx, "confirm dialog is a sibling after the popover");
+  assert.equal(
+    toolbarSource.includes("document.querySelector('[data-vault-delete-confirm=\"true\"]')"),
+    false,
   );
 });

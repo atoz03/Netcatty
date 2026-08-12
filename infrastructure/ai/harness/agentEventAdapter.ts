@@ -1,5 +1,5 @@
 import type { AgentEvent, AgentEventListener } from './types';
-import { resolveStreamChunkToolCallId } from '../../../components/ai/hooks/aiChatStreamingSupport';
+import { resolveStreamChunkToolCallId } from '../aiChatStreamingSupport';
 
 let eventCounter = 0;
 
@@ -93,15 +93,72 @@ export function mapSdkStreamEventToAgentEvents(
         args: (event.args ?? event.input ?? {}) as Record<string, unknown>,
       }];
     case 'tool-result':
+      {
+        const output = event.result ?? event.output ?? '';
       return [{
         ...base,
         id: nextEventId('tool-result'),
         type: 'tool_result',
         toolCallId: String(event.toolCallId ?? ''),
         toolName: typeof event.toolName === 'string' ? event.toolName : undefined,
-        result: String(event.result ?? event.output ?? ''),
-        isError: Boolean(event.isError),
+        result: typeof output === 'string' ? output : JSON.stringify(output),
+        isError: Boolean(event.isError) || isToolResultError(output),
       }];
+      }
+    case 'file-change':
+      return [{
+        ...base,
+        id: nextEventId('file-change'),
+        type: 'file_change',
+        itemId: String(event.itemId ?? ''),
+        status: event.status === 'failed' ? 'failed' : 'completed',
+        changes: Array.isArray(event.changes)
+          ? event.changes as Array<{ path: string; kind: 'add' | 'delete' | 'update' }>
+          : [],
+      }];
+    case 'web-search':
+      return [{
+        ...base,
+        id: nextEventId('web-search'),
+        type: 'web_search',
+        itemId: String(event.itemId ?? ''),
+        query: String(event.query ?? ''),
+        status: event.status === 'completed' ? 'completed' : 'running',
+      }];
+    case 'plan-update':
+      return [{
+        ...base,
+        id: nextEventId('plan-update'),
+        type: 'plan_update',
+        itemId: String(event.itemId ?? ''),
+        status: event.status === 'completed' ? 'completed' : 'running',
+        items: Array.isArray(event.items)
+          ? event.items as Array<{ text: string; completed: boolean }>
+          : [],
+      }];
+    case 'warning':
+      return [{
+        ...base,
+        id: nextEventId('warning'),
+        type: 'error',
+        message: String(event.message ?? 'Unknown SDK warning'),
+        recoverable: true,
+      }];
+    case 'usage': {
+      const promptTokens = Number(event.inputTokens) || 0;
+      const completionTokens = Number(event.outputTokens) || 0;
+      return [{
+        ...base,
+        id: nextEventId('usage'),
+        type: 'usage',
+        promptTokens,
+        cachedPromptTokens: Number(event.cachedInputTokens) || 0,
+        completionTokens,
+        reasoningTokens: Number(event.reasoningTokens) || 0,
+        totalTokens: Number(event.totalTokens) || promptTokens + completionTokens,
+        estimated: false,
+      }];
+    }
     case 'error':
       return [{
         ...base,

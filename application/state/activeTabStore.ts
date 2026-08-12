@@ -16,13 +16,21 @@ export const toEditorTabId = (editorId: string): string => `${EDITOR_PREFIX}${ed
 /** Strip the "editor:" prefix to recover the internal editorTab id. */
 export const fromEditorTabId = (tabId: string): string => tabId.slice(EDITOR_PREFIX.length);
 
+type SetActiveTabOptions = {
+  /** When false, keep the previous-tab pointer unchanged (used for close restore). */
+  recordPrevious?: boolean;
+};
+
 class ActiveTabStore {
   private activeTabId: string = 'vault';
+  private previousActiveTabId: string | null = null;
   private listeners = new Set<Listener>();
   private syncListeners = new Set<SyncListener>();
   private notifyRafId: number | null = null;
 
   getActiveTabId = () => this.activeTabId;
+
+  getPreviousActiveTabId = () => this.previousActiveTabId;
 
   private scheduleNotify = () => {
     if (this.notifyRafId !== null) return;
@@ -35,8 +43,11 @@ class ActiveTabStore {
     });
   };
 
-  setActiveTabId = (id: string) => {
+  setActiveTabId = (id: string, options?: SetActiveTabOptions) => {
     if (this.activeTabId !== id) {
+      if (options?.recordPrevious !== false) {
+        this.previousActiveTabId = this.activeTabId;
+      }
       this.activeTabId = id;
       this.syncListeners.forEach((listener) => listener(id));
       // Coalesce rapid tab switches into one notification per frame and avoid

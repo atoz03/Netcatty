@@ -7,7 +7,8 @@ export interface EditorSftpWrite {
     filePath: string,
     content: string,
     filenameEncoding?: SftpFilenameEncoding,
-  ): Promise<void>;
+    sftpTabId?: string,
+  ): Promise<string>;
 }
 
 // `useSftpState` is instantiated in at least two places (the top-level SftpView
@@ -51,8 +52,7 @@ export const editorSftpWrite: EditorSftpWrite = async (...args) => {
   let lastNotMine: Error | null = null;
   for (const fn of writers) {
     try {
-      await fn(...args);
-      return;
+      return await fn(...args);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (NOT_MY_CONNECTION_RE.test(msg)) {

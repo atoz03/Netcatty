@@ -17,7 +17,7 @@ export {
   resolveReadableForegroundForHsl,
 } from '../../domain/colorContrast';
 
-export const DEFAULT_THEME: 'light' | 'dark' | 'system' = 'dark';
+export const DEFAULT_THEME: 'light' | 'dark' | 'system' = 'system';
 export const DEFAULT_WINDOW_OPACITY = 1;
 export function clampWindowOpacity(opacity: unknown): number {
   const value = Number(opacity);
@@ -76,10 +76,13 @@ export const DEFAULT_SFTP_AUTO_OPEN_SIDEBAR = false;
 export const DEFAULT_SFTP_FOLLOW_TERMINAL_CWD = false;
 export const DEFAULT_SFTP_DEFAULT_VIEW_MODE: 'list' | 'tree' = 'list';
 export const DEFAULT_SHOW_RECENT_HOSTS = true;
+export { DEFAULT_HOST_CLICK_BEHAVIOR } from '../../domain/hostClickBehavior';
+export type { HostClickBehavior } from '../../domain/hostClickBehavior';
 export const DEFAULT_SHOW_ONLY_UNGROUPED_HOSTS_IN_ROOT = false;
 export const DEFAULT_SHOW_SFTP_TAB = true;
 export const DEFAULT_SHOW_HOST_TREE_SIDEBAR = true;
 export const DEFAULT_SHELL_ONLY_TAB_NUMBER_SHORTCUTS = false;
+export const DEFAULT_SHOW_TAB_NUMBER_BADGES = true;
 export const DEFAULT_DISABLE_TERMINAL_FONT_ZOOM = false;
 export { DEFAULT_RESTORE_PREVIOUS_SESSION } from './sessionRestoreSettings';
 
@@ -93,6 +96,8 @@ export const DEFAULT_SESSION_LOGS_TIMESTAMPS_ENABLED = false;
 export const DEFAULT_SSH_DEBUG_LOGS_ENABLED = false;
 export const DEFAULT_SSH_DEEP_LINK_ENABLED = true;
 export const DEFAULT_JMS_DEEP_LINK_ENABLED = false;
+/** Windows Explorer context menu; true matches NSIS installer default. */
+export const DEFAULT_EXPLORER_CONTEXT_MENU_ENABLED = true;
 
 export const readStoredString = (key: string): string | null => {
   const raw = localStorageAdapter.readString(key);

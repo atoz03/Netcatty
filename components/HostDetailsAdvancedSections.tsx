@@ -1,7 +1,8 @@
 import React from "react";
-import { AlertTriangle, ChevronDown, ChevronUp, Forward, Globe, HeartPulse, Link2, Palette, Plus, Router, ShieldAlert, TerminalSquare, Wifi, X, Variable } from "lucide-react";
+import { AlertTriangle, ChevronDown, ChevronUp, Forward, Globe, HeartPulse, KeyRound, Link2, Palette, Plus, Router, ShieldAlert, TerminalSquare, Timer, Wifi, X, Variable } from "lucide-react";
 import { customThemeStore } from "../application/state/customThemeStore";
 import { clearHostFontSizeOverride, clearHostThemeOverride } from "../domain/terminalAppearance";
+import { resolveSshAgentToggleUpdate } from "../domain/sshAuth";
 import { MAX_FONT_SIZE, MIN_FONT_SIZE } from "../infrastructure/config/fonts";
 import { AlgorithmOverridesPanel } from "./host-details/AlgorithmOverridesPanel";
 import { Badge } from "./ui/badge";
@@ -13,14 +14,19 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from ".
 import { Switch } from "./ui/switch";
 import { Textarea } from "./ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "./ui/tooltip";
+import {
+  DEFAULT_SSH_AUTH_READY_TIMEOUT_SECONDS,
+  DEFAULT_SSH_TCP_CONNECT_TIMEOUT_SECONDS,
+  MAX_SSH_CONNECTION_TIMEOUT_SECONDS,
+} from "../domain/sshConnectionTimeouts";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type HostDetailsAdvancedSectionsProps = Record<string, any>;
 
-const ToggleRow: React.FC<{ label: string; hint?: React.ReactNode; enabled: boolean; onToggle: () => void }> = ({ label, hint, enabled, onToggle }) => {
+const ToggleRow: React.FC<{ label: string; hint?: React.ReactNode; enabled: boolean; disabled?: boolean; onToggle: () => void }> = ({ label, hint, enabled, disabled, onToggle }) => {
   return (
     <HostDetailsSettingRow label={label} hint={hint}>
-      <Switch checked={enabled} onCheckedChange={() => onToggle()} />
+      <Switch checked={enabled} disabled={disabled} onCheckedChange={() => onToggle()} />
     </HostDetailsSettingRow>
   );
 };
@@ -35,7 +41,9 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
   effectiveFontSize,
   hasEffectiveFontSizeOverride,
   sshAgentStatus,
+  sshForwardingAgentStatus,
   effectiveGroupDefaults,
+  effectiveAuthMethod,
   showAlgorithmOverrides,
   setShowAlgorithmOverrides,
   chainedHosts,
@@ -50,6 +58,10 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
   const effectiveDeviceType = form.deviceType ?? inheritedDeviceType;
   const inheritedStartupCommandRunMode = effectiveGroupDefaults?.startupCommandRunMode ?? "paste";
   const effectiveStartupCommandRunMode = form.startupCommandRunMode ?? inheritedStartupCommandRunMode;
+  const systemSshAgentSupported = effectiveAuthMethod === "auto" || effectiveAuthMethod === "key";
+  const systemSshAgentEnabled = effectiveAuthMethod === "auto"
+    ? form.useSshAgent !== false
+    : effectiveAuthMethod === "key" && form.useSshAgent === true;
 
   return (
   <>
@@ -216,7 +228,7 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
               <HostDetailsSettingRow label={t("hostDetails.et.port")} hint={t("hostDetails.et.port.desc")}>
                 <Input
                   type="number"
-                  className="w-28"
+                  className="h-8 w-28"
                   placeholder="2022"
                   value={form.etPort ?? ""}
                   onChange={(e) => {
@@ -226,6 +238,74 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
                 />
               </HostDetailsSettingRow>
             </>
+          )}
+        </HostDetailsSection>
+
+        {/* System SSH Agent login */}
+        <HostDetailsSection
+          icon={<KeyRound size={14} className="text-muted-foreground" />}
+          title={t("hostDetails.section.systemSshAgent")}
+        >
+          <ToggleRow
+            label={t("hostDetails.systemSshAgent")}
+            hint={t("hostDetails.systemSshAgent.desc")}
+            enabled={systemSshAgentEnabled}
+            disabled={!systemSshAgentSupported}
+            onToggle={() => setForm((previous: typeof form) => {
+              const enabled = effectiveAuthMethod === "auto"
+                ? previous.useSshAgent !== false
+                : effectiveAuthMethod === "key" && previous.useSshAgent === true;
+              const enabling = !enabled;
+              return {
+                ...previous,
+                // Automatic mode treats the ambient agent as an optional first
+                // choice. Keep the unset state when re-enabling that default so
+                // an unavailable agent still falls back to local keys/password.
+                ...resolveSshAgentToggleUpdate(previous, effectiveAuthMethod, enabling),
+              };
+            })}
+          />
+          {systemSshAgentEnabled && (
+            <>
+              <HostDetailsSettingRow
+                label={t("hostDetails.systemSshAgent.socket")}
+                hint={t("hostDetails.systemSshAgent.socket.desc")}
+              >
+                <Input
+                  className="h-8 w-44 font-mono text-xs"
+                  placeholder="$SSH_AUTH_SOCK"
+                  value={form.identityAgent ?? ""}
+                  onChange={(event) => setForm((previous: typeof form) => ({
+                    ...previous,
+                    useSshAgent: true,
+                    identityAgent: event.target.value || undefined,
+                  }))}
+                />
+              </HostDetailsSettingRow>
+              <ToggleRow
+                label={t("hostDetails.systemSshAgent.identitiesOnly")}
+                hint={t("hostDetails.systemSshAgent.identitiesOnly.desc")}
+                enabled={!!form.identitiesOnly}
+                onToggle={() => setForm((previous: typeof form) => ({
+                  ...previous,
+                  useSshAgent: true,
+                  identitiesOnly: !previous.identitiesOnly,
+                }))}
+              />
+            </>
+          )}
+          {systemSshAgentEnabled && sshAgentStatus && !sshAgentStatus.running && (
+            <div className="flex items-start gap-2 p-2 rounded-md bg-yellow-500/10 border border-yellow-500/20">
+              <AlertTriangle size={14} className="text-yellow-500 mt-0.5 flex-shrink-0" />
+              <div className="space-y-1">
+                <p className="text-xs text-yellow-600 dark:text-yellow-400 font-medium">
+                  {t("hostDetails.systemSshAgent.notRunning")}
+                </p>
+                <p className="text-xs text-muted-foreground">
+                  {t("hostDetails.systemSshAgent.notRunningHint")}
+                </p>
+              </div>
+            </div>
           )}
         </HostDetailsSection>
 
@@ -240,7 +320,7 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
             enabled={!!form.agentForwarding}
             onToggle={() => update("agentForwarding", !form.agentForwarding)}
           />
-          {form.agentForwarding && sshAgentStatus && !sshAgentStatus.running && (
+          {form.agentForwarding && sshForwardingAgentStatus && !sshForwardingAgentStatus.running && (
             <div className="flex items-start gap-2 p-2 rounded-md bg-yellow-500/10 border border-yellow-500/20">
               <AlertTriangle size={14} className="text-yellow-500 mt-0.5 flex-shrink-0" />
               <div className="space-y-1">
@@ -384,7 +464,7 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
               value={form.backspaceBehavior ?? "default"}
               onValueChange={(v) => update("backspaceBehavior", v === "default" ? undefined : v)}
             >
-              <SelectTrigger className="h-10 w-36 text-xs">
+              <SelectTrigger className="h-8 w-36 text-xs">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -454,6 +534,48 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
               )}
             </div>
           )}
+        </HostDetailsSection>
+
+        <HostDetailsSection
+          icon={<Timer size={14} className="text-muted-foreground" />}
+          title={t("hostDetails.section.sshTimeouts")}
+        >
+          <HostDetailsSettingRow
+            label={t("hostDetails.sshTimeouts.tcpConnect")}
+            hint={t("hostDetails.sshTimeouts.tcpConnect.desc")}
+          >
+            <Input
+              type="number"
+              min={1}
+              max={MAX_SSH_CONNECTION_TIMEOUT_SECONDS}
+              className="h-8 w-20 text-xs"
+              aria-label={t("hostDetails.sshTimeouts.tcpConnect")}
+              value={form.sshTcpConnectTimeoutSeconds ?? DEFAULT_SSH_TCP_CONNECT_TIMEOUT_SECONDS}
+              onChange={(e) => {
+                const value = Number.parseInt(e.target.value, 10);
+                if (!Number.isFinite(value) || value < 1 || value > MAX_SSH_CONNECTION_TIMEOUT_SECONDS) return;
+                update("sshTcpConnectTimeoutSeconds", value);
+              }}
+            />
+          </HostDetailsSettingRow>
+          <HostDetailsSettingRow
+            label={t("hostDetails.sshTimeouts.authReady")}
+            hint={t("hostDetails.sshTimeouts.authReady.desc")}
+          >
+            <Input
+              type="number"
+              min={1}
+              max={MAX_SSH_CONNECTION_TIMEOUT_SECONDS}
+              className="h-8 w-20 text-xs"
+              aria-label={t("hostDetails.sshTimeouts.authReady")}
+              value={form.sshAuthReadyTimeoutSeconds ?? DEFAULT_SSH_AUTH_READY_TIMEOUT_SECONDS}
+              onChange={(e) => {
+                const value = Number.parseInt(e.target.value, 10);
+                if (!Number.isFinite(value) || value < 1 || value > MAX_SSH_CONNECTION_TIMEOUT_SECONDS) return;
+                update("sshAuthReadyTimeoutSeconds", value);
+              }}
+            />
+          </HostDetailsSettingRow>
         </HostDetailsSection>
 
         {/* Proxy via Hosts (Jump Hosts / ProxyJump) */}
@@ -639,7 +761,7 @@ export const HostDetailsAdvancedSections: React.FC<HostDetailsAdvancedSectionsPr
                 value === inheritedStartupCommandRunMode ? undefined : value,
               )}
             >
-              <SelectTrigger className="h-9 w-[180px]">
+              <SelectTrigger className="h-8 w-[180px]">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>

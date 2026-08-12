@@ -1,8 +1,58 @@
 import { Host } from "./models";
+import { hasMacKeychainAgentDirectives } from "./sshAuth";
 
 const DEFAULT_SSH_PORT = 22;
 const MANAGED_BLOCK_BEGIN = "# BEGIN NETCATTY MANAGED - DO NOT EDIT THIS BLOCK";
 const MANAGED_BLOCK_END = "# END NETCATTY MANAGED";
+const UNSAFE_SSH_CONFIG_VALUE = /[\r\n\0]/;
+const UNSAFE_SSH_PROXY_JUMP_HOSTNAME = /[\s,@#]/;
+const UNSAFE_SSH_PROXY_JUMP_USERNAME = /[\s,#]/;
+const UNSAFE_SSH_HOST_ALIAS = /["\\*?!,[\]@#]/;
+const UNSAFE_SSH_HOST_MATCH_LITERAL = /[\s*?!,[\]@#]/;
+const ENCODED_HOST_ALIAS_PREFIX = "netcatty-encoded-";
+
+const assertSafeSshConfigValue = (value: string, field: string): void => {
+  if (UNSAFE_SSH_CONFIG_VALUE.test(value)) {
+    throw new Error(`${field} must not contain line breaks or null bytes.`);
+  }
+};
+
+export const toSafeSshHostAlias = (label: string, hostname: string): string => {
+  assertSafeSshConfigValue(label, "Host label");
+  assertSafeSshConfigValue(hostname, "Host hostname");
+  const alias = label.replace(/\s/g, '') || hostname.replace(/\s/g, '');
+  if (!alias) throw new Error("Host alias must not be empty.");
+  const needsEncoding = alias.startsWith('-')
+    || alias.startsWith(ENCODED_HOST_ALIAS_PREFIX)
+    || UNSAFE_SSH_HOST_ALIAS.test(alias);
+  if (!needsEncoding) return alias;
+  const encoded = Array.from(new TextEncoder().encode(alias), (byte) =>
+    byte.toString(16).padStart(2, '0')).join('');
+  return `${ENCODED_HOST_ALIAS_PREFIX}${encoded}`;
+};
+
+export const isSafeSshHostMatchLiteral = (value: string): boolean =>
+  !UNSAFE_SSH_CONFIG_VALUE.test(value) && !UNSAFE_SSH_HOST_MATCH_LITERAL.test(value);
+
+const assertSafeProxyJumpHostname = (value: string): void => {
+  assertSafeSshConfigValue(value, "Jump host hostname");
+  if (value.startsWith('-') || UNSAFE_SSH_PROXY_JUMP_HOSTNAME.test(value)) {
+    throw new Error("Jump host hostname contains SSH ProxyJump separator characters.");
+  }
+};
+
+const assertSafeProxyJumpUsername = (value: string): void => {
+  const field = "Jump host username";
+  assertSafeSshConfigValue(value, field);
+  if (value.startsWith('-') || UNSAFE_SSH_PROXY_JUMP_USERNAME.test(value)) {
+    throw new Error(`${field} contains SSH ProxyJump separator characters.`);
+  }
+};
+
+const formatSshConfigArgument = (value: string): string => {
+  if (!/[\s"\\#]/.test(value)) return value;
+  return `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+};
 
 /**
  * Check if a string is an IPv6 address
@@ -19,6 +69,11 @@ const isIPv6 = (hostname: string): boolean => {
  * @param managedHostIds - Set of host IDs that have Host blocks in the managed config
  */
 const serializeJumpHost = (host: Host, managedHostIds: Set<string>): string => {
+  assertSafeSshConfigValue(host.label, "Jump host label");
+  assertSafeSshConfigValue(host.hostname, "Jump host hostname");
+  if (host.username) {
+    assertSafeProxyJumpUsername(host.username);
+  }
   let result = "";
   if (host.username) {
     result += `${host.username}@`;
@@ -28,11 +83,12 @@ const serializeJumpHost = (host: Host, managedHostIds: Set<string>): string => {
   // and sanitize it by removing spaces. Otherwise use hostname directly.
   let hostPart: string;
   if (managedHostIds.has(host.id) && host.label) {
-    // Use sanitized label (same as the Host block alias)
-    hostPart = host.label.replace(/\s/g, '') || host.hostname;
+    // Use the same literal-safe alias as the Host block.
+    hostPart = toSafeSshHostAlias(host.label, host.hostname);
   } else {
     // Jump host is outside managed config, use hostname directly
     hostPart = host.hostname;
+    assertSafeProxyJumpHostname(hostPart);
   }
 
   // For IPv6 addresses, always wrap in brackets to disambiguate colons
@@ -96,17 +152,21 @@ export const serializeHostsToSshConfig = (hosts: Host[], allHosts?: Host[]): str
   for (const host of hosts) {
     if (host.protocol && host.protocol !== "ssh") continue;
 
+    assertSafeSshConfigValue(host.label, "Host label");
+    assertSafeSshConfigValue(host.hostname, "Host hostname");
+    assertSafeSshConfigValue(host.username, "Host username");
+
     const lines: string[] = [];
-    // Sanitize alias by removing spaces (SSH config doesn't allow spaces in Host patterns)
-    const alias = (host.label?.replace(/\s/g, '') || host.hostname);
+    // Encode SSH pattern characters so UI display names remain usable as literal aliases.
+    const alias = toSafeSshHostAlias(host.label, host.hostname);
     lines.push(`Host ${alias}`);
 
     if (host.hostname !== alias) {
-      lines.push(`    HostName ${host.hostname}`);
+      lines.push(`    HostName ${formatSshConfigArgument(host.hostname)}`);
     }
 
     if (host.username) {
-      lines.push(`    User ${host.username}`);
+      lines.push(`    User ${formatSshConfigArgument(host.username)}`);
     }
 
     if (host.port && host.port !== DEFAULT_SSH_PORT) {
@@ -120,10 +180,44 @@ export const serializeHostsToSshConfig = (hosts: Host[], allHosts?: Host[]): str
     // Serialize IdentityFile paths
     if (host.identityFilePaths && host.identityFilePaths.length > 0) {
       for (const keyPath of host.identityFilePaths) {
-        // Quote paths that contain spaces
-        const formatted = keyPath.includes(" ") ? `"${keyPath}"` : keyPath;
-        lines.push(`    IdentityFile ${formatted}`);
+        assertSafeSshConfigValue(keyPath, "IdentityFile path");
+        lines.push(`    IdentityFile ${formatSshConfigArgument(keyPath)}`);
       }
+    }
+
+    const hasMacKeychainAgent = hasMacKeychainAgentDirectives(host);
+    let serializedIdentityAgent = host.identityAgent;
+    if (host.useSshAgent === false) {
+      serializedIdentityAgent = "none";
+    } else if (
+      host.useSshAgent === true
+      && host.identityAgent?.toLowerCase() === "none"
+    ) {
+      serializedIdentityAgent = "${SSH_AUTH_SOCK}";
+    } else if (
+      host.useSshAgent === true
+      && host.identityAgent === undefined
+      && !hasMacKeychainAgent
+    ) {
+      serializedIdentityAgent = "${SSH_AUTH_SOCK}";
+    }
+
+    if (serializedIdentityAgent !== undefined) {
+      assertSafeSshConfigValue(serializedIdentityAgent, "IdentityAgent");
+      lines.push(`    IdentityAgent ${formatSshConfigArgument(serializedIdentityAgent)}`);
+    }
+
+    if (host.identitiesOnly !== undefined) {
+      lines.push(`    IdentitiesOnly ${host.identitiesOnly ? "yes" : "no"}`);
+    }
+
+    if (host.addKeysToAgent !== undefined) {
+      assertSafeSshConfigValue(host.addKeysToAgent, "AddKeysToAgent");
+      lines.push(`    AddKeysToAgent ${host.addKeysToAgent}`);
+    }
+
+    if (host.useKeychain !== undefined) {
+      lines.push(`    UseKeychain ${host.useKeychain ? "yes" : "no"}`);
     }
 
     // Serialize ProxyJump if host has a chain

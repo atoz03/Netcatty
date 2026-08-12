@@ -1,6 +1,10 @@
 import React, { useCallback, useMemo, useRef, useState } from "react";
 import type { SftpFileEntry } from "../../../types";
 import type { SftpPane } from "../../../application/state/sftp/types";
+import {
+  isWindowsPath,
+  normalizeSftpNavigationPath,
+} from "../../../application/state/sftp/utils";
 import { filterHiddenFiles, isNavigableDirectory } from "../utils";
 
 interface UseSftpPanePathParams {
@@ -84,21 +88,19 @@ export const useSftpPanePath = ({
   };
 
   const handlePathSubmit = useCallback((pathOverride?: string) => {
-    const newPath = (pathOverride ?? editingPathValue).trim() || "/";
+    // Only treat //host/share as UNC when this pane is already on a Windows-style path.
+    const acceptForwardSlashUnc = !!(
+      connection && isWindowsPath(connection.currentPath)
+    );
+    const newPath = normalizeSftpNavigationPath(
+      pathOverride ?? editingPathValue,
+      { acceptForwardSlashUnc },
+    );
     setIsEditingPath(false);
     setShowPathSuggestions(false);
     setPathSuggestionIndex(-1);
     if (connection && newPath !== connection.currentPath) {
-      const isWindowsPath = /^[A-Za-z]:/.test(newPath);
-      if (isWindowsPath) {
-        let normalizedPath = newPath;
-        if (/^[A-Za-z]:[\\/]?$/.test(newPath)) {
-          normalizedPath = newPath.charAt(0).toUpperCase() + ":\\";
-        }
-        onNavigateTo(normalizedPath);
-      } else {
-        onNavigateTo(newPath.startsWith("/") ? newPath : `/${newPath}`);
-      }
+      onNavigateTo(newPath);
     }
   }, [connection, editingPathValue, onNavigateTo]);
 

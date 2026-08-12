@@ -1,12 +1,13 @@
 import React from "react";
 import { ChevronDown, Eye, EyeOff, FileKey, FolderLock, FolderOpen, Key, KeyRound, MapPin, Plus, Shapes, Shield, Trash2, User, X } from "lucide-react";
 import type { Host } from "../types";
+import { applyHostAuthMethodSelection } from "../domain/sshAuth";
 import { HostIconPicker } from "./HostIconPicker";
 import { Button } from "./ui/button";
 import { Combobox } from "./ui/combobox";
 import { HostDetailsSection, HostDetailsSettingRow } from "./host-details";
 import { Input } from "./ui/input";
-import { Popover, PopoverContent, PopoverTrigger } from "./ui/popover";
+import { Popover, PopoverAnchor, PopoverContent, PopoverTrigger } from "./ui/popover";
 import { ScrollArea } from "./ui/scroll-area";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "./ui/select";
 import { Switch } from "./ui/switch";
@@ -15,11 +16,68 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "./ui/tooltip";
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type HostDetailsConnectionSectionsProps = Record<string, any>;
 
+export const HOST_AUTH_METHOD_CHOICES = [
+  ["auto", "hostDetails.auth.auto"],
+  ["password", "hostDetails.auth.passwordOnly"],
+  ["key", "hostDetails.auth.key"],
+  ["certificate", "hostDetails.auth.certificate"],
+] as const;
+
+export function shouldForceAuthMethodReselect(
+  nextMethod: "auto" | "password" | "key" | "certificate",
+  currentMethod: "auto" | "password" | "key" | "certificate",
+): boolean {
+  // Radix Select skips onValueChange when the value is unchanged. Key/certificate
+  // still need that path so re-opening the chooser keeps working.
+  return (
+    nextMethod === currentMethod
+    && (nextMethod === "key" || nextMethod === "certificate")
+  );
+}
+
+
+export const applyEffectiveHostAuthMethodSelection = (
+  host: Host,
+  authMethod: "auto" | "password" | "key" | "certificate",
+  effectiveAuthMethod: "auto" | "password" | "key" | "certificate",
+  effectiveUsername?: string,
+): Host => {
+  if (authMethod === effectiveAuthMethod) return host;
+  const selected = applyHostAuthMethodSelection(host, authMethod, effectiveAuthMethod);
+  return !selected.username?.trim() && effectiveUsername?.trim()
+    ? { ...selected, username: effectiveUsername }
+    : selected;
+};
+
+export const detachEffectiveHostIdentity = (host: Host, effectiveUsername?: string): Host => ({
+  ...host,
+  identityId: "",
+  ...(!host.username?.trim() && effectiveUsername?.trim()
+    ? { username: effectiveUsername }
+    : {}),
+});
+
+export const removeSelectedHostCredential = (
+  host: Host,
+  effectiveAuthMethod: "auto" | "password" | "key" | "certificate",
+  effectiveUsername?: string,
+): Host => {
+  const authMethod = host.password ? "password" : "auto";
+  const selected = applyHostAuthMethodSelection(host, authMethod, effectiveAuthMethod);
+  return !selected.username?.trim() && effectiveUsername?.trim()
+    ? { ...selected, username: effectiveUsername }
+    : selected;
+};
+
 export const HostDetailsConnectionSections: React.FC<HostDetailsConnectionSectionsProps> = ({
   t,
   form,
+  setForm,
   update,
   groupDefaults,
+  effectiveAuthMethod,
+  effectiveUsername,
+  effectiveIdentityId,
   selectedIdentity,
   clearIdentity,
   identities,
@@ -44,6 +102,32 @@ export const HostDetailsConnectionSections: React.FC<HostDetailsConnectionSectio
   effectiveFormDistro,
   getDistroOptionLabel,
 }) => {
+  const selectAuthMethod = (authMethod: "auto" | "password" | "key" | "certificate") => {
+    setForm((previous: Host) => applyEffectiveHostAuthMethodSelection(
+      previous,
+      authMethod,
+      effectiveAuthMethod,
+      effectiveUsername,
+    ));
+    if (authMethod === "auto" || authMethod === "password") {
+      setPendingReferenceKeyPath(null);
+      setSelectedCredentialType(null);
+      setCredentialPopoverOpen(false);
+      return;
+    }
+    setSelectedCredentialType(authMethod);
+    setCredentialPopoverOpen(false);
+  };
+
+  const resolvedAuthMethod = HOST_AUTH_METHOD_CHOICES.some(([value]) => value === effectiveAuthMethod)
+    ? effectiveAuthMethod
+    : "auto";
+  const selectedAuthMethodLabel = t(
+    HOST_AUTH_METHOD_CHOICES.find(([value]) => value === resolvedAuthMethod)?.[1] ?? "hostDetails.auth.auto",
+  );
+  const effectiveEtEnabled = form.etEnabled ?? groupDefaults?.etEnabled;
+  const effectiveProtocol = form.protocol ?? groupDefaults?.protocol;
+
   return (
   <>
         <HostDetailsSection
@@ -81,6 +165,66 @@ export const HostDetailsConnectionSections: React.FC<HostDetailsConnectionSectio
             </div>
           </div>
           <div className="grid gap-2">
+            <HostDetailsSettingRow
+              label={t("hostDetails.auth.method")}
+              hint={t(`hostDetails.auth.${resolvedAuthMethod}.desc`)}
+            >
+              <Select
+                value={resolvedAuthMethod}
+                onValueChange={(val) => selectAuthMethod(val as "auto" | "password" | "key" | "certificate")}
+              >
+                <SelectTrigger
+                  className="h-8 w-32 gap-2"
+                  aria-label={t("hostDetails.auth.method")}
+                >
+                  {/*
+                    Radix Select only mirrors the selected item text after the
+                    closed control is measured. Render the current label directly
+                    so the default value is never blank on first paint.
+                  */}
+                  <span className="min-w-0 flex-1 truncate text-left">
+                    {selectedAuthMethodLabel}
+                  </span>
+                </SelectTrigger>
+                <SelectContent>
+                  {HOST_AUTH_METHOD_CHOICES.map(([value, labelKey]) => (
+                    <SelectItem
+                      key={value}
+                      value={value}
+                      textValue={t(labelKey)}
+                      onPointerUp={() => {
+                        // Radix skips consumer onValueChange for an unchanged value.
+                        // Key/certificate still need the same-item path to reopen the chooser.
+                        if (shouldForceAuthMethodReselect(value, resolvedAuthMethod)) {
+                          selectAuthMethod(value);
+                        }
+                      }}
+                      onKeyDown={(event) => {
+                        if (
+                          (event.key === "Enter" || event.key === " ")
+                          && shouldForceAuthMethodReselect(value, resolvedAuthMethod)
+                        ) {
+                          selectAuthMethod(value);
+                        }
+                      }}
+                    >
+                      {t(labelKey)}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </HostDetailsSettingRow>
+            {!effectiveEtEnabled && effectiveProtocol !== "et" && (
+              <HostDetailsSettingRow
+                label={t("hostDetails.auth.mfaFirst")}
+                hint={t("hostDetails.auth.mfaFirst.desc")}
+              >
+                <Switch
+                  checked={!!form.requiresMfa}
+                  onCheckedChange={(val) => update("requiresMfa" as keyof Host, val)}
+                />
+              </HostDetailsSettingRow>
+            )}
             {selectedIdentity ? (
               <div className="flex items-center gap-2 h-10 px-3 rounded-md border border-border/70 bg-secondary/60">
                 <User size={16} className="text-muted-foreground" />
@@ -103,7 +247,7 @@ export const HostDetailsConnectionSections: React.FC<HostDetailsConnectionSectio
                   <TooltipContent>{t("common.clear")}</TooltipContent>
                 </Tooltip>
               </div>
-            ) : form.identityId ? (
+            ) : effectiveIdentityId ? (
               <div className="flex items-center gap-2 h-10 px-3 rounded-md border border-border/70 bg-secondary/60">
                 <User size={16} className="text-muted-foreground" />
                 <div className="min-w-0 flex-1">
@@ -147,8 +291,18 @@ export const HostDetailsConnectionSections: React.FC<HostDetailsConnectionSectio
                     }
                     onOpenChange={setIdentitySuggestionsOpen}
                   >
-                    <PopoverTrigger asChild>
-                      <div className="relative">
+                    {/*
+                      Anchor (not Trigger): wrapping the username Input in
+                      PopoverTrigger races focus→open with the same click's
+                      toggle→close, which flashes saved identities then closes.
+                      Anchor is not exempt from Radix outside dismissal (only
+                      Trigger is), so tag it and ignore those events below.
+                    */}
+                    <PopoverAnchor asChild>
+                      <div
+                        className="relative"
+                        data-identity-suggestions-anchor=""
+                      >
                         <Input
                           placeholder={groupDefaults?.username || t("hostDetails.username.placeholder")}
                           value={form.username}
@@ -206,12 +360,18 @@ export const HostDetailsConnectionSections: React.FC<HostDetailsConnectionSectio
                           <TooltipContent>{t("hostDetails.identity.suggestions")}</TooltipContent>
                         </Tooltip>
                       </div>
-                    </PopoverTrigger>
+                    </PopoverAnchor>
                     <PopoverContent
                       className="p-0 border-border/60"
                       align="start"
                       sideOffset={4}
                       onOpenAutoFocus={(e) => e.preventDefault()}
+                      onInteractOutside={(e) => {
+                        const target = e.target as Element | null;
+                        if (target?.closest("[data-identity-suggestions-anchor]")) {
+                          e.preventDefault();
+                        }
+                      }}
                       style={{ width: "var(--radix-popover-trigger-width)" }}
                     >
                       <ScrollArea className="max-h-[280px]">
@@ -364,8 +524,11 @@ export const HostDetailsConnectionSections: React.FC<HostDetailsConnectionSectio
                   size="icon"
                   className="h-6 w-6 shrink-0"
                   onClick={() => {
-                    update("identityFileId", undefined);
-                    update("authMethod", "password");
+                    setForm((previous: Host) => removeSelectedHostCredential(
+                      previous,
+                      effectiveAuthMethod,
+                      effectiveUsername,
+                    ));
                     setPendingReferenceKeyPath(null);
                     setSelectedCredentialType(null);
                   }}
@@ -584,12 +747,38 @@ export const HostDetailsConnectionSections: React.FC<HostDetailsConnectionSectio
           title={t("hostDetails.section.sftp")}
         >
           <HostDetailsSettingRow
+            label={t("hostDetails.sftp.fileProtocol")}
+            hint={t("hostDetails.sftp.fileProtocol.desc")}
+          >
+            <Select
+              value={form.sftpFileProtocol || "auto"}
+              onValueChange={(val) => {
+                const protocol = val as Host["sftpFileProtocol"];
+                update("sftpFileProtocol", protocol);
+                // SCP mode has no sudo-sftp elevation path; clear a contradictory saved flag.
+                if (protocol === "scp" && form.sftpSudo) {
+                  update("sftpSudo", false);
+                }
+              }}
+            >
+              <SelectTrigger className="h-8 w-32">
+                <SelectValue placeholder={t("hostDetails.sftp.fileProtocol.auto")} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="auto">{t("hostDetails.sftp.fileProtocol.auto")}</SelectItem>
+                <SelectItem value="sftp">{t("hostDetails.sftp.fileProtocol.sftp")}</SelectItem>
+                <SelectItem value="scp">{t("hostDetails.sftp.fileProtocol.scp")}</SelectItem>
+              </SelectContent>
+            </Select>
+          </HostDetailsSettingRow>
+          <HostDetailsSettingRow
             label={t("hostDetails.sftp.sudo")}
             hint={t("hostDetails.sftp.sudo.desc")}
           >
             <Switch
               checked={form.sftpSudo || false}
               onCheckedChange={(val) => update("sftpSudo", val)}
+              disabled={form.sftpFileProtocol === "scp"}
             />
           </HostDetailsSettingRow>
           {form.sftpSudo && !form.password && !selectedIdentity?.password && (
@@ -605,7 +794,7 @@ export const HostDetailsConnectionSections: React.FC<HostDetailsConnectionSectio
               value={form.sftpEncoding || "auto"}
               onValueChange={(val) => update("sftpEncoding", val as Host["sftpEncoding"])}
             >
-              <SelectTrigger className="h-10 w-32">
+              <SelectTrigger className="h-8 w-32">
                 <SelectValue placeholder={t("sftp.encoding.label")} />
               </SelectTrigger>
               <SelectContent>

@@ -64,5 +64,42 @@ export type PanelMode =
     | { type: 'identity'; identity?: import('../../types').Identity }
     | { type: 'export'; key: SSHKey };
 
-// Filter tab types
-export type FilterTab = 'key' | 'certificate';
+interface IdentitySectionVisibilityOptions {
+    identityCount: number;
+    filteredIdentityCount: number;
+    filteredKeyCount: number;
+    search: string;
+}
+
+/** Show identities whenever any exist; while searching, keep the section if it matches or nothing matches. */
+export const shouldShowIdentitySection = ({
+    identityCount,
+    filteredIdentityCount,
+    filteredKeyCount,
+    search,
+}: IdentitySectionVisibilityOptions): boolean => {
+    if (identityCount === 0) return false;
+    if (!search.trim()) return true;
+
+    return filteredIdentityCount > 0 || filteredKeyCount === 0;
+};
+
+/**
+ * Show keys when any match (or exist while browsing). Hide the empty-key CTA when
+ * identities alone already fill the page - including identity-only vaults.
+ */
+export const shouldShowKeySection = ({
+    identityCount,
+    filteredKeyCount,
+}: Pick<
+    IdentitySectionVisibilityOptions,
+    'identityCount' | 'filteredKeyCount' | 'search'
+>): boolean => {
+    return filteredKeyCount > 0 || identityCount === 0;
+};
+
+export const shouldShowSearchNoResults = (
+    search: string,
+    filteredItemCount: number,
+    totalItemCount: number,
+): boolean => Boolean(search.trim()) && totalItemCount > 0 && filteredItemCount === 0;

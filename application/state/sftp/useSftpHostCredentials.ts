@@ -1,8 +1,9 @@
 import { useCallback } from "react";
 import type { Host, Identity, KnownHost, SSHKey, TerminalSettings } from "../../../domain/models";
 import { isEncryptedCredentialPlaceholder, sanitizeCredentialValue } from "../../../domain/credentials";
-import { resolveBridgeKeyAuth, resolveHostAuth } from "../../../domain/sshAuth";
+import { resolveBridgeKeyAuth, resolveBridgeSshAgentAuth, resolveHostAuth } from "../../../domain/sshAuth";
 import { resolveHostKeepalive } from "../../../domain/host";
+import { resolveHostSshConnectionTimeouts } from "../../../domain/sshConnectionTimeouts";
 import {
   findIncompleteProxyIdentityId,
   findMissingProxyIdentityId,
@@ -87,7 +88,10 @@ export const buildSftpHostCredentials = ({
           : jumpHost.identityFilePaths,
         passphrase: jumpAuth.passphrase,
       });
-      const hasJumpKeyMaterial = Boolean(jumpKeyAuth.privateKey || jumpKeyAuth.identityFilePaths?.length);
+      const jumpAgentAuth = resolveBridgeSshAgentAuth(jumpHost, jumpKey, jumpAuth.authMethod);
+      const hasJumpKeyMaterial = Boolean(
+        jumpAgentAuth.useSshAgent || jumpKeyAuth.privateKey || jumpKeyAuth.identityFilePaths?.length,
+      );
       const hasConfiguredJumpProxyEndpoint =
         index === 0 &&
         hasUsableProxyConfig(jumpHost.proxyConfig);
@@ -103,15 +107,19 @@ export const buildSftpHostCredentials = ({
         isEncryptedCredentialPlaceholder(jumpAuth.passphrase);
       if (
         (jumpAuth.authMethod === "password" && isEncryptedCredentialPlaceholder(jumpAuth.password) && !jumpPassword) ||
-        (jumpAuth.authMethod !== "password" && hasUnreadableJumpCredential && !jumpPassword && !hasJumpKeyMaterial)
+        (jumpAuth.authMethod !== "password" && jumpAuth.authMethod !== "auto" && hasUnreadableJumpCredential && !jumpPassword && !hasJumpKeyMaterial)
       ) {
         throw new Error(`Saved credentials for jump host "${jumpHost.label || jumpHost.hostname}" cannot be decrypted on this device. Open host settings and re-enter them.`);
       }
       const hopKeepalive = resolveHostKeepalive(jumpHost, globalTerminalSettings);
+      const hopConnectionTimeouts = resolveHostSshConnectionTimeouts(jumpHost);
       return {
         hostname: jumpHost.hostname,
+        hostId: jumpHost.id,
         port: jumpHost.port || 22,
         username: jumpAuth.username || "root",
+        authMethod: jumpAuth.authMethod,
+        requiresMfa: !!jumpHost.requiresMfa,
         password: jumpPassword,
         privateKey: jumpKeyAuth.privateKey,
         certificate: jumpKey?.certificate,
@@ -124,8 +132,11 @@ export const buildSftpHostCredentials = ({
           ? resolveProxyConfigAuth(jumpHost.proxyConfig, identities)
           : undefined,
         identityFilePaths: jumpKeyAuth.identityFilePaths,
+        ...jumpAgentAuth,
         keepaliveInterval: hopKeepalive.interval,
         keepaliveCountMax: hopKeepalive.countMax,
+        sshTcpConnectTimeoutMs: hopConnectionTimeouts.tcpConnectTimeoutSeconds * 1000,
+        sshAuthReadyTimeoutMs: hopConnectionTimeouts.authReadyTimeoutSeconds * 1000,
         verifyHostKeys: globalTerminalSettings.verifyHostKeys,
         legacyAlgorithms: jumpHost.legacyAlgorithms,
         skipEcdsaHostKey: jumpHost.skipEcdsaHostKey,
@@ -145,23 +156,30 @@ export const buildSftpHostCredentials = ({
       : host.identityFilePaths,
     passphrase: resolved.passphrase,
   });
+  const targetAgentAuth = resolveBridgeSshAgentAuth(host, key, resolved.authMethod);
   const password = sanitizeCredentialValue(resolved.password);
-  const hasKeyMaterial = Boolean(keyAuth.privateKey || keyAuth.identityFilePaths?.length);
+  const hasKeyMaterial = Boolean(
+    targetAgentAuth.useSshAgent || keyAuth.privateKey || keyAuth.identityFilePaths?.length,
+  );
   const hasUnreadableCredential =
     isEncryptedCredentialPlaceholder(resolved.password) ||
     isEncryptedCredentialPlaceholder(key?.privateKey) ||
     isEncryptedCredentialPlaceholder(resolved.passphrase);
   if (
     (resolved.authMethod === "password" && isEncryptedCredentialPlaceholder(resolved.password) && !password) ||
-    (resolved.authMethod !== "password" && hasUnreadableCredential && !password && !hasKeyMaterial)
+    (resolved.authMethod !== "password" && resolved.authMethod !== "auto" && hasUnreadableCredential && !password && !hasKeyMaterial)
   ) {
     throw new Error("Saved credentials cannot be decrypted on this device. Open host settings and re-enter them.");
   }
 
   const targetKeepalive = resolveHostKeepalive(host, globalTerminalSettings);
+  const targetConnectionTimeouts = resolveHostSshConnectionTimeouts(host);
   return {
     hostname: host.hostname,
+    hostId: host.id,
     username: resolved.username,
+    authMethod: resolved.authMethod,
+    requiresMfa: !!host.requiresMfa,
     port: host.port || 22,
     password,
     privateKey: keyAuth.privateKey,
@@ -173,9 +191,13 @@ export const buildSftpHostCredentials = ({
     proxy: proxyConfig,
     jumpHosts: jumpHosts && jumpHosts.length > 0 ? jumpHosts : undefined,
     sudo: host.sftpSudo,
+    fileProtocol: host.sftpFileProtocol || "auto",
     identityFilePaths: keyAuth.identityFilePaths,
+    ...targetAgentAuth,
     keepaliveInterval: targetKeepalive.interval,
     keepaliveCountMax: targetKeepalive.countMax,
+    sshTcpConnectTimeoutMs: targetConnectionTimeouts.tcpConnectTimeoutSeconds * 1000,
+    sshAuthReadyTimeoutMs: targetConnectionTimeouts.authReadyTimeoutSeconds * 1000,
     knownHosts,
     verifyHostKeys: globalTerminalSettings.verifyHostKeys,
     // Algorithm settings — must reach the SFTP bridge or hosts that need

@@ -7,7 +7,7 @@ export class BridgeUnavailableError extends Error {
 
 export const netcattyBridge = {
   get(): NetcattyBridge | undefined {
-    return window.netcatty;
+    return typeof window !== 'undefined' ? window.netcatty : undefined;
   },
 
   require(): NetcattyBridge {
@@ -16,4 +16,3 @@ export const netcattyBridge = {
     return bridge;
   },
 };
-

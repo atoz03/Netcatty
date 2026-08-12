@@ -32,4 +32,10 @@ export interface Workspace {
   focusedSessionId?: string; // Which session is focused when in focus mode
   focusSessionOrder?: string[]; // User-defined session order for the focus-mode sidebar
   snippetId?: string; // If this workspace was created from running a snippet
+  // Whether `title` is an explicit name the user/caller chose. `false` means a
+  // user rename or a named-at-creation workspace; `true`/absent means the tab
+  // may derive a host-based label instead of showing the generic default.
+  // Absent on legacy workspaces — the tab falls back to the default-title
+  // string check for those. See resolveWorkspaceTabLabel.
+  autoTitle?: boolean;
 }

@@ -151,6 +151,52 @@ export function decryptProxyProfiles(profiles: ProxyProfile[]): Promise<ProxyPro
 // Provider Connection (Cloud Sync)
 // ---------------------------------------------------------------------------
 
+/**
+ * Host-owned sealed-config envelope. Must be unambiguous against plugin-owned
+ * JSON: exactly one reserved key, no extra properties. Never treat a plugin
+ * object that merely contains a similar key as already sealed.
+ */
+const PLUGIN_CONFIG_ENVELOPE_KEY = "__netcatty_plugin_config_v1" as const;
+const LEGACY_PLUGIN_CONFIG_ENVELOPE_KEY = "__encryptedPluginConfig" as const;
+/** At-rest envelope for ProviderConnection.credential (opaque refs only). */
+const PLUGIN_CREDENTIAL_ENVELOPE_KEY = "__netcatty_plugin_credential_v1" as const;
+
+type PluginConfigEnvelope = {
+  [PLUGIN_CONFIG_ENVELOPE_KEY]: string;
+};
+
+type PluginCredentialEnvelope = {
+  [PLUGIN_CREDENTIAL_ENVELOPE_KEY]: string;
+};
+
+function isPluginConfigEnvelope(value: unknown): value is PluginConfigEnvelope {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  return keys.length === 1
+    && keys[0] === PLUGIN_CONFIG_ENVELOPE_KEY
+    && typeof record[PLUGIN_CONFIG_ENVELOPE_KEY] === "string";
+}
+
+/** Legacy envelope shape (still accepted on decrypt for one migration hop). */
+function isLegacyPluginConfigEnvelope(value: unknown): value is { __encryptedPluginConfig: string } {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  return keys.length === 1
+    && keys[0] === LEGACY_PLUGIN_CONFIG_ENVELOPE_KEY
+    && typeof record[LEGACY_PLUGIN_CONFIG_ENVELOPE_KEY] === "string";
+}
+
+function isPluginCredentialEnvelope(value: unknown): value is PluginCredentialEnvelope {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record);
+  return keys.length === 1
+    && keys[0] === PLUGIN_CREDENTIAL_ENVELOPE_KEY
+    && typeof record[PLUGIN_CREDENTIAL_ENVELOPE_KEY] === "string";
+}
+
 export async function encryptProviderSecrets(conn: ProviderConnection): Promise<ProviderConnection> {
   const out = { ...conn };
 
@@ -161,22 +207,97 @@ export async function encryptProviderSecrets(conn: ProviderConnection): Promise<
     out.tokens = t;
   }
 
-  if (out.config) {
-    // WebDAV — use authType (required field unique to WebDAVConfig) as discriminator
-    // so that token-auth configs (which may lack a password key after JSON round-trip)
-    // still get their token field encrypted.
-    if ("authType" in out.config) {
+  // Config may be a valid falsy scalar (false, 0, "") — only null/undefined means absent.
+  if (out.config != null) {
+    const providerId = String(out.provider ?? "");
+    const isBuiltin = providerId === "webdav"
+      || providerId === "s3"
+      || providerId === "github"
+      || providerId === "google"
+      || providerId === "onedrive";
+    // Built-in providers use field-level encryption; plugin IDs always seal
+    // the whole opaque config so field-name collisions cannot leak secrets.
+    if (isBuiltin && typeof out.config === "object" && "authType" in out.config) {
       const c = { ...out.config } as WebDAVConfig;
       c.password = await encryptField(c.password);
       c.token = await encryptField(c.token);
       out.config = c;
-    }
-    // S3
-    if ("secretAccessKey" in out.config) {
+    } else if (isBuiltin && typeof out.config === "object" && "secretAccessKey" in out.config) {
       const c = { ...out.config } as S3Config;
       c.secretAccessKey = (await encryptField(c.secretAccessKey)) ?? "";
       c.sessionToken = await encryptField(c.sessionToken);
       out.config = c;
+    } else if (!isBuiltin) {
+      // Always (re)seal opaque plugin config. An exact marker-shaped object may
+      // be either a trusted host envelope or plugin-owned JSON that collides
+      // with our key — try unwrap; on failure seal the whole value as opaque.
+      let toSeal: unknown = out.config;
+      if (isPluginConfigEnvelope(out.config) || isLegacyPluginConfigEnvelope(out.config)) {
+        const sealedValue = isPluginConfigEnvelope(out.config)
+          ? out.config[PLUGIN_CONFIG_ENVELOPE_KEY]
+          : out.config[LEGACY_PLUGIN_CONFIG_ENVELOPE_KEY];
+        const plain = await decryptField(sealedValue);
+        if (plain != null && plain !== "") {
+          try {
+            toSeal = JSON.parse(plain);
+          } catch {
+            toSeal = out.config;
+          }
+        } else {
+          toSeal = out.config;
+        }
+      }
+      const sealed = await encryptField(JSON.stringify(toSeal));
+      if (sealed) {
+        out.config = {
+          [PLUGIN_CONFIG_ENVELOPE_KEY]: sealed,
+        } as ProviderConnection["config"];
+      }
+    }
+  }
+
+  // Seal durable plugin credential refs as one opaque blob (same threat model
+  // as plugin config: do not leave kind/id/key plaintext in localStorage).
+  if (out.credential != null && typeof out.credential === "object") {
+    let toSeal: unknown = out.credential;
+    if (isPluginCredentialEnvelope(out.credential)) {
+      const plain = await decryptField(out.credential[PLUGIN_CREDENTIAL_ENVELOPE_KEY]);
+      if (plain != null && plain !== "") {
+        try {
+          toSeal = JSON.parse(plain);
+        } catch {
+          toSeal = out.credential;
+        }
+      } else {
+        toSeal = out.credential;
+      }
+    }
+    const kind = (toSeal as { kind?: unknown }).kind;
+    const id = (toSeal as { id?: unknown }).id;
+    const key = (toSeal as { key?: unknown }).key;
+    if ((kind === "secret" || kind === "credential") && typeof id === "string" && id.length > 0) {
+      const normalized = {
+        kind,
+        id,
+        ...(typeof key === "string" ? { key } : {}),
+      };
+      const sealed = await encryptField(JSON.stringify(normalized));
+      if (sealed) {
+        out.credential = {
+          [PLUGIN_CREDENTIAL_ENVELOPE_KEY]: sealed,
+        } as unknown as ProviderConnection["credential"];
+      }
+    } else if (isPluginCredentialEnvelope(toSeal)) {
+      // Marker-collision object that is not a durable ref — seal as opaque JSON.
+      const sealed = await encryptField(JSON.stringify(toSeal));
+      if (sealed) {
+        out.credential = {
+          [PLUGIN_CREDENTIAL_ENVELOPE_KEY]: sealed,
+        } as unknown as ProviderConnection["credential"];
+      }
+    } else {
+      // Drop leases / malformed shapes — never persist them at rest.
+      delete out.credential;
     }
   }
 
@@ -193,18 +314,65 @@ export async function decryptProviderSecrets(conn: ProviderConnection): Promise<
     out.tokens = t;
   }
 
-  if (out.config) {
-    if ("authType" in out.config) {
+  // Config may be a valid falsy scalar — only null/undefined means absent.
+  if (out.config != null) {
+    const providerId = String(out.provider ?? "");
+    const isBuiltin = providerId === "webdav"
+      || providerId === "s3"
+      || providerId === "github"
+      || providerId === "google"
+      || providerId === "onedrive";
+    if (isBuiltin && typeof out.config === "object" && "authType" in out.config) {
       const c = { ...out.config } as WebDAVConfig;
       c.password = await decryptField(c.password);
       c.token = await decryptField(c.token);
       out.config = c;
-    }
-    if ("secretAccessKey" in out.config) {
+    } else if (isBuiltin && typeof out.config === "object" && "secretAccessKey" in out.config) {
       const c = { ...out.config } as S3Config;
       c.secretAccessKey = (await decryptField(c.secretAccessKey)) ?? "";
       c.sessionToken = await decryptField(c.sessionToken);
       out.config = c;
+    } else if (isPluginConfigEnvelope(out.config) || isLegacyPluginConfigEnvelope(out.config)) {
+      const sealed = isPluginConfigEnvelope(out.config)
+        ? out.config[PLUGIN_CONFIG_ENVELOPE_KEY]
+        : out.config[LEGACY_PLUGIN_CONFIG_ENVELOPE_KEY];
+      const plain = await decryptField(sealed);
+      // plain may be JSON "false"/"0"/'""' — treat empty decrypt as failure only.
+      if (plain != null && plain !== "") {
+        try {
+          out.config = JSON.parse(plain) as ProviderConnection["config"];
+        } catch {
+          // leave sealed if corrupt
+        }
+      }
+    }
+  }
+
+  if (isPluginCredentialEnvelope(out.credential)) {
+    const plain = await decryptField(out.credential[PLUGIN_CREDENTIAL_ENVELOPE_KEY]);
+    if (plain != null && plain !== "") {
+      try {
+        const parsed = JSON.parse(plain) as {
+          kind?: unknown;
+          id?: unknown;
+          key?: unknown;
+        };
+        if (
+          (parsed.kind === "secret" || parsed.kind === "credential")
+          && typeof parsed.id === "string"
+          && parsed.id.length > 0
+        ) {
+          out.credential = {
+            kind: parsed.kind,
+            id: parsed.id,
+            ...(typeof parsed.key === "string" ? { key: parsed.key } : {}),
+          };
+        } else {
+          delete out.credential;
+        }
+      } catch {
+        // leave sealed if corrupt
+      }
     }
   }
 

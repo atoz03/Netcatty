@@ -10,6 +10,8 @@
 "use strict";
 
 const crypto = require("crypto");
+const { StringDecoder } = require("node:string_decoder");
+const { invalidateSshTransport } = require("../sshTransportInvalidation.cjs");
 const {
   createStatefulDecoder,
   detectShellKind,
@@ -24,12 +26,22 @@ const {
   stripAnsi,
 } = require("./ptyExecHelpers.cjs");
 
+const DEFAULT_FOREGROUND_PTY_CAPTURE_CHARS = 1024 * 1024;
+
+function stripJobMarkerLines(text, marker) {
+  return text.replace(
+    new RegExp(`^([^\r\n]*?)${marker}[^\r\n]*[\r\n]*`, "gm"),
+    "$1",
+  );
+}
+
 function startPtyJob(ptyStream, command, options) {
   const {
     stripMarkers = false,
     trackForCancellation = null,
     timeoutMs = 60000,
     shellKind,
+    loginShellHint,
     chatSessionId,
     abortSignal,
     expectedPrompt,
@@ -41,7 +53,12 @@ function startPtyJob(ptyStream, command, options) {
   } = options || {};
 
   const marker = `__NCMCP_${Date.now().toString(36)}_${crypto.randomBytes(16).toString('hex')}__`;
-  const resolvedShellKind = resolveEffectiveShellKind(shellKind, expectedPrompt);
+  const resolvedShellKind = resolveEffectiveShellKind(shellKind, expectedPrompt, {
+    loginShellHint,
+  });
+  const captureLimitChars = maxBufferedChars > 0
+    ? maxBufferedChars
+    : DEFAULT_FOREGROUND_PTY_CAPTURE_CHARS;
   const CANCEL_RETRY_MS = 5000;
   const CANCEL_WALL_TIMEOUT_MS = 30000;
 
@@ -70,6 +87,7 @@ function startPtyJob(ptyStream, command, options) {
   const cleanupFns = [];
   let pendingStart = "";
   let resolveResult;
+  const outputDecoder = new StringDecoder("utf8");
   const resultPromise = new Promise((resolve) => {
     resolveResult = resolve;
   });
@@ -214,7 +232,7 @@ function startPtyJob(ptyStream, command, options) {
   }
 
   function checkEnd() {
-    const found = findEndMarker(output, marker);
+    const found = findEndMarker(output, marker, { allowInline: true });
     if (!found) return;
     const stdout = output.slice(0, found.endIdx);
     finish(stdout, found.exitCode);
@@ -232,7 +250,17 @@ function startPtyJob(ptyStream, command, options) {
 
   function appendToVisible(text) {
     if (!text) return;
-    const normalized = consumeVisibleText(visibleCarry, text);
+    let boundedInput = text;
+    if (boundedInput.length > captureLimitChars) {
+      const skipped = boundedInput.length - captureLimitChars;
+      boundedInput = boundedInput.slice(-captureLimitChars);
+      // A skipped prefix may end inside a control sequence; drop any carry
+      // from that prefix and treat offsets as a conservative raw-char count.
+      visibleCarry = "";
+      visibleOutputOffset += skipped;
+      visibleHighWatermark += skipped;
+    }
+    const normalized = consumeVisibleText(visibleCarry, boundedInput);
     visibleCarry = normalized.carry;
     if (!normalized.visibleText) return;
 
@@ -265,18 +293,18 @@ function startPtyJob(ptyStream, command, options) {
       // Strip only this job's specific marker lines so user output that
       // happens to contain "__NCMCP_" (e.g. printf '__NCMCP_demo\n') is
       // preserved.
-      cleanVisible = cleanVisible.replace(new RegExp(`^[^\r\n]*${marker}[^\r\n]*[\r\n]*`, "gm"), "");
+      cleanVisible = stripJobMarkerLines(cleanVisible, marker);
       if (!cleanVisible) return;
     }
     visibleHighWatermark += cleanVisible.length;
-    const next = appendBoundedOutput(visibleOutput, cleanVisible, maxBufferedChars);
+    const next = appendBoundedOutput(visibleOutput, cleanVisible, captureLimitChars);
     visibleOutput = next.text;
     visibleOutputOffset += next.dropped;
   }
 
   function appendToOutput(text) {
     if (!text) return;
-    const next = appendBoundedOutput(output, text, maxBufferedChars);
+    const next = appendBoundedOutput(output, text, captureLimitChars);
     output = next.text;
     appendToVisible(text);
   }
@@ -308,10 +336,10 @@ function startPtyJob(ptyStream, command, options) {
 
     // Flush any incomplete marker carry — if it wasn't this job's marker, append it.
     if (visibleMarkerCarry) {
-      const leftover = visibleMarkerCarry.replace(new RegExp(`^[^\r\n]*${marker}[^\r\n]*[\r\n]*`, "gm"), "");
+      const leftover = stripJobMarkerLines(visibleMarkerCarry, marker);
       visibleMarkerCarry = "";
       if (leftover) {
-        const next = appendBoundedOutput(visibleOutput, leftover, maxBufferedChars);
+        const next = appendBoundedOutput(visibleOutput, leftover, captureLimitChars);
         visibleOutput = next.text;
         visibleOutputOffset += next.dropped;
       }
@@ -384,17 +412,17 @@ function startPtyJob(ptyStream, command, options) {
   }
 
   function onData(data) {
-    const text = data.toString();
+    const bytes = Buffer.isBuffer(data)
+      ? data
+      : data instanceof Uint8Array
+        ? Buffer.from(data)
+        : Buffer.from(String(data ?? ""));
+    const text = outputDecoder.write(bytes);
+    if (!text) return;
     armOutputTimeout();
 
     if (!foundStart) {
       preStartOutput += text;
-      // Cap preStartOutput for background jobs so a noisy idle PTY can't
-      // accumulate megabytes before the start marker arrives. We only need
-      // enough tail to find the marker boundary.
-      if (maxBufferedChars > 0 && preStartOutput.length > maxBufferedChars) {
-        preStartOutput = preStartOutput.slice(preStartOutput.length - maxBufferedChars);
-      }
       const combined = pendingStart + text;
       pendingStart = "";
       const startMarker = marker + "_S";
@@ -451,6 +479,16 @@ function startPtyJob(ptyStream, command, options) {
           finish(stdout, fallbackEnd.exitCode);
           return;
         }
+      }
+      // A noisy PTY before the start marker must not grow without bound. Keep
+      // enough tail for marker/prompt detection; the current chunk was already
+      // scanned above so dropping its prefix cannot hide a completed marker.
+      if (preStartOutput.length > captureLimitChars) {
+        preStartOutput = preStartOutput.slice(-captureLimitChars);
+      }
+      const markerCarryLimit = marker.length + 256;
+      if (pendingStart.length > markerCarryLimit) {
+        pendingStart = pendingStart.slice(-markerCarryLimit);
       }
       // If we're cancelling a still-queued command and the shell has returned
       // to its idle prompt, finish immediately as Cancelled instead of waiting
@@ -591,13 +629,18 @@ function execViaPty(ptyStream, command, options) {
  * @param {string} command - The command to execute
  * @param {object} [options]
  * @param {number} [options.timeoutMs=60000] - Command timeout in milliseconds
+ * @param {number} [options.maxOutputBytes=1048576] - Combined stdout/stderr hard limit
  */
 function execViaChannel(sshClient, command, options) {
   const {
     timeoutMs = 60000,
+    maxOutputBytes = 1024 * 1024,
     trackForCancellation = null,
     chatSessionId,
   } = options || {};
+  const outputLimitBytes = Number.isSafeInteger(maxOutputBytes) && maxOutputBytes > 0
+    ? maxOutputBytes
+    : 1024 * 1024;
 
   return new Promise((resolve) => {
     // Register a *pending* cancellation marker synchronously, before
@@ -610,76 +653,163 @@ function execViaChannel(sshClient, command, options) {
     // check the latch and short-circuit instead of starting work.
     const pendingMarker = `__NCMCP_CH_PENDING_${Date.now().toString(36)}_${crypto.randomBytes(8).toString('hex')}__`;
     let cancelled = false;
+    let settled = false;
+    let openingTimer = null;
+    let activeMarker = null;
+    const settle = (result) => {
+      if (settled) return false;
+      settled = true;
+      clearTimeout(openingTimer);
+      if (trackForCancellation) {
+        trackForCancellation.delete(pendingMarker);
+        if (activeMarker) trackForCancellation.delete(activeMarker);
+      }
+      resolve(result);
+      return true;
+    };
+    const cancelPending = () => {
+      cancelled = true;
+      settle({ ok: false, stdout: "", stderr: "", exitCode: -1, error: "Cancelled" });
+      invalidateSshTransport(sshClient);
+    };
     if (trackForCancellation) {
       trackForCancellation.set(pendingMarker, {
         chatSessionId: chatSessionId || null,
-        cancel: () => { cancelled = true; },
-        cleanup: () => { /* nothing pending to clean up before channel opens */ },
+        cancel: cancelPending,
+        cleanup: cancelPending,
       });
     }
 
+    openingTimer = setTimeout(() => {
+      const timeoutSec = Math.round(timeoutMs / 1000);
+      settle({
+        ok: false,
+        stdout: "",
+        stderr: "",
+        exitCode: -1,
+        error: `Command timed out (${timeoutSec}s) while opening SSH exec channel`,
+      });
+      invalidateSshTransport(sshClient);
+    }, timeoutMs);
+    openingTimer.unref?.();
+
     try {
       sshClient.exec(command, (err, execStream) => {
-      if (trackForCancellation) {
-        trackForCancellation.delete(pendingMarker);
-      }
-      if (cancelled) {
-        if (execStream) {
-          try { execStream.close(); } catch { /* ignore */ }
-        }
-        resolve({ ok: false, stdout: "", stderr: "", exitCode: -1, error: "Cancelled" });
-        return;
-      }
-      if (err) {
-        resolve({ ok: false, error: err.message });
-        return;
-      }
-      if (!execStream) {
-        resolve({ ok: false, error: 'Failed to create exec stream', exitCode: 1 });
-        return;
-      }
-      const marker = `__NCMCP_CH_${Date.now().toString(36)}_${crypto.randomBytes(16).toString('hex')}__`;
-      let stdout = "";
-      let stderr = "";
-      let finished = false;
-      const finish = (result) => {
-        if (finished) return;
-        finished = true;
-        clearTimeout(timeoutId);
         if (trackForCancellation) {
-          trackForCancellation.delete(marker);
+          trackForCancellation.delete(pendingMarker);
         }
-        resolve(result);
-      };
-      const timeoutId = setTimeout(() => {
-        try { execStream.close(); } catch { /* ignore */ }
-        const timeoutSec = Math.round(timeoutMs / 1000);
-        finish({ ok: false, stdout, stderr, exitCode: -1, error: `Command timed out (${timeoutSec}s)` });
-      }, timeoutMs);
-      if (trackForCancellation) {
-        trackForCancellation.set(marker, {
-          chatSessionId: chatSessionId || null,
-          cancel: () => {
+        clearTimeout(openingTimer);
+        if (settled || cancelled) {
+          if (execStream) {
             try { execStream.close(); } catch { /* ignore */ }
-            finish({ ok: false, stdout, stderr, exitCode: -1, error: "Cancelled" });
-          },
-          cleanup: () => {
-            clearTimeout(timeoutId);
-            try { execStream.close(); } catch { /* ignore */ }
-          },
-        });
-      }
-      execStream.on("data", (data) => { stdout += data.toString(); });
-      execStream.stderr.on("data", (data) => { stderr += data.toString(); });
-      execStream.on("close", (code) => {
-        // code is null when SSH disconnects or process is signal-terminated
-        if (code == null) {
-          finish({ ok: false, stdout, stderr, exitCode: -1, error: "Command terminated unexpectedly (connection lost or signal)" });
-        } else {
-          finish({ ok: code === 0, stdout, stderr, exitCode: code });
+          }
+          if (!settled) cancelPending();
+          return;
         }
+        if (err) {
+          settle({ ok: false, error: err.message });
+          return;
+        }
+        if (!execStream) {
+          settle({ ok: false, error: 'Failed to create exec stream', exitCode: 1 });
+          return;
+        }
+        activeMarker = `__NCMCP_CH_${Date.now().toString(36)}_${crypto.randomBytes(16).toString('hex')}__`;
+        let stdout = "";
+        let stderr = "";
+        let outputBytes = 0;
+        const stdoutDecoder = new StringDecoder("utf8");
+        const stderrDecoder = new StringDecoder("utf8");
+        let finished = false;
+        let timeoutId = null;
+        let cleanupStreamListeners = () => {};
+        const finish = (result) => {
+          if (finished) return;
+          finished = true;
+          clearTimeout(timeoutId);
+          cleanupStreamListeners();
+          settle(result);
+        };
+        const terminateExecStream = () => {
+          try { execStream.close?.(); } catch { /* ignore */ }
+          try { execStream.destroy?.(); } catch { /* ignore */ }
+        };
+        const appendOutput = (target, data) => {
+          if (finished) return;
+          const chunk = Buffer.isBuffer(data) ? data : Buffer.from(String(data));
+          const remaining = Math.max(0, outputLimitBytes - outputBytes);
+          if (chunk.length <= remaining) {
+            if (target === "stdout") stdout += stdoutDecoder.write(chunk);
+            else stderr += stderrDecoder.write(chunk);
+            outputBytes += chunk.length;
+            return;
+          }
+          if (remaining > 0) {
+            const accepted = chunk.subarray(0, remaining);
+            if (target === "stdout") stdout += stdoutDecoder.write(accepted);
+            else stderr += stderrDecoder.write(accepted);
+            outputBytes += remaining;
+          }
+          finish({
+            ok: false,
+            stdout,
+            stderr,
+            exitCode: -1,
+            error: `Command output exceeded the ${outputLimitBytes} byte limit`,
+          });
+          terminateExecStream();
+        };
+        timeoutId = setTimeout(() => {
+          const timeoutSec = Math.round(timeoutMs / 1000);
+          finish({ ok: false, stdout, stderr, exitCode: -1, error: `Command timed out (${timeoutSec}s)` });
+          terminateExecStream();
+        }, timeoutMs);
+        if (trackForCancellation) {
+          trackForCancellation.set(activeMarker, {
+            chatSessionId: chatSessionId || null,
+            cancel: () => {
+              finish({ ok: false, stdout, stderr, exitCode: -1, error: "Cancelled" });
+              terminateExecStream();
+            },
+            cleanup: () => {
+              clearTimeout(timeoutId);
+              terminateExecStream();
+            },
+          });
+        }
+        const onStdoutData = (data) => appendOutput("stdout", data);
+        const onStderrData = (data) => appendOutput("stderr", data);
+        const onClose = (code) => {
+          // code is null when SSH disconnects or process is signal-terminated
+          if (code == null) {
+            finish({ ok: false, stdout, stderr, exitCode: -1, error: "Command terminated unexpectedly (connection lost or signal)" });
+          } else {
+            finish({ ok: code === 0, stdout, stderr, exitCode: code });
+          }
+        };
+        const onError = (error) => {
+          finish({
+            ok: false,
+            stdout,
+            stderr,
+            exitCode: -1,
+            error: error?.message || String(error || "SSH exec channel failed"),
+          });
+          terminateExecStream();
+        };
+        cleanupStreamListeners = () => {
+          execStream.removeListener?.("data", onStdoutData);
+          execStream.stderr?.removeListener?.("data", onStderrData);
+          execStream.stderr?.removeListener?.("error", onError);
+          execStream.removeListener?.("close", onClose);
+          execStream.removeListener?.("error", onError);
+        };
+        execStream.on("data", onStdoutData);
+        execStream.stderr?.on?.("data", onStderrData);
+        execStream.stderr?.on?.("error", onError);
+        execStream.on("close", onClose);
+        execStream.on("error", onError);
       });
-    });
     } catch (err) {
       // Rare path: `sshClient.exec` itself synchronously throws (e.g.
       // because the underlying ssh2 client was destroyed between the
@@ -687,10 +817,7 @@ function execViaChannel(sshClient, command, options) {
       // leak in `activePtyExecs`, and resolve as a normal failure
       // result instead of letting the Promise reject — the tool layer
       // expects `{ ok, error }` shape, not a thrown error.
-      if (trackForCancellation) {
-        trackForCancellation.delete(pendingMarker);
-      }
-      resolve({ ok: false, error: err?.message || String(err) });
+      settle({ ok: false, error: err?.message || String(err) });
     }
   });
 }
@@ -905,6 +1032,7 @@ function execViaRawPty(serialPort, command, options) {
 execViaRawPty._seq = 0;
 
 module.exports = {
+  DEFAULT_FOREGROUND_PTY_CAPTURE_CHARS,
   execViaPty,
   startPtyJob,
   execViaChannel,

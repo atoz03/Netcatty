@@ -292,9 +292,9 @@ test("buildExternalAgentHistoryMessages still drops one-word filler user message
   }
 });
 
-test("buildExternalAgentHistoryMessages replaces recent terminal tool output with a replay placeholder", () => {
-  // Historical terminal output should remain self-describing without
-  // replaying the actual bytes on every follow-up.
+test("buildExternalAgentHistoryMessages keeps bounded recent terminal evidence", () => {
+  // Historical terminal output stays self-describing and useful while
+  // remaining bounded on every follow-up.
   const bigToolOutput = "DATA ".repeat(300); // ~1500 chars — bigger than summary cap but smaller than raw cap
   const messages: ChatMessage[] = [
     message("u1", "user", "cat /etc/hosts"),
@@ -314,13 +314,13 @@ test("buildExternalAgentHistoryMessages replaces recent terminal tool output wit
 
   assert.match(flat, /Tool result \[from terminal.*?cat \/etc\/hosts.*?\] \(call1\): \[Historical terminal output omitted from replay/);
   assert.match(flat, /outputChars=1500/);
-  assert.doesNotMatch(flat, /DATA DATA DATA/);
+  assert.match(flat, /DATA DATA DATA/);
   const toolResultIdx = flat.indexOf("Tool result [from terminal");
   assert.ok(toolResultIdx >= 0, "tool result line must appear in raw window");
   const toolResultChunk = flat.slice(toolResultIdx);
   assert.ok(
-    toolResultChunk.length < 500,
-    `expected terminal result placeholder to stay compact, got ${toolResultChunk.length}`,
+    toolResultChunk.length < 2_100,
+    `expected terminal result evidence to stay bounded, got ${toolResultChunk.length}`,
   );
 });
 
@@ -648,8 +648,8 @@ test("buildExternalAgentHistoryMessages resolves tool_call provenance correctly 
   // args. Use non-greedy .*? — the args JSON can contain parentheses.
   const hostsMatch = flat.match(/Tool result \[from [^\]]*?cat \/etc\/hosts[^\]]*?\][^\n]*Historical terminal output omitted from replay[^\n]*cat \/etc\/hosts/);
   const resolvMatch = flat.match(/Tool result \[from [^\]]*?cat \/etc\/resolv\.conf[^\]]*?\][^\n]*Historical terminal output omitted from replay[^\n]*cat \/etc\/resolv\.conf/);
-  assert.doesNotMatch(flat, /HOSTS_BYTES/);
-  assert.doesNotMatch(flat, /RESOLV_BYTES/);
+  assert.match(flat, /HOSTS_BYTES/);
+  assert.match(flat, /RESOLV_BYTES/);
 
   assert.ok(hostsMatch, "hosts result must still be labeled with cat /etc/hosts despite later id reuse");
   assert.ok(resolvMatch, "resolv result must be labeled with cat /etc/resolv.conf");

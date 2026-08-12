@@ -69,6 +69,8 @@ function createConfigAndCleanupApi(ctx) {
       if (chatSessionId) {
         scopedMetadata.delete(chatSessionId);
         scopedAttachments.delete(chatSessionId);
+        preserveIdleSessionCleanup?.(chatSessionId);
+        clearOpenedSessionScope?.(chatSessionId);
         cancelledChatSessions.delete(chatSessionId);
         cancelBackgroundJobsForSession(chatSessionId);
         cancelWorkerBackgroundJobsForSession(chatSessionId);

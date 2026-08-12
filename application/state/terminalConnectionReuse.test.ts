@@ -91,3 +91,70 @@ test("split and copy session clones preserve local start directory", () => {
     "/Users/alice/project with spaces ",
   );
 });
+
+test("split clone applies remote inheritedCwd as pendingInitialCwd without touching localStartDir", () => {
+  const clone = createSplitTerminalSessionClone(session({ protocol: "ssh" }), {
+    id: "split-remote-cwd",
+    inheritedCwd: "/var/log",
+  });
+
+  assert.equal(clone.pendingInitialCwd, "/var/log");
+  assert.equal(clone.localStartDir, undefined);
+});
+
+test("split clone applies local inheritedCwd as localStartDir without pendingInitialCwd", () => {
+  const clone = createSplitTerminalSessionClone(
+    session({ protocol: "local", localStartDir: "/home/u", status: "connecting" }),
+    { id: "split-local-cwd", localShellType: "posix", inheritedCwd: "/tmp/work" },
+  );
+
+  assert.equal(clone.localStartDir, "/tmp/work");
+  assert.equal(clone.pendingInitialCwd, undefined);
+});
+
+test("clone does not set pendingInitialCwd for protocols that never inject a cd", () => {
+  for (const overrides of [
+    { protocol: "telnet" as const },
+    { protocol: "serial" as const },
+    { protocol: "ssh" as const, moshEnabled: true },
+    { protocol: "ssh" as const, etEnabled: true },
+  ]) {
+    const clone = createSplitTerminalSessionClone(session(overrides), {
+      id: "split-no-inject",
+      inheritedCwd: "/var/log",
+    });
+    assert.equal(clone.pendingInitialCwd, undefined, `${JSON.stringify(overrides)} should not set pendingInitialCwd`);
+  }
+});
+
+test("copy clone without inheritedCwd keeps localStartDir and sets no pendingInitialCwd", () => {
+  const clone = createCopiedTerminalSessionClone(
+    session({ protocol: "local", localStartDir: "/home/u", status: "connecting" }),
+    { id: "copy-no-cwd", localShellType: "posix" },
+  );
+
+  assert.equal(clone.localStartDir, "/home/u");
+  assert.equal(clone.pendingInitialCwd, undefined);
+});
+
+test("split and copy session clones preserve isolated plugin connection snapshots", () => {
+  const pluginConnection = {
+    providerId: "com.example.transport.connection",
+    configuration: { endpoint: "gateway.example", options: ["fast"] },
+    credentialId: "credential-reference-1234",
+  };
+  const source = session({
+    protocol: `plugin:${pluginConnection.providerId}`,
+    pluginConnection,
+  });
+
+  const split = createSplitTerminalSessionClone(source, { id: "split-plugin" });
+  const copied = createCopiedTerminalSessionClone(source, { id: "copy-plugin" });
+
+  assert.deepEqual(split.pluginConnection, pluginConnection);
+  assert.deepEqual(copied.pluginConnection, pluginConnection);
+  assert.notEqual(split.pluginConnection, pluginConnection);
+  assert.notEqual(copied.pluginConnection, pluginConnection);
+  assert.equal(split.reuseConnectionFromSessionId, undefined);
+  assert.equal(copied.reuseConnectionFromSessionId, undefined);
+});

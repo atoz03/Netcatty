@@ -1,5 +1,11 @@
 import type { ModelMessage } from 'ai';
-import type { ChatMessage, ChatMessageAttachment, ToolResult } from '../../types';
+import type {
+  AISessionContextCompaction,
+  ChatMessage,
+  ChatMessageAttachment,
+  ToolResult,
+} from '../../types';
+import { buildTerminalWriteFingerprint } from '../toolResultDedup';
 import {
   buildHistoricalToolReplayMaps,
   buildHistoricalToolResultReplayText,
@@ -19,7 +25,10 @@ import {
   toAssistantModelContent,
   type AssistantContentPart,
   type CattyProviderContinuationContext,
-} from '../../../../components/ai/hooks/aiChatStreamingSupport';
+} from '../../aiChatStreamingSupport';
+import { redactSecretsInValueForModel } from '../modelSecretRedaction';
+import { fitLargeUserInputForModel } from '../largeUserInput';
+import type { ToolOutputStore } from '../toolOutputStore';
 
 const OPENAI_CHAT_ASSISTANT_FIELDS = Symbol('netcatty.openAIChatAssistantFields');
 
@@ -68,22 +77,28 @@ export function collectOpenAIChatAssistantFieldsForMessages(
 
 export interface BuildCattySdkMessagesInput {
   allMessages: ChatMessage[];
+  contextCompaction?: AISessionContextCompaction;
   includeCurrentUserMessage: boolean;
   trimmed: string;
   attachments?: ChatMessageAttachment[];
   continuationContext: CattyProviderContinuationContext;
   preserveTerminalToolResults?: ReadonlySet<ToolResult>;
+  chatSessionId: string;
+  toolOutputStore: ToolOutputStore;
   fieldsByMessage: Map<ModelMessage, OpenAIChatAssistantFields | undefined>;
 }
 
 export function buildCattySdkMessages(input: BuildCattySdkMessagesInput): ModelMessage[] {
   const {
     allMessages,
+    contextCompaction,
     includeCurrentUserMessage,
     trimmed,
     attachments,
     continuationContext,
     preserveTerminalToolResults = new Set<ToolResult>(),
+    chatSessionId,
+    toolOutputStore,
     fieldsByMessage,
   } = input;
 
@@ -92,13 +107,29 @@ export function buildCattySdkMessages(input: BuildCattySdkMessagesInput): ModelM
   const sdkMessages: ModelMessage[] = [];
   let previousHistoryMessageWasToolResult = false;
 
-  for (const m of allMessages) {
+  const compactedMessageCount = Math.min(
+    allMessages.length,
+    Math.max(0, contextCompaction?.compactedMessageCount ?? 0),
+  );
+  if (contextCompaction?.summary && compactedMessageCount > 0) {
+    sdkMessages.push({
+      role: 'user',
+      content: `[Previous conversation summary]\n\n${contextCompaction.summary}\n\n[Continue with the recent messages below.]`,
+    });
+    sdkMessages.push({
+      role: 'assistant',
+      content: 'I understand the previous conversation summary and will continue from the recent messages.',
+    });
+  }
+
+  for (const m of allMessages.slice(compactedMessageCount)) {
     const currentMessageFollowsToolResult = previousHistoryMessageWasToolResult;
     if (m.role === 'user') {
       const messageAttachments = m.attachments ?? m.images;
+      const boundedContent = fitLargeUserInputForModel(m.content, chatSessionId, toolOutputStore);
       sdkMessages.push({
         role: 'user',
-        content: buildHistoricalUserReplayContent(m.content, messageAttachments ?? []),
+        content: buildHistoricalUserReplayContent(boundedContent, messageAttachments ?? []),
       });
     } else if (m.role === 'assistant') {
       const activeContinuation = isProviderContinuationForSource(
@@ -140,7 +171,7 @@ export function buildCattySdkMessages(input: BuildCattySdkMessagesInput): ModelM
             type: 'tool-call' as const,
             toolCallId: tc.id,
             toolName: tc.name,
-            input: tc.arguments ?? {},
+            input: redactSecretsInValueForModel(tc.arguments ?? {}),
             ...(providerOptions ? { providerOptions } : {}),
           });
         }
@@ -246,6 +277,23 @@ export function collectToolResultsAfterMessage(
     }
   }
   return results;
+}
+
+export function collectPreservedTerminalWriteFingerprints(
+  messages: ChatMessage[],
+  messageId: string,
+  chatSessionId: string,
+): string[] {
+  const preservedResults = collectToolResultsAfterMessage(messages, messageId);
+  const { toolCallByToolResult } = buildHistoricalToolReplayMaps(messages);
+  const fingerprints: string[] = [];
+  for (const result of preservedResults) {
+    const call = toolCallByToolResult.get(result);
+    if (call?.name !== 'terminal_execute' && call?.name !== 'terminal_start') continue;
+    const fingerprint = buildTerminalWriteFingerprint(call.name, chatSessionId, call.arguments);
+    if (fingerprint) fingerprints.push(fingerprint);
+  }
+  return fingerprints;
 }
 
 export function createContinuationContext(

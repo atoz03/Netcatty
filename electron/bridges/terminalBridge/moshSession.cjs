@@ -1,168 +1,59 @@
 /* eslint-disable no-undef */
+const { execFile } = require("node:child_process");
+const { promisify } = require("node:util");
 const { emitTerminalSessionData } = require("../emitTerminalSessionData.cjs");
 const {
   setBufferedOutputBytes,
   shouldAcceptSessionOutput,
   shouldProcessSessionOutput,
 } = require("../terminalFlowAck.cjs");
+const { createSshConnExecProbe } = require("../ai/sessionShellKind.cjs");
+const { orderSshIdentityNames, SSH_KEY_PATTERN } = require("../sshAuthHelper.cjs");
+const { fanoutSessionExit } = require("../terminalAttachRestore.cjs");
+const {
+  buildAuthoritativeKnownHostsContent,
+  buildExternalHostKeySshOptions,
+  vaultPinsConnectionHosts,
+} = require("../externalSshHostKeyPolicy.cjs");
+
+const execFileAsync = promisify(execFile);
+
+// MoshCatty normally emits this cleanup together with an alternate-screen
+// exit. Netcatty keeps the primary screen, so restore only terminal modes that
+// can leak from a full-screen remote program and leave scrollback untouched.
+const MOSH_PRIMARY_SCREEN_RESET = "\x1b[?1l\x1b[0m\x1b[?25h"
+  + "\x1b[?1003l\x1b[?1002l\x1b[?1001l\x1b[?1000l"
+  + "\x1b[?1015l\x1b[?1006l\x1b[?1005l";
+
+// The interactive SSH bootstrap can paint password prompts, MOTD text, and
+// mosh-server diagnostics into Netcatty's primary screen. MoshCatty then
+// reconstructs only the cells present in the remote Mosh state, so untouched
+// bootstrap cells would remain visible around the new shell. Clear the current
+// viewport at the successful handoff while preserving primary-screen scrollback.
+const MOSH_HANDSHAKE_VIEWPORT_RESET = "\x1b[2J\x1b[H";
+
+function withShellProbeTimeout(promise, timeoutMs) {
+  const ms = Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : 3000;
+  let timer = null;
+  return Promise.race([
+    Promise.resolve(promise),
+    new Promise((resolve) => {
+      timer = setTimeout(() => resolve(null), ms);
+    }),
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
 
 function createMoshSessionApi(ctx) {
   with (ctx) {
     function resolveBareMoshClient(_options, opts = {}) {
       return bundledMoshClient(opts);
     }
-    
-    function getEnvPathKey(env) {
-      const pathKeys = Object.keys(env).filter((key) => key.toLowerCase() === "path");
-      if (pathKeys.length === 0) return "PATH";
-      return pathKeys.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))[0];
-    }
-    
-    function getEnvPathDelimiter(opts = {}) {
-      return (opts.platform || process.platform) === "win32" ? ";" : path.delimiter;
-    }
-    
-    function normalizeEnvPathPart(part, opts = {}) {
-      const pathApi = (opts.platform || process.platform) === "win32" ? path.win32 : path;
-      return pathApi.normalize(part).toLowerCase();
-    }
-    
-    function prependEnvPath(env, dir, opts = {}) {
-      if (!dir) return env;
-      const pathKey = getEnvPathKey(env);
-      const duplicatePathKeys = Object.keys(env)
-        .filter((key) => key.toLowerCase() === "path" && key !== pathKey);
-      for (const key of duplicatePathKeys) {
-        delete env[key];
-      }
-      const current = env[pathKey] || "";
-      const delimiter = getEnvPathDelimiter(opts);
-      const parts = String(current).split(delimiter).filter(Boolean);
-      const normalizedDir = normalizeEnvPathPart(dir, opts);
-      if (!parts.some((part) => normalizeEnvPathPart(part, opts) === normalizedDir)) {
-        env[pathKey] = current ? `${dir}${delimiter}${current}` : dir;
-      }
-      return env;
-    }
-    
-    function findBundledMoshDllDir(bareClient, opts = {}) {
-      const platform = opts.platform || process.platform;
-      if (platform !== "win32" || !bareClient) return null;
-    
-      const clientDir = path.dirname(bareClient);
-      const arch = opts.arch || process.arch;
-      const preferred = path.join(clientDir, `mosh-client-win32-${arch}-dlls`);
-      if (fs.existsSync(preferred) && fs.statSync(preferred).isDirectory()) {
-        return preferred;
-      }
-    
-      try {
-        const match = fs.readdirSync(clientDir)
-          .map((name) => path.join(clientDir, name))
-          .find((candidate) => {
-            const name = path.basename(candidate);
-            return /^mosh-client-win32-.+-dlls$/.test(name)
-              && fs.existsSync(candidate)
-              && fs.statSync(candidate).isDirectory();
-          });
-        return match || null;
-      } catch {
-        return null;
-      }
-    }
-    
-    function addBundledMoshDllPath(env, bareClient, opts = {}) {
-      const dllDir = findBundledMoshDllDir(bareClient, opts);
-      return dllDir ? prependEnvPath(env, dllDir, opts) : env;
-    }
-    
-    function findBundledMoshTerminfoDir(bareClient, _opts = {}) {
-      if (!bareClient) return null;
-      const terminfoDir = path.join(path.dirname(bareClient), "terminfo");
-      const hasXterm256 =
-        fs.existsSync(path.join(terminfoDir, "x", "xterm-256color")) ||
-        fs.existsSync(path.join(terminfoDir, "78", "xterm-256color"));
-      return hasXterm256 ? terminfoDir : null;
-    }
 
-    /**
-     * Convert a Windows path into the POSIX form Cygwin ncurses expects for
-     * TERMINFO / TERMINFO_DIRS. A raw `C:\...\terminfo` value is unusable:
-     * ncurses splits TERMINFO_DIRS on `:`, so the drive letter becomes a
-     * one-character bogus directory and the real path is never searched.
-     * Issue #2025.
-     */
-    function toCygwinPath(winPath) {
-      if (typeof winPath !== "string" || !winPath) return winPath;
-      const normalized = winPath.replace(/\\/g, "/");
-      const drive = normalized.match(/^([A-Za-z]):(\/.*)?$/);
-      if (drive) {
-        const rest = drive[2] || "/";
-        return `/cygdrive/${drive[1].toLowerCase()}${rest}`;
-      }
-      if (normalized.startsWith("/")) return normalized;
-      return normalized;
-    }
-    
-    // Standard locations where distros / package managers install the compiled
-    // terminfo database. Used as a fallback only — the bundled directory ships
-    // with the mosh release and is preferred. See issue #890 for context.
-    const LINUX_SYSTEM_TERMINFO_DIRS = [
-      "/etc/terminfo",
-      "/lib/terminfo",
-      "/usr/share/terminfo",
-      "/usr/lib/terminfo",
-    ];
-    
-    const DARWIN_SYSTEM_TERMINFO_DIRS = [
-      "/usr/share/terminfo",
-      "/opt/homebrew/share/terminfo",
-      "/usr/local/share/terminfo",
-      "/opt/local/share/terminfo",
-    ];
-    
-    function addBundledMoshTerminfoEnv(env, bareClient, opts = {}) {
-      const platform = opts.platform || process.platform;
-      const terminfoDir = findBundledMoshTerminfoDir(bareClient, opts);
-    
-      if (platform === "win32") {
-        if (!terminfoDir) return env;
-        // Cygwin mosh-client reads these as POSIX paths. Keep the Windows
-        // form only when the caller already supplied a cygdrive path.
-        const cygTerminfo = toCygwinPath(terminfoDir);
-        env.TERMINFO = cygTerminfo;
-        env.TERMINFO_DIRS = cygTerminfo;
-        return env;
-      }
-    
-      // POSIX. The bundled terminfo is the source of truth — our static
-      // ncurses' compiled-in default points at a build-time temp dir that no
-      // longer exists on the user's machine. Fall back to standard distro
-      // paths when the bundle is absent (e.g. running against an older mosh
-      // binary release that pre-dates the bundle). A caller-supplied
-      // TERMINFO_DIRS is preserved between the bundle and the system defaults.
-      const existing = (typeof env.TERMINFO_DIRS === "string" && env.TERMINFO_DIRS.length > 0)
-        ? env.TERMINFO_DIRS.split(":").filter(Boolean)
-        : [];
-      const systemDirs = platform === "darwin" ? DARWIN_SYSTEM_TERMINFO_DIRS : LINUX_SYSTEM_TERMINFO_DIRS;
-      const dirs = [];
-      if (terminfoDir) dirs.push(terminfoDir);
-      for (const dir of existing) {
-        if (!dirs.includes(dir)) dirs.push(dir);
-      }
-      for (const dir of systemDirs) {
-        if (!dirs.includes(dir)) dirs.push(dir);
-      }
-      if (terminfoDir) {
-        env.TERMINFO = terminfoDir;
-      }
-      env.TERMINFO_DIRS = dirs.join(":");
-      return env;
-    }
-    
-    function addBundledMoshRuntimeEnv(env, bareClient, opts = {}) {
-      addBundledMoshDllPath(env, bareClient, opts);
-      addBundledMoshTerminfoEnv(env, bareClient, opts);
+    // MoshCatty is a pure single binary (no Cygwin DLL bag, no terminfo).
+    // Runtime env only needs MOSH_KEY / TERM / LANG from the handshake path.
+    function addBundledMoshRuntimeEnv(env, _bareClient, _opts = {}) {
       return env;
     }
 
@@ -228,6 +119,58 @@ function createMoshSessionApi(ctx) {
       if (trimmed.startsWith("~/")) return path.join(os.homedir(), trimmed.slice(2));
       return trimmed;
     }
+
+    function discoverMoshIdentityPaths() {
+      const sshDir = path.join(os.homedir(), ".ssh");
+      try {
+        const names = fs.readdirSync(sshDir, { withFileTypes: true })
+          .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && SSH_KEY_PATTERN.test(entry.name))
+          .map((entry) => entry.name);
+        return orderSshIdentityNames(names).map((name) => path.join(sshDir, name));
+      } catch {
+        return [];
+      }
+    }
+
+    async function prepareMoshSshAgentOptions(options) {
+      if (options?.useSshAgent !== true && !options?.agentForwarding) return options;
+      let prepared = options;
+      if (options.useSshAgent === true) {
+        await prepareSystemSshAgentForAuth(options, "[Mosh]");
+        const loginSocketPath = await getAvailableAgentSocket(options.identityAgent, options);
+        if (!loginSocketPath) {
+          throw new Error("System SSH agent is unavailable. Start or unlock it, or configure a valid agent socket.");
+        }
+        prepared = { ...prepared, _resolvedSshAgentSocket: loginSocketPath };
+      }
+      if (options.agentForwarding) {
+        const forwardingSocketPath = await getAvailableForwardingAgentSocket(options.identityAgent, options);
+        if (forwardingSocketPath) {
+          prepared = { ...prepared, _resolvedForwardingAgentSocket: forwardingSocketPath };
+        }
+      }
+      return prepared;
+    }
+
+    function applyMoshSshAgentEnvironment(env, options) {
+      delete env.SSH_AUTH_SOCK;
+      if (
+        process.platform === "win32"
+        && options?.agentForwarding
+        && options._resolvedForwardingAgentSocket
+      ) {
+        // Windows OpenSSH reparses backslashes in a direct ForwardAgent value.
+        // Keep the named pipe intact by expanding the standard socket variable.
+        env.SSH_AUTH_SOCK = options._resolvedForwardingAgentSocket;
+        return env;
+      }
+      if (options?.useSshAgent === false) {
+        return env;
+      }
+      const socketPath = options?._resolvedSshAgentSocket || process.env.SSH_AUTH_SOCK;
+      if (socketPath) env.SSH_AUTH_SOCK = socketPath;
+      return env;
+    }
     
     function safeMoshAuthFileName(sessionId, keyId, suffix) {
       const safeId = String(keyId || sessionId || randomUUID())
@@ -283,9 +226,10 @@ function createMoshSessionApi(ctx) {
       let lastError = null;
       for (const identity of identities) {
         try {
-          await execFileAsync("icacls.exe", [target, "/grant:r", `${identity}:F`], { windowsHide: true });
-          await execFileAsync("icacls.exe", [target, "/inheritance:r"], { windowsHide: true });
-          await execFileAsync("icacls.exe", [target, "/grant:r", `${identity}:F`], { windowsHide: true });
+          const commandOptions = { timeout: 5_000, maxBuffer: 1024 * 1024, windowsHide: true };
+          await execFileAsync("icacls.exe", [target, "/grant:r", `${identity}:F`], commandOptions);
+          await execFileAsync("icacls.exe", [target, "/inheritance:r"], commandOptions);
+          await execFileAsync("icacls.exe", [target, "/grant:r", `${identity}:F`], commandOptions);
           return true;
         } catch (err) {
           lastError = err;
@@ -309,10 +253,27 @@ function createMoshSessionApi(ctx) {
         }
       }
     }
+
+    function buildMoshPreferredAuthentications({ authMethod, requiresMfa = false, hasPassword = false, hasPublicKey = false }) {
+      if (authMethod === "password") {
+        return requiresMfa ? "keyboard-interactive,password" : "password,keyboard-interactive";
+      }
+      if (!requiresMfa) return "";
+      if (hasPublicKey && hasPassword) return "publickey,keyboard-interactive,password";
+      if (hasPublicKey) return "publickey,keyboard-interactive";
+      if (hasPassword) return "keyboard-interactive,password";
+      return "keyboard-interactive";
+    }
     
     async function buildMoshSshAuthArgs(options, sessionId) {
       const sshArgs = [];
       const tempFiles = [];
+      const resolvedIdentityFilePaths = [];
+      const rememberIdentityFilePath = (keyPath) => {
+        if (keyPath && !resolvedIdentityFilePaths.includes(keyPath)) {
+          resolvedIdentityFilePaths.push(keyPath);
+        }
+      };
     
       try {
         if (typeof options.privateKey === "string" && options.privateKey.trim().length > 0) {
@@ -331,12 +292,27 @@ function createMoshSessionApi(ctx) {
             tempFiles.push(certPath);
             sshArgs.push("-o", `CertificateFile=${certPath}`);
           }
+        } else if (options.useSshAgent && Array.isArray(options.agentPublicKeys) && options.agentPublicKeys.length > 0) {
+          for (let index = 0; index < options.agentPublicKeys.length; index += 1) {
+            const selectorPath = await writeMoshAuthTempFile(
+              safeMoshAuthFileName(sessionId, `${options.keyId || "agent"}-${index}`, ".pub"),
+              options.agentPublicKeys[index],
+            );
+            tempFiles.push(selectorPath);
+            sshArgs.push("-i", selectorPath);
+          }
         } else if (Array.isArray(options.identityFilePaths) && options.identityFilePaths.length > 0) {
           for (const keyPath of options.identityFilePaths) {
             const normalized = normalizeMoshIdentityPath(keyPath);
-            if (normalized) sshArgs.push("-i", normalized);
+            if (normalized) {
+              rememberIdentityFilePath(normalized);
+              const selector = options.useSshAgent && !normalized.toLowerCase().endsWith(".pub")
+                ? `${normalized}.pub`
+                : normalized;
+              sshArgs.push("-i", selector);
+            }
           }
-          if (sshArgs.length > 0) {
+          if (sshArgs.length > 0 && (!options.useSshAgent || options.identitiesOnly)) {
             sshArgs.push("-o", "IdentitiesOnly=yes");
           }
           if (typeof options.certificate === "string" && options.certificate.trim().length > 0) {
@@ -348,12 +324,122 @@ function createMoshSessionApi(ctx) {
             sshArgs.push("-o", `CertificateFile=${certPath}`);
           }
         }
+
+        if (options.authMethod === "auto") {
+          const selectedIdentities = new Set();
+          const useAgentOnlySelectors = options.useSshAgent === true
+            && options.identitiesOnly === true;
+          for (let index = 0; index < sshArgs.length - 1; index += 1) {
+            if (sshArgs[index] === "-i") selectedIdentities.add(sshArgs[index + 1]);
+          }
+          for (const keyPath of discoverMoshIdentityPaths()) {
+            rememberIdentityFilePath(keyPath);
+            const selector = useAgentOnlySelectors ? `${keyPath}.pub` : keyPath;
+            if (!selectedIdentities.has(selector)) {
+              sshArgs.push("-i", selector);
+              selectedIdentities.add(selector);
+            }
+          }
+        }
+
+        const hasSelectedIdentity = sshArgs.some((arg) => arg === "-i");
+        const hasPassword = typeof options.password === "string" && options.password.length > 0;
+        if (
+          (options.authMethod === "key" || options.authMethod === "certificate")
+          && !hasSelectedIdentity
+        ) {
+          sshArgs.push("-o", "IdentityFile=none", "-o", "IdentitiesOnly=yes");
+        }
+
+        if (options.useSshAgent === false) {
+          sshArgs.push("-o", "IdentityAgent=none");
+        } else if (options.useSshAgent && options._resolvedSshAgentSocket) {
+          sshArgs.push("-o", `IdentityAgent=${options._resolvedSshAgentSocket}`);
+          if (options.identitiesOnly && !sshArgs.includes("IdentitiesOnly=yes")) {
+            sshArgs.push("-o", "IdentitiesOnly=yes");
+          }
+        }
+        if (options.agentForwarding && options._resolvedForwardingAgentSocket) {
+          const forwardingValue = process.platform === "win32"
+            ? "${SSH_AUTH_SOCK}"
+            : options._resolvedForwardingAgentSocket;
+          sshArgs.push("-o", `ForwardAgent=${forwardingValue}`);
+        }
+
+        if (options.authMethod === "password") {
+          sshArgs.push("-o", "PubkeyAuthentication=no");
+        }
+        const preferredAuthentications = buildMoshPreferredAuthentications({
+          authMethod: options.authMethod,
+          requiresMfa: !!options.requiresMfa,
+          hasPassword,
+          hasPublicKey: Boolean(options.useSshAgent || hasSelectedIdentity),
+        });
+        if (preferredAuthentications) {
+          sshArgs.push("-o", `PreferredAuthentications=${preferredAuthentications}`);
+        }
+
+        // Vault known_hosts (issue #2501): Mosh bootstraps via system OpenSSH.
+        // When the vault pins hosts, write an authoritative known_hosts
+        // snapshot (vault pins + filtered system entries) and force
+        // StrictHostKeyChecking=ask so a permissive user ssh_config cannot
+        // disable verification. Vault hosts exclude conflicting system pins
+        // so a rotated system key cannot override the vault.
+        const verifyHostKeys = options.verifyHostKeys !== false;
+        let authoritativeKnownHostsPath = null;
+        let emptyKnownHostsPath = null;
+        if (verifyHostKeys) {
+          // Only override system known_hosts when the vault pins this target
+          // (or a jump host). Unrelated vault entries must not force a temp
+          // UserKnownHostsFile for every Mosh session.
+          const connectionHosts = [
+            { hostname: options.hostname, port: options.port || 22 },
+            ...(Array.isArray(options.jumpHosts)
+              ? options.jumpHosts.map((jump) => ({
+                hostname: jump.hostname,
+                port: jump.port || 22,
+              }))
+              : []),
+          ];
+          if (vaultPinsConnectionHosts(options.knownHosts, connectionHosts)) {
+            const authoritativeContent = buildAuthoritativeKnownHostsContent({
+              knownHosts: options.knownHosts,
+              fs,
+              hostname: options.hostname,
+              port: options.port || 22,
+              username: options.username,
+              pathModule: path,
+              homedir: os.homedir(),
+              memo: new Map(),
+            });
+            if (authoritativeContent) {
+              authoritativeKnownHostsPath = await writeMoshAuthTempFile(
+                safeMoshAuthFileName(sessionId, "authoritative-known-hosts", ".txt"),
+                authoritativeContent,
+              );
+              tempFiles.push(authoritativeKnownHostsPath);
+            }
+          }
+        } else {
+          emptyKnownHostsPath = await writeMoshAuthTempFile(
+            safeMoshAuthFileName(sessionId, "empty-known-hosts", ".txt"),
+            "",
+          );
+          tempFiles.push(emptyKnownHostsPath);
+        }
+        sshArgs.push(...buildExternalHostKeySshOptions({
+          authoritativeKnownHostsPath,
+          emptyKnownHostsPath,
+          verifyHostKeys,
+          protocol: "mosh",
+          style: "args",
+        }));
       } catch (err) {
         cleanupMoshAuthTempFiles(tempFiles);
         throw err;
       }
     
-      return { sshArgs, tempFiles };
+      return { sshArgs, tempFiles, identityFilePaths: resolvedIdentityFilePaths };
     }
     
     /**
@@ -392,21 +478,24 @@ function createMoshSessionApi(ctx) {
         port: options.port,
         username: options.username,
         lang,
+        locales: optionsEnv,
         moshServer: moshHandshake.buildMoshServerCommand(options.moshServerPath),
         sshArgs: moshAuth.sshArgs,
       });
     
-      const sshEnv = { ...process.env, ...optionsEnv, TERM: "xterm-256color" };
-      // macOS Terminal/iTerm export LC_CTYPE=UTF-8 (a bare value, not a real
-      // locale name). System ssh_config has `SendEnv LC_*`, so without scrubbing
-      // these the remote shell tries to setlocale("UTF-8") and prints a warning
-      // on every connection. mosh-server sets the locale it needs separately.
+      const { buildTerminalProcessEnv } = require("../httpNetworkProxyBridge.cjs");
+      const sshEnv = { ...buildTerminalProcessEnv(process.env), ...optionsEnv, TERM: "xterm-256color" };
+      // Do not let ssh_config SendEnv force the local locale onto the remote
+      // process. The handshake passes the configured locale variables through
+      // mosh-server's stock `-l` fallback mechanism instead, so a minimal host
+      // can keep its working native C.UTF-8 locale when a requested locale is
+      // not installed.
       for (const key of Object.keys(sshEnv)) {
-        if (key.startsWith("LC_")) delete sshEnv[key];
+        if (key === "LANG" || key === "LANGUAGE" || key.startsWith("LC_")) {
+          delete sshEnv[key];
+        }
       }
-      if (options.agentForwarding && process.env.SSH_AUTH_SOCK) {
-        sshEnv.SSH_AUTH_SOCK = process.env.SSH_AUTH_SOCK;
-      }
+      applyMoshSshAgentEnvironment(sshEnv, options);
     
       let sshPty;
       try {
@@ -416,6 +505,7 @@ function createMoshSessionApi(ctx) {
           env: sshEnv,
           cwd: os.homedir(),
           encoding: null,
+          useConptyDll: process.platform === "win32",
         });
       } catch (err) {
         cleanupMoshAuthTempFiles(moshAuth.tempFiles);
@@ -431,7 +521,19 @@ function createMoshSessionApi(ctx) {
         hostname: options.hostname || "",
         username: options.username || "",
         label: options.label || options.hostname || "Mosh Session",
-        shellKind: "posix",
+        // Leave unset so ensureSessionShellKind can probe via companion SSH
+        // exec before AI wrappers (fish login shells — issue #1854).
+        shellKind: undefined,
+        _shellKindExecProbe: async (command, timeoutMs) => {
+          if (typeof ensureMoshStatsConnection !== "function") return null;
+          const contents = electronModule?.webContents?.fromId?.(session.webContentsId);
+          const conn = await withShellProbeTimeout(
+            ensureMoshStatsConnection(session, sessionId, contents),
+            timeoutMs,
+          );
+          const probe = createSshConnExecProbe(conn);
+          return probe ? probe(command, timeoutMs) : null;
+        },
         shellExecutable: "remote-shell",
         flushPendingData: null,
         lastIdlePrompt: "",
@@ -443,7 +545,17 @@ function createMoshSessionApi(ctx) {
         moshHandshakeResult: null,
         moshAuthTempFiles: moshAuth.tempFiles,
       };
-      sessions.set(sessionId, session);
+      {
+        const { claimSessionSlot } = require("../sessionBootEpoch.cjs");
+        const claim = claimSessionSlot(sessions, sessionId, session, options.bootEpoch);
+        if (!claim.ok) {
+          try { sshPty.kill(); } catch { /* ignore */ }
+          cleanupMoshAuthTempFiles(moshAuth.tempFiles);
+          const supersededError = new Error("Connection superseded by a newer reconnect");
+          supersededError.code = "NETCATTY_BOOT_SUPERSEDED";
+          throw supersededError;
+        }
+      }
       openTerminalOutputSession?.(sessionId, event.sender);
     
       let logStreamToken = null;
@@ -469,14 +581,21 @@ function createMoshSessionApi(ctx) {
         discard,
       } = createPtyOutputBuffer((data, meta) => {
         const contents = electronModule.webContents.fromId(session.webContentsId);
+        // Tag SSH-handshake output so the renderer does not treat the session
+        // as shell-ready yet. Startup commands / pending scripts must wait for
+        // mosh-client (issue #2199).
+        const handshakeMeta = session.moshHandshakePhase !== "mosh-client"
+          ? { ...(meta || {}), moshHandshake: true }
+          : meta;
         emitTerminalSessionData(contents, sessionId, data, {
+          session,
           cols: session.cols,
           rows: session.rows,
-          meta,
+          meta: handshakeMeta,
         });
       }, {
         onPendingBytesChange: (bytes) => setBufferedOutputBytes(session, bytes),
-        shouldAcceptOutput: () => shouldAcceptSessionOutput(session),
+        shouldAcceptOutput: () => sessions.get(sessionId) === session && shouldAcceptSessionOutput(session),
       });
       session.flushPendingData = flushPaced;
       session.discardPendingData = discard;
@@ -489,6 +608,7 @@ function createMoshSessionApi(ctx) {
       // during handshake — it can't appear during ssh login output and
       // would only complicate the swap.
       sshPty.onData((chunk) => {
+        if (sessions.get(sessionId) !== session) return;
         const { visible, parsed } = sniffer.feed(chunk);
         if (visible && (visible.length || (typeof visible === "string" && visible))) {
           const str = Buffer.isBuffer(visible) ? visible.toString("utf8") : visible;
@@ -535,6 +655,7 @@ function createMoshSessionApi(ctx) {
               bareClient,
               optionsEnv,
               lang,
+              identityFilePaths: moshAuth.identityFilePaths,
               parsed: session.moshHandshakeResult,
               bufferData,
               flush,
@@ -543,12 +664,14 @@ function createMoshSessionApi(ctx) {
             });
           } catch (err) {
             flushPaced(() => {
+              if (sessions.get(sessionId) !== session) return;
               sessionLogStreamManager.stopStream(sessionId, logStreamToken);
               const contents = electronModule.webContents.fromId(session.webContentsId);
-              contents?.send("netcatty:exit", {
+              fanoutSessionExit(sessionId, contents, {
                 sessionId,
                 reason: "error",
                 error: `Failed to spawn mosh-client: ${err.message}`,
+                _terminalSessionGeneration: session._terminalSessionGeneration,
               });
               closeTerminalOutputSession?.(sessionId);
               sessions.delete(sessionId);
@@ -558,17 +681,32 @@ function createMoshSessionApi(ctx) {
         }
     
         // Handshake failed before MOSH CONNECT — ssh exited without parse.
-        // The user has already seen the failure output (auth error, host
-        // key warning, etc). Just surface a session-exit with the code so
-        // the renderer can label the session "disconnected".
+        // Common on Windows when ConPTY mangled the magic line (#2025) or when
+        // mosh-server never started. Surface an explicit hint so the banner +
+        // "[mosh-server detached]" alone is not mistaken for a successful
+        // session that immediately closed (Netcatty #2121 residual connect).
+        const handshakeHint =
+          "\r\n[Mosh handshake failed during SSH startup: did not receive a valid "
+          + "MOSH CONNECT line from mosh-server. The UDP client was not started. "
+          + "Confirm the SSH login succeeded and mosh-server started correctly "
+          + "on the remote host.]\r\n";
+        try {
+          bufferData(handshakeHint);
+          sessionLogStreamManager.appendData(sessionId, handshakeHint);
+        } catch {
+          // Best-effort diagnostics; still tear the session down below.
+        }
         flushPaced(() => {
+          if (sessions.get(sessionId) !== session) return;
           sessionLogStreamManager.stopStream(sessionId, logStreamToken);
           const contents = electronModule.webContents.fromId(session.webContentsId);
-          contents?.send("netcatty:exit", {
+          fanoutSessionExit(sessionId, contents, {
             sessionId,
             exitCode,
             signal,
             reason: "error",
+            error: "Mosh SSH startup failed: no MOSH CONNECT from mosh-server (UDP client not started)",
+            _terminalSessionGeneration: session._terminalSessionGeneration,
           });
           closeTerminalOutputSession?.(sessionId);
           sessions.delete(sessionId);
@@ -585,17 +723,33 @@ function createMoshSessionApi(ctx) {
      * sentry whose writeToRemote closure captured the previous handle.
      */
     function swapToMoshClient(session, options, ctx) {
-      const { bareClient, optionsEnv, lang, parsed, bufferData, flush, flushPaced, sessionId } = ctx;
+      const {
+        bareClient,
+        optionsEnv,
+        lang,
+        identityFilePaths,
+        parsed,
+        bufferData,
+        flush,
+        flushPaced,
+        sessionId,
+      } = ctx;
     
+      const { buildTerminalProcessEnv } = require("../httpNetworkProxyBridge.cjs");
       const env = moshHandshake.buildMoshClientEnv({
-        baseEnv: { ...process.env, ...optionsEnv, TERM: "xterm-256color" },
+        baseEnv: { ...buildTerminalProcessEnv(process.env), ...optionsEnv, TERM: "xterm-256color" },
         key: parsed.key,
         lang,
+        fallbackHost: parsed.host && parsed.host !== options.hostname
+          ? options.hostname
+          : undefined,
       });
+      // Netcatty owns the terminal buffer. Keeping MoshCatty on the primary
+      // screen preserves scrollback and lets renderer features such as keyword
+      // highlighting keep observing the active buffer.
+      env.MOSH_NO_TERM_INIT = "1";
       addBundledMoshRuntimeEnv(env, bareClient);
-      if (options.agentForwarding && process.env.SSH_AUTH_SOCK) {
-        env.SSH_AUTH_SOCK = process.env.SSH_AUTH_SOCK;
-      }
+      applyMoshSshAgentEnvironment(env, options);
     
       const { command, args: clientArgs } = moshHandshake.buildMoshClientCommand({
         moshClientPath: bareClient,
@@ -609,6 +763,7 @@ function createMoshSessionApi(ctx) {
         env,
         cwd: os.homedir(),
         encoding: null,
+        useConptyDll: process.platform === "win32",
       });
     
       // Atomic swap — writeToSession / resizeSession both read
@@ -617,6 +772,25 @@ function createMoshSessionApi(ctx) {
       session.proc = mcPty;
       session.pty = mcPty;
       session.moshHandshakePhase = "mosh-client";
+
+      // Establish the blank terminal baseline that mosh-client expects before
+      // its first reconstructed frame. Keep this ordered through the same
+      // output buffer as both the SSH bootstrap and Mosh client data.
+      bufferData(MOSH_HANDSHAKE_VIEWPORT_RESET);
+
+      // Notify the renderer that the interactive mosh shell is ready. This is
+      // distinct from the first SSH-handshake bytes (which can mark the
+      // session "connected" too early and fire startup/scripts into the
+      // ephemeral handshake PTY — issue #2199).
+      try {
+        const readyContents = electronModule.webContents.fromId(session.webContentsId);
+        readyContents?.send("netcatty:mosh:ready", {
+          sessionId,
+          bootEpoch: session.bootEpoch,
+        });
+      } catch {
+        // Best-effort; startup-command deferral falls back if the event is missed.
+      }
 
       // The SSH handshake just succeeded, so these credentials are known
       // good. Stash them so sshBridge can lazily open a best-effort companion
@@ -633,12 +807,19 @@ function createMoshSessionApi(ctx) {
         hostname: options.hostname,
         port: options.port || 22,
         username: options.username,
+        authMethod: options.authMethod,
         password: options.password,
         privateKey: options.privateKey,
         passphrase: options.passphrase,
         certificate: options.certificate,
         keyId: options.keyId,
-        identityFilePaths: options.identityFilePaths,
+        identityFilePaths: identityFilePaths || options.identityFilePaths,
+        agentPublicKeys: options.agentPublicKeys,
+        useSshAgent: options.useSshAgent,
+        identityAgent: options.identityAgent,
+        identitiesOnly: options.identitiesOnly,
+        addKeysToAgent: options.addKeysToAgent,
+        useKeychain: options.useKeychain,
         legacyAlgorithms: options.legacyAlgorithms,
         skipEcdsaHostKey: options.skipEcdsaHostKey,
         algorithmOverrides: options.algorithmOverrides,
@@ -647,6 +828,8 @@ function createMoshSessionApi(ctx) {
         // does not depend on this.
         knownHosts: options.knownHosts,
         verifyHostKeys: options.verifyHostKeys,
+        hasJumpHost: Array.isArray(options.jumpHosts) && options.jumpHosts.length > 0,
+        hasProxy: !!options.proxy,
       };
       session.systemManagerSudoPassword = typeof options.sudoAutofillPassword === "string" && options.sudoAutofillPassword.length > 0
         ? options.sudoAutofillPassword
@@ -668,21 +851,23 @@ function createMoshSessionApi(ctx) {
           },
           getWebContents() { return electronModule.webContents.fromId(session.webContentsId); },
           selectUploadFiles: selectZmodemUploadFiles
-            ? () => selectZmodemUploadFiles(session.webContentsId)
+            ? () => selectZmodemUploadFiles(session.webContentsId, sessionId)
             : undefined,
           selectDownloadDirectory: selectZmodemDownloadDirectory
-            ? () => selectZmodemDownloadDirectory(session.webContentsId)
+            ? () => selectZmodemDownloadDirectory(session.webContentsId, sessionId)
             : undefined,
           protocolLabel: "Mosh",
         });
         session.zmodemSentry = sentry;
         mcPty.onData((data) => {
+          if (sessions.get(sessionId) !== session) return;
           if (!shouldProcessSessionOutput(session, sentry)) return;
           sentry.consume(data);
         });
       } else {
         const decodeMoshOutput = createMoshUtf8Decoder();
         mcPty.onData((data) => {
+          if (sessions.get(sessionId) !== session) return;
           if (!shouldProcessSessionOutput(session)) return;
           const str = decodeMoshOutput(data);
           if (!str) return;
@@ -700,14 +885,17 @@ function createMoshSessionApi(ctx) {
         // #1198) if one was opened — it lives on moshStatsConn and outlives
         // the mosh-client PTY otherwise.
         try { session.moshStatsConn?.end(); } catch { /* ignore */ }
+        bufferData(MOSH_PRIMARY_SCREEN_RESET);
         flushPaced(() => {
+          if (sessions.get(sessionId) !== session) return;
           sessionLogStreamManager.stopStream(sessionId, session.logStreamToken);
           const contents = electronModule.webContents.fromId(session.webContentsId);
-          contents?.send("netcatty:exit", {
+          fanoutSessionExit(sessionId, contents, {
             sessionId,
             exitCode,
             signal,
             reason: exitCode !== 0 ? "error" : "exited",
+            _terminalSessionGeneration: session._terminalSessionGeneration,
           });
           closeTerminalOutputSession?.(sessionId);
           sessions.delete(sessionId);
@@ -748,7 +936,7 @@ function createMoshSessionApi(ctx) {
       const sshExe = moshHandshake.resolveSshExecutable({
         findExecutable: (name) => (
           process.platform === "win32"
-            ? findExecutable(name, { pathOverride: mergedPathForResolution })
+            ? (opts.findExecutable || findExecutable)(name, { pathOverride: mergedPathForResolution })
             : resolvePosixExecutable(name, { pathOverride: mergedPathForResolution })
         ),
         fileExists: (p) => isExecutableFile(p) || fs.existsSync(p),
@@ -757,17 +945,17 @@ function createMoshSessionApi(ctx) {
         throw new Error("OpenSSH client not found. Netcatty needs ssh to start the remote mosh-server handshake.");
       }
     
-      return startMoshSessionViaHandshake(event, options, { bareClient, sshExe });
+      const preparedOptions = await prepareMoshSshAgentOptions(options);
+      return startMoshSessionViaHandshake(event, preparedOptions, { bareClient, sshExe });
     }
 
     return {
       resolveBareMoshClient,
-      addBundledMoshDllPath,
-      addBundledMoshTerminfoEnv,
       addBundledMoshRuntimeEnv,
-      toCygwinPath,
       createMoshUtf8Decoder,
       buildMoshSshAuthArgs,
+      prepareMoshSshAgentOptions,
+      applyMoshSshAgentEnvironment,
       cleanupMoshAuthTempFiles,
       startMoshSessionViaHandshake,
       swapToMoshClient,

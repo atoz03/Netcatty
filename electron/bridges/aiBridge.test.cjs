@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const Module = require("node:module");
 const os = require("node:os");
 const path = require("node:path");
+const http = require("node:http");
 const { prepareCommandForSpawn } = require("./ai/shellUtils.cjs");
 const {
   isCodexAuthError: realIsCodexAuthError,
@@ -141,6 +142,18 @@ function loadBridgeWithMocks(options = {}) {
         typeof options.probeCopilotAuth === "function" ? options.probeCopilotAuth(...args) : { authenticated: false, authSource: null },
       probeCodexAuth: (...args) =>
         typeof options.probeCodexAuth === "function" ? options.probeCodexAuth(...args) : { authenticated: false, authSource: null },
+      probeCodebuddyAuth: (...args) =>
+        typeof options.probeCodebuddyAuth === "function"
+          ? options.probeCodebuddyAuth(...args)
+          : { authenticated: false, authSource: null },
+      probeCursorCliAuth: (...args) =>
+        typeof options.probeCursorCliAuth === "function"
+          ? options.probeCursorCliAuth(...args)
+          : { authenticated: false, authSource: null, email: null, binPath: null },
+      probeGrokAuth: (...args) =>
+        typeof options.probeGrokAuth === "function"
+          ? options.probeGrokAuth(...args)
+          : { authenticated: false, authSource: null },
     },
     "./ai/ptyExec.cjs": {
       execViaPty: async () => {
@@ -148,7 +161,9 @@ function loadBridgeWithMocks(options = {}) {
       },
     },
     "./ipcUtils.cjs": {
-      safeSend() {},
+      safeSend: (...args) => {
+        if (typeof options.safeSend === "function") options.safeSend(...args);
+      },
     },
     "./windowManager.cjs": {
       getMainWindow() {
@@ -162,6 +177,11 @@ function loadBridgeWithMocks(options = {}) {
       },
     },
   };
+  if (typeof options.registerSdkStreamHandlers === "function") {
+    mocks["./aiBridge/sdk/sdkStreamHandlers.cjs"] = {
+      registerSdkStreamHandlers: options.registerSdkStreamHandlers,
+    };
+  }
 
   const bridgePath = require.resolve("./aiBridge.cjs");
   const originalLoad = Module._load;
@@ -192,6 +212,140 @@ function loadBridgeWithMocks(options = {}) {
     throw error;
   }
 }
+
+test("cleanup closes persistent CodeBuddy sessions", () => {
+  let codebuddyCloseCalls = 0;
+  let codexCloseCalls = 0;
+  let sdkAbortCalls = 0;
+  const { bridge, restore } = loadBridgeWithMocks({
+    registerSdkStreamHandlers: (context) => {
+      context.sdkActiveStreams = new Map([
+        ["request-1", { abort: () => { sdkAbortCalls += 1; } }],
+      ]);
+      context.codexAppServerRuntime = {
+        close: () => { codexCloseCalls += 1; },
+      };
+      context.codebuddySessionManager = {
+        closeAll: () => { codebuddyCloseCalls += 1; },
+      };
+    },
+  });
+  const ipcMain = createIpcMainStub();
+
+  bridge.init({
+    sessions: new Map(),
+    sftpClients: new Map(),
+    electronModule: { app: { getPath: () => process.cwd() } },
+  });
+  bridge.registerHandlers(ipcMain);
+
+  try {
+    bridge.cleanup();
+    assert.equal(sdkAbortCalls, 1);
+    assert.equal(codexCloseCalls, 1);
+    assert.equal(codebuddyCloseCalls, 1);
+  } finally {
+    restore();
+  }
+});
+
+test("non-2xx streaming responses are bounded and actively terminated", async () => {
+  let requestClosed = false;
+  let resolveRequestClosed;
+  const requestClosedPromise = new Promise((resolve) => { resolveRequestClosed = resolve; });
+  const server = http.createServer((_request, response) => {
+    response.writeHead(500, { "content-type": "text/plain" });
+    const interval = setInterval(() => response.write("abcdefgh"), 2);
+    response.on("close", () => {
+      clearInterval(interval);
+      requestClosed = true;
+      resolveRequestClosed();
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const { bridge, restore } = loadBridgeWithMocks();
+  bridge.init({
+    sessions: new Map(),
+    sftpClients: new Map(),
+    electronModule: { app: { getPath: () => process.cwd() }, session: {} },
+  });
+
+  try {
+    await assert.rejects(
+      () => bridge._streamRequestForTests(
+        `http://127.0.0.1:${address.port}/streaming-error`,
+        {
+          method: "GET",
+          maxErrorBodyBytes: 32,
+          totalTimeoutMs: 1_000,
+        },
+        { sender: { id: 1 } },
+        "streaming-error",
+        false,
+      ),
+      /error response exceeded/i,
+    );
+    await Promise.race([
+      requestClosedPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("server request stayed open")), 500)),
+    ]);
+    assert.equal(requestClosed, true);
+    assert.equal(bridge._getActiveStreamCountForTests(), 0);
+  } finally {
+    restore();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("streaming requests enforce a total deadline even while bytes keep arriving", async () => {
+  let requestClosed = false;
+  let resolveRequestClosed;
+  const requestClosedPromise = new Promise((resolve) => { resolveRequestClosed = resolve; });
+  const server = http.createServer((_request, response) => {
+    response.writeHead(500, { "content-type": "text/plain" });
+    const interval = setInterval(() => response.write("x"), 2);
+    response.on("close", () => {
+      clearInterval(interval);
+      requestClosed = true;
+      resolveRequestClosed();
+    });
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  const { bridge, restore } = loadBridgeWithMocks();
+  bridge.init({
+    sessions: new Map(),
+    sftpClients: new Map(),
+    electronModule: { app: { getPath: () => process.cwd() }, session: {} },
+  });
+
+  try {
+    await assert.rejects(
+      () => bridge._streamRequestForTests(
+        `http://127.0.0.1:${address.port}/never-ending`,
+        {
+          method: "GET",
+          maxErrorBodyBytes: 1024 * 1024,
+          totalTimeoutMs: 30,
+        },
+        { sender: { id: 1 } },
+        "never-ending",
+        false,
+      ),
+      /total deadline exceeded/i,
+    );
+    await Promise.race([
+      requestClosedPromise,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("server request stayed open")), 500)),
+    ]);
+    assert.equal(requestClosed, true);
+    assert.equal(bridge._getActiveStreamCountForTests(), 0);
+  } finally {
+    restore();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
 
 test("mcp attachment update handler forwards current chat attachments", async () => {
   const calls = [];
@@ -251,6 +405,77 @@ test("command timeout handler accepts one-day timeout values", async () => {
 
     assert.deepEqual(result, { ok: true });
     assert.deepEqual(calls, [86_400]);
+  } finally {
+    restore();
+  }
+});
+
+test("streaming AI responses preserve UTF-8 characters split across network chunks", { timeout: 5_000 }, async (t) => {
+  const sentEvents = [];
+  let handleStreamEvent = () => {};
+  const { bridge, restore } = loadBridgeWithMocks({
+    safeSend: (_sender, channel, payload) => {
+      sentEvents.push({ channel, payload });
+      handleStreamEvent(channel, payload);
+    },
+  });
+  const ipcMain = createIpcMainStub();
+  const server = require("node:http").createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "text/event-stream" });
+      const message = Buffer.from('data: {"choices":[{"delta":{"content":"环境正常"}}]}\n\n');
+      const splitAt = message.indexOf(Buffer.from("环")) + 1;
+      res.write(message.subarray(0, splitAt));
+      setImmediate(() => res.end(message.subarray(splitAt)));
+    });
+  });
+
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", resolve);
+  });
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+
+  bridge.init({
+    sessions: new Map(),
+    sftpClients: new Map(),
+    electronModule: { app: { getPath: () => process.cwd() } },
+  });
+  bridge.registerHandlers(ipcMain);
+
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const baseURL = `http://127.0.0.1:${address.port}`;
+    const sender = { id: 1 };
+    await ipcMain.handlers.get("netcatty:ai:sync-providers")(
+      { sender },
+      { providers: [{ id: "split-utf8", baseURL }] },
+    );
+
+    const streamFinished = new Promise((resolve, reject) => {
+      handleStreamEvent = (channel, payload) => {
+        if (channel === "netcatty:ai:stream:end") resolve();
+        else if (channel === "netcatty:ai:stream:error") reject(new Error(payload.error));
+      };
+    });
+
+    const result = await ipcMain.handlers.get("netcatty:ai:chat:stream")(
+      { sender },
+      {
+        requestId: "split-utf8-request",
+        url: `${baseURL}/v1/chat/completions`,
+        headers: { "content-type": "application/json" },
+        body: '{"stream":true}',
+        providerId: "split-utf8",
+      },
+    );
+    await streamFinished;
+
+    assert.equal(result.ok, true);
+    const dataEvent = sentEvents.find(({ channel }) => channel === "netcatty:ai:stream:data");
+    assert.equal(dataEvent?.payload.data, '{"choices":[{"delta":{"content":"环境正常"}}]}');
   } finally {
     restore();
   }
@@ -543,6 +768,11 @@ test("resolve-cli reports Cursor SDK installed but unavailable without an API ke
       installed: true,
       authenticated: false,
       authSource: null,
+      cliEmail: null,
+      cliBinPath: null,
+      cliLoginOk: false,
+      apiKeyOk: false,
+      sdkInstalled: true,
     });
   } finally {
     restore();
@@ -572,6 +802,11 @@ test("resolve-cli separates Cursor SDK installation from API key availability", 
       installed: true,
       authenticated: false,
       authSource: null,
+      cliEmail: null,
+      cliBinPath: null,
+      cliLoginOk: false,
+      apiKeyOk: false,
+      sdkInstalled: true,
     });
   } finally {
     restore();
@@ -602,6 +837,11 @@ test("resolve-cli ignores custom Cursor paths and stores the SDK sentinel path",
       installed: true,
       authenticated: true,
       authSource: "CURSOR_API_KEY",
+      cliEmail: null,
+      cliBinPath: null,
+      cliLoginOk: false,
+      apiKeyOk: true,
+      sdkInstalled: true,
     });
   } finally {
     restore();
@@ -628,6 +868,11 @@ test("resolve-cli exposes Cursor SDK support when installed and authenticated", 
       installed: true,
       authenticated: true,
       authSource: "CURSOR_API_KEY",
+      cliEmail: null,
+      cliBinPath: null,
+      cliLoginOk: false,
+      apiKeyOk: true,
+      sdkInstalled: true,
     });
   } finally {
     restore();
@@ -656,6 +901,11 @@ test("resolve-cli exposes Cursor SDK support when API key is saved in settings",
       installed: true,
       authenticated: true,
       authSource: "settings",
+      cliEmail: null,
+      cliBinPath: null,
+      cliLoginOk: false,
+      apiKeyOk: true,
+      sdkInstalled: true,
     });
   } finally {
     restore();
@@ -711,6 +961,35 @@ test("resolve-cli can refresh shell env before resolving Cursor", async () => {
   }
 });
 
+test("discover exposes Cursor when CLI login succeeds without API key", async () => {
+  const { bridge, restore } = loadBridgeWithMocks({
+    resolveCliFromPath: () => null,
+    probeCursorCliAuth: () => ({
+      authenticated: true,
+      authSource: "cli-login",
+      email: "user@example.com",
+      binPath: "/Users/me/.local/bin/agent",
+    }),
+  });
+  const ipcMain = createIpcMainStub();
+  bridge.init({ sessions: new Map(), sftpClients: new Map(), electronModule: { app: { getPath: () => process.cwd() } } });
+  bridge.registerHandlers(ipcMain);
+
+  try {
+    const discover = ipcMain.handlers.get("netcatty:ai:agents:discover");
+    const agents = await discover({ sender: { id: 1 } }, {});
+    const cursor = agents.find((agent) => agent.command === "cursor");
+
+    assert.equal(cursor?.available, true);
+    assert.equal(cursor?.authenticated, true);
+    assert.equal(cursor?.authSource, "cli-login");
+    assert.equal(cursor?.path, "/Users/me/.local/bin/agent");
+    assert.equal(cursor?.cliEmail, "user@example.com");
+  } finally {
+    restore();
+  }
+});
+
 test("discover exposes Cursor SDK support when API key is saved in settings", async () => {
   const { bridge, restore } = loadBridgeWithMocks({
     resolveCliFromPath: () => null,
@@ -728,6 +1007,33 @@ test("discover exposes Cursor SDK support when API key is saved in settings", as
     assert.equal(cursor?.available, true);
     assert.equal(cursor?.authenticated, true);
     assert.equal(cursor?.authSource, "settings");
+  } finally {
+    restore();
+  }
+});
+
+test("resolve-cli exposes Cursor CLI login without API key", async () => {
+  const { bridge, restore } = loadBridgeWithMocks({
+    resolveCliFromPath: () => null,
+    probeCursorCliAuth: () => ({
+      authenticated: true,
+      authSource: "cli-login",
+      email: "user@example.com",
+      binPath: "/Users/me/.local/bin/agent",
+    }),
+  });
+  const ipcMain = createIpcMainStub();
+  bridge.init({ sessions: new Map(), sftpClients: new Map(), electronModule: { app: { getPath: () => process.cwd() } } });
+  bridge.registerHandlers(ipcMain);
+
+  try {
+    const resolveCli = ipcMain.handlers.get("netcatty:ai:resolve-cli");
+    const result = await resolveCli({ sender: { id: 1 } }, { command: "cursor", customPath: "" });
+    assert.equal(result.available, true);
+    assert.equal(result.authenticated, true);
+    assert.equal(result.authSource, "cli-login");
+    assert.equal(result.path, "/Users/me/.local/bin/agent");
+    assert.equal(result.cliEmail, "user@example.com");
   } finally {
     restore();
   }

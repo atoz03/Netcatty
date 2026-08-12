@@ -36,6 +36,12 @@ test("manual theme list selection reads focused appearance from runtime", () => 
   assert.match(source, /resolvedPreviewTheme = focusedAppearance\.theme/);
 });
 
+test("focusedAppearance recomputes from appearanceChromeStore accent churn", () => {
+  assert.match(source, /useAppearanceChromeStore\(\)/);
+  assert.match(source, /appearanceChrome\.accentMode/);
+  assert.match(source, /appearanceChrome\.customAccent/);
+});
+
 test("closing the theme tab clears runtime user intent", () => {
   assert.match(source, /if \(isSidePanelOpenForCurrentTab\)/);
   assert.match(source, /clearIntent\(\)/);

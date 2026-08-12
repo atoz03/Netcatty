@@ -110,6 +110,7 @@ export interface ScriptDialogRequest {
   type: 'alert' | 'confirm' | 'prompt' | 'waitForTimeout' | 'form';
   message: string;
   defaultValue?: string;
+  sensitive?: boolean;
   pattern?: string;
   timeoutMs?: number;
   form?: ScriptDialogForm;
@@ -126,6 +127,7 @@ export interface ScriptRunParams {
   /** Renderer-provided session state (worker SSH sessions are not in main-process map). */
   sessionMeta?: {
     connected?: boolean;
+    name?: string;
     hostname?: string;
     username?: string;
   };
@@ -148,7 +150,14 @@ declare global {
     scriptScreenSnapshotResponse(requestId: string, snapshot: ScriptScreenSnapshot): Promise<{ ok: boolean }>;
     scriptRecordingStart(sessionId: string): Promise<{ ok: boolean }>;
     scriptRecordingStop(sessionId: string): Promise<{ steps: ScriptRecordingStep[]; code: string }>;
-    scriptRecordingAppendStep(sessionId: string, step: ScriptRecordingStep): Promise<{ ok: boolean }>;
+    scriptRecordingAppendStep(sessionId: string, step: ScriptRecordingStep): Promise<{
+      ok: boolean;
+      stopped?: boolean;
+      reason?: 'limit';
+      error?: string;
+      steps?: ScriptRecordingStep[];
+      code?: string;
+    }>;
     onScriptRunsUpdated(cb: (payload: { runs: ScriptRun[] }) => void): () => void;
     onScriptDialogRequest(cb: (payload: ScriptDialogRequest) => void): () => void;
     onScriptScreenSnapshotRequest(cb: (payload: { requestId: string; sessionId: string }) => void): () => void;

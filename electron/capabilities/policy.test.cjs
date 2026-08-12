@@ -12,6 +12,21 @@ const {
   OBSERVER_DENY_MESSAGE,
 } = require("./policy.cjs");
 const { CAPABILITY_SURFACES, PERMISSION_MODES } = require("./constants.cjs");
+const { ALL_CAPABILITIES } = require("./catalog/index.cjs");
+
+test("new vault management writes use the standard permission policy", () => {
+  const ids = [
+    "portforward.rules.create", "portforward.rules.update", "portforward.rules.duplicate", "portforward.rules.delete",
+    "vault.note.delete", "vault.group.create", "vault.group.update", "vault.group.delete",
+  ];
+  for (const id of ids) {
+    const capability = ALL_CAPABILITIES.find((entry) => entry.id === id);
+    assert.ok(capability, id);
+    assert.equal(capability.policy.write, true, id);
+    assert.equal(capability.policy.bypassesObserverBlock, false, id);
+    assert.equal(capability.policy.bypassesApproval, false, id);
+  }
+});
 
 test("builtin write methods match legacy mcpServerBridge write set", () => {
   const legacyWriteMethods = [

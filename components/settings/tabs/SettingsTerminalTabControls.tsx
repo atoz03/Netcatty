@@ -6,6 +6,7 @@ import { DEFAULT_KEYWORD_HIGHLIGHT_RULES, type KeywordHighlightRule } from "../.
 import { useI18n } from "../../../application/i18n/I18nProvider";
 import { TERMINAL_THEMES } from "../../../infrastructure/config/terminalThemes";
 import { cn } from "../../../lib/utils";
+import { Toggle } from "../settings-ui";
 import { Button } from "../../ui/button";
 import { Dialog, DialogContent, DialogFooter, DialogHeader, DialogTitle } from "../../ui/dialog";
 import { Input } from "../../ui/input";
@@ -14,6 +15,16 @@ import { Textarea } from "../../ui/textarea";
 
 // Keyword highlight rules editor for global settings
 const DEFAULT_NEW_RULE_COLOR = '#F87171';
+
+/** Temporarily disable/enable one rule without deleting it. */
+export function toggleKeywordHighlightRuleEnabled(
+  rules: KeywordHighlightRule[],
+  ruleId: string,
+): KeywordHighlightRule[] {
+  return rules.map((rule) => (
+    rule.id === ruleId ? { ...rule, enabled: !rule.enabled } : rule
+  ));
+}
 
 export const AddCustomRuleDialog: React.FC<{
   open: boolean;
@@ -194,6 +205,11 @@ export const KeywordHighlightRulesEditor: React.FC<{
                 style={{ backgroundColor: rule.color }}
               />
             </label>
+            <Toggle
+              checked={rule.enabled}
+              onChange={() => onChange(toggleKeywordHighlightRuleEnabled(rules, rule.id))}
+              ariaLabel={`${rule.label}, ${rule.enabled ? t('common.enabled') : t('common.disabled')}`}
+            />
           </div>
         );
       })}

@@ -2,8 +2,9 @@ import React from "react";
 import { ExternalLink, LogIn, LogOut, RefreshCw, RotateCcw, X } from "lucide-react";
 import { useI18n } from "../../../../application/i18n/I18nProvider";
 import { Button } from "../../../ui/button";
+import { Switch } from "../../../ui/switch";
 import { cn } from "../../../../lib/utils";
-import type { AgentPathInfo, CodexIntegrationStatus, CodexLoginSession } from "./types";
+import type { AgentPathInfo, CodexAppServerStatus, CodexIntegrationStatus, CodexLoginSession } from "./types";
 
 export const CodexConnectionCard: React.FC<{
   pathInfo: AgentPathInfo | null;
@@ -22,6 +23,9 @@ export const CodexConnectionCard: React.FC<{
   onCancel: () => void;
   onOpenUrl: () => void;
   onLogout: () => void;
+  appServerRuntime: 'sdk' | 'app-server';
+  appServerStatus: CodexAppServerStatus | null;
+  onAppServerRuntimeChange: (runtime: 'sdk' | 'app-server') => void;
 }> = ({
   pathInfo,
   isResolvingPath,
@@ -39,6 +43,9 @@ export const CodexConnectionCard: React.FC<{
   onCancel,
   onOpenUrl,
   onLogout,
+  appServerRuntime,
+  appServerStatus,
+  onAppServerRuntimeChange,
 }) => {
   const { t } = useI18n();
   const found = pathInfo?.available;
@@ -137,6 +144,35 @@ export const CodexConnectionCard: React.FC<{
               {t('ai.codex.resetPath')}
             </Button>
           </div>
+        </div>
+      )}
+
+      {found && (
+        <div className="border-t border-border/40 pt-3 flex items-start justify-between gap-4">
+          <div className="min-w-0 space-y-1">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">{t('ai.codex.appServer.title')}</span>
+              <span className="rounded border border-amber-500/30 bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-500">
+                {t('ai.codex.appServer.experimental')}
+              </span>
+            </div>
+            <p className="text-xs text-muted-foreground leading-5">
+              {t('ai.codex.appServer.description')}
+            </p>
+            {appServerStatus?.checking ? (
+              <p className="text-xs text-muted-foreground">{t('ai.codex.appServer.checking')}</p>
+            ) : appServerStatus?.available ? (
+              <p className="text-xs text-emerald-500">{t('ai.codex.appServer.available')}</p>
+            ) : appServerStatus?.error ? (
+              <p className="text-xs text-amber-500">{appServerStatus.error}</p>
+            ) : null}
+          </div>
+          <Switch
+            checked={appServerRuntime === 'app-server'}
+            disabled={Boolean(appServerStatus?.checking) || (appServerRuntime === 'sdk' && appServerStatus?.available !== true)}
+            aria-label={t('ai.codex.appServer.title')}
+            onCheckedChange={(checked) => onAppServerRuntimeChange(checked ? 'app-server' : 'sdk')}
+          />
         </div>
       )}
 

@@ -19,7 +19,7 @@ import { executeWebSearchProvider } from './webSearchProviders';
 /** Discriminated union returned by every shared executor. */
 export type ToolExecResult<T = unknown> =
   | { ok: true; data: T }
-  | { ok: false; error: string };
+  | { ok: false; error: string; data?: T };
 
 // ---------------------------------------------------------------------------
 // Dependencies bundle
@@ -96,10 +96,15 @@ export async function executeTerminalExecute(
   const result = await bridge.aiExec(sessionId, command, deps.chatSessionId);
   // Real execution failures (timeout, disconnect, no stream) have an `error` field
   if (!result.ok && result.error) {
-    const parts = [result.error];
-    if (result.stdout) parts.push(`Partial output:\n${result.stdout}`);
-    if (result.stderr) parts.push(`Stderr:\n${result.stderr}`);
-    return { ok: false, error: parts.join('\n\n') };
+    return {
+      ok: false,
+      error: result.error,
+      data: {
+        stdout: result.stdout || '',
+        stderr: result.stderr || '',
+        exitCode: isNetworkDevice ? (result.exitCode ?? null) : (result.exitCode ?? -1),
+      },
+    };
   }
   // Command ran (even if exit code is non-zero) — always return stdout+exitCode for LLM to judge.
   // Network device / serial sessions return exitCode: null because vendor CLIs don't expose

@@ -3,17 +3,25 @@
  * Full connection overlay with host info, progress indicator, and auth/progress content
  */
 import { Fingerprint, Loader2, Plug, TerminalSquare, X } from 'lucide-react';
-import React from 'react';
+import React, { useCallback, useEffect, useRef } from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { cn } from '../../lib/utils';
 import { Host, SSHKey } from '../../types';
 import { formatHostPort, resolveTelnetPort } from '../../domain/host';
+import { isPluginHostProtocol } from '../../domain/pluginConnection';
 import { DistroAvatar } from '../DistroAvatar';
 import { Button } from '../ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
 import { TerminalAuthDialog, TerminalAuthDialogProps } from './TerminalAuthDialog';
 import { TerminalConnectionProgress, TerminalConnectionProgressProps } from './TerminalConnectionProgress';
 import { HostKeyInfo, TerminalHostKeyVerification } from './TerminalHostKeyVerification';
+import {
+    resolveDisconnectedDialogTerminalRoot,
+    restoreTerminalFocusFromDisconnectedDialog,
+    shouldClaimDisconnectedDialogFocus,
+    shouldReconnectDisconnectedDialogOnEnterKey,
+    shouldRestoreDisconnectedDialogTerminalFocus,
+} from './terminalHelpers';
 
 export interface ChainProgress {
     currentHop: number;
@@ -36,6 +44,8 @@ export interface TerminalConnectionDialogProps {
     keys: SSHKey[];
     onDismissDisconnected?: () => void;
     showEnterReconnectHint?: boolean;
+    /** False for unfocused split siblings — do not claim body/document focus. */
+    isFocusedPane?: boolean;
     hostKeyVerification?: {
         hostKeyInfo: HostKeyInfo;
         onClose: () => void;
@@ -61,6 +71,9 @@ const getProtocolInfo = (host: Host): { i18nKey: string; showPort: boolean; port
         return { i18nKey: 'terminal.connection.protocol.et', showPort: true, port: host.etPort || 2022 };
     }
     const protocol = host.protocol || 'ssh';
+    if (isPluginHostProtocol(protocol)) {
+        return { i18nKey: 'terminal.connection.protocol.plugin', showPort: false, port: 0 };
+    }
     switch (protocol) {
         case 'local':
             return { i18nKey: 'terminal.connection.protocol.local', showPort: false, port: 0 };
@@ -91,6 +104,7 @@ export const TerminalConnectionDialog: React.FC<TerminalConnectionDialogProps> =
     keys,
     onDismissDisconnected,
     showEnterReconnectHint,
+    isFocusedPane,
     hostKeyVerification,
     progressProps,
 }) => {
@@ -103,6 +117,94 @@ export const TerminalConnectionDialog: React.FC<TerminalConnectionDialogProps> =
     const isVerifyingHostKey = Boolean(hostKeyVerification);
     const isHostKeyChanged = hostKeyVerification?.hostKeyInfo.status === 'changed';
     const shouldCompleteProgress = hasError || (!isConnecting && !needsAuth);
+    // When the disconnected overlay is up and Enter-reconnect is advertised,
+    // keep a focus sink on the overlay itself so body/document focus loss cannot
+    // make the hint lie (#2544). Auth/host-key flows keep their own inputs.
+    const onRetry = progressProps.onRetry;
+    const canEnterReconnectFromDialog = Boolean(
+        showEnterReconnectHint
+        && status === 'disconnected'
+        && !needsAuth
+        && !isVerifyingHostKey
+        && onRetry,
+    );
+    const dialogFocusRef = useRef<HTMLDivElement | null>(null);
+    // Unmount cleanup keeps [] deps; read the latest pane ownership then.
+    const isFocusedPaneRef = useRef(isFocusedPane);
+    isFocusedPaneRef.current = isFocusedPane;
+
+    // Claim focus only when Enter-reconnect mode turns on — not on every
+    // showLogs/error rerender (those would steal keyboard focus off buttons).
+    useEffect(() => {
+        if (!canEnterReconnectFromDialog) return;
+        const node = dialogFocusRef.current;
+        if (!node) return;
+        const sessionRoot = node.closest("[data-session-id]");
+        const focusOverlay = () => {
+            if (typeof document === "undefined") return;
+            if (!shouldClaimDisconnectedDialogFocus({
+                activeElement: document.activeElement,
+                dialogNode: node,
+                sessionRoot,
+                documentBody: document.body,
+                documentElement: document.documentElement,
+                isFocusedPane,
+            })) {
+                return;
+            }
+            node.focus({ preventScroll: true });
+        };
+        focusOverlay();
+        // Re-assert after paint/microtasks so late blur from xterm teardown
+        // cannot leave focus on document.body — still never steals other panes.
+        const timer = window.setTimeout(focusOverlay, 0);
+        return () => window.clearTimeout(timer);
+    }, [canEnterReconnectFromDialog, isFocusedPane]);
+
+    // Restore xterm focus only when this overlay unmounts (connected / dismiss).
+    // Do not key on Enter-reconnect mode: reconnect may keep the dialog mounted
+    // for connecting / auth / host-key, and restoring then routes keyboard behind
+    // the blocking overlay.
+    useEffect(() => {
+        const node = dialogFocusRef.current;
+        if (!node) return;
+        // Capture the terminal root while the dialog is still mounted — after
+        // unmount, parentElement is null and popup trees have no data-session-id.
+        const sessionRoot = resolveDisconnectedDialogTerminalRoot(
+            node,
+            node.closest("[data-session-id]"),
+        );
+        return () => {
+            if (typeof document === "undefined") return;
+            if (!shouldRestoreDisconnectedDialogTerminalFocus(node)) return;
+            restoreTerminalFocusFromDisconnectedDialog({
+                activeElement: document.activeElement,
+                dialogNode: node,
+                sessionRoot,
+                documentBody: document.body,
+                documentElement: document.documentElement,
+                isFocusedPane: isFocusedPaneRef.current,
+            });
+        };
+    }, []);
+
+    const handleDialogKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+        if (!shouldReconnectDisconnectedDialogOnEnterKey({
+            key: event.key,
+            enabled: canEnterReconnectFromDialog,
+            altKey: event.altKey,
+            ctrlKey: event.ctrlKey,
+            metaKey: event.metaKey,
+            shiftKey: event.shiftKey,
+            isComposing: event.nativeEvent.isComposing,
+            target: event.target,
+        })) {
+            return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        onRetry();
+    }, [canEnterReconnectFromDialog, onRetry]);
     const targetFirstSegmentWidth = isVerifyingHostKey || shouldCompleteProgress
         ? 100
         : Math.min(100, progressValue * 2);
@@ -153,9 +255,24 @@ export const TerminalConnectionDialog: React.FC<TerminalConnectionDialogProps> =
                     ? 'var(--terminal-ui-bg, var(--background))'
                     : 'color-mix(in srgb, var(--terminal-ui-bg, var(--background)) 35%, transparent)',
             }}
+            onMouseDown={(event) => {
+                // Clicking the dimmed backdrop (not a control) should park focus
+                // on the overlay so the next Enter still reconnects.
+                if (!canEnterReconnectFromDialog) return;
+                const target = event.target;
+                if (!(target instanceof HTMLElement)) return;
+                if (target.closest("button, a, input, textarea, select, [contenteditable='true'], [role='button'], [role='menuitem'], [role='textbox']")) {
+                    return;
+                }
+                dialogFocusRef.current?.focus({ preventScroll: true });
+            }}
         >
             <div
-                className="w-[540px] max-w-[88vw] rounded-xl shadow-xl p-4 space-y-3 transition-all duration-200"
+                ref={dialogFocusRef}
+                tabIndex={canEnterReconnectFromDialog ? -1 : undefined}
+                data-terminal-disconnected-dialog={canEnterReconnectFromDialog ? 'true' : undefined}
+                onKeyDown={handleDialogKeyDown}
+                className="w-[540px] max-w-[88vw] rounded-xl shadow-xl p-4 space-y-3 transition-all duration-200 outline-none"
                 style={{
                     backgroundColor: 'color-mix(in srgb, var(--terminal-ui-bg, var(--background)) 95%, transparent)',
                     border: '1px solid color-mix(in srgb, var(--terminal-ui-fg, var(--foreground)) 12%, var(--terminal-ui-bg, var(--background)) 88%)',

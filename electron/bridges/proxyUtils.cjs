@@ -35,6 +35,14 @@ function substituteProxyCommand(command, targetHost, targetPort, options = {}) {
 }
 
 function createProcessSocket(child) {
+    let proxyReady = false;
+    const proxyReadyCallbacks = new Set();
+    const markProxyReady = () => {
+        if (proxyReady) return;
+        proxyReady = true;
+        for (const callback of proxyReadyCallbacks) callback();
+        proxyReadyCallbacks.clear();
+    };
     const socket = new Duplex({
         read() {
             child.stdout.resume();
@@ -54,6 +62,7 @@ function createProcessSocket(child) {
             child.stdin.end(callback);
         },
         destroy(error, callback) {
+            proxyReadyCallbacks.clear();
             try { child.stdin.destroy(); } catch { /* ignore */ }
             try { child.stdout.destroy(); } catch { /* ignore */ }
             if (!child.killed) {
@@ -65,8 +74,13 @@ function createProcessSocket(child) {
     socket.setNoDelay = () => socket;
     socket.setKeepAlive = () => socket;
     socket.setTimeout = () => socket;
+    socket.__netcattyOnProxyReady = (callback) => {
+        if (proxyReady) queueMicrotask(callback);
+        else proxyReadyCallbacks.add(callback);
+    };
 
     child.stdout.on("data", (chunk) => {
+        markProxyReady();
         if (!socket.push(chunk)) child.stdout.pause();
     });
     child.stdout.on("end", () => socket.push(null));
@@ -76,25 +90,58 @@ function createProcessSocket(child) {
     return socket;
 }
 
+function runWhenProxyConnectionReady(socket, callback) {
+    if (typeof socket?.__netcattyOnProxyReady === "function") {
+        socket.__netcattyOnProxyReady(callback);
+        return;
+    }
+    callback();
+}
+
 function createProxyCommandSocket(proxy, targetHost, targetPort, options = {}) {
     const command = substituteProxyCommand(proxy.command, targetHost, targetPort, { platform: process.platform }).trim();
     if (!command) return Promise.reject(new Error("ProxyCommand is required"));
 
+    // Keep SSH ProxyCommand on the launch-time proxy env. App-level Direct/Custom
+    // rewrites process.env for Node HTTP clients only and must not change SSH.
+    const { buildTerminalProcessEnv } = require("./httpNetworkProxyBridge.cjs");
     const child = spawn(command, {
         shell: true,
         stdio: ["pipe", "pipe", "pipe"],
         windowsHide: true,
+        env: buildTerminalProcessEnv(process.env),
     });
     const socket = createProcessSocket(child);
+    const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
+        ? Number(options.timeoutMs)
+        : 0;
     let settled = false;
     let stderr = "";
+    let timeoutId = null;
+
+    const clearConnectTimeout = () => {
+        if (!timeoutId) return;
+        clearTimeout(timeoutId);
+        timeoutId = null;
+    };
 
     child.stderr?.on("data", (chunk) => {
         stderr = (stderr + chunk.toString()).slice(-4096);
     });
+    child.stdout.once("data", clearConnectTimeout);
+    child.once("close", clearConnectTimeout);
+
+    if (timeoutMs) {
+        timeoutId = setTimeout(() => {
+            const err = new Error(`ProxyCommand connection timeout to ${targetHost}:${targetPort}`);
+            socket.destroy(err);
+        }, timeoutMs);
+        timeoutId.unref?.();
+    }
 
     return new Promise((resolve, reject) => {
         child.once("error", (err) => {
+            clearConnectTimeout();
             if (settled) {
                 socket.destroy(err);
                 return;
@@ -119,6 +166,7 @@ function createProxyCommandSocket(proxy, targetHost, targetPort, options = {}) {
             }
         });
     }).catch((err) => {
+        clearConnectTimeout();
         try { child.kill(); } catch { /* ignore */ }
         throw err;
     });
@@ -294,5 +342,6 @@ function createProxySocket(proxy, targetHost, targetPort, options = {}) {
 
 module.exports = {
     createProxySocket,
+    runWhenProxyConnectionReady,
     substituteProxyCommand,
 };

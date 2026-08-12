@@ -60,6 +60,7 @@ const META_CAPABILITIES = [
     },
     surfaces: {
       builtin: { rpcMethod: "netcatty/listAttachments", mcpTool: "list_attachments" },
+      cli: { command: ["attachment", "list"] },
     },
   },
   {
@@ -78,6 +79,7 @@ const META_CAPABILITIES = [
     },
     surfaces: {
       builtin: { rpcMethod: "netcatty/readAttachment", mcpTool: "read_attachment" },
+      cli: { command: ["attachment", "read"] },
     },
   },
   {
@@ -135,6 +137,25 @@ const META_CAPABILITIES = [
     surfaces: {
       builtin: { rpcMethod: "netcatty/getContext" },
       cli: { command: ["session"] },
+    },
+  },
+  {
+    id: "session.close",
+    domain: "session",
+    status: CAPABILITY_STATUS.IMPLEMENTED,
+    description: "Close a terminal session previously opened by host_open in the current AI scope.",
+    policy: {
+      write: true,
+      sensitiveRead: false,
+      longRunning: false,
+      requiresChatSession: true,
+      bypassesObserverBlock: true,
+      bypassesApproval: true,
+      bypassesChatCancel: true,
+    },
+    surfaces: {
+      global: { rpcMethod: "session/close" },
+      public: { rpcMethod: "public/session/close", mcpTool: "session_close" },
     },
   },
 ];

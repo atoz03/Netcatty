@@ -1,17 +1,23 @@
 import type { Terminal as XTerm } from "@xterm/xterm";
 
 /**
- * Strip full-screen redraw sequences inside DEC Mode 2026 synchronized-output
+ * Soften full-screen redraw clears inside DEC Mode 2026 synchronized-output
  * blocks before data reaches xterm.js.
  *
  * Codex and Claude Code emit `\x1b[H` + `\x1b[2J` inside sync blocks for
  * full-screen frames. xterm.js resets viewportY on `\x1b[2J`, which yanks
- * scroll position. Incremental sync blocks must pass through untouched.
+ * scroll position when the user is reading scrollback (xterm.js#5801).
+ * Incremental sync blocks must pass through untouched.
  *
  * Detection follows anthropics/claude-code#35580: only blocks that contain
  * both cursor-home and erase-display are treated as full redraws. Pane (#120)
- * strips `\x1b[2J`; we also hold the leading `\x1b[H` until `\x1b[2J` confirms
- * the redraw so incremental blocks that never emit `\x1b[2J` still work.
+ * strips `\x1b[2J` only. We hold the leading `\x1b[H` until `\x1b[2J` confirms
+ * the redraw, then:
+ *   - emit the held cursor-home (so the new frame still starts at the origin)
+ *   - strip only `\x1b[2J` (to avoid viewport yank)
+ *
+ * Stripping both home and clear used to stack whole TUI frames when
+ * `viewportY < baseY` was a false positive (overflow / sticky lag, #2291).
  *
  * @see https://github.com/Dcouple-Inc/Pane/pull/120
  * @see https://github.com/anthropics/claude-code/issues/35580
@@ -23,9 +29,23 @@ export type SyncBlockFilterState = {
   pending: string;
   /** Leading `\x1b[H` held until `\x1b[2J` confirms a full redraw. */
   pendingCursorHome: string | null;
-  /** null = unknown; true = strip home+clear; false = pass block through. */
+  /**
+   * null = unknown;
+   * true = strip further clears in this block (home already emitted);
+   * false = pass remaining block through.
+   */
   fullRedrawBlock: boolean | null;
 };
+
+/**
+ * Minimum rows into scrollback before we treat the viewport as "reading
+ * history" and soft-strip full-redraw clears.
+ *
+ * Intentional 1-row peeks still receive `\x1b[2J` (possible viewport yank);
+ * that is deliberate so a 1-row sticky-bottom / trackpad lag cannot strip
+ * agent TUI frames (#2291).
+ */
+export const SYNC_BLOCK_SCROLLBACK_STRIP_MIN_ROWS = 2;
 
 export type SyncBlockClearFilterResult = {
   output: string;
@@ -176,13 +196,17 @@ const resetSyncBlockState = (state: SyncBlockFilterState): void => {
   state.fullRedrawBlock = null;
 };
 
-/** True when the user has scrolled up into scrollback history. */
+/**
+ * True when the user is reading scrollback far enough that a full-redraw
+ * `\x1b[2J` would yank the viewport. Alternate screen never strips.
+ */
 export const isTerminalViewportScrolledUp = (term: XTerm): boolean => {
-  const buffer = term.buffer.active;
-  if (buffer.type !== "normal") {
+  const buffer = term.buffer?.active;
+  if (!buffer || buffer.type !== "normal") {
     return false;
   }
-  return buffer.viewportY < buffer.baseY;
+  const scrolledRows = buffer.baseY - buffer.viewportY;
+  return scrolledRows >= SYNC_BLOCK_SCROLLBACK_STRIP_MIN_ROWS;
 };
 
 const shouldStripFullRedrawClear = (term?: XTerm): boolean =>
@@ -230,6 +254,8 @@ const scanSyncBlockClears = (
     const cursorHome = readBlockCursorHome(input, index);
     if (cursorHome) {
       if (state.fullRedrawBlock === true) {
+        // Home already applied for this full redraw; drop redundant homes so
+        // we do not re-hold and re-pair with a later clear incorrectly.
         index = cursorHome.end;
         continue;
       }
@@ -238,6 +264,7 @@ const scanSyncBlockClears = (
         index = cursorHome.end;
         continue;
       }
+      // Hold until `\x1b[2J` confirms a full redraw; home is re-emitted then.
       state.pendingCursorHome = cursorHome.raw;
       index = cursorHome.end;
       continue;
@@ -245,8 +272,18 @@ const scanSyncBlockClears = (
 
     if (input.startsWith(CLEAR, index)) {
       if (state.pendingCursorHome !== null) {
+        // Full redraw pair: always re-emit the held home so the frame starts
+        // at the origin (#2291). Re-check scroll at CLEAR time — home may have
+        // been held while scrolled, then the user returned to the live bottom
+        // before 2J arrived in a later PTY chunk.
+        result += state.pendingCursorHome;
         state.pendingCursorHome = null;
-        state.fullRedrawBlock = true;
+        if (shouldStripFullRedrawClear(term)) {
+          state.fullRedrawBlock = true;
+        } else {
+          result += CLEAR;
+          state.fullRedrawBlock = null;
+        }
         index += CLEAR.length;
         continue;
       }
@@ -259,6 +296,7 @@ const scanSyncBlockClears = (
         index += CLEAR.length;
         continue;
       }
+      // Standalone clear (no leading home) is not a full redraw pair.
       state.fullRedrawBlock = false;
       result += CLEAR;
       index += CLEAR.length;

@@ -14,7 +14,12 @@ import {
 import React, { useCallback, useMemo, useState } from "react";
 import { useI18n } from "../application/i18n/I18nProvider";
 import { customThemeStore } from "../application/state/customThemeStore";
-import { resolveGroupDefaults, resolveGroupTerminalThemeId } from "../domain/groupConfig";
+import {
+  hasManualGroupSshCredentials,
+  hasManualGroupTelnetCredentials,
+  resolveGroupDefaults,
+  resolveGroupTerminalThemeId,
+} from "../domain/groupConfig";
 import {
   formatProxyConfigEndpoint,
   formatProxyConfigType,
@@ -54,6 +59,7 @@ import { useAvailableFonts } from "../application/state/fontStore";
 import { toast } from "./ui/toast";
 import { GroupSshSettingsSection } from "./GroupSshSettingsSection";
 import { prepareProxyConfigForSave } from "./HostDetailsPanel.helpers";
+import { TerminalEncodingSelect } from "./TerminalEncodingSelect";
 
 type SubPanel = "none" | "proxy" | "chain" | "env-vars" | "theme-select";
 
@@ -85,9 +91,80 @@ type GroupDetailsPanelPropsWithResize = GroupDetailsPanelProps & AsidePanelResiz
 
 export const hasGroupTelnetFields = (c: Partial<GroupConfig>): boolean =>
   c.telnetPort !== undefined ||
+  c.telnetIdentityId !== undefined ||
   c.telnetUsername !== undefined ||
   c.telnetPassword !== undefined ||
   c.telnetEnabled === true;
+
+export const hasGroupSshFields = (c: Partial<GroupConfig>): boolean =>
+  c.protocol === 'ssh' ||
+  c.port !== undefined || !!c.username || !!c.password || !!c.identityFileId ||
+  c.deviceType !== undefined ||
+  c.agentForwarding !== undefined || c.authMethod !== undefined || c.identityId !== undefined ||
+  !!c.proxyProfileId || !!c.proxyConfig || !!c.hostChain || !!c.startupCommand || c.startupCommandRunMode !== undefined || c.legacyAlgorithms !== undefined || c.skipEcdsaHostKey !== undefined || c.algorithms !== undefined || c.backspaceBehavior !== undefined ||
+  Boolean(c.environmentVariables && c.environmentVariables.length > 0) ||
+  c.moshEnabled !== undefined || !!c.moshServerPath ||
+  c.etEnabled !== undefined || c.etPort !== undefined ||
+  Boolean(c.identityFilePaths && c.identityFilePaths.length > 0);
+
+export const selectGroupSshIdentity = (
+  form: Partial<GroupConfig>,
+  identity: Identity | undefined,
+  identityId = identity?.id || "",
+  inheritedIdentityId?: string,
+): Partial<GroupConfig> => {
+  if (!identityId) {
+    return {
+      ...form,
+      identityId: inheritedIdentityId ? "" : undefined,
+      username: undefined,
+      authMethod: undefined,
+    };
+  }
+  if (!identity) return { ...form, identityId };
+  return {
+    ...form,
+    identityId,
+    username: identity.username,
+    authMethod: identity.authMethod,
+    password: undefined,
+    savePassword: undefined,
+    identityFileId: undefined,
+    identityFilePaths: undefined,
+  };
+};
+
+export const selectGroupTelnetIdentity = (
+  form: Partial<GroupConfig>,
+  identityId: string,
+  inheritedIdentityId?: string,
+): Partial<GroupConfig> => ({
+  ...form,
+  telnetIdentityId: identityId || (inheritedIdentityId ? "" : undefined),
+  ...(identityId ? { telnetUsername: undefined, telnetPassword: undefined } : {}),
+});
+
+export const includeMissingIdentityOption = (
+  options: Array<{ value: string; label: string; sublabel?: string }>,
+  identityId: string | undefined,
+  missingLabel: string,
+): Array<{ value: string; label: string; sublabel?: string }> => {
+  if (!identityId || options.some((option) => option.value === identityId)) return options;
+  return [{ value: identityId, label: missingLabel }, ...options];
+};
+
+export const resolveGroupFormIdentityId = (
+  form: Partial<GroupConfig>,
+  inheritedIdentityId: string | undefined,
+  protocol: "ssh" | "telnet",
+): string | undefined => {
+  const formIdentityId = protocol === "ssh" ? form.identityId : form.telnetIdentityId;
+  if (formIdentityId !== undefined) return formIdentityId;
+  const hasManualCredentials = protocol === "ssh"
+    ? hasManualGroupSshCredentials(form)
+    : hasManualGroupTelnetCredentials(form);
+  return hasManualCredentials ? undefined : inheritedIdentityId;
+};
 
 const GroupDetailsPanel: React.FC<GroupDetailsPanelPropsWithResize> = ({
   groupPath,
@@ -130,18 +207,7 @@ const GroupDetailsPanel: React.FC<GroupDetailsPanelPropsWithResize> = ({
   const [nameError, setNameError] = useState<string | null>(null);
 
   // Protocol sections enabled state
-  const hasSshFields = (c: Partial<GroupConfig>) =>
-    c.protocol === 'ssh' ||
-    c.port !== undefined || !!c.username || !!c.password || !!c.identityFileId ||
-    c.deviceType !== undefined ||
-    c.agentForwarding !== undefined || c.authMethod !== undefined || !!c.identityId ||
-    !!c.proxyProfileId || !!c.proxyConfig || !!c.hostChain || !!c.startupCommand || c.startupCommandRunMode !== undefined || c.legacyAlgorithms !== undefined || c.skipEcdsaHostKey !== undefined || c.algorithms !== undefined || c.backspaceBehavior !== undefined ||
-    (c.environmentVariables && c.environmentVariables.length > 0) ||
-    c.moshEnabled !== undefined || !!c.moshServerPath ||
-    c.etEnabled !== undefined || c.etPort !== undefined ||
-    (c.identityFilePaths && c.identityFilePaths.length > 0);
-
-  const [sshEnabled, setSshEnabled] = useState(() => hasSshFields(config || {}));
+  const [sshEnabled, setSshEnabled] = useState(() => hasGroupSshFields(config || {}));
   const [telnetEnabled, setTelnetEnabled] = useState(() => hasGroupTelnetFields(config || {}));
 
   // Sub-panel state
@@ -220,6 +286,7 @@ const GroupDetailsPanel: React.FC<GroupDetailsPanelPropsWithResize> = ({
       const next = { ...prev };
       delete next.telnetEnabled;
       delete next.telnetPort;
+      delete next.telnetIdentityId;
       delete next.telnetUsername;
       delete next.telnetPassword;
       return next;
@@ -319,6 +386,65 @@ const GroupDetailsPanel: React.FC<GroupDetailsPanelPropsWithResize> = ({
       certificate: availableKeys.filter((k) => k.category === "certificate"),
     };
   }, [availableKeys]);
+
+  const identityOptions = useMemo(
+    () => identities.map((identity) => ({
+      value: identity.id,
+      label: identity.label,
+      sublabel: identity.username,
+    })),
+    [identities],
+  );
+
+  const inheritedConnectionDefaults = useMemo(() => {
+    if (!parentGroup || groupConfigs.length === 0) return {};
+    return resolveGroupDefaults(parentGroup, groupConfigs);
+  }, [groupConfigs, parentGroup]);
+  const effectiveSshIdentityId = resolveGroupFormIdentityId(
+    form,
+    inheritedConnectionDefaults.identityId,
+    "ssh",
+  );
+  const effectiveTelnetIdentityId = resolveGroupFormIdentityId(
+    form,
+    inheritedConnectionDefaults.telnetIdentityId,
+    "telnet",
+  );
+  const sshIdentityOptions = useMemo(
+    () => includeMissingIdentityOption(
+      identityOptions,
+      effectiveSshIdentityId,
+      t("hostDetails.identity.missing"),
+    ),
+    [effectiveSshIdentityId, identityOptions, t],
+  );
+  const telnetIdentityOptions = useMemo(
+    () => includeMissingIdentityOption(
+      identityOptions,
+      effectiveTelnetIdentityId,
+      t("hostDetails.identity.missing"),
+    ),
+    [effectiveTelnetIdentityId, identityOptions, t],
+  );
+
+  const updateSshIdentity = useCallback((identityId: string) => {
+    setForm((prev) => selectGroupSshIdentity(
+      prev,
+      identities.find((item) => item.id === identityId),
+      identityId,
+      inheritedConnectionDefaults.identityId,
+    ));
+    setSelectedCredentialType(null);
+    setCredentialPopoverOpen(false);
+  }, [identities, inheritedConnectionDefaults.identityId]);
+
+  const updateTelnetIdentity = useCallback((identityId: string) => {
+    setForm((prev) => selectGroupTelnetIdentity(
+      prev,
+      identityId,
+      inheritedConnectionDefaults.telnetIdentityId,
+    ));
+  }, [inheritedConnectionDefaults.telnetIdentityId]);
 
   // Parent group options — exclude self and children
   const parentGroupOptions = useMemo(() => {
@@ -453,6 +579,7 @@ const GroupDetailsPanel: React.FC<GroupDetailsPanelPropsWithResize> = ({
       ...(telnetEnabled && {
         telnetEnabled: true,
         ...(form.telnetPort !== undefined && { telnetPort: form.telnetPort }),
+        ...(form.telnetIdentityId !== undefined && { telnetIdentityId: form.telnetIdentityId }),
         ...(form.telnetUsername !== undefined && { telnetUsername: form.telnetUsername }),
         ...(form.telnetPassword !== undefined && { telnetPassword: form.telnetPassword }),
       }),
@@ -630,6 +757,10 @@ const GroupDetailsPanel: React.FC<GroupDetailsPanelPropsWithResize> = ({
           showPassword={showPassword}
           setShowPassword={setShowPassword}
           availableKeys={availableKeys}
+          identities={identities}
+          identityOptions={sshIdentityOptions}
+          updateSshIdentity={updateSshIdentity}
+          effectiveSshIdentityId={effectiveSshIdentityId}
           setSelectedCredentialType={setSelectedCredentialType}
           selectedCredentialType={selectedCredentialType}
           credentialPopoverOpen={credentialPopoverOpen}
@@ -715,28 +846,40 @@ const GroupDetailsPanel: React.FC<GroupDetailsPanelPropsWithResize> = ({
               </div>
             </div>
 
-            <Input
-              placeholder={t("hostDetails.username.placeholder")}
-              value={form.telnetUsername || ""}
-              onChange={(e) => update("telnetUsername", e.target.value)}
-              className="h-10"
-            />
-            <div className="relative">
-              <Input
-                placeholder={t("hostDetails.password.placeholder")}
-                type={showTelnetPassword ? "text" : "password"}
-                value={form.telnetPassword || ""}
-                onChange={(e) => update("telnetPassword", e.target.value)}
-                className="h-10 pr-10"
+            {(identities.length > 0 || effectiveTelnetIdentityId) && (
+              <Combobox
+                options={telnetIdentityOptions}
+                value={effectiveTelnetIdentityId || ""}
+                onValueChange={updateTelnetIdentity}
+                placeholder={t("hostDetails.identity.suggestions")}
+                emptyText={t("common.noResultsFound")}
+                className="w-full"
               />
-              <button
-                type="button"
-                onClick={() => setShowTelnetPassword(!showTelnetPassword)}
-                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground transition-colors"
-              >
-                {showTelnetPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-              </button>
-            </div>
+            )}
+            {!effectiveTelnetIdentityId && (<>
+              <Input
+                placeholder={t("hostDetails.username.placeholder")}
+                value={form.telnetUsername || ""}
+                onChange={(e) => update("telnetUsername", e.target.value)}
+                className="h-10"
+              />
+              <div className="relative">
+                <Input
+                  placeholder={t("hostDetails.password.placeholder")}
+                  type={showTelnetPassword ? "text" : "password"}
+                  value={form.telnetPassword || ""}
+                  onChange={(e) => update("telnetPassword", e.target.value)}
+                  className="h-10 pr-10"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowTelnetPassword(!showTelnetPassword)}
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showTelnetPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
+              </div>
+            </>)}
           </HostDetailsSection>
         )}
 
@@ -746,11 +889,10 @@ const GroupDetailsPanel: React.FC<GroupDetailsPanelPropsWithResize> = ({
           icon={<Globe size={14} className="text-muted-foreground" />}
           title={t("vault.groups.details.advanced")}
         >
-          <Input
-            placeholder="UTF-8"
-            value={form.charset || ""}
-            onChange={(e) => update("charset", e.target.value || undefined)}
-            className="h-10"
+          <TerminalEncodingSelect
+            value={form.charset}
+            inheritedValue={inheritedConnectionDefaults.charset}
+            onValueChange={(value) => update("charset", value)}
           />
         </HostDetailsSection>
 
@@ -816,6 +958,7 @@ const GroupDetailsPanel: React.FC<GroupDetailsPanelPropsWithResize> = ({
                 }));
               }}
               className="min-w-0 flex-1"
+              ariaLabel={t("vault.groups.details.fontFamily")}
             />
             {form.fontFamilyOverride && (
               <HostDetailsOverrideReset

@@ -6,7 +6,10 @@ import {
   getTerminalPaneSnapshot,
   HIDDEN_TERMINAL_PANE_SNAPSHOT,
   parseTerminalPaneRenderSnapshot,
-  resolveHiddenTerminalPaneStyle,
+  resolveInactiveTerminalPaneStyle,
+  resolveTerminalLayerSurfaceStyle,
+  shouldMeasureTerminalLayerLayout,
+  shouldUseTerminalPaneSplitLayout,
 } from "./terminalPaneVisibility";
 import type { Workspace } from "../types";
 
@@ -139,16 +142,143 @@ test("terminal pane render snapshot combines visibility and focus in one token",
   assert.equal(parsed.isFocusedPane, true);
 });
 
-test("hidden terminal pane keeps its last visible size without moving offscreen", () => {
-  const hiddenStyle = resolveHiddenTerminalPaneStyle(
-    { left: 0, top: 0, width: "100%", height: "100%" },
+test("hidden focus workspaces keep the focused pane full-size and other panes split", () => {
+  const workspace = createWorkspace("ws-focus", ["f-1", "f-2"], {
+    viewMode: "focus",
+    focusedSessionId: "f-2",
+  });
+
+  assert.equal(shouldUseTerminalPaneSplitLayout({
+    workspace,
+    sessionId: "f-2",
+    isVisible: false,
+    hibernateHiddenTabs: false,
+  }), false);
+  assert.equal(shouldUseTerminalPaneSplitLayout({
+    workspace,
+    sessionId: "f-1",
+    isVisible: false,
+    hibernateHiddenTabs: false,
+  }), true);
+  assert.equal(shouldUseTerminalPaneSplitLayout({
+    workspace,
+    sessionId: "f-1",
+    isVisible: false,
+    hibernateHiddenTabs: true,
+  }), false);
+});
+
+test("default and explicit split workspaces always use split layout geometry", () => {
+  // Drag-to-split workspaces omit viewMode (undefined means tiled split).
+  const defaultSplit: Workspace = {
+    ...createWorkspace("ws-default", ["d-1", "d-2"], { focusedSessionId: "d-1" }),
+    viewMode: undefined,
+  };
+  const explicitSplit = createWorkspace("ws-split", ["s-1", "s-2"], {
+    viewMode: "split",
+    focusedSessionId: "s-1",
+  });
+
+  for (const workspace of [defaultSplit, explicitSplit]) {
+    assert.equal(shouldUseTerminalPaneSplitLayout({
+      workspace,
+      sessionId: workspace.focusedSessionId ?? "x",
+      isVisible: true,
+      hibernateHiddenTabs: false,
+    }), true);
+    assert.equal(shouldUseTerminalPaneSplitLayout({
+      workspace,
+      sessionId: "other",
+      isVisible: false,
+      hibernateHiddenTabs: false,
+    }), true);
+    assert.equal(shouldUseTerminalPaneSplitLayout({
+      workspace,
+      sessionId: "other",
+      isVisible: false,
+      hibernateHiddenTabs: true,
+    }), true);
+  }
+});
+
+test("hidden terminal layers measure once when their layout must stay active", () => {
+  assert.equal(shouldMeasureTerminalLayerLayout({
+    isTerminalLayerVisible: false,
+    keepHiddenLayoutActive: true,
+    workspaceArea: { width: 0, height: 0 },
+  }), true);
+  assert.equal(shouldMeasureTerminalLayerLayout({
+    isTerminalLayerVisible: false,
+    keepHiddenLayoutActive: true,
+    workspaceArea: { width: 1200, height: 800 },
+  }), false);
+  assert.equal(shouldMeasureTerminalLayerLayout({
+    isTerminalLayerVisible: false,
+    keepHiddenLayoutActive: false,
+    workspaceArea: { width: 0, height: 0 },
+  }), false);
+  assert.equal(shouldMeasureTerminalLayerLayout({
+    isTerminalLayerVisible: true,
+    keepHiddenLayoutActive: false,
+    workspaceArea: { width: 0, height: 0 },
+  }), true);
+});
+
+test("inactive terminal pane keeps rendering when hibernate is disabled", () => {
+  const inactiveStyle = resolveInactiveTerminalPaneStyle(
+    { left: "40px", top: 0, width: "640px", height: "480px" },
     { width: 1180, height: 720 },
+    false,
   );
 
-  assert.equal(hiddenStyle.left, 0);
-  assert.equal(hiddenStyle.top, 0);
-  assert.equal(hiddenStyle.visibility, "hidden");
-  assert.equal(hiddenStyle.pointerEvents, "none");
-  assert.equal(hiddenStyle.width, "1180px");
-  assert.equal(hiddenStyle.height, "720px");
+  assert.equal(inactiveStyle.left, "40px");
+  assert.equal(inactiveStyle.top, 0);
+  assert.equal(inactiveStyle.visibility, "visible");
+  assert.equal(inactiveStyle.pointerEvents, "none");
+  assert.equal(inactiveStyle.zIndex, 0);
+  assert.equal(inactiveStyle.width, "640px");
+  assert.equal(inactiveStyle.height, "480px");
+});
+
+test("inactive full-size panes keep their last visible dimensions without hibernate", () => {
+  const inactiveStyle = resolveInactiveTerminalPaneStyle(
+    { left: 0, top: 0, width: "100%", height: "100%" },
+    { width: 1180, height: 720 },
+    false,
+    true,
+  );
+
+  assert.equal(inactiveStyle.visibility, "visible");
+  assert.equal(inactiveStyle.width, "1180px");
+  assert.equal(inactiveStyle.height, "720px");
+});
+
+test("inactive terminal pane is hidden only when hibernate is enabled", () => {
+  const inactiveStyle = resolveInactiveTerminalPaneStyle(
+    { left: 0, top: 0, width: "100%", height: "100%" },
+    { width: 1180, height: 720 },
+    true,
+  );
+
+  assert.equal(inactiveStyle.visibility, "hidden");
+  assert.equal(inactiveStyle.pointerEvents, "none");
+  assert.equal(inactiveStyle.zIndex, 0);
+});
+
+test("terminal layer stays rendered behind other app surfaces unless hibernate is enabled", () => {
+  assert.deepEqual(resolveTerminalLayerSurfaceStyle(false, false), {
+    visibility: "visible",
+    pointerEvents: "none",
+    zIndex: 0,
+  });
+  assert.deepEqual(resolveTerminalLayerSurfaceStyle(false, true), {
+    visibility: "hidden",
+    pointerEvents: "none",
+    zIndex: 0,
+  });
+  assert.deepEqual(resolveTerminalLayerSurfaceStyle(true, true), {
+    visibility: "visible",
+    pointerEvents: "auto",
+    zIndex: 10,
+  });
 });

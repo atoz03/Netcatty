@@ -73,6 +73,25 @@ function cancelPassphraseRequest(requestId, reason = "cancelled") {
   return cancelled;
 }
 
+function cancelPassphraseRequestsForSession(sessionId, reason = "session-closed", bootEpoch) {
+  if (!sessionId) return 0;
+  const requestedEpoch = Number.isFinite(bootEpoch) ? Number(bootEpoch) : undefined;
+  let cancelled = 0;
+  for (const [requestId, pending] of [...passphraseRequests.entries()]) {
+    if (pending.sessionId !== sessionId) continue;
+    // A stale close for an older boot must not cancel a newer reconnect's prompt.
+    if (
+      requestedEpoch !== undefined
+      && Number.isFinite(pending.bootEpoch)
+      && pending.bootEpoch > requestedEpoch
+    ) {
+      continue;
+    }
+    if (cancelPassphraseRequest(requestId, reason)) cancelled += 1;
+  }
+  return cancelled;
+}
+
 function requestPassphrase(sender, keyPath, keyName, hostname, passphraseInvalid, options = {}) {
   return new Promise((resolve) => {
     if (!sender || sender.isDestroyed()) {
@@ -111,6 +130,8 @@ function requestPassphrase(sender, keyPath, keyName, hostname, passphraseInvalid
       webContentsId: sender.id,
       keyPath,
       keyName,
+      sessionId: typeof options.sessionId === "string" ? options.sessionId : undefined,
+      bootEpoch: Number.isFinite(options.bootEpoch) ? Number(options.bootEpoch) : undefined,
       createdAt: Date.now(),
       timeoutId,
       signal,
@@ -130,6 +151,8 @@ function requestPassphrase(sender, keyPath, keyName, hostname, passphraseInvalid
         keyName,
         hostname,
         passphraseInvalid: !!passphraseInvalid,
+        ...(typeof options.sessionId === "string" ? { sessionId: options.sessionId } : {}),
+        ...(Number.isFinite(options.bootEpoch) ? { bootEpoch: Number(options.bootEpoch) } : {}),
       });
     } catch (err) {
       console.error('[Passphrase] Failed to send passphrase request:', err);
@@ -148,6 +171,11 @@ function handleResponse(_event, payload) {
   if (!pending) {
     console.warn(`[Passphrase] No pending request for ${requestId}`);
     return { success: false, error: 'Request not found' };
+  }
+
+  if (_event?.sender?.id !== pending.webContentsId) {
+    console.warn(`[Passphrase] Wrong sender for request ${requestId}`);
+    return { success: false, error: 'Wrong sender' };
   }
   
   if (cancelled) {
@@ -184,6 +212,7 @@ module.exports = {
   generateRequestId,
   requestPassphrase,
   cancelPassphraseRequest,
+  cancelPassphraseRequestsForSession,
   handleResponse,
   registerHandler,
   getRequests,

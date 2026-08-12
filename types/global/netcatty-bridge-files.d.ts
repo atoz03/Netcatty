@@ -6,17 +6,12 @@ declare global {
     selectApplication?(): Promise<{ path: string; name: string } | null>;
     openWithApplication?(filePath: string, appPath: string): Promise<boolean>;
     openWithSystemDefault?(filePath: string): Promise<{ success: boolean; error?: string }>;
-    downloadSftpToTemp?(sftpId: string, remotePath: string, fileName: string, encoding?: SftpFilenameEncoding): Promise<string>;
     downloadSftpToTempWithProgress?(
       sftpId: string,
       remotePath: string,
       fileName: string,
       encoding: SftpFilenameEncoding | undefined,
-      transferId: string,
-      onProgress?: (transferred: number, total: number, speed: number) => void,
-      onComplete?: () => void,
-      onError?: (error: string) => void,
-      onCancelled?: () => void
+      transferId: string
     ): Promise<{ localPath: string; cancelled: boolean }>;
 
     // Save dialog for file downloads
@@ -29,11 +24,15 @@ declare global {
     stopFileWatch?(watchId: string, cleanupTempFile?: boolean): Promise<{ success: boolean }>;
     listFileWatches?(): Promise<Array<{ watchId: string; localPath: string; remotePath: string; sftpId: string }>>;
     registerTempFile?(sftpId: string, localPath: string): Promise<{ success: boolean }>;
+    unregisterTempFile?(sftpId: string, localPath: string): Promise<{ success: boolean; retained?: boolean }>;
     onFileWatchSynced?(cb: (payload: { watchId: string; localPath: string; remotePath: string; bytesWritten: number }) => void): () => void;
     onFileWatchError?(cb: (payload: { watchId: string; localPath: string; remotePath: string; error: string }) => void): () => void;
+    onFileWatchStopped?(cb: (payload: { watchId: string; localPath: string; remotePath: string; sftpId: string }) => void): () => void;
 
     // Temp file cleanup
     deleteTempFile?(filePath: string): Promise<{ success: boolean }>;
+    stageUploadFile?(file: File, transferId: string): Promise<string>;
+    cancelStagedUploadFile?(transferId: string): Promise<{ success: boolean }>;
 
     // Crash Logs
     getCrashLogs?(): Promise<Array<{ fileName: string; date: string; size: number; entryCount: number }>>;
@@ -62,6 +61,22 @@ declare global {
     clearTempDir?(): Promise<{ deletedCount: number; failedCount: number; error?: string }>;
     getTempDirPath?(): Promise<string>;
     openTempDir?(): Promise<{ success: boolean }>;
+    getToolOutputPersistenceStatus?(): Promise<{ durable: boolean; reason?: string }>;
+    writeToolOutputTemp?(record: import('../../infrastructure/ai/harness/toolOutputStore').PersistedToolOutputRecord, content: string): Promise<{ ok: boolean; path?: string; manifestPath?: string; error?: string }>;
+    restoreToolOutputTemp?(handleId: string, chatSessionId: string): Promise<{
+      path: string;
+      record: import('../../infrastructure/ai/harness/toolOutputStore').PersistedToolOutputRecord;
+    } | null>;
+    readToolOutputTemp?(filePath: string, request?: {
+      mode?: 'head' | 'tail' | 'full' | 'range' | 'search';
+      maxChars?: number;
+      offset?: number;
+      query?: string;
+    }): Promise<unknown | null>;
+    deleteToolOutputTemp?(filePath: string): Promise<{ ok: boolean }>;
+    deleteChatToolOutputsTemp?(chatSessionId: string): Promise<{ deletedCount: number }>;
+    deleteTerminalToolOutputsTemp?(chatSessionId: string, terminalSessionId: string): Promise<{ deletedCount: number }>;
+    deleteTerminalToolOutputsEverywhereTemp?(terminalSessionId: string): Promise<{ deletedCount: number }>;
 
     // Session Logs
     exportSessionLog?(payload: {
@@ -82,11 +97,30 @@ declare global {
       directory: string;
     }): Promise<{ success: boolean; error?: string; filePath?: string }>;
     openSessionLogsDir?(directory: string): Promise<{ success: boolean; error?: string }>;
+    clearSessionLogsDir?(directory: string): Promise<{ success: boolean; deletedCount: number; failedCount: number; error?: string }>;
+    chooseManualSessionLogPath?(payload: {
+      sessionId: string;
+      sessionName?: string;
+      preferredDirectory?: string;
+      format?: 'txt' | 'raw' | 'html';
+    }): Promise<{
+      success: boolean;
+      canceled?: boolean;
+      error?: string;
+      selectionToken?: string;
+      filePath?: string;
+      format?: 'txt' | 'raw' | 'html';
+    }>;
     startManualSessionLog?(payload: {
       sessionId: string;
       sessionName?: string;
       preferredDirectory?: string;
+      /** Opaque token from chooseManualSessionLogPath (path is main-process only). */
+      selectionToken?: string;
+      format?: 'txt' | 'raw' | 'html';
+      timestampsEnabled?: boolean;
       initialLine?: string;
+      alternateScreenActive?: boolean;
     }): Promise<{ success: boolean; started: boolean; canceled?: boolean; error?: string; filePath?: string }>;
     stopManualSessionLog?(payload: {
       sessionId: string;
@@ -101,6 +135,7 @@ declare global {
     writeClipboardText?(text: string): Promise<boolean>;
     readClipboardFiles?(): Promise<Array<{ path: string; name: string; isDirectory: boolean; size?: number }>>;
     readClipboardImage?(): Promise<{ path: string; name: string; mediaType: string; size?: number } | null>;
+    hasClipboardImage?(): Promise<boolean>;
 
     // Credential encryption (field-level safeStorage for sensitive data at rest)
     credentialsAvailable?(): Promise<boolean>;

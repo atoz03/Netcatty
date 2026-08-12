@@ -3,14 +3,30 @@
  *
  * Shows snippets organized by package hierarchy as a single tree view.
  * Packages expand / collapse via a chevron; clicking a snippet executes it
- * in the focused terminal session. Typing in the search box flattens to a
- * list of matching snippets regardless of package nesting.
+ * in the focused terminal session. Search is icon-toggled (expands below the
+ * toolbar); typing flattens matches regardless of package nesting.
  */
 
-import { ChevronRight, Edit2, Layers, Package, Play, Plus, Search, Trash2, Zap } from 'lucide-react';
+import {
+  CheckSquare,
+  ChevronRight,
+  Edit2,
+  Expand,
+  FolderPlus,
+  Layers,
+  Minimize2,
+  Package,
+  Play,
+  Plus,
+  Search,
+  Trash2,
+  X,
+  Zap,
+} from 'lucide-react';
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useI18n } from '../application/i18n/I18nProvider';
 import { getScriptRecordingSnapshot, subscribeScriptRecording } from '../application/state/scriptRecordingStore.ts';
+import { VaultDeleteConfirmDialog } from './vault/VaultDeleteConfirmDialog';
 import { reorderVaultItems, reorderVaultStrings, sortByVaultOrder } from '../domain/vaultOrder';
 import { isScriptSnippet } from '../domain/snippetScript.ts';
 import { cn } from '../lib/utils';
@@ -25,9 +41,15 @@ import {
   ContextMenuTrigger,
 } from './ui/context-menu';
 import { FixedSizeVirtualList } from './ui/FixedSizeVirtualList';
+import { Button } from './ui/button';
 import { Input } from './ui/input';
+import { Label } from './ui/label';
 import { SnippetCommandTooltipContent } from './snippets/SnippetCommandTooltipContent';
+import { TERMINAL_SIDE_PANEL_INNER_HEADER_CLASS } from './terminalLayer/terminalSidePanelChrome';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip';
+
+const toolbarIconButtonClass =
+  'h-7 w-7 shrink-0 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-40 disabled:pointer-events-none';
 
 const SCRIPT_ROW_HEIGHT = 34;
 
@@ -51,6 +73,12 @@ interface ScriptsSidePanelProps {
   onResumeRun?: (runId: string) => void;
   onStartRecording?: () => void;
   focusedSessionId?: string;
+  /**
+   * When set, bulk-delete confirmation is owned by the parent. Required when
+   * this panel is nested in a Popover — the portalled confirm would otherwise
+   * steal focus, dismiss the popover, and unmount the prompt.
+   */
+  onBulkDeleteRequest?: (ids: string[]) => void;
 }
 
 type TreeRow =
@@ -122,15 +150,11 @@ const getVerticalDropIntent = (
 const hasDragType = (dataTransfer: DataTransfer, type: string) =>
   Array.from(dataTransfer.types).includes(type);
 
-export function buildScriptsSidePanelRows({
-  snippets,
-  packages,
-  expandedPaths,
-}: {
-  snippets: Snippet[];
-  packages: string[];
-  expandedPaths: Set<string>;
-}): TreeRow[] {
+/** Collect every package path (including implied ancestors) shown in the tree. */
+export function collectScriptsSidePanelPackagePaths(
+  packages: string[],
+  snippets: Snippet[],
+): string[] {
   const normalizedPackages = new Set<string>();
   const addWithAncestors = (raw: string) => {
     const path = raw.trim();
@@ -148,6 +172,19 @@ export function buildScriptsSidePanelRows({
   snippets.forEach((snippet) => {
     if (snippet.package) addWithAncestors(snippet.package);
   });
+  return Array.from(normalizedPackages);
+}
+
+export function buildScriptsSidePanelRows({
+  snippets,
+  packages,
+  expandedPaths,
+}: {
+  snippets: Snippet[];
+  packages: string[];
+  expandedPaths: Set<string>;
+}): TreeRow[] {
+  const normalizedPackages = new Set(collectScriptsSidePanelPackagePaths(packages, snippets));
 
   const snippetsByPackage = new Map<string, Snippet[]>();
   const descendantCountByPackage = new Map<string, number>();
@@ -246,11 +283,30 @@ const ScriptsSidePanelInner: React.FC<ScriptsSidePanelProps> = ({
   onResumeRun,
   onStartRecording,
   focusedSessionId,
+  onBulkDeleteRequest,
 }) => {
   const { t } = useI18n();
   const [search, setSearch] = useState('');
+  const [searchExpanded, setSearchExpanded] = useState(false);
   const [subView, setSubView] = useState<'library' | 'running'>('library');
   const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
+  const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
+  const [selectedSnippetIds, setSelectedSnippetIds] = useState<Set<string>>(new Set());
+  const [pendingDeleteIds, setPendingDeleteIds] = useState<string[] | null>(null);
+  const [isPackageDialogOpen, setIsPackageDialogOpen] = useState(false);
+  const [newPackageName, setNewPackageName] = useState('');
+  const [packageError, setPackageError] = useState('');
+  const packageDialogRef = useRef<HTMLDivElement>(null);
+  const packageNameInputRef = useRef<HTMLInputElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!searchExpanded) return;
+    const frame = requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [searchExpanded]);
 
   useEffect(() => {
     const handler = (event: Event) => {
@@ -280,24 +336,7 @@ const ScriptsSidePanelInner: React.FC<ScriptsSidePanelProps> = ({
   // (e.g. package "a/b/c" implies roots "a" and "a/b" even when not listed).
   const normalizedPackages = useMemo(() => {
     if (!isVisible) return new Set<string>();
-    const set = new Set<string>();
-    const addWithAncestors = (raw: string) => {
-      const path = raw.trim();
-      if (!path) return;
-      const isAbs = path.startsWith('/');
-      const body = isAbs ? path.slice(1) : path;
-      const parts = body.split('/').filter(Boolean);
-      for (let i = 1; i <= parts.length; i++) {
-        const sub = parts.slice(0, i).join('/');
-        set.add(isAbs ? `/${sub}` : sub);
-      }
-    };
-    packages.forEach(addWithAncestors);
-    // A snippet may reference a package path that's not in `packages` yet.
-    snippets.forEach((s) => {
-      if (s.package) addWithAncestors(s.package);
-    });
-    return set;
+    return new Set(collectScriptsSidePanelPackagePaths(packages, snippets));
   }, [packages, snippets, isVisible]);
 
   // Track every package we've ever observed so we can tell "new" from
@@ -337,6 +376,92 @@ const ScriptsSidePanelInner: React.FC<ScriptsSidePanelProps> = ({
       return next;
     });
   }, []);
+
+  const expandAllGroups = useCallback(() => {
+    setExpandedPaths(new Set(normalizedPackages));
+  }, [normalizedPackages]);
+
+  const collapseAllGroups = useCallback(() => {
+    setExpandedPaths(new Set());
+  }, []);
+
+  const clearSnippetSelection = useCallback(() => {
+    setSelectedSnippetIds(new Set());
+    setIsMultiSelectMode(false);
+  }, []);
+
+  useEffect(() => {
+    setSelectedSnippetIds((prev) => {
+      if (prev.size === 0) return prev;
+      const alive = new Set(snippets.map((snippet) => snippet.id));
+      let changed = false;
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (alive.has(id)) next.add(id);
+        else changed = true;
+      });
+      return changed ? next : prev;
+    });
+  }, [snippets]);
+
+  useEffect(() => {
+    if (!isVisible) setPendingDeleteIds(null);
+  }, [isVisible]);
+
+  // Parent-owned confirm (compact toolbar popover) dispatches the shared delete
+  // event; clear local multi-select when that bulk delete lands.
+  useEffect(() => {
+    if (!onBulkDeleteRequest) return;
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ ids?: string[] }>).detail;
+      if (!detail?.ids?.length) return;
+      clearSnippetSelection();
+    };
+    window.addEventListener('netcatty:snippets:delete', handler);
+    return () => window.removeEventListener('netcatty:snippets:delete', handler);
+  }, [clearSnippetSelection, onBulkDeleteRequest]);
+
+  const toggleSnippetSelection = useCallback((id: string) => {
+    setSelectedSnippetIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const deleteSelectedSnippets = useCallback(() => {
+    const ids = snippets
+      .filter((snippet) => selectedSnippetIds.has(snippet.id))
+      .map((snippet) => snippet.id);
+    if (ids.length === 0) return;
+    if (onBulkDeleteRequest) {
+      onBulkDeleteRequest(ids);
+      return;
+    }
+    setPendingDeleteIds(ids);
+  }, [onBulkDeleteRequest, selectedSnippetIds, snippets]);
+
+  const existingPendingDeleteIds = pendingDeleteIds
+    ? pendingDeleteIds.filter((id) => snippets.some((snippet) => snippet.id === id))
+    : [];
+
+  const confirmDeleteSelectedSnippets = useCallback(() => {
+    const ids = (pendingDeleteIds ?? []).filter((id) =>
+      snippets.some((snippet) => snippet.id === id),
+    );
+    setPendingDeleteIds(null);
+    if (ids.length === 0) {
+      clearSnippetSelection();
+      return;
+    }
+    // Always route through the shared event so AppSideEffects can clear host
+    // login/connect bindings (onSnippetsChange alone would leave them stale).
+    window.dispatchEvent(
+      new CustomEvent('netcatty:snippets:delete', { detail: { ids } }),
+    );
+    clearSnippetSelection();
+  }, [clearSnippetSelection, pendingDeleteIds, snippets]);
 
   // When search is active, flatten everything (no tree, no packages).
   const searchMatches = useMemo(() => {
@@ -390,6 +515,10 @@ const ScriptsSidePanelInner: React.FC<ScriptsSidePanelProps> = ({
 
   const handleSnippetClick = useCallback(
     (snippet: Snippet) => {
+      if (isMultiSelectMode) {
+        toggleSnippetSelection(snippet.id);
+        return;
+      }
       if (isScriptSnippet(snippet)) {
         onRunScript?.(snippet);
         setSubView('running');
@@ -397,8 +526,11 @@ const ScriptsSidePanelInner: React.FC<ScriptsSidePanelProps> = ({
       }
       onSnippetClick(snippet);
     },
-    [onRunScript, onSnippetClick],
+    [isMultiSelectMode, onRunScript, onSnippetClick, toggleSnippetSelection],
   );
+
+  const hasSearch = search.trim().length > 0;
+  const canExpandCollapse = normalizedPackages.size > 0 && !hasSearch;
 
   const sessionRuns = useMemo(() => {
     if (!focusedSessionId) return runs;
@@ -588,6 +720,105 @@ const ScriptsSidePanelInner: React.FC<ScriptsSidePanelProps> = ({
     window.dispatchEvent(new CustomEvent('netcatty:scripts:add'));
   }, []);
 
+  const openPackageDialog = useCallback(() => {
+    setNewPackageName('');
+    setPackageError('');
+    setIsPackageDialogOpen(true);
+  }, []);
+
+  // Keep Tab focus inside the package dialog while it is open.
+  useEffect(() => {
+    if (!isPackageDialogOpen) return;
+    const focusTimer = window.setTimeout(() => packageNameInputRef.current?.focus(), 30);
+
+    const listFocusable = (): HTMLElement[] => {
+      const root = packageDialogRef.current;
+      if (!root) return [];
+      const nodes = root.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      return Array.from(nodes).filter((el) => {
+        if (el.classList.contains('sr-only')) return false;
+        if (el.getAttribute('aria-hidden') === 'true') return false;
+        return el.tabIndex >= 0 || el.tagName === 'INPUT' || el.tagName === 'BUTTON';
+      });
+    };
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab') return;
+      const focusable = listFocusable();
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey) {
+        if (!active || active === first || !packageDialogRef.current?.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (!active || active === last || !packageDialogRef.current?.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+
+    const onFocusIn = (e: FocusEvent) => {
+      const target = e.target as Node | null;
+      if (target && packageDialogRef.current?.contains(target)) return;
+      (listFocusable()[0] ?? packageNameInputRef.current)?.focus();
+    };
+
+    document.addEventListener('keydown', onKeyDown, true);
+    document.addEventListener('focusin', onFocusIn);
+    return () => {
+      window.clearTimeout(focusTimer);
+      document.removeEventListener('keydown', onKeyDown, true);
+      document.removeEventListener('focusin', onFocusIn);
+    };
+  }, [isPackageDialogOpen]);
+
+  const handleCreatePackage = useCallback(() => {
+    if (!onPackagesChange) {
+      setPackageError(t('snippets.renameDialog.error.empty'));
+      return;
+    }
+    const name = newPackageName.trim();
+    if (!name) {
+      setPackageError(t('snippets.renameDialog.error.empty'));
+      return;
+    }
+    // Match SnippetsManager.createPackage path rules so tree rows stay stable.
+    if (!/^\/?([\w\p{L}\p{N}-]+(\/[\w\p{L}\p{N}-]+)*)\/?$/u.test(name)) {
+      setPackageError(t('snippets.renameDialog.error.invalidChars'));
+      return;
+    }
+    let full = name.endsWith('/') ? name.slice(0, -1) : name;
+    if (full !== '/' && full.endsWith('/')) full = full.slice(0, -1);
+    const existingPackage = packages.find((p) => p.toLowerCase() === full.toLowerCase());
+    if (existingPackage) {
+      setPackageError(t('snippets.renameDialog.error.duplicate'));
+      return;
+    }
+    onPackagesChange([...packages, full]);
+    setExpandedPaths((prev) => {
+      const next = new Set(prev);
+      let path = full.startsWith('/') ? full.slice(1) : full;
+      // Expand both absolute and relative forms used by the tree walker.
+      next.add(full);
+      while (path) {
+        next.add(path);
+        if (full.startsWith('/')) next.add(`/${path}`);
+        const slash = path.lastIndexOf('/');
+        if (slash < 0) break;
+        path = path.slice(0, slash);
+      }
+      return next;
+    });
+    setIsPackageDialogOpen(false);
+    setNewPackageName('');
+    setPackageError('');
+  }, [newPackageName, onPackagesChange, packages, t]);
+
   const handleEditSnippet = useCallback((snippet: Snippet) => {
     window.dispatchEvent(
       new CustomEvent('netcatty:snippets:edit', { detail: { snippet } }),
@@ -607,16 +838,19 @@ const ScriptsSidePanelInner: React.FC<ScriptsSidePanelProps> = ({
   return (
     <TooltipProvider delayDuration={300}>
     <div
-      className="h-full flex flex-col bg-background overflow-hidden"
+      className="relative h-full flex flex-col bg-background overflow-hidden"
       data-section="snippets-panel"
     >
       {/* Sub view tabs */}
-      <div className="shrink-0 px-2 py-1 border-b border-border/50 flex items-center gap-1">
+      <div className={cn(
+        TERMINAL_SIDE_PANEL_INNER_HEADER_CLASS,
+        'px-2 border-b border-border/50 flex items-center gap-1',
+      )}>
         <button
           type="button"
           className={cn(
-            'flex-1 h-7 rounded-md text-xs',
-            subView === 'library' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-muted/50',
+            'flex-1 h-6 rounded-md text-[11px]',
+            subView === 'library' ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-muted/50',
           )}
           onClick={() => setSubView('library')}
         >
@@ -625,8 +859,8 @@ const ScriptsSidePanelInner: React.FC<ScriptsSidePanelProps> = ({
         <button
           type="button"
           className={cn(
-            'flex-1 h-7 rounded-md text-xs',
-            subView === 'running' ? 'bg-accent text-foreground' : 'text-muted-foreground hover:bg-muted/50',
+            'flex-1 h-6 rounded-md text-[11px]',
+            subView === 'running' ? 'bg-accent text-accent-foreground' : 'text-muted-foreground hover:bg-muted/50',
           )}
           onClick={() => setSubView('running')}
         >
@@ -645,30 +879,160 @@ const ScriptsSidePanelInner: React.FC<ScriptsSidePanelProps> = ({
         </div>
       ) : (
       <>
-      {/* Search + Add */}
-      <div className="shrink-0 px-2 py-1.5 border-b border-border/50 flex items-center gap-1.5">
-        <div className="relative flex-1 min-w-0">
-          <Search size={12} className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder={t('snippets.searchPlaceholder')}
-            className="h-7 pl-7 text-xs bg-muted/30 border-none"
-          />
+      {/* Icon toolbar + expandable search */}
+      <div className="shrink-0 border-b border-border/50">
+        <div className="px-2 py-1.5 flex items-center gap-1">
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className={cn(
+                  toolbarIconButtonClass,
+                  (searchExpanded || hasSearch) && 'bg-muted/70 text-foreground',
+                )}
+                aria-label={t('snippets.searchPlaceholder')}
+                aria-pressed={searchExpanded}
+                onClick={() => setSearchExpanded((open) => !open)}
+              >
+                <Search size={14} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t('snippets.searchPlaceholder')}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className={toolbarIconButtonClass}
+                disabled={!canExpandCollapse}
+                aria-label={t('vault.tree.expandAll')}
+                onClick={expandAllGroups}
+              >
+                <Expand size={14} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t('vault.tree.expandAll')}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className={toolbarIconButtonClass}
+                disabled={!canExpandCollapse}
+                aria-label={t('vault.tree.collapseAll')}
+                onClick={collapseAllGroups}
+              >
+                <Minimize2 size={14} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t('vault.tree.collapseAll')}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className={cn(
+                  toolbarIconButtonClass,
+                  isMultiSelectMode && 'bg-muted/70 text-foreground',
+                )}
+                aria-label={t('snippets.action.selectSnippets')}
+                aria-pressed={isMultiSelectMode}
+                onClick={() => {
+                  if (isMultiSelectMode) {
+                    clearSnippetSelection();
+                  } else {
+                    setIsMultiSelectMode(true);
+                  }
+                }}
+              >
+                <CheckSquare size={14} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t('snippets.action.selectSnippets')}</TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={handleAddSnippet}
+                aria-label={t('snippets.action.newSnippet')}
+                className={cn(toolbarIconButtonClass, 'ml-auto')}
+              >
+                <Plus size={14} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t('snippets.action.newSnippet')}</TooltipContent>
+          </Tooltip>
+          {onPackagesChange ? (
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <button
+                  type="button"
+                  onClick={openPackageDialog}
+                  aria-label={t('snippets.action.newPackage')}
+                  className={toolbarIconButtonClass}
+                >
+                  <FolderPlus size={14} />
+                </button>
+              </TooltipTrigger>
+              <TooltipContent side="bottom">{t('snippets.action.newPackage')}</TooltipContent>
+            </Tooltip>
+          ) : null}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={handleAddScript}
+                aria-label={t('snippets.action.newScript')}
+                className={toolbarIconButtonClass}
+              >
+                <Play size={14} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">{t('snippets.action.newScript')}</TooltipContent>
+          </Tooltip>
         </div>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              type="button"
-              onClick={handleAddSnippet}
-              aria-label={t('snippets.action.newSnippet')}
-              className="shrink-0 h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
-            >
-              <Plus size={14} />
-            </button>
-          </TooltipTrigger>
-          <TooltipContent>{t('snippets.action.newSnippet')}</TooltipContent>
-        </Tooltip>
+
+        <div
+          className={cn(
+            'overflow-hidden transition-[max-height,opacity] duration-200 ease-out',
+            searchExpanded ? 'max-h-9 opacity-100' : 'max-h-0 opacity-0',
+          )}
+        >
+          <div className="h-9 flex items-center gap-0.5 px-2 border-t border-border/50">
+            <div className="relative flex-1 min-w-0">
+              <Search
+                size={12}
+                className="absolute left-2 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none"
+              />
+              <Input
+                ref={searchInputRef}
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder={t('snippets.searchPlaceholder')}
+                className="h-7 pl-7 text-xs bg-muted/30 border-none"
+              />
+            </div>
+            {hasSearch ? (
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    type="button"
+                    className={toolbarIconButtonClass}
+                    aria-label={t('common.clear')}
+                    onClick={() => {
+                      setSearch('');
+                      searchInputRef.current?.focus();
+                    }}
+                  >
+                    <X size={14} />
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{t('common.clear')}</TooltipContent>
+              </Tooltip>
+            ) : null}
+          </div>
+        </div>
       </div>
 
       {/* Content */}
@@ -691,11 +1055,14 @@ const ScriptsSidePanelInner: React.FC<ScriptsSidePanelProps> = ({
             getItemKey={(item) => item.key}
             renderItem={(item) => {
               if (item.kind === 'search') {
+                const isScript = isScriptSnippet(item.snippet);
                 return (
                   <SnippetRow
                     snippet={item.snippet}
                     depth={0}
                     subtitle={item.snippet.package || t('terminal.toolbar.library')}
+                    selected={selectedSnippetIds.has(item.snippet.id)}
+                    multiSelect={isMultiSelectMode}
                     draggable={false}
                     sortableTarget={false}
                     onDragOver={handleRowDragOver}
@@ -704,6 +1071,16 @@ const ScriptsSidePanelInner: React.FC<ScriptsSidePanelProps> = ({
                     onClick={() => handleSnippetClick(item.snippet)}
                     onEdit={() => handleEditSnippet(item.snippet)}
                     onDelete={() => handleDeleteSnippet(item.snippet.id)}
+                    onRunParallel={onRunScriptOnWorkspace
+                      ? () => onRunScriptOnWorkspace(item.snippet, 'parallel')
+                      : undefined}
+                    onRunSequential={isScript && onRunScriptOnWorkspace
+                      ? () => onRunScriptOnWorkspace(item.snippet, 'sequential')
+                      : undefined}
+                    runParallelLabel={isScript
+                      ? t('scripts.actions.runParallel')
+                      : t('scripts.actions.runOnAllTabs')}
+                    runSequentialLabel={t('scripts.actions.runSequential')}
                     editLabel={t('action.edit')}
                     deleteLabel={t('action.delete')}
                   />
@@ -722,34 +1099,78 @@ const ScriptsSidePanelInner: React.FC<ScriptsSidePanelProps> = ({
                   />
                 );
               }
-              return (
-                <SnippetRow
-                  snippet={item.row.snippet}
-                  depth={item.row.depth}
-                  draggable={Boolean(onSnippetsChange)}
-                  sortableTarget={true}
-                  onDragOver={handleRowDragOver}
-                  onDrop={handleRowDrop}
-                  onDragEnd={clearScriptsDropIndicator}
-                  onClick={() => handleSnippetClick(item.row.snippet)}
-                  onEdit={() => handleEditSnippet(item.row.snippet)}
-                  onDelete={() => handleDeleteSnippet(item.row.snippet.id)}
-                  onRunParallel={isScriptSnippet(item.row.snippet) && onRunScriptOnWorkspace
-                    ? () => onRunScriptOnWorkspace(item.row.snippet, 'parallel')
-                    : undefined}
-                  onRunSequential={isScriptSnippet(item.row.snippet) && onRunScriptOnWorkspace
-                    ? () => onRunScriptOnWorkspace(item.row.snippet, 'sequential')
-                    : undefined}
-                  runParallelLabel={t('scripts.actions.runParallel')}
-                  runSequentialLabel={t('scripts.actions.runSequential')}
-                  editLabel={t('action.edit')}
-                  deleteLabel={t('action.delete')}
-                />
-              );
+              {
+                const isScript = isScriptSnippet(item.row.snippet);
+                return (
+                  <SnippetRow
+                    snippet={item.row.snippet}
+                    depth={item.row.depth}
+                    selected={selectedSnippetIds.has(item.row.snippet.id)}
+                    multiSelect={isMultiSelectMode}
+                    draggable={Boolean(onSnippetsChange) && !isMultiSelectMode}
+                    sortableTarget={true}
+                    onDragOver={handleRowDragOver}
+                    onDrop={handleRowDrop}
+                    onDragEnd={clearScriptsDropIndicator}
+                    onClick={() => handleSnippetClick(item.row.snippet)}
+                    onEdit={() => handleEditSnippet(item.row.snippet)}
+                    onDelete={() => handleDeleteSnippet(item.row.snippet.id)}
+                    onRunParallel={onRunScriptOnWorkspace
+                      ? () => onRunScriptOnWorkspace(item.row.snippet, 'parallel')
+                      : undefined}
+                    onRunSequential={isScript && onRunScriptOnWorkspace
+                      ? () => onRunScriptOnWorkspace(item.row.snippet, 'sequential')
+                      : undefined}
+                    runParallelLabel={isScript
+                      ? t('scripts.actions.runParallel')
+                      : t('scripts.actions.runOnAllTabs')}
+                    runSequentialLabel={t('scripts.actions.runSequential')}
+                    editLabel={t('action.edit')}
+                    deleteLabel={t('action.delete')}
+                  />
+                );
+              }
             }}
           />
         )}
       </div>
+      {selectedSnippetIds.size > 0 ? (
+        <div className="shrink-0 px-2 py-1.5 border-t border-border/50 flex items-center gap-2">
+          <span className="flex-1 min-w-0 text-[11px] text-muted-foreground truncate">
+            {t('snippets.selection.selected', { count: selectedSnippetIds.size })}
+          </span>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className={cn(toolbarIconButtonClass, 'text-destructive hover:text-destructive')}
+                aria-label={t('snippets.selection.deleteSelected', {
+                  count: selectedSnippetIds.size,
+                })}
+                onClick={deleteSelectedSnippets}
+              >
+                <Trash2 size={14} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">
+              {t('snippets.selection.deleteSelected', { count: selectedSnippetIds.size })}
+            </TooltipContent>
+          </Tooltip>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className={toolbarIconButtonClass}
+                aria-label={t('snippets.selection.deselectAll')}
+                onClick={clearSnippetSelection}
+              >
+                <X size={14} />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="top">{t('snippets.selection.deselectAll')}</TooltipContent>
+          </Tooltip>
+        </div>
+      ) : null}
       <div className="shrink-0 px-2 py-2 border-t border-border/50 flex items-center gap-2">
         <button
           type="button"
@@ -793,6 +1214,97 @@ const ScriptsSidePanelInner: React.FC<ScriptsSidePanelProps> = ({
       ) : null}
       </>
       )}
+
+      {isPackageDialogOpen ? (
+        <div
+          ref={packageDialogRef}
+          className="absolute inset-0 z-40 flex items-center justify-center bg-background/80 p-3"
+          role="dialog"
+          aria-modal="true"
+          data-state="open"
+          aria-label={t('snippets.packageDialog.title')}
+          onKeyDown={(e) => {
+            if (e.key === 'Escape') {
+              e.preventDefault();
+              e.stopPropagation();
+              setIsPackageDialogOpen(false);
+            }
+          }}
+          onClick={() => setIsPackageDialogOpen(false)}
+        >
+          <button
+            type="button"
+            data-dialog-close="true"
+            tabIndex={-1}
+            aria-hidden="true"
+            className="sr-only"
+            onClick={() => setIsPackageDialogOpen(false)}
+          >
+            {t('common.close')}
+          </button>
+          <div
+            className="w-full max-w-[280px] rounded-lg border border-border/60 bg-background p-3 space-y-3 shadow-lg"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div>
+              <p className="text-sm font-semibold">{t('snippets.packageDialog.title')}</p>
+              <p className="text-[11px] text-muted-foreground mt-0.5">
+                {t('snippets.packageDialog.parent', { parent: t('snippets.packageDialog.root') })}
+              </p>
+            </div>
+            <div className="space-y-1.5">
+              <Label className="text-xs">{t('field.name')}</Label>
+              <Input
+                ref={packageNameInputRef}
+                value={newPackageName}
+                onChange={(e) => {
+                  setNewPackageName(e.target.value);
+                  setPackageError('');
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    handleCreatePackage();
+                  }
+                }}
+                placeholder={t('snippets.packageDialog.placeholder')}
+                className="h-8 text-xs"
+              />
+              <p className="text-[10px] text-muted-foreground">{t('snippets.packageDialog.hint')}</p>
+              {packageError ? (
+                <p className="text-[10px] text-destructive">{packageError}</p>
+              ) : null}
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setIsPackageDialogOpen(false)}
+              >
+                {t('common.cancel')}
+              </Button>
+              <Button type="button" size="sm" onClick={handleCreatePackage}>
+                {t('common.create')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {!onBulkDeleteRequest ? (
+        <VaultDeleteConfirmDialog
+          open={Boolean(pendingDeleteIds)}
+          title={t('snippets.selection.deleteConfirmTitle', {
+            count: existingPendingDeleteIds.length,
+          })}
+          description={t('snippets.selection.deleteConfirmDesc')}
+          onOpenChange={(open) => {
+            if (!open) setPendingDeleteIds(null);
+          }}
+          onConfirm={confirmDeleteSelectedSnippets}
+        />
+      ) : null}
     </div>
     </TooltipProvider>
   );
@@ -844,6 +1356,8 @@ interface SnippetRowProps {
   snippet: Snippet;
   depth: number;
   subtitle?: string;
+  selected?: boolean;
+  multiSelect?: boolean;
   draggable: boolean;
   sortableTarget: boolean;
   onDragOver: (event: React.DragEvent<HTMLElement>) => void;
@@ -864,6 +1378,8 @@ const SnippetRow = memo<SnippetRowProps>(({
   snippet,
   depth,
   subtitle,
+  selected = false,
+  multiSelect = false,
   draggable,
   sortableTarget,
   onDragOver,
@@ -899,13 +1415,25 @@ const SnippetRow = memo<SnippetRowProps>(({
             <button
               type="button"
               onClick={onClick}
-              className="w-full flex items-center gap-1.5 pr-3 py-1.5 text-left hover:bg-accent/50 transition-colors overflow-hidden"
+              aria-pressed={multiSelect ? selected : undefined}
+              className={cn(
+                'w-full flex items-center gap-1.5 pr-3 py-1.5 text-left hover:bg-accent/50 transition-colors overflow-hidden',
+                selected && 'bg-primary/10 hover:bg-primary/15',
+              )}
               style={{ paddingLeft: 8 + depth * 14 }}
             >
               {/* Hidden chevron column mirrors PackageRow's layout so the
                   snippet icon lines up exactly with the package icon above. */}
               <ChevronRight size={12} className="shrink-0 opacity-0" aria-hidden />
-              {isScriptSnippet(snippet) ? (
+              {multiSelect ? (
+                <CheckSquare
+                  size={12}
+                  className={cn(
+                    'shrink-0',
+                    selected ? 'text-primary' : 'text-muted-foreground/70',
+                  )}
+                />
+              ) : isScriptSnippet(snippet) ? (
                 <Play size={12} className="shrink-0 text-primary" />
               ) : (
                 <Zap size={12} className="shrink-0 text-muted-foreground" />

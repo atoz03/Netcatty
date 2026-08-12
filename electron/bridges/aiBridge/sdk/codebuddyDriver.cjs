@@ -13,6 +13,8 @@
  *   resume, thinking mode config, and model listing.
  */
 const { mcpEnvPairsToObject } = require("./injectMcp.cjs");
+const { isLikelyNetcattyCliShellCommand } = require("./copilotDriver.cjs");
+const { randomUUID } = require("node:crypto");
 
 // Built-in tools that need interactive UI netcatty doesn't provide — they would
 // hang the turn waiting for a response, so they are blocked in BOTH modes.
@@ -73,19 +75,109 @@ function buildCodebuddyThinkingEnv(thinking) {
 // MCP servers
 // ---------------------------------------------------------------------------
 
-/** Convert neutral injectMcp configs into the SDK's keyed mcpServers map. */
+/** Convert neutral injectMcp configs into the SDK's keyed mcpServers map.
+ *  Supports stdio (default), sse, http, and sdk (in-process) transport types (SDK 0.3.230). */
 function toSdkMcpServers(injectedMcpServers) {
   const map = {};
   for (const cfg of injectedMcpServers || []) {
     if (!cfg || !cfg.name) continue;
-    map[cfg.name] = {
-      type: "stdio",
-      command: cfg.command,
-      args: cfg.args || [],
-      env: mcpEnvPairsToObject(cfg.env),
-    };
+    const transport = cfg.type || "stdio";
+    if (transport === "sse" || transport === "http") {
+      map[cfg.name] = {
+        type: transport,
+        url: cfg.url,
+        headers: cfg.headers || undefined,
+      };
+    } else if (transport === "sdk") {
+      // In-process MCP server created via createSdkMcpServer() — pass instance through.
+      map[cfg.name] = {
+        type: "sdk",
+        name: cfg.name,
+        instance: cfg.instance,
+      };
+    } else {
+      map[cfg.name] = {
+        type: "stdio",
+        command: cfg.command,
+        args: cfg.args || [],
+        env: mcpEnvPairsToObject(cfg.env),
+      };
+    }
   }
   return map;
+}
+
+/**
+ * Create an in-process SDK MCP server with Netcatty tools.
+ * Uses createSdkMcpServer() + tool() from @tencent-ai/agent-sdk to avoid
+ * spawning a subprocess for lightweight built-in tools.
+ * @param {Array<{name: string, description: string, inputSchema: object, handler: Function}>} toolDefs
+ * @returns {Promise<object|null>} McpSdkServerResult instance or null if unavailable
+ */
+async function createCodebuddySdkMcpServer(toolDefs) {
+  let sdk;
+  try { sdk = await import("@tencent-ai/agent-sdk"); } catch { return null; }
+  if (!sdk.createSdkMcpServer || !sdk.tool) return null;
+  const tools = (toolDefs || []).map((def) =>
+    sdk.tool(def.name, def.description, def.inputSchema, def.handler),
+  );
+  return sdk.createSdkMcpServer({ name: "netcatty-builtin", tools });
+}
+
+// ---------------------------------------------------------------------------
+// Permission handler (canUseTool)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build an SDK canUseTool permission handler based on Netcatty's permission mode.
+ *
+ * When the CodeBuddy CLI encounters a security restriction that requires a
+ * permission decision (instead of throwing an error), the SDK routes the
+ * request through this handler:
+ * - auto: automatically confirm execution (no user interruption)
+ * - confirm: forward to the Netcatty renderer approval UI and wait for the
+ *   user's decision (approve once / always allow / reject)
+ * - observer: deny all restricted tool executions
+ *
+ * @param {object} args
+ * @param {string} args.permissionMode  Netcatty permission mode ('auto'|'confirm'|'observer')
+ * @param {string} [args.chatSessionId]  chat session scope for the approval card
+ * @param {Function} [args.requestApproval]  (toolName, args, chatSessionId) => Promise<boolean>
+ * @returns {Function} SDK CanUseTool handler: (toolName, input, options) => Promise<PermissionResult>
+ */
+function buildCodebuddyCanUseTool({ permissionMode, chatSessionId, requestApproval }) {
+  return async (toolName, input, _options) => {
+    // Auto mode: confirm execution immediately without user interruption.
+    if (permissionMode === "auto") {
+      return { behavior: "allow" };
+    }
+    // Observer mode: deny all restricted tool executions.
+    if (permissionMode === "observer") {
+      return {
+        behavior: "deny",
+        message: `Observer mode: tool "${toolName}" execution denied.`,
+      };
+    }
+    // Confirm mode (default): forward to the Netcatty approval UI.
+    if (typeof requestApproval !== "function") {
+      // No approval channel available — deny to preserve confirm-mode safety guarantee.
+      return {
+        behavior: "deny",
+        message: `Tool "${toolName}" requires approval but no approval channel is available.`,
+      };
+    }
+    try {
+      const approved = await requestApproval(toolName, input || {}, chatSessionId);
+      return approved
+        ? { behavior: "allow" }
+        : { behavior: "deny", message: `User denied execution of tool "${toolName}".` };
+    } catch {
+      return {
+        behavior: "deny",
+        message: `Approval request for tool "${toolName}" failed.`,
+      };
+    }
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -104,6 +196,11 @@ function codebuddyBuiltinTools(toolIntegrationMode) {
 function buildCodebuddyQueryOptions({
   cwd, model, env, injectedMcpServers, abortController,
   resume, pathToCodebuddyCode, toolIntegrationMode, thinking,
+  // Phase 1: SDK 0.3.230 options
+  systemPrompt, effort, maxTurns, maxBudgetUsd, fallbackModel,
+  sandbox, agents, outputFormat, enableFileCheckpointing,
+  traceId, parentSpanId, persistSession, sessionId, hooks,
+  elicitation, canUseTool,
 }) {
   const builtinTools = codebuddyBuiltinTools(toolIntegrationMode);
   const options = {
@@ -135,10 +232,59 @@ function buildCodebuddyQueryOptions({
   const thinkingConfig = thinking || parseCodebuddyThinking(env?.NETCATTY_CODEBUDDY_THINKING);
   if (thinkingConfig) {
     options.thinking = thinkingConfig;
-    if (thinkingConfig.type === "enabled" && thinkingConfig.budgetTokens) {
-      options.maxThinkingTokens = thinkingConfig.budgetTokens;
-    }
   }
+  // --- SDK 0.3.230 options ---
+  // System prompt: string is treated as append to default.
+  if (systemPrompt) {
+    options.systemPrompt = typeof systemPrompt === "string"
+      ? { append: systemPrompt }
+      : systemPrompt;
+  }
+  // Effort level for model reasoning.
+  if (["low", "medium", "high", "xhigh"].includes(effort)) {
+    options.effort = effort;
+  }
+  // Safety guardrails.
+  if (Number.isInteger(maxTurns) && maxTurns > 0) options.maxTurns = maxTurns;
+  if (Number.isFinite(maxBudgetUsd) && maxBudgetUsd > 0) {
+    options.maxBudgetUsd = maxBudgetUsd;
+  }
+  // Fallback model when primary is unavailable.
+  if (typeof fallbackModel === "string" && fallbackModel.trim()) {
+    options.fallbackModel = fallbackModel.trim();
+  }
+  // Sandbox settings.
+  if (
+    sandbox &&
+    typeof sandbox === "object" &&
+    !Array.isArray(sandbox) &&
+    sandbox.enabled === true
+  ) {
+    options.sandbox = sandbox;
+  }
+  // Custom subagent definitions.
+  if (agents && typeof agents === "object") options.agents = agents;
+  // Structured output format.
+  if (outputFormat && typeof outputFormat === "object") options.outputFormat = outputFormat;
+  // File checkpointing for rollback.
+  if (enableFileCheckpointing === true) options.enableFileCheckpointing = true;
+  // Distributed tracing.
+  if (traceId) options.traceId = traceId;
+  if (parentSpanId) options.parentSpanId = parentSpanId;
+  // Session persistence control.
+  if (persistSession != null) options.persistSession = persistSession;
+  // Custom session ID.
+  if (sessionId) options.sessionId = sessionId;
+  // Lifecycle hooks.
+  if (hooks && typeof hooks === "object") options.hooks = hooks;
+  // Supported by @tencent-ai/agent-sdk 0.3.230 Options.elicitation.
+  // QueryController advertises capabilities.elicitation.form during
+  // initialization and routes elicitation_create control requests here.
+  if (elicitation && typeof elicitation === "object") options.elicitation = elicitation;
+  // Permission handler: when the CLI hits a security restriction, route the
+  // decision through Netcatty (auto-confirm / user approval / deny) instead
+  // of throwing an error.
+  if (typeof canUseTool === "function") options.canUseTool = canUseTool;
   return options;
 }
 
@@ -162,7 +308,7 @@ function translateCodebuddyMessage(message, emitter, opts = {}) {
   const type = message.type;
 
   if (type === "system") {
-    if (message.session_id) emitter.sessionId(message.session_id);
+    if (!opts.skipSessionId && message.session_id) emitter.sessionId(message.session_id);
     if (message.message) emitter.status(message.message);
     return;
   }
@@ -180,13 +326,28 @@ function translateCodebuddyMessage(message, emitter, opts = {}) {
     return;
   }
 
+  if (type === "error") {
+    emitter.emitError(String(message.error || "CodeBuddy execution failed."));
+    return { terminalError: true };
+  }
+
   if (type === "assistant" && message.message && Array.isArray(message.message.content)) {
+    if (message.error) {
+      emitter.emitError(String(message.error));
+      return { terminalError: true };
+    }
     for (const block of message.message.content) {
       if (!block || typeof block !== "object") continue;
       if (block.type === "tool_use") {
         emitter.toolCall(block.name, block.input || {}, block.id);
       } else if (!opts.skipAssistantText && block.type === "text" && block.text) {
         emitter.text(block.text);
+      } else if (
+        !opts.skipAssistantReasoning &&
+        block.type === "thinking" &&
+        block.thinking
+      ) {
+        emitter.reasoning(block.thinking);
       }
     }
     return;
@@ -209,8 +370,26 @@ function translateCodebuddyMessage(message, emitter, opts = {}) {
     return;
   }
 
-  // result carries final duration/cost/usage — emit as status summary.
+  // result carries final duration/cost/usage.
   if (type === "result") {
+    const usage = message.usage;
+    if (usage && typeof usage === "object") {
+      const uncachedInputTokens = Number(usage.input_tokens) || 0;
+      const cachedInputTokens = Number(usage.cache_read_input_tokens) || 0;
+      const cacheCreationInputTokens = Number(usage.cache_creation_input_tokens) || 0;
+      // CodeBuddy follows Anthropic usage semantics: cache read/creation tokens
+      // are reported separately from input_tokens. AgentUsage expects total
+      // prompt tokens with cachedPromptTokens as the cached subset.
+      const inputTokens =
+        uncachedInputTokens + cachedInputTokens + cacheCreationInputTokens;
+      const outputTokens = Number(usage.output_tokens) || 0;
+      emitter.usage?.({
+        inputTokens,
+        cachedInputTokens,
+        outputTokens,
+        totalTokens: inputTokens + outputTokens,
+      });
+    }
     const parts = [];
     if (message.num_turns) parts.push(`${message.num_turns} turns`);
     if (message.total_cost_usd > 0) parts.push(`$${message.total_cost_usd.toFixed(4)}`);
@@ -220,9 +399,53 @@ function translateCodebuddyMessage(message, emitter, opts = {}) {
     if (parts.length > 0) {
       emitter.status(`CodeBuddy: ${parts.join(", ")}`);
     }
-    return;
+    if (message.is_error) {
+      const detail = Array.isArray(message.errors) && message.errors.length > 0
+        ? message.errors.join("; ")
+        : message.subtype === "error_max_turns"
+          ? "CodeBuddy stopped after reaching the maximum turn limit."
+          : message.subtype === "error_max_budget_usd"
+            ? "CodeBuddy stopped after reaching the configured budget limit."
+            : "CodeBuddy execution failed.";
+      emitter.emitError(detail);
+      return { terminalError: true };
+    }
+    return { terminalError: false };
   }
   // tool_progress, compact_boundary — no renderer mapping.
+}
+
+function inspectCodebuddyMessageContent(message) {
+  const delta = message?.type === "stream_event" ? message.event?.delta : null;
+  const blocks = Array.isArray(message?.message?.content) ? message.message.content : [];
+  const streamedText = delta?.type === "text_delta" && Boolean(delta.text);
+  const streamedReasoning = delta?.type === "thinking_delta" && Boolean(delta.thinking);
+  const assistantText = message?.type === "assistant" &&
+    blocks.some((block) => block?.type === "text" && block.text);
+  const assistantReasoning = message?.type === "assistant" &&
+    blocks.some((block) => block?.type === "thinking" && block.thinking);
+  const assistantTool = message?.type === "assistant" &&
+    blocks.some((block) => block?.type === "tool_use");
+  const toolResult = message?.type === "user" &&
+    blocks.some((block) => block?.type === "tool_result");
+  return {
+    hasContent: streamedText || streamedReasoning ||
+      assistantText || assistantReasoning || assistantTool || toolResult,
+    hasText: streamedText || assistantText,
+    streamedText,
+    streamedReasoning,
+  };
+}
+
+function codebuddyResultFallbackText(message) {
+  if (message?.type !== "result" || message.is_error) return "";
+  if (typeof message.result === "string" && message.result) return message.result;
+  if (message.structured_output === undefined) return "";
+  try {
+    return JSON.stringify(message.structured_output, null, 2);
+  } catch {
+    return String(message.structured_output);
+  }
 }
 
 /** Classify a spawn failure for user-friendly error messages. */
@@ -281,6 +504,11 @@ function buildCodebuddyPromptInput(prompt, attachments) {
  * @param {Function} [args.queryFn] inject @tencent-ai/agent-sdk query (for tests)
  */
 async function runCodebuddyTurn({ prompt, attachments, options, emitter, queryFn }) {
+  if (options.abortController?.signal?.aborted) {
+    emitter.emitDone();
+    return { sessionId: null };
+  }
+
   let query = queryFn;
   if (!query) {
     let sdk;
@@ -295,7 +523,11 @@ async function runCodebuddyTurn({ prompt, attachments, options, emitter, queryFn
 
   let sessionId = null;
   let hasContent = false;
+  let hasAssistantText = false;
   let hasStreamedText = false;
+  let hasStreamedReasoning = false;
+  let hasTerminalError = false;
+  let resultFallbackText = "";
   let queryRef = null;
   let removeAbortListener = null;
   try {
@@ -303,7 +535,9 @@ async function runCodebuddyTurn({ prompt, attachments, options, emitter, queryFn
     const signal = options.abortController?.signal;
     const interruptQuery = () => {
       if (typeof queryRef?.interrupt === "function") {
-        void queryRef.interrupt().catch(() => {});
+        void queryRef.interrupt().catch((err) => {
+          console.debug("[CodeBuddy SDK] interrupt failed:", err?.message || err);
+        });
       }
     };
     if (signal) {
@@ -316,28 +550,38 @@ async function runCodebuddyTurn({ prompt, attachments, options, emitter, queryFn
     for await (const message of queryRef) {
       if (options.abortController?.signal?.aborted) {
         if (typeof queryRef.interrupt === "function") {
-          try { await queryRef.interrupt(); } catch { /* best effort */ }
+          try { await queryRef.interrupt(); } catch (err) {
+            // Best effort — surface for diagnostics without failing the turn.
+            console.debug("[CodeBuddy SDK] interrupt failed:", err?.message || err);
+          }
         }
         break;
       }
       if (message?.session_id && message.session_id !== sessionId) {
         sessionId = message.session_id;
       }
-      if (
-        message?.type === "stream_event" ||
-        (message?.type === "assistant" && Array.isArray(message?.message?.content) && message.message.content.length > 0)
-      ) {
-        hasContent = true;
-      }
-      translateCodebuddyMessage(message, emitter, { skipAssistantText: hasStreamedText });
-      if (
-        message?.type === "stream_event" &&
-        message.event?.type === "content_block_delta" &&
-        message.event?.delta?.type === "text_delta" &&
-        message.event.delta.text
-      ) {
-        hasStreamedText = true;
-      }
+      const contentState = inspectCodebuddyMessageContent(message);
+      if (contentState.hasContent) hasContent = true;
+      if (contentState.hasText) hasAssistantText = true;
+      resultFallbackText ||= codebuddyResultFallbackText(message);
+      const translation = translateCodebuddyMessage(
+        message,
+        emitter,
+        {
+          skipAssistantText: hasStreamedText,
+          skipAssistantReasoning: hasStreamedReasoning,
+        },
+      );
+      if (translation?.terminalError) hasTerminalError = true;
+      if (contentState.streamedText) hasStreamedText = true;
+      if (contentState.streamedReasoning) hasStreamedReasoning = true;
+    }
+    if (hasTerminalError) {
+      return { sessionId };
+    }
+    if (!hasAssistantText && resultFallbackText) {
+      emitter.text(resultFallbackText);
+      hasContent = true;
     }
     if (!hasContent && !options.abortController?.signal?.aborted) {
       emitter.emitError(
@@ -349,6 +593,10 @@ async function runCodebuddyTurn({ prompt, attachments, options, emitter, queryFn
     emitter.emitDone();
     return { sessionId };
   } catch (error) {
+    if (options.abortController?.signal?.aborted) {
+      emitter.emitDone();
+      return { sessionId };
+    }
     const classified = classifyCodebuddySpawnError(error);
     if (classified.isSpawnEnoent) {
       emitter.emitError(
@@ -403,7 +651,265 @@ function mapCodebuddyModels(models) {
  * @param {object} [args.env]
  * @param {Function} [args.queryFn] inject query() for tests
  */
-async function listCodebuddyModels({ pathToCodebuddyCode, env, queryFn }) {
+async function listCodebuddyModels({
+  pathToCodebuddyCode,
+  env,
+  queryFn,
+  abortController,
+  signal,
+}) {
+  const externalSignal = signal || abortController?.signal;
+  if (externalSignal?.aborted) return [];
+  let query = queryFn;
+  if (!query) {
+    let sdk;
+    try { sdk = await import("@tencent-ai/agent-sdk"); } catch { return []; }
+    query = sdk.query;
+  }
+  const queryAbortController = new AbortController();
+  const forwardAbort = () => {
+    try { queryAbortController.abort(externalSignal?.reason); } catch {}
+  };
+  if (externalSignal) {
+    externalSignal.addEventListener("abort", forwardAbort, { once: true });
+    if (externalSignal.aborted) forwardAbort();
+  }
+  async function* idleInput() {
+    await new Promise((resolve) => {
+      if (queryAbortController.signal.aborted) return resolve();
+      queryAbortController.signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+  }
+  let q;
+  try {
+    q = query({
+      prompt: idleInput(),
+      options: {
+        pathToCodebuddyCode,
+        env,
+        abortController: queryAbortController,
+        includePartialMessages: false,
+      },
+    });
+    const result = await Promise.race([
+      Promise.resolve(q.supportedModels()).then((models) => ({ type: "models", models })),
+      new Promise((resolve) => {
+        if (queryAbortController.signal.aborted) return resolve({ type: "aborted" });
+        queryAbortController.signal.addEventListener(
+          "abort",
+          () => resolve({ type: "aborted" }),
+          { once: true },
+        );
+      }),
+    ]);
+    return result.type === "models" ? mapCodebuddyModels(result.models) : [];
+  } catch {
+    return [];
+  } finally {
+    if (externalSignal) externalSignal.removeEventListener("abort", forwardAbort);
+    queryAbortController.abort();
+    try { void Promise.resolve(q?.return?.(undefined)).catch(() => {}); } catch { /* best effort */ }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Hooks (SDK 0.3.230 lifecycle callbacks)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build SDK hooks option from an emitter. Registers PreToolUse / PostToolUse /
+ * PostToolUseFailure / SessionEnd / Notification hooks that forward events to
+ * the renderer via the existing emitter event channel.
+ * @param {object} emitter  createStreamEmitter(...)
+ * @returns {object} hooks map suitable for Options.hooks
+ */
+function isAllowedCodebuddySkillsBash(command, allowedCliCommandPrefix) {
+  const text = String(command || "").trim();
+  const prefix = String(allowedCliCommandPrefix || "").trim();
+  if (!text || !prefix) return false;
+  if (text !== prefix && !text.startsWith(`${prefix} `)) return false;
+  return isLikelyNetcattyCliShellCommand(text);
+}
+
+function buildCodebuddyHooks(
+  emitter,
+  { toolIntegrationMode, additionalHooks, allowedCliCommandPrefix } = {},
+) {
+  const makeHook = (hookEventName, extract) => ([{
+    hooks: [async (input, _toolUseID, _opts) => {
+      try {
+        emitter.emitEvent({ type: "hook", hookEvent: hookEventName, ...extract(input) });
+      } catch { /* best effort — never block the turn */ }
+      return { continue: true };
+    }],
+  }]);
+
+  const hooks = {
+    PreToolUse: [{
+      hooks: [async (input, _toolUseID, _opts) => {
+        try {
+          emitter.emitEvent({
+            type: "hook",
+            hookEvent: "PreToolUse",
+            toolName: input.tool_name,
+            toolInput: input.tool_input,
+            toolUseId: input.tool_use_id,
+          });
+        } catch { /* best effort — never block the turn */ }
+        if (
+          toolIntegrationMode === "skills" &&
+          input.tool_name === "Bash" &&
+          (
+            input.tool_input?.run_in_background === true ||
+            !isAllowedCodebuddySkillsBash(
+              input.tool_input?.command,
+              allowedCliCommandPrefix,
+            )
+          )
+        ) {
+          return {
+            continue: true,
+            decision: "block",
+            reason:
+              "Only Netcatty CLI commands are allowed in Skills mode. " +
+              "Use the netcatty-tool-cli command prefix provided by the host.",
+          };
+        }
+        return { continue: true };
+      }],
+    }],
+    PostToolUse: makeHook("PostToolUse", (input) => ({
+      toolName: input.tool_name,
+      toolInput: input.tool_input,
+      toolUseId: input.tool_use_id,
+    })),
+    PostToolUseFailure: makeHook("PostToolUseFailure", (input) => ({
+      toolName: input.tool_name,
+      toolInput: input.tool_input,
+      toolUseId: input.tool_use_id,
+      error: input.error,
+    })),
+    SessionEnd: makeHook("SessionEnd", (input) => ({
+      reason: input.reason,
+    })),
+    Notification: makeHook("Notification", (input) => ({
+      message: input.message,
+      title: input.title,
+      notificationType: input.notification_type,
+    })),
+  };
+  for (const [eventName, matchers] of Object.entries(additionalHooks || {})) {
+    if (!Array.isArray(matchers) || matchers.length === 0) continue;
+    hooks[eventName] = [...(hooks[eventName] || []), ...matchers];
+  }
+  return hooks;
+}
+
+// ---------------------------------------------------------------------------
+// Elicitation handler (SDK 0.3.230 — interactive confirmations)
+// ---------------------------------------------------------------------------
+
+/**
+ * Build an elicitation handler that forwards create/complete events to the
+ * renderer and waits for the user's decision via a pending-response map.
+ * @param {object} emitter  createStreamEmitter(...)
+ * @param {Map} pendingMap  Map<elicitationId, { resolve, reject, chatSessionId }> —
+ *   shared with the IPC response handler so it can resolve waiting promises.
+ * @param {object} [opts]
+ * @param {string} [opts.chatSessionId]  chat scope, so cleanup can cancel
+ *   pending elicitations when the chat session is torn down.
+ * @returns {object} ElicitationHandler
+ */
+function buildCodebuddyElicitation(emitter, pendingMap, { chatSessionId } = {}) {
+  const scopedId = (protocolElicitationId) => {
+    const rawId = String(protocolElicitationId || "");
+    if (!rawId) return "";
+    return chatSessionId
+      ? `codebuddy:${encodeURIComponent(String(chatSessionId))}:${encodeURIComponent(rawId)}`
+      : rawId;
+  };
+  return {
+    async create(request, { signal } = {}) {
+      if (signal?.aborted) {
+        return { action: "cancel" };
+      }
+      const protocolElicitationId = request?._meta?.["codebuddy.ai"]?.elicitationId
+        || `elicitation_${randomUUID()}`;
+      const elicitationId = scopedId(protocolElicitationId);
+
+      const previous = pendingMap.get(elicitationId);
+      if (previous) {
+        pendingMap.delete(elicitationId);
+        previous.resolve({ action: "cancel" });
+      }
+
+      return await new Promise((resolve, reject) => {
+        let settled = false;
+        const cleanup = () => {
+          signal?.removeEventListener("abort", onAbort);
+          if (pendingMap.get(elicitationId) === pending) {
+            pendingMap.delete(elicitationId);
+          }
+        };
+        const finish = (response) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          resolve(response);
+        };
+        const fail = (error) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          reject(error);
+        };
+        const onAbort = () => finish({ action: "cancel" });
+        const pending = { resolve: finish, reject: fail, chatSessionId };
+        pendingMap.set(elicitationId, pending);
+
+        if (signal) {
+          signal.addEventListener("abort", onAbort, { once: true });
+          if (signal.aborted) {
+            onAbort();
+            return;
+          }
+        }
+
+        try {
+          emitter.emitEvent({ type: "elicitation-create", elicitationId, request });
+        } catch (error) {
+          fail(error);
+        }
+      });
+    },
+    complete(notification) {
+      const protocolElicitationId = String(notification?.elicitationId || "");
+      const elicitationId = scopedId(protocolElicitationId);
+      const pending = elicitationId ? pendingMap.get(elicitationId) : null;
+      if (pending) {
+        pendingMap.delete(elicitationId);
+        pending.resolve({ action: "cancel" });
+      }
+      emitter.emitEvent({
+        type: "elicitation-complete",
+        notification: {
+          ...notification,
+          elicitationId,
+        },
+      });
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// MCP server status & account info (SDK 0.3.230)
+// ---------------------------------------------------------------------------
+
+/**
+ * Query MCP server connection status via the SDK control channel.
+ * Returns [] on failure.
+ */
+async function getCodebuddyMcpStatus({ pathToCodebuddyCode, env, queryFn }) {
   let query = queryFn;
   if (!query) {
     let sdk;
@@ -422,7 +928,7 @@ async function listCodebuddyModels({ pathToCodebuddyCode, env, queryFn }) {
     options: { pathToCodebuddyCode, env, abortController, includePartialMessages: false },
   });
   try {
-    return mapCodebuddyModels(await q.supportedModels());
+    return await q.mcpServerStatus();
   } catch {
     return [];
   } finally {
@@ -431,18 +937,93 @@ async function listCodebuddyModels({ pathToCodebuddyCode, env, queryFn }) {
   }
 }
 
+/**
+ * Query CodeBuddy account info via the SDK control channel.
+ * Returns null on failure.
+ */
+async function getCodebuddyAccountInfo({ pathToCodebuddyCode, env, queryFn }) {
+  let query = queryFn;
+  if (!query) {
+    let sdk;
+    try { sdk = await import("@tencent-ai/agent-sdk"); } catch { return null; }
+    query = sdk.query;
+  }
+  const abortController = new AbortController();
+  async function* idleInput() {
+    await new Promise((resolve) => {
+      if (abortController.signal.aborted) return resolve();
+      abortController.signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+  }
+  const q = query({
+    prompt: idleInput(),
+    options: { pathToCodebuddyCode, env, abortController, includePartialMessages: false },
+  });
+  try {
+    return await q.accountInfo();
+  } catch {
+    return null;
+  } finally {
+    abortController.abort();
+    try { await q.return?.(undefined); } catch { /* best effort */ }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Plugin management (SDK 0.3.230)
+// ---------------------------------------------------------------------------
+
+async function codebuddyInstallPlugin(options) {
+  const sdk = await import("@tencent-ai/agent-sdk");
+  return sdk.installPlugin(options);
+}
+
+async function codebuddyEnablePlugin(name, marketplace) {
+  const sdk = await import("@tencent-ai/agent-sdk");
+  return sdk.enablePlugin(name, marketplace);
+}
+
+async function codebuddyDisablePlugin(name, marketplace) {
+  const sdk = await import("@tencent-ai/agent-sdk");
+  return sdk.disablePlugin(name, marketplace);
+}
+
+async function codebuddyInstallMarketplace(options) {
+  const sdk = await import("@tencent-ai/agent-sdk");
+  return sdk.installMarketplace(options);
+}
+
+async function codebuddyRemoveMarketplace(options) {
+  const sdk = await import("@tencent-ai/agent-sdk");
+  return sdk.removeMarketplace(options);
+}
+
 module.exports = {
   buildCodebuddyQueryOptions,
+  buildCodebuddyCanUseTool,
   translateCodebuddyMessage,
+  inspectCodebuddyMessageContent,
+  codebuddyResultFallbackText,
   classifyCodebuddySpawnError,
   buildCodebuddyPromptInput,
   buildCodebuddyThinkingEnv,
   parseCodebuddyThinking,
   toSdkMcpServers,
+  createCodebuddySdkMcpServer,
   runCodebuddyTurn,
   listCodebuddyModels,
   mapCodebuddyModels,
   codebuddyBuiltinTools,
+  buildCodebuddyHooks,
+  isAllowedCodebuddySkillsBash,
+  buildCodebuddyElicitation,
+  getCodebuddyMcpStatus,
+  getCodebuddyAccountInfo,
+  codebuddyInstallPlugin,
+  codebuddyEnablePlugin,
+  codebuddyDisablePlugin,
+  codebuddyInstallMarketplace,
+  codebuddyRemoveMarketplace,
   UI_DISALLOWED_TOOLS,
   MCP_MODE_TOOLS,
   SKILLS_MODE_TOOLS,

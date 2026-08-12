@@ -6,12 +6,31 @@ export class UploadController {
   private activeCompressionIds = new Set<string>();
   private currentTransferId = "";
   private bridge: UploadBridge | null = null;
+  private cancelListeners = new Set<() => void>();
+
+  /**
+   * Register a listener fired as soon as cancel() is requested (before async
+   * cleanup). Used to abort in-flight local tree scans.
+   */
+  addCancelListener(listener: () => void): () => void {
+    this.cancelListeners.add(listener);
+    return () => {
+      this.cancelListeners.delete(listener);
+    };
+  }
 
   /**
    * Cancel all active uploads
    */
   async cancel(): Promise<void> {
     this.cancelled = true;
+    for (const listener of Array.from(this.cancelListeners)) {
+      try {
+        listener();
+      } catch {
+        // Ignore listener errors so cancel still drains transfers.
+      }
+    }
 
     // Cancel all active compressed uploads
     const activeCompressionIds = Array.from(this.activeCompressionIds);
@@ -29,13 +48,11 @@ export class UploadController {
     const activeIds = Array.from(this.activeFileTransferIds);
     for (const transferId of activeIds) {
       try {
-        // Try cancelTransfer first (for stream transfers)
+        if (this.bridge?.cancelStagedUploadFile) {
+          await this.bridge.cancelStagedUploadFile(transferId);
+        }
         if (this.bridge?.cancelTransfer) {
           await this.bridge.cancelTransfer(transferId);
-        }
-        // Also try cancelSftpUpload (for legacy uploads)
-        if (this.bridge?.cancelSftpUpload) {
-          await this.bridge.cancelSftpUpload(transferId);
         }
       } catch {
         // Ignore cancel errors
@@ -47,9 +64,6 @@ export class UploadController {
       try {
         if (this.bridge?.cancelTransfer) {
           await this.bridge.cancelTransfer(this.currentTransferId);
-        }
-        if (this.bridge?.cancelSftpUpload) {
-          await this.bridge.cancelSftpUpload(this.currentTransferId);
         }
       } catch {
         // Ignore cancel errors
@@ -78,10 +92,24 @@ export class UploadController {
   }
 
   /**
-   * Reset controller state for new upload
+   * Reset controller state for a brand-new upload session.
+   * Prefer prepareForEntries when the controller already owns an external drop
+   * (scan cancel listeners must stay attached until the drop settles).
    */
   reset(): void {
     this.cancelled = false;
+    this.cancelListeners.clear();
+    this.activeFileTransferIds.clear();
+    this.activeCompressionIds.clear();
+    this.currentTransferId = "";
+  }
+
+  /**
+   * Soft prepare for entry upload without clearing cancel latches/listeners.
+   * External drop flows attach scan/conflict cancel listeners before entries
+   * are ready; a full reset would leave the scanning row uncancelable.
+   */
+  prepareForEntries(): void {
     this.activeFileTransferIds.clear();
     this.activeCompressionIds.clear();
     this.currentTransferId = "";

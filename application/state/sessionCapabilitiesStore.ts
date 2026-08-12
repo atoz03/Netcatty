@@ -15,6 +15,16 @@ function isExpired(entry: StoreEntry): boolean {
   return Date.now() > entry.expiresAt;
 }
 
+function normalizeCapabilities(capabilities: SessionCapabilities): SessionCapabilities {
+  return {
+    ...capabilities,
+    hasSs: capabilities.hasSs === true,
+    hasNetstat: capabilities.hasNetstat === true,
+    hasLsof: capabilities.hasLsof === true,
+    hasSystemctl: capabilities.hasSystemctl === true,
+  };
+}
+
 function notifySession(sessionId: string) {
   listenersBySessionId.get(sessionId)?.forEach((listener) => listener());
 }
@@ -28,13 +38,13 @@ export const sessionCapabilitiesStore = {
       notifySession(sessionId);
       return undefined;
     }
-    return entry.capabilities;
+    return normalizeCapabilities(entry.capabilities);
   },
 
   set(sessionId: string, capabilities: SessionCapabilities, ttlMs: number) {
     const entry: StoreEntry = {
       capabilities: {
-        ...capabilities,
+        ...normalizeCapabilities(capabilities),
         probedAt: Date.now(),
       },
       expiresAt: Date.now() + ttlMs,

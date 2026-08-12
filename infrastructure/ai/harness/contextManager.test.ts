@@ -132,6 +132,19 @@ test('TraceStore records compaction events for export', async () => {
   assert.equal(exported.compactions[0]?.trigger, 'force');
 });
 
+test('TraceStore bounds compaction history independently from events', () => {
+  const store = new TraceStore(20, 3);
+  for (let index = 0; index < 10; index += 1) {
+    store.append({
+      id: `compaction-${index}`,
+      type: 'compaction',
+      sessionId: 'chat-bounded-compactions',
+      trace: { trigger: 'force' },
+    } as import('./types').AgentEvent);
+  }
+  assert.equal(store.getCompactions('chat-bounded-compactions').length, 3);
+});
+
 test('prepareStepContext replaces prior step handle notices under v7 carry-forward semantics', async () => {
   const store = new ToolOutputStore();
   store.store({
@@ -236,6 +249,61 @@ test('prepareStepContext retains handle notice after step budget guard', async (
   );
   assert.equal(notices.length, 1);
   assert.match(String(notices[0]?.content), /\[step 2\]/);
+});
+
+test('prepareStepContext never leaves orphan results from a parallel tool batch', async () => {
+  const toolCallIds = ['a', 'b', 'c', 'd', 'e', 'f'];
+  const messages: ModelMessage[] = [
+    {
+      role: 'assistant',
+      content: toolCallIds.map((toolCallId) => ({
+        type: 'tool-call' as const,
+        toolCallId,
+        toolName: 'terminal_poll',
+        input: { jobId: toolCallId },
+      })),
+    },
+    ...toolCallIds.map((toolCallId) => ({
+      role: 'tool' as const,
+      content: [{
+        type: 'tool-result' as const,
+        toolCallId,
+        toolName: 'terminal_poll',
+        output: { type: 'text' as const, value: `${toolCallId}:${'output '.repeat(4_000)}` },
+      }],
+    })),
+    { role: 'user', content: 'summarize the completed jobs' },
+  ];
+
+  const prepared = await prepareStepContext({
+    messages,
+    stepNumber: 4,
+    sessionId: 'chat-parallel',
+    chatSessionId: 'chat-parallel',
+    contextWindow: 8_000,
+    reservedTokens: 500,
+    maxOutputTokens: 512,
+    runtimeContext: createInitialCattyRuntimeContext({
+      chatSessionId: 'chat-parallel',
+      turnId: 'turn-parallel',
+      permissionMode: 'confirm',
+      scopeType: 'terminal',
+    }),
+  });
+
+  const knownCalls = new Set<string>();
+  for (const message of prepared.messages) {
+    if (message.role === 'assistant' && Array.isArray(message.content)) {
+      for (const part of message.content as Array<{ type?: string; toolCallId?: string }>) {
+        if (part.type === 'tool-call' && part.toolCallId) knownCalls.add(part.toolCallId);
+      }
+    }
+    if (message.role === 'tool' && Array.isArray(message.content)) {
+      for (const part of message.content as Array<{ type?: string; toolCallId?: string }>) {
+        if (part.type === 'tool-result') assert.equal(knownCalls.has(part.toolCallId ?? ''), true);
+      }
+    }
+  }
 });
 
 test('prepareTurnContext calls summarize when over dynamic threshold', async () => {

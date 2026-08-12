@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  DEFAULT_THEME,
   getContrastRatio,
   buildAppThemeCssVars,
   getHslTokenRelativeLuminance,
@@ -23,6 +24,10 @@ function installMemoryLocalStorage(): Map<string, string> {
   };
   return store;
 }
+
+test("fresh installs follow the operating system color scheme by default", () => {
+  assert.equal(DEFAULT_THEME, "system");
+});
 
 test("migrateIncomingTerminalFontId rewrites deprecated ids to the auto sentinel, not menlo", () => {
   // menlo would put Windows/Linux upgrade users back into the #1647 path,

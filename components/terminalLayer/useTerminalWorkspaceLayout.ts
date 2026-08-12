@@ -26,6 +26,7 @@ interface UseTerminalWorkspaceLayoutOptions {
   activeSession: TerminalSession | undefined;
   activeWorkspace: Workspace | undefined;
   isFocusMode: boolean;
+  shouldKeepHiddenWorkspaceLaidOut: (workspace: Workspace) => boolean;
   onAddSessionToWorkspace: (workspaceId: string, sessionId: string, hint: Exclude<SplitHint, null>) => void;
   onCreateWorkspaceFromSessions: (baseSessionId: string, joiningSessionId: string, hint: Exclude<SplitHint, null>) => void;
   onSetDraggingSessionId: (id: string | null) => void;
@@ -38,6 +39,7 @@ export function useTerminalWorkspaceLayout({
   activeSession,
   activeWorkspace,
   isFocusMode,
+  shouldKeepHiddenWorkspaceLaidOut,
   onAddSessionToWorkspace,
   onCreateWorkspaceFromSessions,
   onSetDraggingSessionId,
@@ -143,9 +145,6 @@ export function useTerminalWorkspaceLayout({
   const workspaceRectsById = useMemo(
       () => {
         const map = new Map<string, Record<string, WorkspaceRect>>();
-        const previewKey = resizing
-          ? `${resizing.workspaceId}:${resizing.splitId}:${resizePreviewDelta}`
-          : 'still';
         const liveWorkspaceIds = new Set(workspaces.map((workspace) => workspace.id));
         for (const workspaceId of workspaceRectsCacheRef.current.keys()) {
           if (!liveWorkspaceIds.has(workspaceId)) {
@@ -153,13 +152,49 @@ export function useTerminalWorkspaceLayout({
           }
         }
 
-        // Hidden workspaces do not need fresh geometry. Recomputing every
-        // workspace on a side-panel width change makes tab switches fan out to
-        // panes that cannot currently be seen.
+        for (const workspace of workspaces) {
+          if (shouldKeepHiddenWorkspaceLaidOut(workspace)) {
+            if (workspace.id === activeWorkspace?.id) continue;
+            const layoutWorkspace = workspaceForLayout(workspace);
+            const previewKey = resizing?.workspaceId === workspace.id
+              ? `${resizing.workspaceId}:${resizing.splitId}:${resizePreviewDelta}`
+              : 'still';
+            const cached = workspaceRectsCacheRef.current.get(workspace.id);
+            const cachedSizeIsUsable = !!cached && cached.width > 0 && cached.height > 0;
+            if (
+              cached
+              && cached.root === layoutWorkspace.root
+              && cached.previewKey === previewKey
+              && (cachedSizeIsUsable || workspaceArea.width <= 0 || workspaceArea.height <= 0)
+            ) {
+              map.set(workspace.id, cached.rects);
+              continue;
+            }
+
+            const layoutSize = cachedSizeIsUsable
+              ? { width: cached.width, height: cached.height }
+              : workspaceArea;
+            if (layoutSize.width <= 0 || layoutSize.height <= 0) continue;
+
+            const rects = computeWorkspaceRects(layoutWorkspace, layoutSize);
+            workspaceRectsCacheRef.current.set(workspace.id, {
+              root: layoutWorkspace.root,
+              previewKey,
+              width: layoutSize.width,
+              height: layoutSize.height,
+              rects,
+            });
+            map.set(workspace.id, rects);
+          }
+        }
+
         if (!activeWorkspace) return map;
 
         const workspace = workspaces.find((candidate) => candidate.id === activeWorkspace.id) ?? activeWorkspace;
         const layoutWorkspace = workspaceForLayout(workspace);
+        const previewKey = resizing?.workspaceId === workspace.id
+          ? `${resizing.workspaceId}:${resizing.splitId}:${resizePreviewDelta}`
+          : 'still';
         const cached = workspaceRectsCacheRef.current.get(workspace.id);
         if (
           cached
@@ -183,7 +218,7 @@ export function useTerminalWorkspaceLayout({
         map.set(workspace.id, rects);
         return map;
       },
-      [activeWorkspace, computeWorkspaceRects, resizePreviewDelta, resizing, workspaceArea, workspaceForLayout, workspaces],
+      [activeWorkspace, computeWorkspaceRects, resizePreviewDelta, resizing, shouldKeepHiddenWorkspaceLaidOut, workspaceArea, workspaceForLayout, workspaces],
     );
   
   const activeWorkspaceRects = useMemo<Record<string, WorkspaceRect>>(
@@ -319,6 +354,7 @@ export function useTerminalWorkspaceLayout({
     setDropHint,
     setResizing,
     setWorkspaceArea,
+    workspaceArea,
     workspaceInnerRef,
     workspaceOuterRef,
     workspaceOverlayRef,

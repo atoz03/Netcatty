@@ -10,13 +10,23 @@ else
     ln -sf '/opt/${sanitizedProductName}/${executable}' '/usr/bin/${executable}'
 fi
 
-# Check if user namespaces are supported by the kernel and working with a quick test:
-if ! { [[ -L /proc/self/ns/user ]] && unshare --user true; }; then
-    # Use SUID chrome-sandbox only on systems without user namespaces:
-    chmod 4755 '/opt/${sanitizedProductName}/chrome-sandbox' || true
-else
-    chmod 0755 '/opt/${sanitizedProductName}/chrome-sandbox' || true
-fi
+# Always set the chrome-sandbox SUID bit so its sandbox works as a fallback.
+#
+# The upstream electron-builder template gates this on a `unshare --user true`
+# probe and only sets 4755 when unprivileged user namespaces look unavailable.
+# But this post-install script runs as root under dpkg/rpm, and root can create
+# a user namespace even when unprivileged userns is restricted (e.g. Ubuntu 23.10+
+# with kernel.apparmor_restrict_unprivileged_userns=1). The probe therefore always
+# passes at install time and leaves chrome-sandbox at 0755, so on machines where
+# the app itself cannot use the userns sandbox Chromium aborts with:
+#   "The SUID sandbox helper binary was found, but is not configured correctly ...
+#    must be owned by root and have mode 4755".
+#
+# Setting 4755 unconditionally is the historical electron/chrome default and is a
+# safe fallback: on hosts where the bundled AppArmor profile grants userns, Chromium
+# still prefers the namespace sandbox; elsewhere the SUID sandbox keeps the app
+# launchable. See https://github.com/binaricat/Netcatty/issues/2607.
+chmod 4755 '/opt/${sanitizedProductName}/chrome-sandbox' || true
 
 if hash update-mime-database 2>/dev/null; then
     update-mime-database /usr/share/mime || true

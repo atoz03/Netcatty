@@ -1,15 +1,32 @@
 import React, { createContext, lazy, memo, Suspense, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 import { activeTabStore } from '../../application/state/activeTabStore';
+import {
+  applySessionPresentation,
+  usePresentedSession,
+} from '../../application/state/sessionPresentationStore';
 import { useTerminalLayoutSuppressActive } from '../../application/state/terminalLayoutSuppressStore';
 import type { TerminalSessionExitEvent } from '../../application/state/resolveTerminalSessionExitIntent';
 import { createTerminalSelectionAttachment } from '../../application/state/terminalSelectionAttachment';
 import { getTopTabInsertionTarget, isPointInsideRect, WORKSPACE_SESSION_DRAG_TYPE } from '../../application/state/terminalDragData';
 import { useAIState } from '../../application/state/useAIState';
+import { useAISessionsStore } from '../../application/state/aiSessionsStore';
 import { useStoredBoolean } from '../../application/state/useStoredBoolean';
 import { isSavedVaultHost } from '../../domain/ephemeralHosts';
+import {
+  buildAITerminalSessionInfo,
+  type AIPanelContext,
+  type AITerminalSessionInfo,
+} from '../../domain/buildAITerminalSessionInfo';
+export { buildAITerminalSessionInfo };
+export type { AIPanelContext, AITerminalSessionInfo };
 import { collectSessionIds, SplitDirection } from '../../domain/workspace';
 import { resolveSessionTabTitle } from '../../domain/sessionTabTitle';
+import { terminalPaneSessionsEqual } from '../../domain/terminalPaneSessionsEqual';
+import {
+  resolveTerminalHibernateEnabled,
+  resolveTerminalHibernateEnabledForProtocol,
+} from '../../domain/terminalHibernate';
 import { KeyBinding, TerminalSettings } from '../../domain/models';
 import { STORAGE_KEY_AI_SHOW_TERMINAL_SELECTION_ACTION } from '../../infrastructure/config/storageKeys';
 import { cn } from '../../lib/utils';
@@ -17,6 +34,7 @@ import { LazyLoadBoundary } from '../ui/lazy-load-boundary';
 import type { DropEntry } from '../../lib/sftpFileUtils';
 import type { GroupConfig, Host, Identity, KnownHost, ProxyProfile, SSHKey, Snippet, TerminalSession, VaultNote, Workspace } from '../../types';
 import type { ExecutorContext } from '../../infrastructure/ai/cattyAgent/executor';
+import type { AISession } from '../../infrastructure/ai/types';
 import Terminal from '../Terminal';
 import { removePaneVisible, setPaneVisible } from '../terminal/paneVisibilityStore';
 import type { TerminalBroadcastInputOptions } from '../terminal/terminalHelpers';
@@ -24,13 +42,15 @@ import type { TerminalContextReader } from '../../domain/terminalContextRead';
 import {
   getTerminalPaneRenderSnapshot,
   parseTerminalPaneRenderSnapshot,
-  resolveHiddenTerminalPaneStyle,
+  resolveInactiveTerminalPaneStyle,
+  shouldUseTerminalPaneSplitLayout,
   type TerminalPaneHiddenSize,
 } from '../terminalPaneVisibility';
 import type { ResolvedAppearance, TerminalAppearanceHostScope } from '../../domain/terminalAppearanceRuntime';
 import type { TerminalSidePanelAutoOpenTab } from '../../domain/terminalSidePanelAutoOpen';
+import type { SidePanelTool } from '../../domain/sidePanelLayout';
 
-export type SidePanelTab = 'sftp' | 'scripts' | 'history' | 'theme' | 'ai' | 'system' | 'notes';
+export type SidePanelTab = SidePanelTool;
 
 const LazyAIChatSidePanel = lazy(() =>
   import('../AIChatSidePanel').then((module) => ({ default: module.AIChatSidePanel })),
@@ -72,8 +92,18 @@ export type PendingSftpUpload = {
 export type SnippetExecutor = (
   command: string,
   noAutoRun?: boolean,
-  options?: { broadcast?: boolean; multiLineRunMode?: Snippet["multiLineRunMode"] },
-) => void;
+  options?: {
+    broadcast?: boolean;
+    multiLineRunMode?: Snippet["multiLineRunMode"];
+    /** When false, do not steal keyboard focus (multi-tab fan-out). Default true. */
+    focus?: boolean;
+  },
+  /**
+   * Returns true when the command was written to the session. False means the
+   * executor could not write and the caller may fall back to a direct backend
+   * write. May be async when the pane needs to wake from hibernation first.
+   */
+) => boolean | Promise<boolean>;
 
 export type PendingTerminalSelectionForAI = {
   requestId: string;
@@ -212,130 +242,19 @@ export const filterTabsMap = <T,>(source: Map<string, T>, validIds: Set<string>)
   return changed ? next : source;
 };
 
-// eslint-disable-next-line no-control-regex
-const TERMINAL_OSC_SEQUENCE_REGEX = new RegExp('\\u001B\\][^\\u0007\\u001B]*(?:\\u0007|\\u001B\\\\)', 'g');
-// eslint-disable-next-line no-control-regex
-const TERMINAL_ESCAPE_SEQUENCE_REGEX = new RegExp('\\u001B(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])', 'g');
-// eslint-disable-next-line no-control-regex
-const TERMINAL_CONTROL_CHAR_REGEX = new RegExp('[\\u0000-\\u0008\\u000B-\\u001F\\u007F]', 'g');
-// eslint-disable-next-line no-control-regex
-const INCOMPLETE_ESCAPE_TAIL_REGEX = new RegExp('\\u001B(?:\\][^\\u0007\\u001B]*(?:\\u001B)?|\\[[0-?]*[ -/]*)?$');
+export { ChunkedEscapeFilter, hasNotifiableTerminalOutput } from './activityEscapeFilter';
 
-const stripTerminalControlSequences = (data: string): string => {
-  return data
-    .replace(TERMINAL_OSC_SEQUENCE_REGEX, '')
-    .replace(TERMINAL_ESCAPE_SEQUENCE_REGEX, '')
-    .replace(TERMINAL_CONTROL_CHAR_REGEX, '');
-};
+/**
+ * Providers, permissions, agent config and the session mutators — everything
+ * except `sessions` / `activeSessionIdMap` / `draftsByScope` /
+ * `panelViewByScope`, which `useAIState` deliberately keeps out of its return
+ * and publishes to `aiSessionsStore` instead. Because the hot slices are absent,
+ * a landing token cannot change this Context's identity, so provider and
+ * permission consumers stay put while a turn streams.
+ */
+export type AIConfigValue = ReturnType<typeof useAIState>;
 
-export class ChunkedEscapeFilter {
-  private pending = '';
-
-  feed(chunk: string): string {
-    const data = this.pending + chunk;
-    const tailMatch = INCOMPLETE_ESCAPE_TAIL_REGEX.exec(data);
-    if (tailMatch) {
-      this.pending = tailMatch[0];
-      return stripTerminalControlSequences(data.slice(0, tailMatch.index));
-    }
-    this.pending = '';
-    return stripTerminalControlSequences(data);
-  }
-}
-
-export const hasNotifiableTerminalOutput = (filter: ChunkedEscapeFilter, chunk: string): boolean => {
-  return filter.feed(chunk).trim().length > 0;
-};
-
-export type AITerminalSessionInfo = {
-  sessionId: string;
-  hostId: string;
-  hostname: string;
-  label: string;
-  os?: string;
-  username?: string;
-  protocol?: string;
-  shellType?: string;
-  deviceType?: string;
-  connected: boolean;
-  hostChain?: Array<{ hostId: string; label?: string; hostname?: string }>;
-  activePortForwards?: Array<{
-    ruleId: string;
-    label?: string;
-    type?: string;
-    localPort?: number;
-    status?: string;
-  }>;
-};
-
-function summarizeHostChain(
-  host: Host | undefined,
-  allHosts: Host[],
-): AITerminalSessionInfo['hostChain'] | undefined {
-  if (!host?.hostChain?.hostIds?.length) return undefined;
-  return host.hostChain.hostIds.map((hostId) => {
-    const jumpHost = allHosts.find((entry) => entry.id === hostId);
-    return {
-      hostId,
-      label: jumpHost?.label,
-      hostname: jumpHost?.hostname,
-    };
-  });
-}
-
-export type AIPanelContext = {
-  scopeType: 'terminal' | 'workspace';
-  scopeTargetId?: string;
-  scopeHostIds: string[];
-  scopeLabel: string;
-  terminalSessions: AITerminalSessionInfo[];
-};
-
-type AIStateValue = ReturnType<typeof useAIState>;
-
-const AIStateContext = createContext<AIStateValue | null>(null);
-
-export const buildAITerminalSessionInfo = (
-  session: TerminalSession | undefined,
-  host: Host | undefined,
-  localOs: 'linux' | 'macos' | 'windows',
-  options?: {
-    allHosts?: Host[];
-    portForwardingRules?: import('../../domain/models').PortForwardingRule[];
-  },
-): AITerminalSessionInfo => {
-  const protocol = session?.protocol || host?.protocol;
-  const isLocalSession = protocol === 'local' || session?.hostId?.startsWith('local-');
-  const allHosts = options?.allHosts ?? (host ? [host] : []);
-  const hostChain = summarizeHostChain(host, allHosts);
-  const activePortForwards = host?.id && options?.portForwardingRules
-    ? options.portForwardingRules
-      .filter((rule) => rule.hostId === host.id && (rule.status === 'active' || rule.status === 'connecting'))
-      .map((rule) => ({
-        ruleId: rule.id,
-        label: rule.label,
-        type: rule.type,
-        localPort: rule.localPort,
-        status: rule.status,
-      }))
-    : undefined;
-  return {
-    sessionId: session?.id || '',
-    hostId: session?.hostId || '',
-    hostname: host?.hostname || session?.hostname || '',
-    label: host?.label || session?.hostLabel || '',
-    os: host?.os || (isLocalSession ? localOs : undefined),
-    username: host?.username || session?.username,
-    protocol,
-    shellType: session?.shellType && session.shellType !== 'unknown' ? session.shellType : undefined,
-    // Suppress deviceType for Mosh / ET sessions — both require a shell-backed
-    // PTY and cannot connect to vendor CLIs, so network device mode doesn't apply.
-    deviceType: (session?.moshEnabled || host?.moshEnabled || session?.etEnabled || host?.etEnabled) ? undefined : host?.deviceType,
-    connected: session?.status === 'connected',
-    ...(hostChain?.length ? { hostChain } : {}),
-    ...(activePortForwards?.length ? { activePortForwards } : {}),
-  };
-};
+const AIConfigContext = createContext<AIConfigValue | null>(null);
 
 interface AIChatPanelsHostProps {
   mountedTabIds: string[];
@@ -358,16 +277,19 @@ interface AIChatPanelsHostProps {
   onOpenVaultSnippetFromChat?: (snippetId: string) => void;
 }
 
+const EMPTY_WORKSPACES: Workspace[] = [];
+
 interface AIStateMaintenanceHostProps {
   validAIScopeTargetIds: Set<string>;
+  workspaces?: Workspace[] | null;
 }
 
 const AIStateProviderInner: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const aiState = useAIState();
+  const aiConfig = useAIState();
   return (
-    <AIStateContext.Provider value={aiState}>
+    <AIConfigContext.Provider value={aiConfig}>
       {children}
-    </AIStateContext.Provider>
+    </AIConfigContext.Provider>
   );
 };
 
@@ -376,18 +298,100 @@ AIStateProvider.displayName = 'AIStateProvider';
 
 const AIStateMaintenanceHostInner: React.FC<AIStateMaintenanceHostProps> = ({
   validAIScopeTargetIds,
+  workspaces: workspacesProp,
 }) => {
-  const aiState = useContext(AIStateContext);
+  const aiConfig = useContext(AIConfigContext);
 
-  if (!aiState) {
+  if (!aiConfig) {
     throw new Error('AIStateMaintenanceHost must be rendered inside AIStateProvider');
   }
 
-  const { cleanupOrphanedSessions } = aiState;
+  // Guard missing prop so a wiring gap cannot crash the terminal shell.
+  const workspaces = workspacesProp ?? EMPTY_WORKSPACES;
+
+  const {
+    cleanupOrphanedSessions,
+    seedWorkspaceActiveSessionFromMembers,
+    handoffDissolvedWorkspaceScope,
+    retargetWorkspaceActiveChatForMemberLoss,
+  } = aiConfig;
+  const previousWorkspacesRef = useRef(workspaces);
+  const previousSessionWorkspaceRef = useRef(
+    new Map(workspaces.flatMap((workspace) => (
+      collectSessionIds(workspace.root).map((sessionId) => [sessionId, workspace.id] as const)
+    ))),
+  );
 
   useEffect(() => {
+    const previousWorkspaces = previousWorkspacesRef.current;
+    const previousIds = new Set(previousWorkspaces.map((workspace) => workspace.id));
+    const nextIds = new Set(workspaces.map((workspace) => workspace.id));
+    const previousSessionWorkspace = previousSessionWorkspaceRef.current;
+
+    for (const workspace of workspaces) {
+      if (previousIds.has(workspace.id)) continue;
+      const memberTerminalIds = collectSessionIds(workspace.root);
+      seedWorkspaceActiveSessionFromMembers({
+        workspaceId: workspace.id,
+        memberTerminalIds,
+        preferredTerminalId: workspace.focusedSessionId,
+      });
+    }
+
+    for (const workspace of workspaces) {
+      for (const sessionId of collectSessionIds(workspace.root)) {
+        const previousWorkspaceId = previousSessionWorkspace.get(sessionId);
+        if (previousWorkspaceId === workspace.id) continue;
+        // Member newly joined this workspace — seed only fills an empty map.
+        // Prefer the workspace focused pane so we don't pin the joiner's chat
+        // ahead of the pane the user is already looking at.
+        seedWorkspaceActiveSessionFromMembers({
+          workspaceId: workspace.id,
+          memberTerminalIds: collectSessionIds(workspace.root),
+          preferredTerminalId: workspace.focusedSessionId,
+        });
+        break;
+      }
+    }
+
+    for (const workspace of workspaces) {
+      if (!previousIds.has(workspace.id)) continue;
+      const previousWorkspace = previousWorkspaces.find((entry) => entry.id === workspace.id);
+      if (!previousWorkspace) continue;
+      const previousMemberIds = collectSessionIds(previousWorkspace.root);
+      const currentMemberIds = collectSessionIds(workspace.root);
+      if (previousMemberIds.every((sessionId) => currentMemberIds.includes(sessionId))) continue;
+      retargetWorkspaceActiveChatForMemberLoss({
+        workspaceId: workspace.id,
+        previousMemberTerminalIds: previousMemberIds,
+        currentMemberTerminalIds: currentMemberIds,
+        preferredTerminalId: workspace.focusedSessionId,
+      });
+    }
+
+    for (const workspace of previousWorkspaces) {
+      if (nextIds.has(workspace.id)) continue;
+      const memberTerminalIds = collectSessionIds(workspace.root);
+      handoffDissolvedWorkspaceScope({
+        workspaceId: workspace.id,
+        terminalIds: memberTerminalIds.filter((sessionId) => validAIScopeTargetIds.has(sessionId)),
+        preferredTerminalId: workspace.focusedSessionId,
+      });
+    }
+
+    previousWorkspacesRef.current = workspaces;
+    previousSessionWorkspaceRef.current = new Map(workspaces.flatMap((workspace) => (
+      collectSessionIds(workspace.root).map((sessionId) => [sessionId, workspace.id] as const)
+    )));
     cleanupOrphanedSessions(validAIScopeTargetIds);
-  }, [cleanupOrphanedSessions, validAIScopeTargetIds]);
+  }, [
+    cleanupOrphanedSessions,
+    handoffDissolvedWorkspaceScope,
+    retargetWorkspaceActiveChatForMemberLoss,
+    seedWorkspaceActiveSessionFromMembers,
+    validAIScopeTargetIds,
+    workspaces,
+  ]);
 
   return null;
 };
@@ -397,15 +401,20 @@ AIStateMaintenanceHost.displayName = 'AIStateMaintenanceHost';
 
 interface AISidePanelStateRootProps {
   validAIScopeTargetIds: Set<string>;
+  workspaces?: Workspace[] | null;
   children: React.ReactNode;
 }
 
 const AISidePanelStateRootInner: React.FC<AISidePanelStateRootProps> = ({
   validAIScopeTargetIds,
+  workspaces,
   children,
 }) => (
   <AIStateProvider>
-    <AIStateMaintenanceHost validAIScopeTargetIds={validAIScopeTargetIds} />
+    <AIStateMaintenanceHost
+      validAIScopeTargetIds={validAIScopeTargetIds}
+      workspaces={workspaces}
+    />
     {children}
   </AIStateProvider>
 );
@@ -441,6 +450,18 @@ function aiChatPanelsHostAreEqual(
   return true;
 }
 
+const consumedTerminalSelectionRequestIds = new Set<string>();
+const CONSUMED_TERMINAL_SELECTION_REQUEST_ID_LIMIT = 64;
+
+function markTerminalSelectionRequestConsumed(requestId: string): void {
+  consumedTerminalSelectionRequestIds.add(requestId);
+  if (consumedTerminalSelectionRequestIds.size <= CONSUMED_TERMINAL_SELECTION_REQUEST_ID_LIMIT) {
+    return;
+  }
+  const oldest = consumedTerminalSelectionRequestIds.values().next().value;
+  if (oldest !== undefined) consumedTerminalSelectionRequestIds.delete(oldest);
+}
+
 const AIChatPanelsHostInner: React.FC<AIChatPanelsHostProps> = ({
   mountedTabIds,
   activeTabId,
@@ -457,30 +478,36 @@ const AIChatPanelsHostInner: React.FC<AIChatPanelsHostProps> = ({
   onOpenVaultSectionFromChat,
   onOpenVaultSnippetFromChat,
 }) => {
-  const aiState = useContext(AIStateContext);
+  const aiConfig = useContext(AIConfigContext);
 
-  if (!aiState) {
+  if (!aiConfig) {
     throw new Error('AIChatPanelsHost must be rendered inside AIStateProvider');
   }
   const {
+    sessions,
     activeSessionIdMap,
-    defaultAgentId,
+    draftsByScope,
     panelViewByScope,
+  } = useAISessionsStore();
+  const {
+    defaultAgentId,
     showDraftView,
     updateDraft,
-  } = aiState;
+  } = aiConfig;
 
   useEffect(() => {
     if (!pendingTerminalSelection) return;
+    if (consumedTerminalSelectionRequestIds.has(pendingTerminalSelection.requestId)) {
+      return;
+    }
 
     const context = contextsByTabId.get(pendingTerminalSelection.tabId);
     if (!context) return;
 
     const attachment = createTerminalSelectionAttachment(pendingTerminalSelection.text);
-    if (!attachment) {
-      onPendingTerminalSelectionConsumed?.(pendingTerminalSelection.requestId);
-      return;
-    }
+    markTerminalSelectionRequestConsumed(pendingTerminalSelection.requestId);
+    onPendingTerminalSelectionConsumed?.(pendingTerminalSelection.requestId);
+    if (!attachment) return;
 
     const scopeKey = `${context.scopeType}:${context.scopeTargetId ?? ''}`;
     const isSessionView =
@@ -493,7 +520,6 @@ const AIChatPanelsHostInner: React.FC<AIChatPanelsHostProps> = ({
       ...draft,
       attachments: [...draft.attachments, attachment],
     }));
-    onPendingTerminalSelectionConsumed?.(pendingTerminalSelection.requestId);
   }, [
     activeSessionIdMap,
     contextsByTabId,
@@ -521,47 +547,51 @@ const AIChatPanelsHostInner: React.FC<AIChatPanelsHostProps> = ({
             <LazyLoadBoundary name="AI side panel" resetKey={tabId}>
               <Suspense fallback={<AIChatSidePanelFallback />}>
                 <LazyAIChatSidePanel
-                    sessions={aiState.sessions}
-                    activeSessionIdMap={aiState.activeSessionIdMap}
-                    draftsByScope={aiState.draftsByScope}
-                    panelViewByScope={aiState.panelViewByScope}
-                    setActiveSessionId={aiState.setActiveSessionId}
-                    ensureDraftForScope={aiState.ensureDraftForScope}
-                    updateDraft={aiState.updateDraft}
-                    showDraftView={aiState.showDraftView}
-                    showSessionView={aiState.showSessionView}
-                    clearDraftForScope={aiState.clearDraftForScope}
-                    addDraftFiles={aiState.addDraftFiles}
-                    removeDraftFile={aiState.removeDraftFile}
-                    createSession={aiState.createSession}
-                    deleteSession={aiState.deleteSession}
-                    updateSessionTitle={aiState.updateSessionTitle}
-                    updateSessionExternalSessionId={aiState.updateSessionExternalSessionId}
-                    addMessageToSession={aiState.addMessageToSession}
-                    updateLastMessage={aiState.updateLastMessage}
-                    updateMessageById={aiState.updateMessageById}
-                    providers={aiState.providers}
-                    activeProviderId={aiState.activeProviderId}
-                    activeModelId={aiState.activeModelId}
-                    defaultAgentId={aiState.defaultAgentId}
-                    toolIntegrationMode={aiState.toolIntegrationMode}
-                    externalAgents={aiState.externalAgents}
-                    setExternalAgents={aiState.setExternalAgents}
-                    agentModelMap={aiState.agentModelMap}
-                    setAgentModel={aiState.setAgentModel}
-                    agentProviderMap={aiState.agentProviderMap}
-                    setAgentProvider={aiState.setAgentProvider}
-                    globalPermissionMode={aiState.globalPermissionMode}
-                    setGlobalPermissionMode={aiState.setGlobalPermissionMode}
-                    commandBlocklist={aiState.commandBlocklist}
-                    commandTimeout={aiState.commandTimeout}
-                    maxIterations={aiState.maxIterations}
-                    webSearchConfig={aiState.webSearchConfig}
-                    quickMessages={aiState.quickMessages}
+                    // Full list keeps fuzzy history ranking; panel areEqual only
+                    // compares exact-scope session object refs for stream isolation.
+                    sessions={sessions as AISession[]}
+                    activeSessionIdMap={activeSessionIdMap as Record<string, string | null>}
+                    draftsByScope={draftsByScope}
+                    panelViewByScope={panelViewByScope}
+                    setActiveSessionId={aiConfig.setActiveSessionId}
+                    ensureDraftForScope={aiConfig.ensureDraftForScope}
+                    updateDraft={aiConfig.updateDraft}
+                    showDraftView={aiConfig.showDraftView}
+                    showSessionView={aiConfig.showSessionView}
+                    clearDraftForScope={aiConfig.clearDraftForScope}
+                    addDraftFiles={aiConfig.addDraftFiles}
+                    removeDraftFile={aiConfig.removeDraftFile}
+                    createSession={aiConfig.createSession}
+                    deleteSession={aiConfig.deleteSession}
+                    updateSessionTitle={aiConfig.updateSessionTitle}
+                    updateSessionExternalSessionId={aiConfig.updateSessionExternalSessionId}
+                    addMessageToSession={aiConfig.addMessageToSession}
+                    updateLastMessage={aiConfig.updateLastMessage}
+                    updateMessageById={aiConfig.updateMessageById}
+                    persistContextCompaction={aiConfig.persistContextCompaction}
+                    providers={aiConfig.providers}
+                    activeProviderId={aiConfig.activeProviderId}
+                    activeModelId={aiConfig.activeModelId}
+                    defaultAgentId={aiConfig.defaultAgentId}
+                    toolIntegrationMode={aiConfig.toolIntegrationMode}
+                    externalAgents={aiConfig.externalAgents}
+                    setExternalAgents={aiConfig.setExternalAgents}
+                    agentModelMap={aiConfig.agentModelMap}
+                    setAgentModel={aiConfig.setAgentModel}
+                    agentProviderMap={aiConfig.agentProviderMap}
+                    setAgentProvider={aiConfig.setAgentProvider}
+                    globalPermissionMode={aiConfig.globalPermissionMode}
+                    setGlobalPermissionMode={aiConfig.setGlobalPermissionMode}
+                    commandBlocklist={aiConfig.commandBlocklist}
+                    commandTimeout={aiConfig.commandTimeout}
+                    maxIterations={aiConfig.maxIterations}
+                    webSearchConfig={aiConfig.webSearchConfig}
+                    quickMessages={aiConfig.quickMessages}
                     scopeType={context.scopeType}
                     scopeTargetId={context.scopeTargetId}
                     scopeHostIds={context.scopeHostIds}
                     scopeLabel={context.scopeLabel}
+                    focusedSessionId={context.focusedSessionId}
                     terminalSessions={context.terminalSessions}
                     resolveExecutorContext={resolveExecutorContext}
                     isVisible={isVisible}
@@ -595,8 +625,6 @@ export interface TerminalLayerProps {
   identities: Identity[];
   snippets: Snippet[];
   snippetPackages: string[];
-  notes: VaultNote[];
-  noteGroups: string[];
   openNoteRequest?: { tabId: string; noteId: string; requestId: number } | null;
   onOpenVaultNoteFromChat?: (noteId: string) => void;
   onOpenVaultHostFromChat?: (hostId: string) => void;
@@ -638,11 +666,12 @@ export interface TerminalLayerProps {
   onUpdateHost: (host: Host) => void;
   onAddKnownHost?: (knownHost: KnownHost) => void;
   onCommandExecuted?: (command: string, hostId: string, hostLabel: string, sessionId: string) => void;
-  shellHistory?: import('../../types').ShellHistoryEntry[];
+  onDeleteShellHistoryEntry?: (entryId: string) => void;
   onTerminalDataCapture?: (sessionId: string, data: string) => void;
   onCreateWorkspaceFromSessions: (baseSessionId: string, joiningSessionId: string, hint: Exclude<SplitHint, null>) => void;
   onAddSessionToWorkspace: (workspaceId: string, sessionId: string, hint: Exclude<SplitHint, null>) => void;
   onRequestAddToWorkspace?: (workspaceId: string) => void;
+  onAppendHostToWorkspace?: (workspaceId: string, hostId: string) => void;
   onUpdateSplitSizes: (workspaceId: string, splitId: string, sizes: number[]) => void;
   onSetDraggingSessionId: (id: string | null) => void;
   onToggleWorkspaceViewMode?: (workspaceId: string) => void;
@@ -671,8 +700,6 @@ export interface TerminalLayerProps {
   updateHosts: (hosts: Host[]) => void;
   updateSnippets?: (snippets: Snippet[]) => void;
   updateSnippetPackages?: (packages: string[]) => void;
-  updateNotes: (notes: VaultNote[]) => void;
-  updateNoteGroups: (groups: string[]) => void;
   sftpDefaultViewMode: 'list' | 'tree';
   sftpDoubleClickBehavior: 'open' | 'transfer';
   sftpAutoSync: boolean;
@@ -688,7 +715,7 @@ export interface TerminalLayerProps {
   // Session log settings for real-time streaming
   sessionLogsEnabled?: boolean;
   sessionLogsDir?: string;
-  sessionLogsFormat?: string;
+  sessionLogsFormat?: "txt" | "raw" | "html";
   sessionLogsTimestampsEnabled?: boolean;
   sshDebugLogsEnabled?: boolean;
   showHostTreeSidebar?: boolean;
@@ -705,6 +732,7 @@ interface TerminalPaneProps {
   sessionHostResolved: boolean;
   chainHosts?: Host[];
   sudoAutofillPassword?: string;
+  sudoAutofillCandidates?: import("../terminal/runtime/terminalSudoAutofill").SudoPasswordAutofillCandidate[];
   workspaceById: Map<string, Workspace>;
   workspaceRectsById: Map<string, Record<string, WorkspaceRect>>;
   isTerminalLayerVisible: boolean;
@@ -731,7 +759,7 @@ interface TerminalPaneProps {
   keyBindings?: KeyBinding[];
   isResizing: boolean;
   isComposeBarOpen: boolean;
-  sessionLog?: { enabled: true; directory: string; format: string; timestampsEnabled?: boolean };
+  sessionLog?: { enabled: boolean; directory: string; format: "txt" | "raw" | "html"; timestampsEnabled?: boolean };
   sshDebugLogEnabled?: boolean;
   onHotkeyAction?: (action: string, event: KeyboardEvent) => void;
   onTerminalFontSizeChange?: (sessionId: string, fontSize: number) => void;
@@ -758,7 +786,6 @@ interface TerminalPaneProps {
   onUpdateHost: (host: Host) => void;
   onAddKnownHost?: (knownHost: KnownHost) => void;
   onCommandExecuted?: (command: string, hostId: string, hostLabel: string, sessionId: string) => void;
-  shellHistory?: import('../../types').ShellHistoryEntry[];
   onCommandSubmitted?: (command: string, hostId: string, hostLabel: string, sessionId: string) => void;
   onSetWorkspaceFocusedSession?: (workspaceId: string, sessionId: string) => void;
   onSplitSession?: (sessionId: string, direction: SplitDirection) => void;
@@ -767,7 +794,7 @@ interface TerminalPaneProps {
     data: string,
     sourceSessionId: string,
     options?: TerminalBroadcastInputOptions,
-  ) => void;
+  ) => string[] | void;
   onToggleWorkspaceComposeBar: () => void;
   onBroadcastInterruptPriorityChange: (
     sessionId: string,
@@ -804,12 +831,18 @@ const getPaneWorkspaceRect = (props: Pick<TerminalPaneProps, 'session' | 'worksp
   return props.workspaceRectsById.get(workspaceId)?.[props.session.id] ?? null;
 };
 
-const getPaneActiveWorkspaceRect = (props: Pick<TerminalPaneProps, 'session' | 'workspaceById' | 'workspaceRectsById'>): WorkspaceRect | null => {
+const getPaneRenderedWorkspaceRect = (props: Pick<TerminalPaneProps, 'session' | 'host' | 'workspaceById' | 'workspaceRectsById' | 'terminalSettings'>): WorkspaceRect | null => {
   const workspaceId = props.session.workspaceId;
   if (!workspaceId) return null;
-  if (activeTabStore.getActiveTabId() !== workspaceId) return null;
   const workspace = props.workspaceById.get(workspaceId);
-  if (!workspace || workspace.viewMode === 'focus') return null;
+  if (!workspace) return null;
+  if (resolveTerminalHibernateEnabledForProtocol(props.terminalSettings, props.host.protocol)
+    && activeTabStore.getActiveTabId() !== workspaceId) {
+    return null;
+  }
+  if (workspace.viewMode === 'focus' && workspace.focusedSessionId === props.session.id) {
+    return null;
+  }
   return props.workspaceRectsById.get(workspaceId)?.[props.session.id] ?? null;
 };
 
@@ -828,8 +861,9 @@ const terminalPanePropsAreEqual = (
   prev.sessionHostResolved === next.sessionHostResolved &&
   prev.chainHosts === next.chainHosts &&
   prev.sudoAutofillPassword === next.sudoAutofillPassword &&
+  prev.sudoAutofillCandidates === next.sudoAutofillCandidates &&
   prev.workspaceById === next.workspaceById &&
-  workspaceRectsEqual(getPaneActiveWorkspaceRect(prev), getPaneActiveWorkspaceRect(next)) &&
+  workspaceRectsEqual(getPaneRenderedWorkspaceRect(prev), getPaneRenderedWorkspaceRect(next)) &&
   prev.isTerminalLayerVisible === next.isTerminalLayerVisible &&
   prev.workspaceFocusHandlersRef === next.workspaceFocusHandlersRef &&
   prev.workspaceBroadcastHandlersRef === next.workspaceBroadcastHandlersRef &&
@@ -844,8 +878,7 @@ const terminalPanePropsAreEqual = (
   prev.fontSize === next.fontSize &&
   prev.terminalTheme === next.terminalTheme &&
   prev.followAppTerminalTheme === next.followAppTerminalTheme &&
-  prev.accentMode === next.accentMode &&
-  prev.customAccent === next.customAccent &&
+  // accentMode / customAccent intentionally omitted — Terminal reads appearanceChromeStore.
   prev.terminalSettings === next.terminalSettings &&
   prev.hotkeyScheme === next.hotkeyScheme &&
   prev.disableTerminalFontZoom === next.disableTerminalFontZoom &&
@@ -892,12 +925,236 @@ const terminalPanePropsAreEqual = (
   prev.onEndSessionDrag === next.onEndSessionDrag
 );
 
+type WorkspaceDetachPointerDragOptions = {
+  inActiveWorkspace: boolean;
+  session: TerminalSession;
+  terminalSettings?: TerminalSettings;
+  workspaceById: Map<string, Workspace>;
+  onStartSessionDrag?: (sessionId: string) => void;
+  onEndSessionDrag?: () => void;
+  onRemoveSessionFromWorkspace?: TerminalPaneProps['onRemoveSessionFromWorkspace'];
+  onReorderTabs?: TerminalPaneProps['onReorderTabs'];
+};
+
+export function useWorkspaceDetachPointerDrag({
+  inActiveWorkspace,
+  session,
+  terminalSettings,
+  workspaceById,
+  onStartSessionDrag,
+  onEndSessionDrag,
+  onRemoveSessionFromWorkspace,
+  onReorderTabs,
+}: WorkspaceDetachPointerDragOptions): (event: React.PointerEvent<HTMLElement>) => void {
+  const activeDragCleanupRef = useRef<(() => void) | null>(null);
+  const cleanupActiveDrag = useCallback(() => {
+    const cleanup = activeDragCleanupRef.current;
+    activeDragCleanupRef.current = null;
+    cleanup?.();
+  }, []);
+
+  useEffect(() => cleanupActiveDrag, [cleanupActiveDrag, session.id]);
+
+  return useCallback((event: React.PointerEvent<HTMLElement>) => {
+    if (!inActiveWorkspace || event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    cleanupActiveDrag();
+
+    const ownerDocument = event.currentTarget.ownerDocument;
+    const ownerWindow = ownerDocument.defaultView;
+    const startPoint = { clientX: event.clientX, clientY: event.clientY };
+    const dragLabel = resolveSessionTabTitle(
+    applySessionPresentation(session),
+    terminalSettings?.dynamicTabTitleMode,
+  );
+    let dragStarted = false;
+    let cleanupFinished = false;
+    let ghostEl: HTMLDivElement | null = null;
+    let insertEl: HTMLDivElement | null = null;
+
+    const ensureDragElements = () => {
+      if (!ghostEl) {
+        ghostEl = ownerDocument.createElement('div');
+        ghostEl.textContent = dragLabel;
+        ghostEl.style.position = 'fixed';
+        ghostEl.style.left = '0';
+        ghostEl.style.top = '0';
+        ghostEl.style.zIndex = '2147483647';
+        ghostEl.style.pointerEvents = 'none';
+        ghostEl.style.maxWidth = '220px';
+        ghostEl.style.padding = '5px 10px';
+        ghostEl.style.borderRadius = '7px';
+        ghostEl.style.border = '1px solid color-mix(in srgb, var(--top-tabs-accent, hsl(var(--accent))) 60%, transparent)';
+        ghostEl.style.background = 'color-mix(in srgb, var(--top-tabs-active-bg, hsl(var(--background))) 90%, transparent)';
+        ghostEl.style.color = 'var(--top-tabs-fg, hsl(var(--foreground)))';
+        ghostEl.style.boxShadow = '0 12px 28px rgba(0, 0, 0, 0.28)';
+        ghostEl.style.fontSize = '12px';
+        ghostEl.style.fontWeight = '600';
+        ghostEl.style.whiteSpace = 'nowrap';
+        ghostEl.style.overflow = 'hidden';
+        ghostEl.style.textOverflow = 'ellipsis';
+        ownerDocument.body.appendChild(ghostEl);
+      }
+
+      if (!insertEl) {
+        insertEl = ownerDocument.createElement('div');
+        insertEl.style.position = 'fixed';
+        insertEl.style.zIndex = '2147483646';
+        insertEl.style.pointerEvents = 'none';
+        insertEl.style.width = '2px';
+        insertEl.style.borderRadius = '999px';
+        insertEl.style.background = 'var(--top-tabs-accent, hsl(var(--accent)))';
+        insertEl.style.boxShadow = '0 0 10px color-mix(in srgb, var(--top-tabs-accent, hsl(var(--accent))) 70%, transparent)';
+        insertEl.style.display = 'none';
+        ownerDocument.body.appendChild(insertEl);
+      }
+    };
+
+    const removeDragElements = () => {
+      ghostEl?.remove();
+      insertEl?.remove();
+      ghostEl = null;
+      insertEl = null;
+    };
+
+    const updateDragElements = (pointerEvent: PointerEvent) => {
+      ensureDragElements();
+      if (ghostEl) {
+        ghostEl.style.transform = `translate(${pointerEvent.clientX + 12}px, ${pointerEvent.clientY + 10}px)`;
+      }
+
+      const topTabsRoot = ownerDocument.querySelector<HTMLElement>('[data-top-tabs-root]');
+      const insertionTarget = getTopTabInsertionTarget(pointerEvent, topTabsRoot);
+      if (!topTabsRoot || !insertionTarget || !insertEl) {
+        if (insertEl) insertEl.style.display = 'none';
+        return insertionTarget;
+      }
+
+      const targetTab = Array.from(topTabsRoot.querySelectorAll<HTMLElement>('[data-tab-id]'))
+        .find((tab) => tab.dataset.tabId === insertionTarget.tabId);
+      if (!targetTab) {
+        insertEl.style.display = 'none';
+        return insertionTarget;
+      }
+
+      const targetRect = targetTab.getBoundingClientRect();
+      const rootRect = topTabsRoot.getBoundingClientRect();
+      const lineX = insertionTarget.position === 'before' ? targetRect.left : targetRect.right;
+      insertEl.style.display = 'block';
+      insertEl.style.left = `${lineX - 1}px`;
+      insertEl.style.top = `${Math.max(rootRect.top + 5, targetRect.top + 3)}px`;
+      insertEl.style.height = `${Math.max(18, Math.min(rootRect.bottom - rootRect.top - 8, targetRect.height - 4))}px`;
+      return insertionTarget;
+    };
+
+    const resolveStableInsertionTarget = (insertionTarget: ReturnType<typeof getTopTabInsertionTarget>) => {
+      if (!insertionTarget || insertionTarget.tabId !== session.workspaceId) return insertionTarget;
+      const sourceWorkspace = session.workspaceId ? workspaceById.get(session.workspaceId) : undefined;
+      if (!sourceWorkspace) return insertionTarget;
+      const remainingSessionIds = collectSessionIds(sourceWorkspace.root)
+        .filter((candidateId) => candidateId !== session.id);
+      if (remainingSessionIds.length !== 1) return insertionTarget;
+      return {
+        tabId: remainingSessionIds[0],
+        position: insertionTarget.position,
+      };
+    };
+
+    const startDragIfNeeded = (pointerEvent: PointerEvent) => {
+      if (cleanupFinished || dragStarted) return;
+      const dx = pointerEvent.clientX - startPoint.clientX;
+      const dy = pointerEvent.clientY - startPoint.clientY;
+      if (Math.hypot(dx, dy) < 4) return;
+      dragStarted = true;
+      onStartSessionDrag?.(session.id);
+      updateDragElements(pointerEvent);
+    };
+
+    const cleanup = () => {
+      if (cleanupFinished) return;
+      cleanupFinished = true;
+      ownerDocument.removeEventListener('pointermove', handlePointerMove, true);
+      ownerDocument.removeEventListener('pointerup', handlePointerUp, true);
+      ownerDocument.removeEventListener('pointercancel', handlePointerCancel, true);
+      ownerWindow?.removeEventListener('blur', handleWindowBlur);
+      removeDragElements();
+      const shouldEndDrag = dragStarted;
+      dragStarted = false;
+      if (activeDragCleanupRef.current === cleanup) {
+        activeDragCleanupRef.current = null;
+      }
+      if (shouldEndDrag) onEndSessionDrag?.();
+    };
+
+    const handlePointerMove = (pointerEvent: PointerEvent) => {
+      startDragIfNeeded(pointerEvent);
+      if (dragStarted) updateDragElements(pointerEvent);
+    };
+
+    const handlePointerCancel = () => {
+      cleanup();
+    };
+
+    const handleWindowBlur = () => {
+      cleanup();
+    };
+
+    const handlePointerUp = (pointerEvent: PointerEvent) => {
+      startDragIfNeeded(pointerEvent);
+      const topTabsRoot = ownerDocument.querySelector<HTMLElement>('[data-top-tabs-root]');
+      const insertionTarget = dragStarted ? updateDragElements(pointerEvent) : null;
+      const shouldDetach = dragStarted
+        && !!topTabsRoot
+        && isPointInsideRect(pointerEvent, topTabsRoot.getBoundingClientRect());
+      cleanup();
+      if (shouldDetach) {
+        const stableInsertionTarget = resolveStableInsertionTarget(insertionTarget);
+        if (onRemoveSessionFromWorkspace) {
+          onRemoveSessionFromWorkspace(
+            session.id,
+            stableInsertionTarget
+              ? {
+                  tabId: stableInsertionTarget.tabId,
+                  position: stableInsertionTarget.position,
+                  additionalTabIds: [session.id, stableInsertionTarget.tabId],
+                }
+              : undefined,
+          );
+        } else if (stableInsertionTarget) {
+          onReorderTabs?.(session.id, stableInsertionTarget.tabId, stableInsertionTarget.position, [
+            session.id,
+            stableInsertionTarget.tabId,
+          ]);
+        }
+      }
+    };
+
+    activeDragCleanupRef.current = cleanup;
+    ownerDocument.addEventListener('pointermove', handlePointerMove, true);
+    ownerDocument.addEventListener('pointerup', handlePointerUp, true);
+    ownerDocument.addEventListener('pointercancel', handlePointerCancel, true);
+    ownerWindow?.addEventListener('blur', handleWindowBlur);
+  }, [
+    cleanupActiveDrag,
+    inActiveWorkspace,
+    onEndSessionDrag,
+    onRemoveSessionFromWorkspace,
+    onReorderTabs,
+    onStartSessionDrag,
+    session,
+    terminalSettings?.dynamicTabTitleMode,
+    workspaceById,
+  ]);
+}
+
 const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   session,
   host,
   sessionHostResolved,
   chainHosts,
   sudoAutofillPassword,
+  sudoAutofillCandidates,
   workspaceById,
   workspaceRectsById,
   isTerminalLayerVisible,
@@ -978,10 +1235,18 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   );
   const renderSnapshot = useSyncExternalStore(activeTabStore.subscribe, getRenderSnapshot, getRenderSnapshot);
   const { paneState, isFocusedPane } = parseTerminalPaneRenderSnapshot(renderSnapshot);
+  // Live titles/icons are store-driven; per-session snapshot so other panes do
+  // not re-render when only a sibling title changes.
+  const presentedSession = usePresentedSession(session);
+  const sessionDisplayName = resolveSessionTabTitle(
+    presentedSession,
+    terminalSettings?.dynamicTabTitleMode,
+  );
   const activeWorkspaceId = paneState.workspaceId;
   const isVisible = paneState.isVisible;
   const paneElementRef = useRef<HTMLDivElement | null>(null);
   const lastVisiblePaneSizeRef = useRef<TerminalPaneHiddenSize | null>(null);
+  const [, bumpHiddenPaneSizeVersion] = useState(0);
 
   // Publish visibility before paint so hibernate / write-path readers see the
   // new value in the same frame as the CSS hide/show (#1985).
@@ -992,8 +1257,18 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   const inActiveWorkspace = !!activeWorkspaceId;
   const isFocusMode = paneState.mode === 'focus';
   const isSplitViewVisible = paneState.mode === 'split';
-  const rect = activeWorkspaceId && isSplitViewVisible
-    ? workspaceRectsById.get(activeWorkspaceId)?.[session.id] ?? null
+  const hibernateHiddenTabs = resolveTerminalHibernateEnabledForProtocol(terminalSettings, host.protocol);
+  const layoutWorkspaceId = activeWorkspaceId ?? (!hibernateHiddenTabs ? session.workspaceId : undefined);
+  const layoutWorkspace = layoutWorkspaceId ? workspaceById.get(layoutWorkspaceId) : undefined;
+  const keepsWorkspacePresentation = !!layoutWorkspace;
+  const usesSplitLayout = shouldUseTerminalPaneSplitLayout({
+    workspace: layoutWorkspace,
+    sessionId: session.id,
+    isVisible,
+    hibernateHiddenTabs,
+  });
+  const rect = layoutWorkspaceId && usesSplitLayout
+    ? workspaceRectsById.get(layoutWorkspaceId)?.[session.id] ?? null
     : null;
   const layoutStyle = rect
     ? {
@@ -1003,7 +1278,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
       height: `${rect.h}px`,
     }
     : { left: 0, top: 0, width: '100%', height: '100%' };
-  const livePaneLayoutKey = isSplitViewVisible && rect
+  const livePaneLayoutKey = usesSplitLayout && rect
     ? `${Math.round(rect.w)}x${Math.round(rect.h)}`
     : 'full';
   const paneLayoutKeyRef = useRef(livePaneLayoutKey);
@@ -1044,23 +1319,58 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   const style: React.CSSProperties = { ...layoutStyle };
 
   useLayoutEffect(() => {
-    if (!isVisible) return;
     const element = paneElementRef.current;
     if (!element) return;
-    const width = element.clientWidth;
-    const height = element.clientHeight;
-    if (width > 0 && height > 0) {
+
+    const capturePaneSize = () => {
+      const width = element.clientWidth;
+      const height = element.clientHeight;
+      if (width <= 0 || height <= 0) return false;
       lastVisiblePaneSizeRef.current = { width, height };
+      return true;
+    };
+
+    if (isVisible) {
+      capturePaneSize();
+      const observer = new ResizeObserver(() => {
+        capturePaneSize();
+      });
+      observer.observe(element);
+      return () => observer.disconnect();
     }
+
+    const initializeHiddenFullSize = !hibernateHiddenTabs
+      && !rect
+      && !lastVisiblePaneSizeRef.current;
+    if (!initializeHiddenFullSize) return;
+    if (capturePaneSize()) {
+      bumpHiddenPaneSizeVersion((version) => version + 1);
+      return;
+    }
+
+    const observer = new ResizeObserver(() => {
+      if (!capturePaneSize()) return;
+      observer.disconnect();
+      bumpHiddenPaneSizeVersion((version) => version + 1);
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
   }, [
+    hibernateHiddenTabs,
     isVisible,
     layoutStyle.height,
     layoutStyle.width,
     activeWorkspaceId,
+    rect,
   ]);
 
   if (!isVisible) {
-    Object.assign(style, resolveHiddenTerminalPaneStyle(style, lastVisiblePaneSizeRef.current));
+    Object.assign(style, resolveInactiveTerminalPaneStyle(
+      style,
+      lastVisiblePaneSizeRef.current,
+      hibernateHiddenTabs,
+      !rect,
+    ));
   }
 
   const workspaceFocusHandler = activeWorkspaceId
@@ -1107,173 +1417,16 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
   const handleDetachDragEnd = useCallback(() => {
     onEndSessionDrag?.();
   }, [onEndSessionDrag]);
-  const handleDetachPointerDown = useCallback((e: React.PointerEvent<HTMLElement>) => {
-    if (!inActiveWorkspace || e.button !== 0) return;
-    e.preventDefault();
-    e.stopPropagation();
-
-    const startPoint = { clientX: e.clientX, clientY: e.clientY };
-    const dragLabel = resolveSessionTabTitle(session, terminalSettings?.dynamicTabTitleMode);
-    let dragStarted = false;
-    let ghostEl: HTMLDivElement | null = null;
-    let insertEl: HTMLDivElement | null = null;
-
-    const ensureDragElements = () => {
-      if (!ghostEl) {
-        ghostEl = document.createElement('div');
-        ghostEl.textContent = dragLabel;
-        ghostEl.style.position = 'fixed';
-        ghostEl.style.left = '0';
-        ghostEl.style.top = '0';
-        ghostEl.style.zIndex = '2147483647';
-        ghostEl.style.pointerEvents = 'none';
-        ghostEl.style.maxWidth = '220px';
-        ghostEl.style.padding = '5px 10px';
-        ghostEl.style.borderRadius = '7px';
-        ghostEl.style.border = '1px solid color-mix(in srgb, var(--top-tabs-accent, hsl(var(--accent))) 60%, transparent)';
-        ghostEl.style.background = 'color-mix(in srgb, var(--top-tabs-active-bg, hsl(var(--background))) 90%, transparent)';
-        ghostEl.style.color = 'var(--top-tabs-fg, hsl(var(--foreground)))';
-        ghostEl.style.boxShadow = '0 12px 28px rgba(0, 0, 0, 0.28)';
-        ghostEl.style.fontSize = '12px';
-        ghostEl.style.fontWeight = '600';
-        ghostEl.style.whiteSpace = 'nowrap';
-        ghostEl.style.overflow = 'hidden';
-        ghostEl.style.textOverflow = 'ellipsis';
-        document.body.appendChild(ghostEl);
-      }
-
-      if (!insertEl) {
-        insertEl = document.createElement('div');
-        insertEl.style.position = 'fixed';
-        insertEl.style.zIndex = '2147483646';
-        insertEl.style.pointerEvents = 'none';
-        insertEl.style.width = '2px';
-        insertEl.style.borderRadius = '999px';
-        insertEl.style.background = 'var(--top-tabs-accent, hsl(var(--accent)))';
-        insertEl.style.boxShadow = '0 0 10px color-mix(in srgb, var(--top-tabs-accent, hsl(var(--accent))) 70%, transparent)';
-        insertEl.style.display = 'none';
-        document.body.appendChild(insertEl);
-      }
-    };
-
-    const removeDragElements = () => {
-      ghostEl?.remove();
-      insertEl?.remove();
-      ghostEl = null;
-      insertEl = null;
-    };
-
-    const updateDragElements = (event: PointerEvent) => {
-      ensureDragElements();
-      if (ghostEl) {
-        ghostEl.style.transform = `translate(${event.clientX + 12}px, ${event.clientY + 10}px)`;
-      }
-
-      const topTabsRoot = document.querySelector<HTMLElement>('[data-top-tabs-root]');
-      const insertionTarget = getTopTabInsertionTarget(event, topTabsRoot);
-      if (!topTabsRoot || !insertionTarget || !insertEl) {
-        if (insertEl) insertEl.style.display = 'none';
-        return insertionTarget;
-      }
-
-      const targetTab = Array.from(topTabsRoot.querySelectorAll<HTMLElement>('[data-tab-id]'))
-        .find((tab) => tab.dataset.tabId === insertionTarget.tabId);
-      if (!targetTab) {
-        insertEl.style.display = 'none';
-        return insertionTarget;
-      }
-
-      const targetRect = targetTab.getBoundingClientRect();
-      const rootRect = topTabsRoot.getBoundingClientRect();
-      const lineX = insertionTarget.position === 'before' ? targetRect.left : targetRect.right;
-      insertEl.style.display = 'block';
-      insertEl.style.left = `${lineX - 1}px`;
-      insertEl.style.top = `${Math.max(rootRect.top + 5, targetRect.top + 3)}px`;
-      insertEl.style.height = `${Math.max(18, Math.min(rootRect.bottom - rootRect.top - 8, targetRect.height - 4))}px`;
-      return insertionTarget;
-    };
-
-    const resolveStableInsertionTarget = (insertionTarget: ReturnType<typeof getTopTabInsertionTarget>) => {
-      if (!insertionTarget || insertionTarget.tabId !== session.workspaceId) return insertionTarget;
-      const sourceWorkspace = session.workspaceId ? workspaceById.get(session.workspaceId) : undefined;
-      if (!sourceWorkspace) return insertionTarget;
-      const remainingSessionIds = collectSessionIds(sourceWorkspace.root)
-        .filter((candidateId) => candidateId !== session.id);
-      if (remainingSessionIds.length !== 1) return insertionTarget;
-      return {
-        tabId: remainingSessionIds[0],
-        position: insertionTarget.position,
-      };
-    };
-
-    const startDragIfNeeded = (event: PointerEvent) => {
-      if (dragStarted) return;
-      const dx = event.clientX - startPoint.clientX;
-      const dy = event.clientY - startPoint.clientY;
-      if (Math.hypot(dx, dy) < 4) return;
-      dragStarted = true;
-      onStartSessionDrag?.(session.id);
-      updateDragElements(event);
-    };
-
-    const cleanup = () => {
-      document.removeEventListener('pointermove', handlePointerMove, true);
-      document.removeEventListener('pointerup', handlePointerUp, true);
-      document.removeEventListener('pointercancel', handlePointerCancel, true);
-      removeDragElements();
-      if (dragStarted) onEndSessionDrag?.();
-    };
-
-    const handlePointerMove = (event: PointerEvent) => {
-      startDragIfNeeded(event);
-      if (dragStarted) updateDragElements(event);
-    };
-
-    const handlePointerCancel = () => {
-      cleanup();
-    };
-
-    const handlePointerUp = (event: PointerEvent) => {
-      startDragIfNeeded(event);
-      const topTabsRoot = document.querySelector<HTMLElement>('[data-top-tabs-root]');
-      const insertionTarget = dragStarted ? updateDragElements(event) : null;
-      const shouldDetach = dragStarted && !!topTabsRoot && isPointInsideRect(event, topTabsRoot.getBoundingClientRect());
-      cleanup();
-      if (shouldDetach) {
-        const stableInsertionTarget = resolveStableInsertionTarget(insertionTarget);
-        if (onRemoveSessionFromWorkspace) {
-          onRemoveSessionFromWorkspace(
-            session.id,
-            stableInsertionTarget
-              ? {
-                  tabId: stableInsertionTarget.tabId,
-                  position: stableInsertionTarget.position,
-                  additionalTabIds: [session.id, stableInsertionTarget.tabId],
-                }
-              : undefined,
-          );
-        } else if (stableInsertionTarget) {
-          onReorderTabs?.(session.id, stableInsertionTarget.tabId, stableInsertionTarget.position, [
-            session.id,
-            stableInsertionTarget.tabId,
-          ]);
-        }
-      }
-    };
-
-    document.addEventListener('pointermove', handlePointerMove, true);
-    document.addEventListener('pointerup', handlePointerUp, true);
-    document.addEventListener('pointercancel', handlePointerCancel, true);
-  }, [
+  const handleDetachPointerDown = useWorkspaceDetachPointerDrag({
     inActiveWorkspace,
+    session,
+    terminalSettings,
+    workspaceById,
+    onStartSessionDrag,
     onEndSessionDrag,
     onRemoveSessionFromWorkspace,
     onReorderTabs,
-    onStartSessionDrag,
-    session,
-    terminalSettings?.dynamicTabTitleMode,
-    workspaceById,
-  ]);
+  });
   const handleTerminalFontSizeChange = useCallback((nextFontSize: number) => {
     onTerminalFontSizeChange?.(session.id, nextFontSize);
   }, [onTerminalFontSizeChange, session.id]);
@@ -1284,6 +1437,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
       data-session-id={session.id}
       data-section="terminal-split-pane"
       data-focused={isFocusedPane ? 'true' : undefined}
+      inert={isVisible ? undefined : true}
       className={cn(
         "absolute bg-background",
         inActiveWorkspace && "workspace-pane",
@@ -1303,10 +1457,11 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
         knownHosts={knownHosts}
         isVisible={isVisible}
         paneLayoutKey={paneLayoutKey}
-        inWorkspace={inActiveWorkspace}
+        inWorkspace={keepsWorkspacePresentation}
         isResizing={isResizing}
-        isFocusMode={isFocusMode}
+        isFocusMode={layoutWorkspace?.viewMode === 'focus'}
         isFocused={isFocusedPane}
+        isFocusedPane={isSplitViewVisible ? isFocusedPane : undefined}
         fontFamilyId={terminalFontFamilyId}
         fontSize={fontSize}
         terminalTheme={terminalTheme}
@@ -1315,7 +1470,9 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
         customAccent={customAccent}
         terminalSettings={terminalSettings}
         sessionId={session.id}
+        workspaceId={session.workspaceId}
         restoreState={session.restoreState}
+        pendingInitialCwd={session.pendingInitialCwd}
         shellType={session.shellType}
         lastCwd={session.lastCwd}
         restoreTerminalCwd={restoreTerminalCwd && sessionHostResolved}
@@ -1364,7 +1521,8 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
         sessionLog={sessionLog}
         sshDebugLogEnabled={sshDebugLogEnabled}
         sudoAutofillPassword={sudoAutofillPassword}
-        sessionDisplayName={resolveSessionTabTitle(session, terminalSettings?.dynamicTabTitleMode)}
+        sudoAutofillCandidates={sudoAutofillCandidates}
+        sessionDisplayName={sessionDisplayName}
         showSelectionAIAction={showSelectionAIAction}
         onAddSelectionToAI={onAddSelectionToAI}
         onRename={handleRename}
@@ -1385,6 +1543,10 @@ interface TerminalPanesHostProps {
   sessionHostsMap: Map<string, Host>;
   sessionChainHostsMap: Map<string, Host[]>;
   sessionSudoAutofillPasswordsMap: Map<string, string | undefined>;
+  sessionSudoAutofillCandidatesMap: Map<
+    string,
+    import("../terminal/runtime/terminalSudoAutofill").SudoPasswordAutofillCandidate[] | undefined
+  >;
   resolvedSessionHostIds: Set<string>;
   workspaceById: Map<string, Workspace>;
   workspaceRectsById: Map<string, Record<string, WorkspaceRect>>;
@@ -1412,7 +1574,7 @@ interface TerminalPanesHostProps {
   keyBindings?: KeyBinding[];
   isResizing: boolean;
   isComposeBarOpen: boolean;
-  sessionLog?: { enabled: true; directory: string; format: string; timestampsEnabled?: boolean };
+  sessionLog?: { enabled: boolean; directory: string; format: "txt" | "raw" | "html"; timestampsEnabled?: boolean };
   sshDebugLogEnabled?: boolean;
   onHotkeyAction?: (action: string, event: KeyboardEvent) => void;
   onTerminalFontSizeChange?: TerminalPaneProps['onTerminalFontSizeChange'];
@@ -1434,7 +1596,6 @@ interface TerminalPanesHostProps {
   onUpdateHost: (host: Host) => void;
   onAddKnownHost?: (knownHost: KnownHost) => void;
   onCommandExecuted?: (command: string, hostId: string, hostLabel: string, sessionId: string) => void;
-  shellHistory?: import('../../types').ShellHistoryEntry[];
   onCommandSubmitted?: (command: string, hostId: string, hostLabel: string, sessionId: string) => void;
   onSetWorkspaceFocusedSession?: (workspaceId: string, sessionId: string) => void;
   onSplitSession?: (sessionId: string, direction: SplitDirection) => void;
@@ -1443,7 +1604,7 @@ interface TerminalPanesHostProps {
     data: string,
     sourceSessionId: string,
     options?: TerminalBroadcastInputOptions,
-  ) => void;
+  ) => string[] | void;
   onToggleWorkspaceComposeBar: () => void;
   onBroadcastInterruptPriorityChange: (
     sessionId: string,
@@ -1466,10 +1627,12 @@ const terminalPanesHostPropsAreEqual = (
   prev: TerminalPanesHostProps,
   next: TerminalPanesHostProps,
 ): boolean => {
-  if (prev.sessions !== next.sessions) return false;
+  // Ignore TopTabs-only presentation fields on sessions (dynamicTitle, coding CLI).
+  if (!terminalPaneSessionsEqual(prev.sessions, next.sessions)) return false;
   if (prev.sessionHostsMap !== next.sessionHostsMap) return false;
   if (prev.sessionChainHostsMap !== next.sessionChainHostsMap) return false;
   if (prev.sessionSudoAutofillPasswordsMap !== next.sessionSudoAutofillPasswordsMap) return false;
+  if (prev.sessionSudoAutofillCandidatesMap !== next.sessionSudoAutofillCandidatesMap) return false;
   if (prev.resolvedSessionHostIds !== next.resolvedSessionHostIds) return false;
   if (prev.workspaceById !== next.workspaceById) return false;
   if (prev.isTerminalLayerVisible !== next.isTerminalLayerVisible) return false;
@@ -1487,8 +1650,7 @@ const terminalPanesHostPropsAreEqual = (
   if (prev.fontSize !== next.fontSize) return false;
   if (prev.terminalTheme !== next.terminalTheme) return false;
   if (prev.followAppTerminalTheme !== next.followAppTerminalTheme) return false;
-  if (prev.accentMode !== next.accentMode) return false;
-  if (prev.customAccent !== next.customAccent) return false;
+  // accentMode / customAccent intentionally omitted — Terminal reads appearanceChromeStore.
   if (prev.terminalSettings !== next.terminalSettings) return false;
   if (prev.hotkeyScheme !== next.hotkeyScheme) return false;
   if (prev.disableTerminalFontZoom !== next.disableTerminalFontZoom) return false;
@@ -1536,12 +1698,21 @@ const terminalPanesHostPropsAreEqual = (
 
   if (prev.workspaceRectsById === next.workspaceRectsById) return true;
 
+  if (!resolveTerminalHibernateEnabled(next.terminalSettings)) {
+    return prev.sessions.every((session) => workspaceRectsEqual(
+      getPaneWorkspaceRect({ session, workspaceRectsById: prev.workspaceRectsById }),
+      getPaneWorkspaceRect({ session, workspaceRectsById: next.workspaceRectsById }),
+    ));
+  }
+
   const activeTabId = activeTabStore.getActiveTabId();
   const activeWorkspace = activeTabId ? next.workspaceById.get(activeTabId) : undefined;
-  if (!activeWorkspace || activeWorkspace.viewMode === 'focus') return true;
 
   return prev.sessions.every((session) => {
-    if (session.workspaceId !== activeWorkspace.id) return true;
+    const isLocalTerminal = next.sessionHostsMap.get(session.id)?.protocol === 'local';
+    const isInVisibleSplitWorkspace = activeWorkspace?.viewMode !== 'focus'
+      && session.workspaceId === activeWorkspace?.id;
+    if (!isLocalTerminal && !isInVisibleSplitWorkspace) return true;
     return workspaceRectsEqual(
       getPaneWorkspaceRect({ session, workspaceRectsById: prev.workspaceRectsById }),
       getPaneWorkspaceRect({ session, workspaceRectsById: next.workspaceRectsById }),
@@ -1554,6 +1725,7 @@ export const TerminalPanesHost: React.FC<TerminalPanesHostProps> = memo(({
   sessionHostsMap,
   sessionChainHostsMap,
   sessionSudoAutofillPasswordsMap,
+  sessionSudoAutofillCandidatesMap,
   resolvedSessionHostIds,
   ...sharedProps
 }) => {
@@ -1575,6 +1747,7 @@ export const TerminalPanesHost: React.FC<TerminalPanesHostProps> = memo(({
             sessionHostResolved={resolvedSessionHostIds.has(session.id)}
             chainHosts={sessionChainHostsMap.get(session.id)}
             sudoAutofillPassword={sessionSudoAutofillPasswordsMap.get(session.id)}
+            sudoAutofillCandidates={sessionSudoAutofillCandidatesMap.get(session.id)}
             showSelectionAIAction={showSelectionAIAction}
             {...sharedProps}
           />

@@ -5,13 +5,17 @@ const { getCapabilityByRpcMethod } = require("../../capabilities/registry.cjs");
 const { getMcpToolNameForRpcMethod } = require("../../capabilities/adapters/mcpAdapter.cjs");
 const { createVaultService } = require("../../capabilities/services/vaultService.cjs");
 const { createPortForwardService } = require("../../capabilities/services/portforwardService.cjs");
+const { createSessionService } = require("../../capabilities/services/sessionService.cjs");
 
 const UNROUTED = Symbol("capability-rpc-unrouted");
 
 const SERVICE_BINDINGS = Object.freeze({
   "vault.host.get": { domain: "vault", method: "getHost" },
   "vault.host.list": { domain: "vault", method: "listHosts" },
+  "vault.host.open": { domain: "vault", method: "openHost" },
   "vault.hosts.create": { domain: "vault", method: "createHosts" },
+  "vault.host.update": { domain: "vault", method: "updateHost" },
+  "vault.host.delete": { domain: "vault", method: "deleteHost" },
   "vault.host.import": { domain: "vault", method: "importHosts" },
   "vault.host.notes.get": { domain: "vault", method: "getHostNotes" },
   "vault.host.notes.set": { domain: "vault", method: "setHostNotes" },
@@ -19,6 +23,13 @@ const SERVICE_BINDINGS = Object.freeze({
   "vault.note.get": { domain: "vault", method: "getNote" },
   "vault.note.create": { domain: "vault", method: "createNote" },
   "vault.note.update": { domain: "vault", method: "updateNote" },
+  "vault.note.delete": { domain: "vault", method: "deleteNote" },
+  "vault.identity.list": { domain: "vault", method: "listIdentities" },
+  "vault.proxyProfile.list": { domain: "vault", method: "listProxyProfiles" },
+  "vault.group.list": { domain: "vault", method: "listGroups" },
+  "vault.group.create": { domain: "vault", method: "createGroup" },
+  "vault.group.update": { domain: "vault", method: "updateGroup" },
+  "vault.group.delete": { domain: "vault", method: "deleteGroup" },
   "vault.snippets.list": { domain: "vault", method: "listSnippets" },
   "vault.snippets.get": { domain: "vault", method: "getSnippet" },
   "vault.snippets.run": { domain: "vault", method: "runSnippet" },
@@ -40,9 +51,14 @@ const SERVICE_BINDINGS = Object.freeze({
   "vault.host.connectScripts.list": { domain: "vault", method: "listHostConnectScripts" },
   "vault.host.connectScripts.set": { domain: "vault", method: "setHostConnectScripts" },
   "portforward.rules.list": { domain: "portforward", method: "listRules" },
+  "portforward.rules.create": { domain: "portforward", method: "createRule" },
+  "portforward.rules.update": { domain: "portforward", method: "updateRule" },
+  "portforward.rules.duplicate": { domain: "portforward", method: "duplicateRule" },
+  "portforward.rules.delete": { domain: "portforward", method: "deleteRule" },
   "portforward.tunnels.list": { domain: "portforward", method: "listTunnels" },
   "portforward.start": { domain: "portforward", method: "start" },
   "portforward.stop": { domain: "portforward", method: "stop" },
+  "session.close": { domain: "session", method: "close" },
 });
 
 function resolveCapabilitySurface(rpcMethod) {
@@ -72,10 +88,21 @@ function createCapabilityRpcDispatcher(deps) {
   } = deps;
 
   const vaultService = createVaultService({ invokeVaultAgent });
-  const portforwardService = createPortForwardService({ invokeVaultAgent });
+  const portforwardService = createPortForwardService({
+    invokeVaultAgent,
+    listPortForwards: deps.listPortForwards,
+  });
+  const sessionService = deps.sessionService || createSessionService({
+    invokeSessionAgent: invokeVaultAgent,
+    validateClose: deps.validateSessionClose,
+    beforeClose: deps.beforeSessionClose,
+    afterClose: deps.afterSessionClose,
+    onClosed: deps.onSessionClosed,
+  });
   const services = {
     vault: vaultService,
     portforward: portforwardService,
+    session: sessionService,
   };
 
   return async function dispatchCapabilityRpc(rpcMethod, params = {}) {
@@ -134,7 +161,14 @@ function createCapabilityRpcDispatcher(deps) {
       };
     }
 
-    return handler(params);
+    const hostOpenGeneration = capability.id === "vault.host.open"
+      ? deps.captureHostOpenScope?.(params?.chatSessionId)
+      : null;
+    const result = await handler(params);
+    if (capability.id === "vault.host.open" && result?.ok !== false && result?.sessionId) {
+      deps.onHostOpened?.(params?.chatSessionId, result.sessionId, hostOpenGeneration);
+    }
+    return result;
   };
 }
 

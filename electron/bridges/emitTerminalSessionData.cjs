@@ -9,13 +9,33 @@ const {
 
 let getSession = null;
 let outputChannel = null;
+let onSessionActivity = null;
 /** @type {Set<(sessionId: string, data: string) => void>} */
 const dataTaps = new Set();
 const emitPerfLogStateBySession = new Map();
+const MAX_EMIT_PERF_SESSION_STATES = 512;
+
+function retainTerminalSessionPerformanceState(key, state) {
+  emitPerfLogStateBySession.delete(key);
+  emitPerfLogStateBySession.set(key, state);
+  while (emitPerfLogStateBySession.size > MAX_EMIT_PERF_SESSION_STATES) {
+    const oldestKey = emitPerfLogStateBySession.keys().next().value;
+    if (oldestKey === undefined) break;
+    emitPerfLogStateBySession.delete(oldestKey);
+  }
+}
+
+function clearTerminalSessionPerformanceState(sessionId) {
+  if (!sessionId) return;
+  emitPerfLogStateBySession.delete(sessionId);
+}
 
 function configureTerminalSessionDataEmitter(options = {}) {
   getSession = typeof options.getSession === "function" ? options.getSession : null;
   outputChannel = options.outputChannel || null;
+  onSessionActivity = typeof options.onSessionActivity === "function"
+    ? options.onSessionActivity
+    : null;
 }
 
 function addTerminalDataTap(listener) {
@@ -46,7 +66,7 @@ function getEmitPerfLogDetails(sessionId, terminalPerf, options = {}) {
     || now - state.lastLoggedAt >= 1000;
 
   if (!shouldLog) {
-    emitPerfLogStateBySession.set(key, state);
+    retainTerminalSessionPerformanceState(key, state);
     return null;
   }
 
@@ -62,7 +82,7 @@ function getEmitPerfLogDetails(sessionId, terminalPerf, options = {}) {
     rows: options?.rows,
   };
 
-  emitPerfLogStateBySession.set(key, {
+  retainTerminalSessionPerformanceState(key, {
     lastLoggedAt: now,
     batchChunks: 0,
     batchChars: 0,
@@ -72,11 +92,17 @@ function getEmitPerfLogDetails(sessionId, terminalPerf, options = {}) {
 }
 
 function emitTerminalSessionData(contents, sessionId, data, options = {}) {
-  if (getSession && sessionId && data) {
-    const session = getSession(sessionId);
-    if (session) {
-      trackEmitted(session, typeof data === "string" ? data.length : 0, sessionId);
+  const currentSession = getSession && sessionId ? getSession(sessionId) : null;
+  if (options.session && currentSession !== options.session) return false;
+  if (sessionId && data && onSessionActivity) {
+    try {
+      onSessionActivity({ sessionId, phase: "touch" });
+    } catch {
+      // Session activity tracking is best-effort and must not break output.
     }
+  }
+  if (currentSession && sessionId && data) {
+    trackEmitted(currentSession, typeof data === "string" ? data.length : 0, sessionId);
   }
   if (sessionId && data) {
     for (const tap of dataTaps) {
@@ -93,12 +119,21 @@ function emitTerminalSessionData(contents, sessionId, data, options = {}) {
   if (emitPerfDetails) {
     logTerminalOutputPerf("backend-emit", emitPerfDetails);
   }
-  if (outputChannel?.send?.(sessionId, data, meta)) return;
-  contents?.send("netcatty:data", meta ? { sessionId, data, meta } : { sessionId, data });
+  if (outputChannel?.send?.(sessionId, data, meta)) return true;
+  const generation = options.session?._terminalSessionGeneration;
+  contents?.send("netcatty:data", {
+    sessionId,
+    data,
+    ...(meta ? { meta } : {}),
+    ...(Number.isSafeInteger(generation) ? { _terminalSessionGeneration: generation } : {}),
+  });
+  return true;
 }
 
 module.exports = {
   configureTerminalSessionDataEmitter,
   emitTerminalSessionData,
   addTerminalDataTap,
+  clearTerminalSessionPerformanceState,
+  _getTerminalSessionPerformanceStateCountForTests: () => emitPerfLogStateBySession.size,
 };

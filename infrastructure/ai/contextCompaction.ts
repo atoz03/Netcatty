@@ -8,6 +8,7 @@ import {
   estimateModelMessagesTokensWithKind,
   estimateUnknownTokens,
 } from "./harness/tokenEstimator";
+import { redactSecretsForModel } from "./harness/modelSecretRedaction";
 
 const REDACTED_PAYLOAD_PREVIEW_CHARS = 80;
 
@@ -114,6 +115,33 @@ export function findSafeCompactionSplitIndex(
   return splitAt;
 }
 
+/**
+ * UI-message equivalent of findSafeCompactionSplitIndex.
+ * Persisted force-compact boundaries use ChatMessage indices; never cut between
+ * an assistant toolCalls message and its following tool result messages.
+ */
+export function findSafeChatMessageCompactionSplitIndex(
+  messages: Array<{ role: string; toolCalls?: readonly unknown[] | null }>,
+  protectRecentMessages = DEFAULT_PROTECT_RECENT_MESSAGES,
+): number {
+  let splitAt = Math.max(0, messages.length - protectRecentMessages);
+
+  while (splitAt > 0 && messages[splitAt]?.role === "tool") {
+    splitAt -= 1;
+  }
+
+  while (
+    splitAt > 0
+    && messages[splitAt - 1]?.role === "assistant"
+    && Array.isArray(messages[splitAt - 1]?.toolCalls)
+    && (messages[splitAt - 1]?.toolCalls?.length ?? 0) > 0
+  ) {
+    splitAt -= 1;
+  }
+
+  return splitAt;
+}
+
 export function buildCompactedMessages({
   summary,
   recentMessages,
@@ -206,8 +234,8 @@ function endsWithToolCall(message: ModelMessage | undefined): boolean {
 }
 
 function formatMessageContent(content: ModelMessage["content"]): string {
-  if (typeof content === "string") return content;
-  return JSON.stringify(sanitizeContentForCompaction(content), null, 2);
+  if (typeof content === "string") return redactSecretsForModel(content);
+  return redactSecretsForModel(JSON.stringify(sanitizeContentForCompaction(content), null, 2));
 }
 
 function sanitizeContentForCompaction(content: Exclude<ModelMessage["content"], string>): unknown {

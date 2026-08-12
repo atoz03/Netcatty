@@ -1,6 +1,6 @@
 "use strict";
 
-const { CAPABILITY_STATUS } = require("../constants.cjs");
+const { AGENT_KINDS, CAPABILITY_STATUS } = require("../constants.cjs");
 
 /** @type {import("../types.cjs").CapabilityDefinition[]} */
 const VAULT_CAPABILITIES = [
@@ -44,6 +44,30 @@ const VAULT_CAPABILITIES = [
     },
   },
   {
+    id: "vault.host.open",
+    domain: "vault",
+    status: CAPABILITY_STATUS.IMPLEMENTED,
+    description:
+      "Open a vault host by creating a new terminal tab and starting the connection. Returns the new sessionId so you can run terminal/SFTP tools against it. Use vault_hosts_list first when you only know the label or hostname.",
+    // Sidebar Catty is scoped to already-open terminals/workspaces and must not
+    // expand that scope mid-turn. Keep host_open for MCP / CLI / global agent.
+    agentKinds: [AGENT_KINDS.GLOBAL],
+    policy: {
+      write: true,
+      sensitiveRead: false,
+      longRunning: false,
+      requiresChatSession: false,
+      bypassesObserverBlock: false,
+      bypassesApproval: false,
+      bypassesChatCancel: false,
+    },
+    surfaces: {
+      cli: { command: ["vault", "host", "open"] },
+      global: { rpcMethod: "vault/hosts/open" },
+      public: { rpcMethod: "public/vault/hosts/open", mcpTool: "host_open" },
+    },
+  },
+  {
     id: "vault.hosts.create",
     domain: "vault",
     status: CAPABILITY_STATUS.IMPLEMENTED,
@@ -60,6 +84,44 @@ const VAULT_CAPABILITIES = [
     surfaces: {
       global: { rpcMethod: "vault/hosts/create" },
       public: { rpcMethod: "public/vault/hosts/create", mcpTool: "vault_hosts_create" },
+    },
+  },
+  {
+    id: "vault.host.update",
+    domain: "vault",
+    status: CAPABILITY_STATUS.IMPLEMENTED,
+    description: "Update selected fields on an existing vault host. Use vault_hosts_list first to resolve the hostId.",
+    policy: {
+      write: true,
+      sensitiveRead: false,
+      longRunning: false,
+      requiresChatSession: false,
+      bypassesObserverBlock: false,
+      bypassesApproval: false,
+      bypassesChatCancel: false,
+    },
+    surfaces: {
+      global: { rpcMethod: "vault/hosts/update" },
+      public: { rpcMethod: "public/vault/hosts/update", mcpTool: "vault_hosts_update" },
+    },
+  },
+  {
+    id: "vault.host.delete",
+    domain: "vault",
+    status: CAPABILITY_STATUS.IMPLEMENTED,
+    description: "Delete a saved vault host by id. Use vault_hosts_list first to resolve the hostId.",
+    policy: {
+      write: true,
+      sensitiveRead: false,
+      longRunning: false,
+      requiresChatSession: false,
+      bypassesObserverBlock: false,
+      bypassesApproval: false,
+      bypassesChatCancel: false,
+    },
+    surfaces: {
+      global: { rpcMethod: "vault/hosts/delete" },
+      public: { rpcMethod: "public/vault/hosts/delete", mcpTool: "vault_hosts_delete" },
     },
   },
   {
@@ -197,6 +259,55 @@ const VAULT_CAPABILITIES = [
       public: { rpcMethod: "public/vault/notes/update", mcpTool: "vault_notes_update" },
     },
   },
+  {
+    id: "vault.note.delete",
+    domain: "vault",
+    status: CAPABILITY_STATUS.IMPLEMENTED,
+    description: "Delete a Vault → Notes entry by id.",
+    policy: { write: true, sensitiveRead: false, longRunning: false, requiresChatSession: false, bypassesObserverBlock: false, bypassesApproval: false, bypassesChatCancel: false },
+    surfaces: {
+      global: { rpcMethod: "vault/notes/delete" },
+      public: { rpcMethod: "public/vault/notes/delete", mcpTool: "vault_notes_delete" },
+    },
+  },
+  {
+    id: "vault.identity.list",
+    domain: "vault",
+    status: CAPABILITY_STATUS.IMPLEMENTED,
+    description: "List reusable vault identities without passwords, private keys, or passphrases.",
+    policy: { write: false, sensitiveRead: true, longRunning: false, requiresChatSession: false, bypassesObserverBlock: false, bypassesApproval: true, bypassesChatCancel: true },
+    surfaces: {
+      global: { rpcMethod: "vault/identities/list" },
+      public: { rpcMethod: "public/vault/identities/list", mcpTool: "vault_identities_list" },
+    },
+  },
+  {
+    id: "vault.proxyProfile.list",
+    domain: "vault",
+    status: CAPABILITY_STATUS.IMPLEMENTED,
+    description: "List reusable proxy profiles without credentials.",
+    policy: { write: false, sensitiveRead: true, longRunning: false, requiresChatSession: false, bypassesObserverBlock: false, bypassesApproval: true, bypassesChatCancel: true },
+    surfaces: {
+      global: { rpcMethod: "vault/proxyProfiles/list" },
+      public: { rpcMethod: "public/vault/proxyProfiles/list", mcpTool: "vault_proxy_profiles_list" },
+    },
+  },
+  ...[
+    ["vault.group.list", "List vault groups and their safe default settings.", "list", "vault_groups_list", false],
+    ["vault.group.create", "Create a vault group with optional default connection settings.", "create", "vault_groups_create", true],
+    ["vault.group.update", "Update or rename a vault group and its default connection settings.", "update", "vault_groups_update", true],
+    ["vault.group.delete", "Delete a vault group, moving its hosts to the root unless deleteHosts is true.", "delete", "vault_groups_delete", true],
+  ].map(([id, description, action, mcpTool, write]) => ({
+    id,
+    domain: "vault",
+    status: CAPABILITY_STATUS.IMPLEMENTED,
+    description,
+    policy: { write, sensitiveRead: false, longRunning: false, requiresChatSession: false, bypassesObserverBlock: false, bypassesApproval: !write, bypassesChatCancel: !write },
+    surfaces: {
+      global: { rpcMethod: `vault/groups/${action}` },
+      public: { rpcMethod: `public/vault/groups/${action}`, mcpTool },
+    },
+  })),
   {
     id: "vault.snippets.list",
     domain: "vault",

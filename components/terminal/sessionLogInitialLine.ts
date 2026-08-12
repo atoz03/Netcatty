@@ -12,7 +12,7 @@ type ActiveBufferLike = {
 
 export type TerminalSessionLogInitialLineSource = {
   buffer: {
-    active: ActiveBufferLike;
+    active: ActiveBufferLike & { type?: string };
   };
 };
 
@@ -26,6 +26,9 @@ const CMD_PROMPT_RE = /^[A-Za-z]:\\.*>$/;
 
 export function getSessionLogInitialLine(term: TerminalSessionLogInitialLineSource): string {
   const buffer = term.buffer.active;
+  if (buffer.type === "alternate") {
+    return "";
+  }
   const cursorY = buffer.cursorY + buffer.baseY;
   const currentPrefix = getLogicalLinePrefix(buffer, cursorY, buffer.cursorX);
 

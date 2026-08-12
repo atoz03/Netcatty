@@ -42,6 +42,10 @@ const getSyncBlockFilterState = (term: XTerm): SyncBlockFilterState => {
   return state;
 };
 
+/** True when a prior chunk opened DEC 2026 and has not closed or expired it. */
+export const isTerminalSyncBlockOpen = (term: XTerm): boolean =>
+  getSyncBlockFilterState(term).inSyncBlock;
+
 const scheduleSyncBlockTimeout = (term: XTerm, state: SyncBlockFilterState): void => {
   if (!state.inSyncBlock) {
     return;

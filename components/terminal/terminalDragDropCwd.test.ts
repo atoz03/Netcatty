@@ -380,7 +380,10 @@ test("fresh cwd resolution falls back to the renderer cwd when backend probe has
     sessionId: "session-1",
     preferFreshBackend: true,
     getSessionPwd: async (_sessionId, options) => {
-      assert.deepEqual(options, { allowHomeFallback: false });
+      assert.deepEqual(options, {
+        allowHomeFallback: false,
+        allowLoginShellFallback: true,
+      });
       return { success: false, error: "Could not determine cwd" };
     },
   });

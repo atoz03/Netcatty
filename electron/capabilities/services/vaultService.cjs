@@ -41,10 +41,28 @@ function createVaultService(ctx = {}) {
       if (bridgeErr) return bridgeErr;
       return invokeVaultAgent("host.list", {});
     },
+    openHost: async (params = {}) => {
+      const bridgeErr = requireBridge();
+      if (bridgeErr) return bridgeErr;
+      return invokeVaultAgent("host.open", {
+        hostId: params.hostId,
+        chatSessionId: params.chatSessionId,
+      });
+    },
     createHosts: async (params = {}) => {
       const bridgeErr = requireBridge();
       if (bridgeErr) return bridgeErr;
       return invokeVaultAgent("hosts.create", params);
+    },
+    updateHost: async (params = {}) => {
+      const bridgeErr = requireBridge();
+      if (bridgeErr) return bridgeErr;
+      return invokeVaultAgent("host.update", params);
+    },
+    deleteHost: async (params = {}) => {
+      const bridgeErr = requireBridge();
+      if (bridgeErr) return bridgeErr;
+      return invokeVaultAgent("host.delete", { hostId: params.hostId });
     },
     importHosts: async (params = {}) => {
       const bridgeErr = requireBridge();
@@ -83,6 +101,41 @@ function createVaultService(ctx = {}) {
       const bridgeErr = requireBridge();
       if (bridgeErr) return bridgeErr;
       return invokeVaultAgent("note.update", params);
+    },
+    deleteNote: async (params = {}) => {
+      const bridgeErr = requireBridge();
+      if (bridgeErr) return bridgeErr;
+      return invokeVaultAgent("note.delete", { noteId: params.noteId });
+    },
+    listIdentities: async () => {
+      const bridgeErr = requireBridge();
+      if (bridgeErr) return bridgeErr;
+      return invokeVaultAgent("identity.list", {});
+    },
+    listProxyProfiles: async () => {
+      const bridgeErr = requireBridge();
+      if (bridgeErr) return bridgeErr;
+      return invokeVaultAgent("proxyProfile.list", {});
+    },
+    listGroups: async () => {
+      const bridgeErr = requireBridge();
+      if (bridgeErr) return bridgeErr;
+      return invokeVaultAgent("group.list", {});
+    },
+    createGroup: async (params = {}) => {
+      const bridgeErr = requireBridge();
+      if (bridgeErr) return bridgeErr;
+      return invokeVaultAgent("group.create", params);
+    },
+    updateGroup: async (params = {}) => {
+      const bridgeErr = requireBridge();
+      if (bridgeErr) return bridgeErr;
+      return invokeVaultAgent("group.update", params);
+    },
+    deleteGroup: async (params = {}) => {
+      const bridgeErr = requireBridge();
+      if (bridgeErr) return bridgeErr;
+      return invokeVaultAgent("group.delete", params);
     },
     listSnippets: async () => {
       const bridgeErr = requireBridge();

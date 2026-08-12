@@ -1,8 +1,9 @@
 import { useMemo } from "react";
 import type { SftpFileEntry } from "../../../types";
 import type { SftpPane } from "../../../application/state/sftp/types";
+import { isWindowsRoot, resolveSftpWindowsPathOptions } from "../../../application/state/sftp/utils";
 import type { SortField, SortOrder } from "../utils";
-import { filterHiddenFiles, sortSftpEntries } from "../utils";
+import { filterHiddenFiles, filterSftpEntriesByName, sortSftpEntries } from "../utils";
 
 interface UseSftpPaneFilesParams {
   files: SftpFileEntry[];
@@ -12,6 +13,7 @@ interface UseSftpPaneFilesParams {
   enableListView: boolean;
   sortField: SortField;
   sortOrder: SortOrder;
+  directoriesFirst: boolean;
 }
 
 interface UseSftpPaneFilesResult {
@@ -28,16 +30,15 @@ export const useSftpPaneFiles = ({
   enableListView,
   sortField,
   sortOrder,
+  directoriesFirst,
 }: UseSftpPaneFilesParams): UseSftpPaneFilesResult => {
   // Extract ".." once and process the remaining files through filter -> sort
   // in fewer passes, instead of repeatedly filtering/finding ".." entries.
   const filteredFiles = useMemo(() => {
     if (!enableListView) return [] as SftpFileEntry[];
-    const term = filter.trim().toLowerCase();
-    let nextFiles = filterHiddenFiles(files, showHiddenFiles);
-    if (!term) return nextFiles;
-    return nextFiles.filter(
-      (f) => f.name === ".." || f.name.toLowerCase().includes(term),
+    return filterSftpEntriesByName(
+      filterHiddenFiles(files, showHiddenFiles),
+      filter,
     );
   }, [enableListView, files, filter, showHiddenFiles]);
 
@@ -48,7 +49,10 @@ export const useSftpPaneFiles = ({
 
     const isRootPath =
       connection.currentPath === "/" ||
-      /^[A-Za-z]:[\\/]?$/.test(connection.currentPath);
+      isWindowsRoot(
+        connection.currentPath,
+        resolveSftpWindowsPathOptions(connection.currentPath, connection.homeDir),
+      );
 
     // Split ".." from other files in a single pass
     let parentEntry: SftpFileEntry | undefined;
@@ -75,12 +79,12 @@ export const useSftpPaneFiles = ({
 
     const display = parentEntry ? [parentEntry, ...otherFiles] : otherFiles;
     const sorted = otherFiles.length
-      ? sortSftpEntries(otherFiles, sortField, sortOrder)
+      ? sortSftpEntries(otherFiles, sortField, sortOrder, directoriesFirst)
       : otherFiles;
     const sortedDisplay = parentEntry ? [parentEntry, ...sorted] : sorted;
 
     return { displayFiles: display, sortedDisplayFiles: sortedDisplay };
-  }, [connection, enableListView, filteredFiles, sortField, sortOrder]);
+  }, [connection, directoriesFirst, enableListView, filteredFiles, sortField, sortOrder]);
 
   return { filteredFiles, displayFiles, sortedDisplayFiles };
 };

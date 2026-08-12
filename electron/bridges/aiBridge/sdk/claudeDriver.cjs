@@ -278,32 +278,67 @@ function mapClaudeModels(models) {
  * @param {object} [args.env]
  * @param {Function} [args.queryFn] inject query() for tests
  */
-async function listClaudeModels({ pathToClaudeCodeExecutable, env, queryFn }) {
+async function listClaudeModels({
+  pathToClaudeCodeExecutable,
+  env,
+  queryFn,
+  abortController,
+  signal,
+}) {
   ensureClaudeConfig();
+  const externalSignal = signal || abortController?.signal;
+  if (externalSignal?.aborted) return [];
   let query = queryFn;
   if (!query) {
     let sdk;
     try { sdk = await import("@anthropic-ai/claude-agent-sdk"); } catch { return []; }
     query = sdk.query;
   }
-  const abortController = new AbortController();
+  const queryAbortController = new AbortController();
+  const forwardAbort = () => {
+    try { queryAbortController.abort(externalSignal?.reason); } catch {}
+  };
+  if (externalSignal) {
+    externalSignal.addEventListener("abort", forwardAbort, { once: true });
+    if (externalSignal.aborted) forwardAbort();
+  }
   // Idle streaming input: keeps the session open (init handshake completes)
   // without sending a turn, so supportedModels() resolves; then we abort.
   async function* idleInput() {
     await new Promise((resolve) => {
-      if (abortController.signal.aborted) return resolve();
-      abortController.signal.addEventListener("abort", () => resolve(), { once: true });
+      if (queryAbortController.signal.aborted) return resolve();
+      queryAbortController.signal.addEventListener("abort", () => resolve(), { once: true });
     });
   }
-  const q = query({
-    prompt: idleInput(),
-    options: { pathToClaudeCodeExecutable, env, abortController, includePartialMessages: false },
-  });
+  let q;
   try {
-    return mapClaudeModels(await q.supportedModels());
+    q = query({
+      prompt: idleInput(),
+      options: {
+        pathToClaudeCodeExecutable,
+        env,
+        abortController: queryAbortController,
+        includePartialMessages: false,
+      },
+    });
+    const result = await Promise.race([
+      Promise.resolve(q.supportedModels()).then((models) => ({ type: "models", models })),
+      new Promise((resolve) => {
+        if (queryAbortController.signal.aborted) return resolve({ type: "aborted" });
+        queryAbortController.signal.addEventListener(
+          "abort",
+          () => resolve({ type: "aborted" }),
+          { once: true },
+        );
+      }),
+    ]);
+    return result.type === "models" ? mapClaudeModels(result.models) : [];
+  } catch {
+    return [];
   } finally {
-    abortController.abort();
-    try { await q.return?.(undefined); } catch { /* best effort */ }
+    if (externalSignal) externalSignal.removeEventListener("abort", forwardAbort);
+    queryAbortController.abort();
+    try { void Promise.resolve(q?.return?.(undefined)).catch(() => {}); } catch { /* best effort */ }
   }
 }
 

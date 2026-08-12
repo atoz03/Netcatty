@@ -8,8 +8,11 @@ const {
   buildOpenCodePromptParts,
   classifyOpenCodeSpawnError,
   createOpenCodeProcessEnv,
+  listOpenCodeModels,
   mapOpenCodeModels,
+  OPENCODE_LIST_SERVER_IDLE_MS,
   parseOpenCodeModel,
+  resetOpenCodeListServerPool,
   resolveUsableOpenCodeBinPath,
   runOpenCodeTurn,
   translateOpenCodeEvent,
@@ -53,6 +56,7 @@ test("buildOpenCodeConfig isolates local tools and injects Netcatty MCP", () => 
   assert.equal(cfg.permission.edit, "deny");
   assert.equal(cfg.permission.bash, "deny");
   assert.equal(cfg.permission.webfetch, "deny");
+  assert.equal(cfg.permission.question, "deny");
   assert.equal(cfg.permission.skill, "allow");
   assert.equal(cfg.permission.external_directory["*"], "deny");
   // Native OpenCode skill directories stay readable in MCP mode (issue #1939).
@@ -399,6 +403,101 @@ test("translateOpenCodeEvent emits a tool call before a result when only complet
   ]);
 });
 
+test("translateOpenCodeEvent maps tool status error to toolResult without failing the turn (#2718)", () => {
+  const { events, emitter } = collector();
+  const state = {};
+  const result = translateOpenCodeEvent(
+    {
+      type: "message.part.updated",
+      properties: {
+        part: {
+          type: "tool",
+          callID: "tool-err",
+          tool: "netcatty-remote-hosts_terminal_execute",
+          state: {
+            status: "error",
+            input: { command: "du /missing" },
+            error: "Error: Operation failed",
+          },
+        },
+      },
+    },
+    emitter,
+    state,
+  );
+
+  assert.equal(result.error, false);
+  assert.equal(result.content, true);
+  assert.deepEqual(events, [
+    {
+      k: "toolCall",
+      name: "netcatty-remote-hosts_terminal_execute",
+      args: { command: "du /missing" },
+      id: "tool-err",
+    },
+    {
+      k: "toolResult",
+      id: "tool-err",
+      out: "Error: Operation failed",
+      name: "netcatty-remote-hosts_terminal_execute",
+    },
+  ]);
+  assert.equal(events.some((event) => event.k === "error"), false);
+});
+
+test("runOpenCodeTurn continues after a tool error part and reaches session.idle (#2718)", async () => {
+  const { events, emitter } = collector();
+  const abortController = new AbortController();
+  const stream = {
+    async *[Symbol.asyncIterator]() {
+      yield {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            type: "tool",
+            sessionID: "sess-1",
+            callID: "t1",
+            tool: "terminal_execute",
+            state: { status: "error", input: { command: "false" }, error: "Error: Operation failed" },
+          },
+        },
+      };
+      yield {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            type: "text",
+            sessionID: "sess-1",
+            id: "p1",
+            text: "retrying",
+          },
+          delta: "retrying",
+        },
+      };
+      yield { type: "session.idle", properties: { sessionID: "sess-1" } };
+    },
+  };
+  const client = {
+    global: { event: async () => ({ stream }) },
+    session: {
+      create: async () => ({ data: { id: "sess-1" } }),
+      promptAsync: async () => ({ data: true }),
+    },
+  };
+
+  await runOpenCodeTurn({
+    prompt: "run false then continue",
+    emitter,
+    abortController,
+    openCodeFactory: async () => ({ client, server: { close() {} } }),
+  });
+
+  assert.ok(events.some((event) => event.k === "toolResult" && event.out === "Error: Operation failed"));
+  assert.ok(events.some((event) => event.k === "text" && event.t === "retrying"));
+  assert.ok(events.some((event) => event.k === "done"));
+  assert.equal(events.some((event) => event.k === "error"), false);
+});
+
 test("mapOpenCodeModels flattens providers", () => {
   assert.deepEqual(mapOpenCodeModels({
     providers: [
@@ -742,8 +841,10 @@ test("createOpenCodeProcessEnv prefers an existing opencode binary", () => {
 });
 
 test("listOpenCodeModels passes an explicit non-default port to the OpenCode SDK factory", async () => {
+  resetOpenCodeListServerPool();
   let capturedPort;
-  const models = await require("./opencodeDriver.cjs").listOpenCodeModels({
+  const models = await listOpenCodeModels({
+    binPath: "/tmp/opencode-port-test",
     openCodeFactory: async (options) => {
       capturedPort = options.port;
       return {
@@ -756,6 +857,155 @@ test("listOpenCodeModels passes an explicit non-default port to the OpenCode SDK
   assert.deepEqual(models, { currentModelId: "openai/gpt-5.1", models: [] });
   assert.equal(typeof capturedPort, "number");
   assert.notEqual(capturedPort, 4096);
+  resetOpenCodeListServerPool();
+});
+
+test("listOpenCodeModels aborts a hanging providers() call and tears down the pooled server", async () => {
+  resetOpenCodeListServerPool();
+  const abortController = new AbortController();
+  let closeCount = 0;
+  let sawAbortSignal = false;
+  let releaseProviders;
+
+  const running = listOpenCodeModels({
+    binPath: "/tmp/opencode-abort-test",
+    signal: abortController.signal,
+    openCodeFactory: async (options) => {
+      sawAbortSignal = Boolean(options.signal);
+      return {
+        client: {
+          config: {
+            providers: () => new Promise((resolve) => {
+              releaseProviders = resolve;
+            }),
+          },
+        },
+        server: {
+          close() { closeCount += 1; },
+        },
+      };
+    },
+  });
+
+  // Let the factory settle, then abort while providers() is pending.
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  abortController.abort(new Error("list-models timed out"));
+  const models = await running;
+  assert.deepEqual(models, { currentModelId: null, models: [] });
+  assert.equal(sawAbortSignal, true);
+
+  // Release schedules a short idle close; force dispose for a deterministic assert.
+  resetOpenCodeListServerPool();
+  assert.equal(closeCount, 1);
+
+  // Unblock any leftover resolver so the test process can exit cleanly.
+  releaseProviders?.({ providers: [], default: {} });
+});
+
+test("listOpenCodeModels reuses one pooled OpenCode server for concurrent loads", async () => {
+  resetOpenCodeListServerPool();
+  let createCount = 0;
+  let closeCount = 0;
+  let releaseProviders;
+  const providersGate = new Promise((resolve) => { releaseProviders = resolve; });
+
+  const openCodeFactory = async () => {
+    createCount += 1;
+    return {
+      client: {
+        config: {
+          providers: async () => providersGate,
+        },
+      },
+      server: {
+        close() { closeCount += 1; },
+      },
+    };
+  };
+
+  const first = listOpenCodeModels({
+    binPath: "/tmp/opencode-pool-test",
+    openCodeFactory,
+  });
+  const second = listOpenCodeModels({
+    binPath: "/tmp/opencode-pool-test",
+    openCodeFactory,
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(createCount, 1);
+
+  releaseProviders({
+    providers: [],
+    default: { openai: "gpt-5.1" },
+  });
+  const [a, b] = await Promise.all([first, second]);
+  assert.deepEqual(a, { currentModelId: "openai/gpt-5.1", models: [] });
+  assert.deepEqual(b, { currentModelId: "openai/gpt-5.1", models: [] });
+  assert.equal(createCount, 1);
+
+  resetOpenCodeListServerPool();
+  assert.equal(closeCount, 1);
+  assert.ok(OPENCODE_LIST_SERVER_IDLE_MS >= 0);
+});
+
+test("listOpenCodeModels returns empty immediately when already aborted", async () => {
+  resetOpenCodeListServerPool();
+  let createCount = 0;
+  const abortController = new AbortController();
+  abortController.abort(new Error("pre-aborted"));
+  const models = await listOpenCodeModels({
+    binPath: "/tmp/opencode-preabort-test",
+    signal: abortController.signal,
+    openCodeFactory: async () => {
+      createCount += 1;
+      return {
+        client: { config: { providers: async () => ({ providers: [] }) } },
+        server: { close() {} },
+      };
+    },
+  });
+  assert.deepEqual(models, { currentModelId: null, models: [] });
+  assert.equal(createCount, 0);
+  resetOpenCodeListServerPool();
+});
+
+test("listOpenCodeModels does not share a pooled server across different catalog env", async () => {
+  resetOpenCodeListServerPool();
+  let createCount = 0;
+  const openCodeFactory = async () => {
+    createCount += 1;
+    const id = createCount;
+    return {
+      client: {
+        config: {
+          providers: async () => ({
+            providers: [],
+            default: { openai: `profile-${id}` },
+          }),
+        },
+      },
+      server: { close() {} },
+    };
+  };
+
+  const first = await listOpenCodeModels({
+    binPath: "/tmp/opencode-env-pool",
+    env: { HOME: "/Users/a", OPENCODE_CONFIG_DIR: "/a/config" },
+    openCodeFactory,
+  });
+  const second = await listOpenCodeModels({
+    binPath: "/tmp/opencode-env-pool",
+    env: { HOME: "/Users/b", OPENCODE_CONFIG_DIR: "/b/config" },
+    openCodeFactory,
+  });
+
+  assert.equal(createCount, 2);
+  assert.deepEqual(first, { currentModelId: "openai/profile-1", models: [] });
+  assert.deepEqual(second, { currentModelId: "openai/profile-2", models: [] });
+  resetOpenCodeListServerPool();
 });
 
 test("classifyOpenCodeSpawnError recognizes missing opencode CLI", () => {

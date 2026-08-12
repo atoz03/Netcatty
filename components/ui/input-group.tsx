@@ -9,7 +9,7 @@ export const InputGroup = forwardRef<HTMLDivElement, InputGroupProps>(
     <div
       ref={ref}
       className={cn(
-        'flex flex-col rounded-[22px] border border-border/65 bg-background transition-[border-color,background-color]',
+        'flex flex-col rounded-xl border border-border/65 bg-background transition-[border-color,background-color]',
         'focus-within:border-primary/45 focus-within:ring-1 focus-within:ring-primary/20',
         'overflow-hidden',
         className,

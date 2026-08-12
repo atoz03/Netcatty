@@ -28,10 +28,15 @@ import {
   type WebDAVConfig,
   type S3Config,
   type SyncedFile,
+  type ConvergentProviderBaselineV2,
+  type ConvergentReplicaRecordV2,
+  type ConvergentFieldConflict,
 } from '../../domain/sync';
 import type { CloudSyncConflictAction, CloudSyncStrategy } from '../../domain/syncStrategy';
+import { materializeConvergentSyncState } from '../../domain/convergentSync';
 import { type CloudAdapter } from './adapters';
 import type { DeviceFlowState } from './adapters/GitHubAdapter';
+import { clearConvergentSyncLocalConfigAfterDowngrade } from './convergentSyncConfig';
 
 
 import { type ShrinkFinding } from '../../domain/syncGuards';
@@ -45,6 +50,7 @@ import {
   completeGitHubAuthImpl,
   completePKCEAuthImpl,
   connectConfigProviderImpl,
+  connectPluginProviderImpl,
   resetProviderStatusImpl,
   setProviderErrorImpl,
   clearConnectingStatusImpl,
@@ -113,7 +119,24 @@ import {
   changeMasterKeyImpl,
   verifyPasswordImpl,
   handleProviderReauthRequiredImpl,
+  setAvailablePluginSyncProviderIdsImpl,
 } from './cloudSync/stateAndSecurityMethods';
+import {
+  clearConvergentSyncStorageImpl,
+  convergentProviderBaselineKeyImpl,
+  loadConvergentProviderBaselineImpl,
+  loadConvergentReplicaImpl,
+  reencryptSyncStorageImpl,
+  saveConvergentProviderBaselineImpl,
+  saveConvergentReplicaImpl,
+} from './cloudSync/convergentSyncStorageMethods';
+import {
+  downgradeConvergentSyncImpl,
+  previewConvergentRecoveryImpl,
+  resolveConvergentConflictAndSyncImpl,
+  syncConvergentProvidersUnlockedImpl,
+  withConvergentSyncWebLock,
+} from './cloudSync/convergentSyncRuntimeMethods';
 
 // ============================================================================
 // Types
@@ -139,6 +162,8 @@ export interface SyncManagerState {
   syncHistory: SyncHistoryEntry[];
   /** True when local vault data differs from the last successful sync snapshot. */
   pendingLocalSync: boolean;
+  /** Current field-level conflicts retained by convergent sync v2. */
+  convergentConflicts: ConvergentFieldConflict[];
   /** Last shrink finding that put us into BLOCKED state, retained until
    * a sync actually succeeds (SYNC_COMPLETED with result.success) or
    * `clearShrinkBlockedState()` is called. Renderer hydrates the banner
@@ -209,6 +234,8 @@ export class CloudSyncManager {
   private providerWriteSeq: Record<CloudProvider, number> = {
     github: 0, google: 0, onedrive: 0, webdav: 0, s3: 0,
   };
+  /** Optional abort signal for the in-flight syncNow / convergent upload path. */
+  activeSyncAbortSignal: AbortSignal | undefined;
 
   constructor() {
     this.state = this.loadInitialState();
@@ -251,7 +278,7 @@ export class CloudSyncManager {
     return loadFromStorageImpl.call(this, key);
   }
 
-  private saveToStorage(key: string, value: unknown): void {
+  private saveToStorage(key: string, value: unknown): boolean {
     return saveToStorageImpl.call(this, key, value);
   }
 
@@ -320,16 +347,15 @@ export class CloudSyncManager {
    */
   private notifyStateChange(): void {
     // Deep clone the state to ensure all nested objects are new references
+    const providers: Record<CloudProvider, ProviderConnection> = {};
+    for (const [providerId, connection] of Object.entries(this.state.providers)) {
+      providers[providerId] = { ...connection };
+    }
     this.stateSnapshot = {
       ...this.state,
-      providers: {
-        github: { ...this.state.providers.github },
-        google: { ...this.state.providers.google },
-        onedrive: { ...this.state.providers.onedrive },
-        webdav: { ...this.state.providers.webdav },
-        s3: { ...this.state.providers.s3 },
-      },
+      providers,
       syncHistory: [...this.state.syncHistory],
+      convergentConflicts: [...this.state.convergentConflicts],
       currentConflict: this.state.currentConflict ? { ...this.state.currentConflict } : null,
     };
     this.stateChangeListeners.forEach(cb => cb());
@@ -482,6 +508,26 @@ export class CloudSyncManager {
     config: WebDAVConfig | S3Config
   ): Promise<void> {
     return connectConfigProviderImpl.call(this, provider, config);
+  }
+
+  /**
+   * Connect a namespaced plugin sync Provider (encrypted-object storage only).
+   */
+  async connectPluginProvider(
+    providerId: string,
+    configuration: unknown = {},
+    credential?: unknown,
+  ): Promise<void> {
+    return connectPluginProviderImpl.call(this, providerId, configuration, credential);
+  }
+
+  /**
+   * Replace the live set of contribution-available plugin sync provider IDs.
+   * Call when plugin contributions change so disabled/uninstalled providers
+   * leave the auto-sync ready set.
+   */
+  setAvailablePluginSyncProviders(providerIds: readonly string[]): void {
+    setAvailablePluginSyncProviderIdsImpl.call(this, providerIds);
   }
 
   /**
@@ -665,9 +711,22 @@ export class CloudSyncManager {
   async syncToProvider(
     provider: CloudProvider,
     payload: SyncPayload,
-    opts: { overrideShrink?: boolean } = {},
+    opts: {
+      overrideShrink?: boolean;
+      applyConvergentPayload?: (
+        payload: SyncPayload,
+        commitReplica: () => Promise<void>,
+      ) => Promise<void>;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<SyncResult> {
-    return syncToProviderImpl.call(this, provider, payload, opts);
+    const previous = this.activeSyncAbortSignal;
+    this.activeSyncAbortSignal = opts.signal;
+    try {
+      return await syncToProviderImpl.call(this, provider, payload, opts);
+    } finally {
+      this.activeSyncAbortSignal = previous;
+    }
   }
 
   /**
@@ -756,9 +815,23 @@ export class CloudSyncManager {
    */
   async syncAllProviders(
     inputPayload?: SyncPayload,
-    opts: { overrideShrink?: boolean; conflictActionOverride?: CloudSyncConflictAction } = {},
+    opts: {
+      overrideShrink?: boolean;
+      conflictActionOverride?: CloudSyncConflictAction;
+      applyConvergentPayload?: (
+        payload: SyncPayload,
+        commitReplica: () => Promise<void>,
+      ) => Promise<void>;
+      signal?: AbortSignal;
+    } = {},
   ): Promise<Map<CloudProvider, SyncResult>> {
-    return syncAllProvidersImpl.call(this, inputPayload, opts);
+    const previous = this.activeSyncAbortSignal;
+    this.activeSyncAbortSignal = opts.signal;
+    try {
+      return await syncAllProvidersImpl.call(this, inputPayload, opts);
+    } finally {
+      this.activeSyncAbortSignal = previous;
+    }
   }
 
   // ==========================================================================
@@ -811,6 +884,10 @@ export class CloudSyncManager {
     return syncSnapshotsKeyImpl.call(this, provider);
   }
 
+  private convergentProviderBaselineKey(provider: CloudProvider): string {
+    return convergentProviderBaselineKeyImpl.call(this, provider);
+  }
+
   private providerAccountIdKey(provider: CloudProvider): string {
     return providerAccountIdKeyImpl.call(this, provider);
   }
@@ -833,6 +910,105 @@ export class CloudSyncManager {
 
   async loadSyncSnapshots(provider?: CloudProvider): Promise<SyncSnapshotEntry[]> {
     return loadSyncSnapshotsImpl.call(this, provider);
+  }
+
+  async saveConvergentReplica(record: ConvergentReplicaRecordV2): Promise<void> {
+    await saveConvergentReplicaImpl.call(this, record);
+    this.state.convergentConflicts = materializeConvergentSyncState(record.state).conflicts;
+    this.notifyStateChange();
+  }
+
+  async loadConvergentReplica(): Promise<ConvergentReplicaRecordV2 | null> {
+    return loadConvergentReplicaImpl.call(this);
+  }
+
+  async refreshConvergentConflicts(): Promise<void> {
+    const replica = await this.loadConvergentReplica();
+    this.state.convergentConflicts = replica
+      ? materializeConvergentSyncState(replica.state).conflicts
+      : [];
+    this.notifyStateChange();
+  }
+
+  async saveConvergentProviderBaseline(baseline: ConvergentProviderBaselineV2): Promise<void> {
+    return saveConvergentProviderBaselineImpl.call(this, baseline);
+  }
+
+  async loadConvergentProviderBaseline(
+    provider: CloudProvider,
+  ): Promise<ConvergentProviderBaselineV2 | null> {
+    return loadConvergentProviderBaselineImpl.call(this, provider);
+  }
+
+  async resolveConvergentConflict(
+    addressKey: string,
+    candidateDot: string,
+    applyPayload: (
+      payload: SyncPayload,
+      commitReplica: () => Promise<void>,
+    ) => Promise<void>,
+    options?: {
+      pluginSidecars?: SyncPayload['pluginSidecars'];
+    },
+  ): Promise<{ payload: SyncPayload; results: Map<CloudProvider, SyncResult> }> {
+    return resolveConvergentConflictAndSyncImpl.call(
+      this,
+      addressKey,
+      candidateDot,
+      applyPayload,
+      options,
+    );
+  }
+
+  async previewConvergentRecovery(): Promise<SyncPayload | null> {
+    return previewConvergentRecoveryImpl.call(this);
+  }
+
+  async downgradeConvergentSync(
+    confirmed: boolean,
+    buildLocalPayload: () => SyncPayload | Promise<SyncPayload>,
+    applyPayload: (
+      payload: SyncPayload,
+      commitReplica: () => Promise<void>,
+    ) => Promise<void>,
+  ): Promise<Map<CloudProvider, SyncResult>> {
+    return downgradeConvergentSyncImpl.call(this, confirmed, buildLocalPayload, applyPayload);
+  }
+
+  async withConvergentSyncLock<T>(task: () => Promise<T>): Promise<T> {
+    return withConvergentSyncWebLock(task);
+  }
+
+  /** Caller must already hold the convergent Web Lock. */
+  async syncConvergentProvidersUnderLock(
+    payload: SyncPayload,
+    applyPayload: (
+      payload: SyncPayload,
+      commitReplica: () => Promise<void>,
+    ) => Promise<void>,
+  ): Promise<Map<CloudProvider, SyncResult>> {
+    return syncConvergentProvidersUnlockedImpl.call(this, payload, { applyPayload });
+  }
+
+  clearConvergentSyncStorage(confirmed = false): void {
+    return clearConvergentSyncStorageImpl.call(this, confirmed);
+  }
+
+  private completeConvergentSyncDowngrade(confirmed: boolean): void {
+    if (!confirmed) throw new Error('Explicit confirmation is required to complete downgrade');
+    // This method is invoked by downgradeConvergentSyncImpl before it releases
+    // the cross-window Web Lock. Clear the replica first so a configuration
+    // persistence failure still cannot let another window re-upload v2 state.
+    this.clearConvergentSyncStorage(true);
+    clearConvergentSyncLocalConfigAfterDowngrade(true);
+  }
+
+  private async reencryptSyncStorage(
+    oldKey: CryptoKey,
+    newKey: CryptoKey,
+    newConfig: MasterKeyConfig,
+  ): Promise<void> {
+    return reencryptSyncStorageImpl.call(this, oldKey, newKey, newConfig);
   }
 
   private clearSyncBase(): void {

@@ -1,5 +1,8 @@
 const { execFile } = require("node:child_process");
 
+const POSIX_PROCESS_LIST_TIMEOUT_MS = 3_000;
+const POSIX_PROCESS_LIST_MAX_BUFFER_BYTES = 4 * 1024 * 1024;
+
 function createProcessTree({ platform, listPosix, listWindows } = {}) {
   const sessionPidMap = new Map();
 
@@ -29,12 +32,16 @@ function createProcessTree({ platform, listPosix, listWindows } = {}) {
   return { registerPid, unregisterPid, getChildProcesses };
 }
 
-function defaultListPosix(ppid) {
+function defaultListPosix(ppid, { execFileFn = execFile } = {}) {
   return new Promise((resolve) => {
     // `ps -A -o pid=,ppid=,args=` works on both BSD (macOS) and GNU (Linux).
     // `args=` shows the full command line (not truncated like `comm=`).
     // The trailing `=` on each column suppresses the header row.
-    execFile("ps", ["-A", "-o", "pid=,ppid=,args="], (err, stdout) => {
+    execFileFn("ps", ["-A", "-o", "pid=,ppid=,args="], {
+      timeout: POSIX_PROCESS_LIST_TIMEOUT_MS,
+      maxBuffer: POSIX_PROCESS_LIST_MAX_BUFFER_BYTES,
+      windowsHide: true,
+    }, (err, stdout) => {
       if (err || typeof stdout !== "string") return resolve([]);
       const out = [];
       for (const line of stdout.split("\n")) {
@@ -81,7 +88,10 @@ function createDefaultProcessTree() {
 const defaultTree = createDefaultProcessTree();
 
 module.exports = {
+  POSIX_PROCESS_LIST_TIMEOUT_MS,
+  POSIX_PROCESS_LIST_MAX_BUFFER_BYTES,
   createProcessTree,
+  defaultListPosix,
   processTree: defaultTree,
   registerPid: (id, pid) => defaultTree.registerPid(id, pid),
   unregisterPid: (id) => defaultTree.unregisterPid(id),

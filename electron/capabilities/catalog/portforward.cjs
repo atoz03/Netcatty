@@ -44,6 +44,30 @@ const PORT_FORWARD_CAPABILITIES = [
       public: { rpcMethod: "public/portforward/tunnels/list", mcpTool: "portforward_tunnels_list" },
     },
   },
+  ...[
+    ["portforward.rules.create", "Create a persisted port forwarding rule.", "create", "portforward_rules_create"],
+    ["portforward.rules.update", "Update a persisted port forwarding rule.", "update", "portforward_rules_update"],
+    ["portforward.rules.duplicate", "Duplicate a persisted port forwarding rule.", "duplicate", "portforward_rules_duplicate"],
+    ["portforward.rules.delete", "Delete a persisted port forwarding rule.", "delete", "portforward_rules_delete"],
+  ].map(([id, description, action, mcpTool]) => ({
+    id,
+    domain: "portforward",
+    status: CAPABILITY_STATUS.IMPLEMENTED,
+    description,
+    policy: {
+      write: true,
+      sensitiveRead: false,
+      longRunning: false,
+      requiresChatSession: false,
+      bypassesObserverBlock: false,
+      bypassesApproval: false,
+      bypassesChatCancel: false,
+    },
+    surfaces: {
+      global: { rpcMethod: `portforward/rules/${action}` },
+      public: { rpcMethod: `public/portforward/rules/${action}`, mcpTool },
+    },
+  })),
   {
     id: "portforward.start",
     domain: "portforward",

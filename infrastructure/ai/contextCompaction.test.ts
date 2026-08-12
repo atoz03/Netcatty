@@ -6,6 +6,7 @@ import {
   buildCompactedMessages,
   estimateModelMessagesTokens,
   estimateUnknownTokens,
+  findSafeChatMessageCompactionSplitIndex,
   findSafeCompactionSplitIndex,
   formatMessagesForCompaction,
   prepareContextCompaction,
@@ -63,6 +64,28 @@ test("findSafeCompactionSplitIndex avoids orphaning a tool result", () => {
   ];
 
   assert.equal(findSafeCompactionSplitIndex(messages, 3), 1);
+});
+
+test("findSafeChatMessageCompactionSplitIndex does not cut tool call/result pairs", () => {
+  const messages = [
+    { role: "user" },
+    { role: "assistant", toolCalls: [{ id: "c1" }] },
+    { role: "tool" },
+    { role: "user" },
+    { role: "assistant" },
+    { role: "user" },
+    { role: "assistant" },
+    { role: "user" },
+    { role: "assistant" },
+    { role: "user" },
+    { role: "assistant" },
+    { role: "user" },
+    { role: "assistant", toolCalls: [{ id: "c2" }] },
+    { role: "tool" },
+  ];
+  // protect last 3 would land inside the final tool pair; pull boundary before assistant toolCalls
+  assert.equal(findSafeChatMessageCompactionSplitIndex(messages, 3), 11);
+  assert.equal(findSafeChatMessageCompactionSplitIndex(messages.slice(0, 8), 10), 0);
 });
 
 test("buildCompactedMessages places the summary before recent messages", () => {

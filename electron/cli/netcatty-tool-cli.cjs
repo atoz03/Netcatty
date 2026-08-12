@@ -22,9 +22,12 @@ function printHelp() {
     "Examples:\n" +
     "  netcatty-tool-cli status --json\n" +
     "  netcatty-tool-cli env --chat-session ai_123 --json\n" +
+    "  netcatty-tool-cli attachment list --chat-session ai_123 --json\n" +
+    "  netcatty-tool-cli attachment read --filename hosts.csv --chat-session ai_123 --json\n" +
     "  netcatty-tool-cli session --session sess_123 --json --chat-session ai_123\n" +
     "  netcatty-tool-cli exec --session sess_123 --chat-session ai_123 --json -- \"pwd\"\n" +
     "  netcatty-tool-cli vault host get --host-id host_123 --json\n" +
+    "  netcatty-tool-cli vault host open --host-id host_123 --json\n" +
     "  netcatty-tool-cli snippets run --snippet-id snip_1 --session sess_123 --chat-session ai_123 --json\n" +
     "  netcatty-tool-cli portforward rules list --json\n\n" +
     "Notes:\n" +
@@ -72,6 +75,7 @@ function parseArgs(argv) {
     mode: null,
     encoding: null,
     hostId: null,
+    filename: null,
     snippetId: null,
     ruleId: null,
     notes: null,
@@ -155,6 +159,11 @@ function parseArgs(argv) {
     }
     if (arg === "--host-id") {
       opts.hostId = readFlagValue(args, i + 1);
+      i += 1;
+      continue;
+    }
+    if (arg === "--filename") {
+      opts.filename = readFlagValue(args, i + 1);
       i += 1;
       continue;
     }

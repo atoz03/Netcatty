@@ -1,5 +1,6 @@
 import { compressVerboseText, truncateTextWithHeadAndTail } from '../requestPayloadCompression';
 import type { ToolOutputStore } from './toolOutputStore';
+import { redactSecretsForModel } from './modelSecretRedaction';
 
 export const MAX_LIVE_TOOL_STRING_CHARS = 8_000;
 
@@ -8,7 +9,9 @@ export interface FitLargeToolResultForModelInput {
   capabilityId: string;
   chatSessionId?: string;
   toolOutputStore?: ToolOutputStore;
+  terminalSessionId?: string;
   maxStringChars?: number;
+  normalizeStrings?: boolean;
 }
 
 export function fitLargeToolResultForModel({
@@ -16,13 +19,17 @@ export function fitLargeToolResultForModel({
   capabilityId,
   chatSessionId,
   toolOutputStore,
+  terminalSessionId,
   maxStringChars = MAX_LIVE_TOOL_STRING_CHARS,
+  normalizeStrings = false,
 }: FitLargeToolResultForModelInput): unknown {
   return fitValue(result, {
     capabilityId,
     chatSessionId,
     toolOutputStore,
+    terminalSessionId,
     maxStringChars,
+    normalizeStrings,
     path: [],
   });
 }
@@ -31,7 +38,9 @@ interface FitValueContext {
   capabilityId: string;
   chatSessionId?: string;
   toolOutputStore?: ToolOutputStore;
+  terminalSessionId?: string;
   maxStringChars: number;
+  normalizeStrings: boolean;
   path: string[];
 }
 
@@ -72,13 +81,17 @@ function fitValue(value: unknown, ctx: FitValueContext): unknown {
 }
 
 function fitString(value: string, ctx: FitValueContext): string {
-  if (value.length <= ctx.maxStringChars) return value;
+  const safeValue = redactSecretsForModel(value);
+  const normalizedValue = ctx.normalizeStrings ? compressVerboseText(safeValue) : safeValue;
+  if (safeValue.length <= ctx.maxStringChars && normalizedValue.length <= ctx.maxStringChars) {
+    return normalizedValue;
+  }
 
   const fitted = truncateTextWithHeadAndTail(
-    compressVerboseText(value),
+    ctx.normalizeStrings ? normalizedValue : compressVerboseText(safeValue),
     ctx.maxStringChars,
   );
-  if (fitted === value) return value;
+  if (fitted === safeValue) return safeValue;
 
   let handleId: string | undefined;
   if (ctx.toolOutputStore && ctx.chatSessionId) {
@@ -86,6 +99,7 @@ function fitString(value: string, ctx: FitValueContext): string {
       chatSessionId: ctx.chatSessionId,
       capabilityId: ctx.capabilityId,
       content: value,
+      sessionId: ctx.terminalSessionId,
     }).id;
   }
 
@@ -94,6 +108,7 @@ function fitString(value: string, ctx: FitValueContext): string {
     fieldPath: formatFieldPath(ctx.path),
     totalChars: value.length,
     handleId,
+    restartPersistenceAvailable: false,
   });
 }
 
@@ -114,8 +129,12 @@ function appendToolOutputHandleNotice(
     fieldPath: string;
     totalChars: number;
     handleId?: string;
+    restartPersistenceAvailable?: boolean;
   },
 ): string {
   const handleSuffix = details.handleId ? ` handleId=${details.handleId}` : '';
-  return `${fitted}\n\n[tool output handle: capability=${details.capabilityId} field=${details.fieldPath} chars=${details.totalChars} truncated for model context${handleSuffix}]`;
+  const restartSuffix = details.handleId && details.restartPersistenceAvailable === false
+    ? ' restartPersistence=unavailable (read before closing the app)'
+    : '';
+  return `${fitted}\n\n[tool output handle: capability=${details.capabilityId} field=${details.fieldPath} chars=${details.totalChars} truncated for model context${handleSuffix}${restartSuffix}]`;
 }

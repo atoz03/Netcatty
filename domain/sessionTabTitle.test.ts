@@ -1,8 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  DEFAULT_WORKSPACE_TITLE,
   getSessionConnectionLabel,
+  resolveCodingCliProviderIconUpdate,
   resolveSessionTabTitle,
+  resolveWorkspaceTabLabel,
+  shouldUpdateCodingCliTabIcon,
 } from './sessionTabTitle';
 
 test('getSessionConnectionLabel prefers customName over hostLabel', () => {
@@ -76,5 +80,122 @@ test('resolveSessionTabTitle strips agent spinner prefixes from dynamic titles',
       { hostLabel: 'web-01', dynamicTitle: '⠋ Droid', codingCliProviderId: 'droid' },
     ),
     'Droid',
+  );
+});
+
+test('coding CLI icon updates stop without clearing the current icon when dynamic titles are off', () => {
+  assert.equal(shouldUpdateCodingCliTabIcon('off'), false);
+  assert.equal(shouldUpdateCodingCliTabIcon('agent'), true);
+  assert.equal(shouldUpdateCodingCliTabIcon('all'), true);
+
+  assert.equal(resolveCodingCliProviderIconUpdate({
+    dynamicTabTitleMode: 'off',
+    currentProviderId: 'claude',
+    nextProviderId: null,
+  }), undefined);
+  assert.equal(resolveCodingCliProviderIconUpdate({
+    dynamicTabTitleMode: 'off',
+    currentProviderId: 'claude',
+    nextProviderId: 'opencode',
+  }), undefined);
+  assert.equal(resolveCodingCliProviderIconUpdate({
+    dynamicTabTitleMode: 'agent',
+    currentProviderId: 'claude',
+    nextProviderId: null,
+  }), null);
+});
+
+test('resolveWorkspaceTabLabel keeps a user-renamed workspace title', () => {
+  assert.equal(
+    resolveWorkspaceTabLabel(
+      { title: 'My Cluster', focusedSessionId: 's1' },
+      [{ id: 's1', hostLabel: 'web-01', hostId: 'host-web' }],
+    ),
+    'My Cluster',
+  );
+});
+
+test('resolveWorkspaceTabLabel derives the focused host name from a default-title workspace', () => {
+  assert.equal(
+    resolveWorkspaceTabLabel(
+      { title: DEFAULT_WORKSPACE_TITLE, focusedSessionId: 's2' },
+      [
+        { id: 's1', hostLabel: 'Localhost', hostId: 'local-terminal' },
+        { id: 's2', hostLabel: 'prod-db', hostId: 'host-db' },
+      ],
+    ),
+    // Two distinct hosts: focused host + "+1" for the other.
+    'prod-db +1',
+  );
+});
+
+test('resolveWorkspaceTabLabel shows a single host name without a suffix', () => {
+  assert.equal(
+    resolveWorkspaceTabLabel(
+      { title: DEFAULT_WORKSPACE_TITLE, focusedSessionId: 's1' },
+      [
+        // Two local terminals share the stable local hostId.
+        { id: 's1', hostLabel: 'Localhost', hostId: 'local-terminal' },
+        { id: 's2', hostLabel: 'Localhost', hostId: 'local-terminal' },
+      ],
+    ),
+    'Localhost',
+  );
+});
+
+test('resolveWorkspaceTabLabel does not add a suffix when a same-host pane is renamed', () => {
+  assert.equal(
+    resolveWorkspaceTabLabel(
+      { title: DEFAULT_WORKSPACE_TITLE, focusedSessionId: 's1' },
+      [
+        { id: 's1', hostLabel: 'web-01', hostId: 'host-web' },
+        // Same host (hostId), but a rename rewrote this pane's customName AND
+        // hostLabel — hostId still ties it to the same host, so no "+1".
+        { id: 's2', customName: 'logs', hostLabel: 'logs', hostId: 'host-web' },
+      ],
+    ),
+    'web-01',
+  );
+});
+
+test('resolveWorkspaceTabLabel shows the focused rename while counting hosts', () => {
+  assert.equal(
+    resolveWorkspaceTabLabel(
+      { title: DEFAULT_WORKSPACE_TITLE, focusedSessionId: 's1' },
+      [
+        { id: 's1', customName: 'my-web', hostLabel: 'my-web', hostId: 'host-web' },
+        { id: 's2', hostLabel: 'db-02', hostId: 'host-db' },
+      ],
+    ),
+    'my-web +1',
+  );
+});
+
+test('resolveWorkspaceTabLabel keeps a workspace explicitly named "Workspace"', () => {
+  // autoTitle:false marks the title as user-chosen even when it equals the
+  // default sentinel — it must not be replaced by a host label.
+  assert.equal(
+    resolveWorkspaceTabLabel(
+      { title: DEFAULT_WORKSPACE_TITLE, autoTitle: false, focusedSessionId: 's1' },
+      [{ id: 's1', hostLabel: 'web-01', hostId: 'host-web' }],
+    ),
+    'Workspace',
+  );
+});
+
+test('resolveWorkspaceTabLabel derives a label for an explicitly auto-titled workspace', () => {
+  assert.equal(
+    resolveWorkspaceTabLabel(
+      { title: DEFAULT_WORKSPACE_TITLE, autoTitle: true, focusedSessionId: 's1' },
+      [{ id: 's1', hostLabel: 'Localhost', hostId: 'local-terminal' }],
+    ),
+    'Localhost',
+  );
+});
+
+test('resolveWorkspaceTabLabel falls back to the default title with no sessions', () => {
+  assert.equal(
+    resolveWorkspaceTabLabel({ title: DEFAULT_WORKSPACE_TITLE, focusedSessionId: null }, []),
+    DEFAULT_WORKSPACE_TITLE,
   );
 });

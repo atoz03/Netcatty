@@ -251,8 +251,13 @@ export async function listDirectoryEntries(
   const fullCacheKey = `${baseKey}:all`;
   const filteredCacheKey = `${baseKey}:prefix:${normalizedPrefix}:${maxEntries}`;
   const bypassCache = shouldBypassCache(protocol, sessionId, os, dirPath);
+  const requestKey = normalizedPrefix ? filteredCacheKey : fullCacheKey;
 
   // Full directory cache can satisfy both full and filtered lookups.
+  // Relative SSH cwd paths bypass durable cache and in-flight reuse: the shell
+  // cwd can move, so a listing started for "." in directory A must not satisfy
+  // a later lookup after cd into B. Soft-budget timeout + late refresh already
+  // share one promise at the getCompletions call site.
   if (!bypassCache) {
     const fullCached = fullDirCache.get(fullCacheKey);
     if (isFresh(fullCached)) {
@@ -271,11 +276,9 @@ export async function listDirectoryEntries(
       return filterEntries(await inFlightFull, normalizedPrefix, maxEntries);
     }
 
-    const inFlight = inFlightRequests.get(normalizedPrefix ? filteredCacheKey : fullCacheKey);
+    const inFlight = inFlightRequests.get(requestKey);
     if (inFlight) return inFlight;
   }
-
-  const requestKey = normalizedPrefix ? filteredCacheKey : fullCacheKey;
 
   // Make IPC call
   const promise = (async (): Promise<DirEntry[]> => {

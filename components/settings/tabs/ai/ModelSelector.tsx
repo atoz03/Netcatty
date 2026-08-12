@@ -79,6 +79,13 @@ export function getModelSuggestionsPresentation({
   };
 }
 
+export function getModelSuggestionClassName(isSelected: boolean): string {
+  return cn(
+    "w-full text-left px-3 py-1.5 text-xs hover:bg-accent hover:text-accent-foreground transition-colors flex items-center justify-between gap-2",
+    isSelected && "bg-accent text-accent-foreground",
+  );
+}
+
 export const ModelSelector: React.FC<{
   value: string;
   onChange: (value: string) => void;
@@ -267,13 +274,10 @@ export const ModelSelector: React.FC<{
                     onModelMetadata?.(m);
                     setIsOpen(false);
                   }}
-                  className={cn(
-                    "w-full text-left px-3 py-1.5 text-xs hover:bg-accent transition-colors flex items-center justify-between gap-2",
-                    m.id === value && "bg-accent",
-                  )}
+                  className={getModelSuggestionClassName(m.id === value)}
                 >
                   <span className="font-mono truncate">{m.id}</span>
-                  {m.id === value && <Check size={12} className="text-primary shrink-0" />}
+                  {m.id === value && <Check size={12} className="text-accent-foreground shrink-0" />}
                 </button>
               ))
             )}

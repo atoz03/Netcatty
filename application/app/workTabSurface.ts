@@ -2,9 +2,10 @@ import {
   fromEditorTabId,
   isEditorTabId,
 } from '../state/activeTabStore';
+import { isPluginViewTabId } from '../state/pluginViewTabStore';
 import { applyCustomAccentToTerminalTheme, resolveHostTerminalThemeId } from '../../domain/terminalAppearance';
 import { collectSessionIds } from '../../domain/workspace';
-import type { EditorTab } from '../state/editorTabStore';
+import type { EditorTabChrome } from '../state/editorTabStore';
 import type { Host, TerminalSession, TerminalTheme, Workspace } from '../../types';
 
 function uniqueTabIds(tabIds: readonly string[]): string[] {
@@ -20,6 +21,14 @@ function uniqueTabIds(tabIds: readonly string[]): string[] {
 
 export function isRootPageTabId(activeTabId: string): boolean {
   return activeTabId === 'vault' || activeTabId === 'sftp';
+}
+
+/**
+ * Host edit from overlays (Quick Switcher): use the terminal work-surface
+ * HostDetailsPanel when a work tab is active; otherwise deep-link into Vault.
+ */
+export function shouldOpenHostEditOnWorkSurface(activeTabId: string): boolean {
+  return !isRootPageTabId(activeTabId) && !isPluginViewTabId(activeTabId);
 }
 
 export function buildOrderedWorkTabIds(
@@ -79,6 +88,7 @@ export function isHostTreeWorkTabSurface({
 }): boolean {
   if (!enabled) return false;
   if (isRootPageTabId(activeTabId)) return false;
+  if (isPluginViewTabId(activeTabId)) return false;
   return orderedTabs.includes(activeTabId)
     || isEditorTabId(activeTabId)
     || logViewIds.has(activeTabId)
@@ -133,7 +143,7 @@ export function resolveWorkTabActiveHostId({
   workspaces,
 }: {
   activeTabId: string;
-  editorTabs: readonly EditorTab[];
+  editorTabs: readonly EditorTabChrome[];
   sessions: readonly TerminalSession[];
   workspaces: readonly Workspace[];
 }): string | null {
@@ -169,7 +179,9 @@ export function resolveWorkTabHostTreeTheme({
   hostById: ReadonlyMap<string, Host>;
   themeById: ReadonlyMap<string, TerminalTheme>;
 }): TerminalTheme {
-  if (!activeHostId || followAppTerminalTheme) return currentTerminalTheme;
+  if (!activeHostId || followAppTerminalTheme) {
+    return applyCustomAccentToTerminalTheme(currentTerminalTheme, accentMode, customAccent);
+  }
 
   const host = hostById.get(activeHostId) ?? null;
   const themeId = resolveHostTerminalThemeId(host, currentTerminalTheme.id);

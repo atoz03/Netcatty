@@ -96,7 +96,7 @@ const SftpConflictDialogInner: React.FC<SftpConflictDialogProps> = ({ conflicts,
 
     return (
         <Dialog open={!!conflict} onOpenChange={() => handleAction('skip')}>
-            <DialogContent className="gap-5 p-5 sm:max-w-[520px] sm:p-6">
+            <DialogContent className="gap-5 p-5 sm:max-w-[640px] sm:p-6">
                 <DialogHeader className="space-y-2 pr-8">
                     <DialogTitle className="flex items-center gap-3 text-xl leading-tight">
                         <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border/70 text-muted-foreground">
@@ -147,25 +147,25 @@ const SftpConflictDialogInner: React.FC<SftpConflictDialogProps> = ({ conflicts,
                     )}
                 </div>
 
-                <DialogFooter className="flex flex-wrap gap-2 sm:items-center sm:justify-end sm:space-x-0">
+                <DialogFooter className="flex flex-wrap gap-2 sm:flex-nowrap sm:items-center sm:justify-end sm:space-x-0">
                     <Button
                         variant="outline"
                         onClick={() => handleAction('stop')}
-                        className="min-w-24 border-border/70 text-muted-foreground hover:text-destructive sm:mr-auto"
+                        className="min-w-24 shrink-0 border-border/70 text-muted-foreground hover:text-destructive sm:mr-auto"
                     >
                         {t('sftp.conflict.action.stop')}
                     </Button>
                     <Button
                         variant="outline"
                         onClick={() => handleAction('skip')}
-                        className="min-w-24"
+                        className="min-w-24 shrink-0"
                     >
                         {t('sftp.conflict.action.skip')}
                     </Button>
                     <Button
                         variant="outline"
                         onClick={() => handleAction('duplicate')}
-                        className="min-w-24"
+                        className="min-w-24 shrink-0"
                     >
                         {t('sftp.conflict.action.duplicate')}
                     </Button>
@@ -174,7 +174,7 @@ const SftpConflictDialogInner: React.FC<SftpConflictDialogProps> = ({ conflicts,
                             variant="outline"
                             onClick={() => handleAction('merge')}
                             disabled={!canMerge}
-                            className="min-w-24"
+                            className="min-w-24 shrink-0"
                         >
                             {t('sftp.conflict.action.merge')}
                         </Button>
@@ -183,7 +183,7 @@ const SftpConflictDialogInner: React.FC<SftpConflictDialogProps> = ({ conflicts,
                         <Button
                             variant="default"
                             onClick={() => handleAction('replace')}
-                            className="min-w-28"
+                            className="min-w-28 shrink-0"
                         >
                             {t('sftp.conflict.action.replace')}
                         </Button>

@@ -1,5 +1,5 @@
 import type { SftpStateApi } from "../../../application/state/useSftpState";
-import { sftpTreeSelectionStore } from "./useSftpTreeSelectionStore";
+import { sftpTreeSelectionStore } from "../../../application/state/sftp/sftpTreeSelectionStore";
 
 export interface SftpSelectionTarget {
   side: "left" | "right";

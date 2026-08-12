@@ -190,3 +190,38 @@ export const normalizeKnownHosts = (knownHosts: KnownHost[]): KnownHost[] => {
   });
   return changed ? next : knownHosts;
 };
+
+/** Minimal host-key shape shared by terminal / SFTP / port-forward verification. */
+export type HostKeyInfoLike = {
+  hostname: string;
+  port?: number;
+  keyType: string;
+  fingerprint: string;
+  publicKey?: string;
+  knownHostId?: string;
+};
+
+/**
+ * Create a KnownHost record from verified host-key info.
+ * Call sites may supply a fallback port (e.g. the SSH host's configured port).
+ */
+export const createKnownHostFromHostKeyInfo = (
+  hostKeyInfo: HostKeyInfoLike,
+  options?: {
+    defaultPort?: number;
+    now?: number;
+    idSuffix?: string;
+  },
+): KnownHost => {
+  const now = options?.now ?? Date.now();
+  const idSuffix = options?.idSuffix ?? Math.random().toString(36).slice(2, 11);
+  return {
+    id: hostKeyInfo.knownHostId || `kh-${now}-${idSuffix}`,
+    hostname: hostKeyInfo.hostname,
+    port: hostKeyInfo.port || options?.defaultPort || 22,
+    keyType: hostKeyInfo.keyType,
+    publicKey: hostKeyInfo.publicKey || `SHA256:${hostKeyInfo.fingerprint}`,
+    fingerprint: hostKeyInfo.fingerprint,
+    discoveredAt: now,
+  };
+};

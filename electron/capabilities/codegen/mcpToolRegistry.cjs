@@ -7,6 +7,7 @@ const TERMINAL_EXECUTE_TOOLS = new Set(["terminal_execute"]);
 const TERMINAL_START_TOOLS = new Set(["terminal_start"]);
 const TERMINAL_POLL_TOOLS = new Set(["terminal_poll"]);
 const TERMINAL_STOP_TOOLS = new Set(["terminal_stop"]);
+const SESSION_CLOSE_TOOLS = new Set(["session_close"]);
 const CONTEXT_TOOLS = new Set(["get_environment"]);
 const ATTACHMENT_LIST_TOOLS = new Set(["list_attachments"]);
 const ATTACHMENT_READ_TOOLS = new Set(["read_attachment"]);
@@ -45,17 +46,69 @@ function buildZodSchema(inputShape) {
 }
 
 function formatRpcError(result) {
-  return `Error: ${result?.error || "Operation failed"}`;
+  if (result?.error) return `Error: ${result.error}`;
+  if (result?.code) return `Error: Operation failed (${result.code})`;
+  return "Error: Operation failed";
+}
+
+/**
+ * True when the RPC result carries command-run evidence (output and/or exit
+ * code). Non-zero exits from PTY exec set ok:false without an error string —
+ * that is still a completed command, not an operational failure.
+ */
+function hasTerminalExecuteEvidence(result) {
+  if (!result || typeof result !== "object") return false;
+  if (typeof result.stdout === "string" && result.stdout.length > 0) return true;
+  if (typeof result.stderr === "string" && result.stderr.length > 0) return true;
+  return result.exitCode != null;
 }
 
 function formatTerminalExecuteResult(result) {
   const parts = [];
-  if (result.stdout) parts.push(result.stdout);
-  if (result.stderr) parts.push(`[stderr] ${result.stderr}`);
-  if (result.exitCode != null) {
+  if (result?.stdout) parts.push(result.stdout);
+  if (result?.stderr) parts.push(`[stderr] ${result.stderr}`);
+  if (result?.exitCode != null) {
     parts.push(`[exit code: ${result.exitCode}]`);
   }
+  if (result?.error) parts.push(`[error] ${result.error}`);
   return parts.join("\n");
+}
+
+// Align with Catty executor wording when a command ran but produced no text.
+const TERMINAL_EXECUTE_NO_OUTPUT_TEXT = "Command completed (no output)";
+
+/**
+ * Format terminal_execute for MCP clients.
+ * Match Catty semantics: when the command actually ran, always surface
+ * stdout/stderr/exitCode so the model can judge the failure. Only pure
+ * operational failures (session missing, blocked, etc.) become a bare
+ * "Error: …" payload. See issue #2718.
+ *
+ * Successful empty results (serial/network raw PTY often returns ok:true with
+ * empty stdout/stderr and exitCode:null) must NOT fall back to
+ * "Error: Operation failed" — Codex P2 on PR #2724.
+ */
+function formatTerminalExecuteMcpResponse(result) {
+  if (!result || typeof result !== "object") {
+    return { content: [{ type: "text", text: formatRpcError(result) }], isError: true };
+  }
+
+  // Operational failure with no command evidence (session not found, busy, blocked…).
+  if (result.ok === false && !hasTerminalExecuteEvidence(result)) {
+    return { content: [{ type: "text", text: formatRpcError(result) }], isError: true };
+  }
+
+  // Empty successful payloads (serial/raw PTY): neutral text.
+  // Never fall back to formatRpcError here — that mislabels silent successes (#2724 P2).
+  // When result.error is set, formatTerminalExecuteResult already includes `[error] …`.
+  const text = formatTerminalExecuteResult(result) || TERMINAL_EXECUTE_NO_OUTPUT_TEXT;
+  // Mark isError only for operational/runtime failures that include an error
+  // string (timeout, cancel, stream lost). Non-zero exit alone is success of
+  // the tool call with a failed command — same as Catty ok:true + exitCode.
+  if (result.ok === false && result.error) {
+    return { content: [{ type: "text", text }], isError: true };
+  }
+  return { content: [{ type: "text", text }] };
 }
 
 function createToolHandler(toolDef, deps) {
@@ -75,10 +128,10 @@ function createToolHandler(toolDef, deps) {
         return { content: [{ type: "text", text: `Error: ${guardErr}` }], isError: true };
       }
       const result = await rpcCall(rpcMethod, { ...scopeParams, sessionId, command });
-      if (!result.ok) {
-        return { content: [{ type: "text", text: formatRpcError(result) }], isError: true };
-      }
       if (TERMINAL_START_TOOLS.has(mcpTool)) {
+        if (!result?.ok) {
+          return { content: [{ type: "text", text: formatRpcError(result) }], isError: true };
+        }
         return {
           content: [{
             type: "text",
@@ -93,7 +146,7 @@ function createToolHandler(toolDef, deps) {
           }],
         };
       }
-      return { content: [{ type: "text", text: formatTerminalExecuteResult(result) }] };
+      return formatTerminalExecuteMcpResponse(result);
     }
 
     if (TERMINAL_POLL_TOOLS.has(mcpTool) || TERMINAL_STOP_TOOLS.has(mcpTool)) {
@@ -101,6 +154,14 @@ function createToolHandler(toolDef, deps) {
         ? { ...scopeParams, jobId: args.jobId, offset: args.offset || 0 }
         : { ...scopeParams, jobId: args.jobId };
       const result = await rpcCall(rpcMethod, params);
+      if (!result.ok) {
+        return { content: [{ type: "text", text: formatRpcError(result) }], isError: true };
+      }
+      return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }] };
+    }
+
+    if (SESSION_CLOSE_TOOLS.has(mcpTool)) {
+      const result = await rpcCall(rpcMethod, { ...scopeParams, sessionId: args.sessionId });
       if (!result.ok) {
         return { content: [{ type: "text", text: formatRpcError(result) }], isError: true };
       }
@@ -179,6 +240,10 @@ function registerMcpTools(server, deps) {
 module.exports = {
   buildZodSchema,
   buildZodShapeObject,
+  formatRpcError,
+  formatTerminalExecuteResult,
+  formatTerminalExecuteMcpResponse,
+  hasTerminalExecuteEvidence,
   registerMcpTools,
   SFTP_WRITE_TOOLS,
 };

@@ -4,6 +4,12 @@ import test from "node:test";
 
 const source = readFileSync(new URL("./SettingsTerminalTab.tsx", import.meta.url), "utf8");
 
+test("terminal settings expose cursor line highlight toggle", () => {
+  assert.match(source, /settings\.terminal\.cursor\.highlightLine/);
+  assert.match(source, /checked=\{terminalSettings\.highlightCursorLine\}/);
+  assert.match(source, /updateTerminalSetting\("highlightCursorLine", v\)/);
+});
+
 test("terminal settings hide terminal theme pickers while following app theme", () => {
   assert.match(source, /\{!followAppTerminalTheme && \(/);
   assert.doesNotMatch(source, /settings\.terminal\.theme\.followingTheme/);
@@ -23,4 +29,15 @@ test("terminal settings expose SSH auto reconnect toggle", () => {
   assert.match(source, /settings\.terminal\.connection\.sshAutoReconnectEnabled/);
   assert.match(source, /checked=\{terminalSettings\.sshAutoReconnectEnabled\}/);
   assert.match(source, /updateTerminalSetting\("sshAutoReconnectEnabled", v\)/);
+});
+
+test("terminal settings expose the host information bar toggle", () => {
+  assert.match(source, /checked=\{terminalSettings\.showHostInfoBar\}/);
+  assert.match(source, /updateTerminalSetting\("showHostInfoBar", v\)/);
+});
+
+test("terminal settings expose host information title mode when the bar is shown", () => {
+  assert.match(source, /terminalSettings\.showHostInfoBar && \(/);
+  assert.match(source, /updateTerminalSetting\("hostInfoBarTitleMode"/);
+  assert.match(source, /settings\.terminal\.hostInfoBar\.titleMode/);
 });

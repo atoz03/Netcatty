@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  CHROME_THEME_CSS_CACHE_MAX_ENTRIES,
+  _cacheChromeThemeCssForTests,
+  _getChromeThemeCssCacheStatsForTests,
   scheduleChromeLayoutAnimation,
   syncActiveChromeTheme,
   themeFingerprint,
@@ -100,4 +103,26 @@ test("active chrome theme foreground uses contrast calculation", () => {
 
   assert.match(source, /resolveReadableForegroundForHsl\(cursor\)/);
   assert.doesNotMatch(source, /cursorLightness > 55/);
+});
+
+test("edited theme previews cannot grow the chrome CSS cache without bound", () => {
+  const base = TERMINAL_THEMES[0];
+  assert.ok(base);
+  let latestFingerprint = "";
+  for (let index = 0; index < CHROME_THEME_CSS_CACHE_MAX_ENTRIES * 2; index += 1) {
+    const theme = {
+      ...base,
+      id: `edited-preview-${index}`,
+      colors: {
+        ...base.colors,
+        background: `#${index.toString(16).padStart(6, "0")}`,
+      },
+    };
+    latestFingerprint = themeFingerprint(theme);
+    _cacheChromeThemeCssForTests(theme);
+  }
+
+  const stats = _getChromeThemeCssCacheStatsForTests();
+  assert.equal(stats.size, CHROME_THEME_CSS_CACHE_MAX_ENTRIES);
+  assert.equal(stats.keys.at(-1), latestFingerprint);
 });

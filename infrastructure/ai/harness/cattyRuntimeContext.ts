@@ -6,6 +6,7 @@ import type { ToolOutputStore } from './toolOutputStore';
 import type { ToolResultDedup } from './toolResultDedup';
 import type { CompactionTrace } from './types';
 import type { AgentKind } from '../agentKinds';
+import type { PromptContextSnapshot } from './promptContextSnapshot';
 
 export const cattyRuntimeContextSchema = z.object({
   chatSessionId: z.string(),
@@ -19,6 +20,7 @@ export const cattyRuntimeContextSchema = z.object({
   scopeLabel: z.string().optional(),
   lastCompaction: z.custom<CompactionTrace>().optional(),
   lastStepAdjusted: z.boolean().optional(),
+  promptContext: z.custom<PromptContextSnapshot>().optional(),
 });
 
 export type CattyRuntimeContext = z.infer<typeof cattyRuntimeContextSchema>;
@@ -46,6 +48,7 @@ export function createInitialCattyRuntimeContext(input: {
   permissionMode: AIPermissionMode;
   scopeType: 'terminal' | 'workspace';
   scopeLabel?: string;
+  promptContext?: PromptContextSnapshot;
 }): CattyRuntimeContext {
   return {
     chatSessionId: input.chatSessionId,
@@ -57,6 +60,7 @@ export function createInitialCattyRuntimeContext(input: {
     permissionMode: input.permissionMode,
     scopeType: input.scopeType,
     scopeLabel: input.scopeLabel,
+    promptContext: input.promptContext,
   };
 }
 

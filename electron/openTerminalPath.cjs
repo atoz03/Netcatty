@@ -12,6 +12,42 @@ function expandHomePath(targetPath, { osHomedir = os.homedir } = {}) {
   return targetPath;
 }
 
+/**
+ * Normalize raw CLI / shell path tokens before resolution.
+ * Handles leftover quotes, trailing dots from the Windows shell `"%1."` trick,
+ * and drive-root trailing separators.
+ */
+function normalizeOpenTerminalPathToken(rawPath) {
+  if (typeof rawPath !== "string") return "";
+  let value = rawPath.trim();
+  if (!value) return "";
+
+  // Strip one layer of matching quotes that may survive argv parsing.
+  if (
+    (value.startsWith('"') && value.endsWith('"') && value.length >= 2)
+    || (value.startsWith("'") && value.endsWith("'") && value.length >= 2)
+  ) {
+    value = value.slice(1, -1).trim();
+  }
+
+  // Windows shell verbs use `"%1."` / `"%V."` so drive roots don't break quoting.
+  // Drop a single trailing dot when it is not part of a `..` segment.
+  if (process.platform === "win32" || /^[A-Za-z]:[\\/]/.test(value) || value.includes("\\")) {
+    if (value.length > 1 && value.endsWith(".") && !value.endsWith("..")) {
+      value = value.slice(0, -1);
+    }
+    // Normalize trailing separators except for drive roots like `C:\`.
+    if (/^[A-Za-z]:\\$/.test(value) || /^[A-Za-z]:\/$/.test(value)) {
+      return value;
+    }
+    while (value.length > 1 && (value.endsWith("\\") || value.endsWith("/"))) {
+      value = value.slice(0, -1);
+    }
+  }
+
+  return value;
+}
+
 function collectOpenTerminalPathArgs(argv) {
   if (!Array.isArray(argv)) return [];
   const paths = [];
@@ -23,7 +59,7 @@ function collectOpenTerminalPathArgs(argv) {
     if (arg === OPEN_TERMINAL_PATH_ARG) {
       const next = argv[index + 1];
       if (typeof next === "string" && next.trim()) {
-        paths.push(next);
+        paths.push(normalizeOpenTerminalPathToken(next));
         index += 1;
       }
       continue;
@@ -32,11 +68,11 @@ function collectOpenTerminalPathArgs(argv) {
     const prefix = `${OPEN_TERMINAL_PATH_ARG}=`;
     if (arg.startsWith(prefix)) {
       const value = arg.slice(prefix.length);
-      if (value.trim()) paths.push(value);
+      if (value.trim()) paths.push(normalizeOpenTerminalPathToken(value));
     }
   }
 
-  return paths;
+  return paths.filter(Boolean);
 }
 
 function resolveOpenTerminalPath(rawPath, {
@@ -45,10 +81,11 @@ function resolveOpenTerminalPath(rawPath, {
   pathModule = path,
   logWarn = console.warn,
 } = {}) {
-  if (typeof rawPath !== "string" || !rawPath.trim()) return null;
+  const normalized = normalizeOpenTerminalPathToken(rawPath);
+  if (!normalized) return null;
 
   try {
-    const expanded = expandHomePath(rawPath);
+    const expanded = expandHomePath(normalized);
     const resolved = pathModule.isAbsolute(expanded)
       ? pathModule.resolve(expanded)
       : pathModule.resolve(baseDirectory || process.cwd(), expanded);
@@ -73,6 +110,7 @@ module.exports = {
   OPEN_TERMINAL_PATH_CHANNEL,
   collectOpenTerminalPathArgs,
   expandHomePath,
+  normalizeOpenTerminalPathToken,
   resolveOpenTerminalPath,
   resolveOpenTerminalPathsFromArgs,
 };

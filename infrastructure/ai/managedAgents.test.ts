@@ -65,3 +65,18 @@ test('legacy backend field is still accepted for saved settings', () => {
     'codex',
   );
 });
+
+test('grok managed config matches by sdk backend and discovered id', () => {
+  assert.equal(
+    matchesManagedAgentConfig({ id: 'discovered_grok', command: 'grok', sdkBackend: 'grok' }, 'grok'),
+    true,
+  );
+  assert.equal(
+    matchesManagedAgentConfig({ id: 'x', command: 'other', sdkBackend: 'grok' }, 'grok'),
+    true,
+  );
+  assert.equal(
+    matchesManagedAgentConfig({ id: 'x', command: 'C:\\\\Tools\\\\grok.exe', sdkBackend: 'grok' }, 'grok'),
+    true,
+  );
+});

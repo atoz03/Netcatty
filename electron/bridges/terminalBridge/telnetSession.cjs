@@ -5,6 +5,7 @@ const {
   shouldAcceptSessionOutput,
   shouldProcessSessionOutput,
 } = require("../terminalFlowAck.cjs");
+const { fanoutSessionExit } = require("../terminalAttachRestore.cjs");
 
 const TELNET_SESSION_REPLACED_ERROR = "Telnet session start was replaced";
 
@@ -46,6 +47,7 @@ function createTelnetSessionApi(ctx) {
         const socket = new net.Socket();
         enableTcpNoDelay(socket);
         let connected = false;
+        let activeSession = null;
         // Token for the log stream we open on this connection. Captured here so
         // the close/error handlers below can pass it back to stopStream and
         // avoid tearing down a fresh stream that a subsequent reconnect on the
@@ -72,7 +74,7 @@ function createTelnetSessionApi(ctx) {
               localEcho: localEchoEnabled,
             };
           }
-          const contents = electronModule.webContents.fromId(event.sender.id);
+          const contents = electronModule.webContents.fromId(session?.webContentsId ?? event.sender.id);
           contents?.send("netcatty:telnet:echo-mode", {
             sessionId,
             remoteEcho: remoteEchoEnabled,
@@ -112,11 +114,19 @@ function createTelnetSessionApi(ctx) {
           },
           onComplete() {
             const contents = electronModule.webContents.fromId(event.sender.id);
-            contents?.send("netcatty:telnet:auto-login-complete", { sessionId });
+            const liveSession = sessions.get(sessionId);
+            contents?.send("netcatty:telnet:auto-login-complete", {
+              sessionId,
+              bootEpoch: liveSession?.bootEpoch ?? options.bootEpoch,
+            });
           },
           onUserInput() {
             const contents = electronModule.webContents.fromId(event.sender.id);
-            contents?.send("netcatty:telnet:auto-login-cancelled", { sessionId });
+            const liveSession = sessions.get(sessionId);
+            contents?.send("netcatty:telnet:auto-login-cancelled", {
+              sessionId,
+              bootEpoch: liveSession?.bootEpoch ?? options.bootEpoch,
+            });
           },
         });
     
@@ -222,8 +232,19 @@ function createTelnetSessionApi(ctx) {
               return telnetProtocolActive;
             },
           };
+          activeSession = session;
           session.flushPendingData = flushTelnetPaced;
-          sessions.set(sessionId, session);
+          const { claimSessionSlot } = require("../sessionBootEpoch.cjs");
+          const claim = claimSessionSlot(sessions, sessionId, session, options.bootEpoch);
+          if (!claim.ok) {
+            try { socket?.destroy?.(); } catch { /* ignore */ }
+            const supersededError = new Error("Connection superseded by a newer reconnect");
+            supersededError.code = "NETCATTY_BOOT_SUPERSEDED";
+            // EventEmitter 'connect' callbacks are not covered by the
+            // enclosing Promise executor try/catch — reject explicitly.
+            reject(supersededError);
+            return;
+          }
           openTerminalOutputSession?.(sessionId, event.sender);
     
           // Start real-time session log stream if configured
@@ -236,25 +257,36 @@ function createTelnetSessionApi(ctx) {
               timestampsEnabled: Boolean(options.sessionLog.timestampsEnabled),
               startTime: Date.now(),
             });
+            session.logStreamToken = logStreamToken;
           }
     
           resolve({ sessionId });
         });
     
-        const telnetWebContentsId = event.sender.id;
+        const getCurrentTelnetWebContentsId = () =>
+          sessions.get(sessionId)?.webContentsId ?? event.sender.id;
+        const getCurrentTelnetWebContents = () =>
+          electronModule.webContents.fromId(getCurrentTelnetWebContentsId());
         const {
           bufferData: bufferTelnetData,
           flushPaced: flushTelnetPaced,
           discard: discardTelnet,
         } = createPtyOutputBuffer((data, meta) => {
-          const contents = electronModule.webContents.fromId(telnetWebContentsId);
-          emitTerminalSessionData(contents, sessionId, data, { cols, rows, meta });
+          const contents = getCurrentTelnetWebContents();
+          emitTerminalSessionData(contents, sessionId, data, {
+            session: activeSession,
+            cols,
+            rows,
+            meta,
+          });
         }, {
           onPendingBytesChange: (bytes) => {
             const activeSession = sessions.get(sessionId);
             if (activeSession?.socket === socket) setBufferedOutputBytes(activeSession, bytes);
           },
-          shouldAcceptOutput: () => shouldAcceptSessionOutput(sessions.get(sessionId)),
+          shouldAcceptOutput: () => activeSession != null
+            && sessions.get(sessionId) === activeSession
+            && shouldAcceptSessionOutput(activeSession),
         });
     
         const telnetZmodemSentry = createZmodemSentry({
@@ -289,13 +321,13 @@ function createTelnetSessionApi(ctx) {
             } catch { return true; }
           },
           getWebContents() {
-            return electronModule.webContents.fromId(telnetWebContentsId);
+            return getCurrentTelnetWebContents();
           },
           selectUploadFiles: selectZmodemUploadFiles
-            ? () => selectZmodemUploadFiles(telnetWebContentsId)
+            ? () => selectZmodemUploadFiles(getCurrentTelnetWebContentsId(), sessionId)
             : undefined,
           selectDownloadDirectory: selectZmodemDownloadDirectory
-            ? () => selectZmodemDownloadDirectory(telnetWebContentsId)
+            ? () => selectZmodemDownloadDirectory(getCurrentTelnetWebContentsId(), sessionId)
             : undefined,
           label: "Telnet",
         });
@@ -337,13 +369,20 @@ function createTelnetSessionApi(ctx) {
             }
             flushTelnetPaced(() => {
               if (telnetExitFinalized) return;
+              if (!activeSession || sessions.get(sessionId) !== activeSession) return;
               telnetExitFinalized = true;
               sessionLogStreamManager.stopStream(sessionId, logStreamToken);
-              const session = sessions.get(sessionId);
+              const session = activeSession;
               if (session) {
                 session.zmodemSentry?.cancel();
                 const contents = electronModule.webContents.fromId(session.webContentsId);
-                contents?.send("netcatty:exit", { sessionId, exitCode: 1, error: err.message, reason: "error" });
+                fanoutSessionExit(sessionId, contents, {
+                  sessionId,
+                  exitCode: 1,
+                  error: err.message,
+                  reason: "error",
+                  _terminalSessionGeneration: session._terminalSessionGeneration,
+                });
               }
               ptyProcessTree.unregisterPid(sessionId);
               closeTerminalOutputSession?.(sessionId);
@@ -363,13 +402,19 @@ function createTelnetSessionApi(ctx) {
           }
           flushTelnetPaced(() => {
             if (telnetExitFinalized) return;
+            if (!activeSession || sessions.get(sessionId) !== activeSession) return;
             telnetExitFinalized = true;
             sessionLogStreamManager.stopStream(sessionId, logStreamToken);
-            const session = sessions.get(sessionId);
+            const session = activeSession;
             if (session) {
               session.zmodemSentry?.cancel();
               const contents = electronModule.webContents.fromId(session.webContentsId);
-              contents?.send("netcatty:exit", { sessionId, exitCode: hadError ? 1 : 0, reason: hadError ? "error" : "closed" });
+              fanoutSessionExit(sessionId, contents, {
+                sessionId,
+                exitCode: hadError ? 1 : 0,
+                reason: hadError ? "error" : "closed",
+                _terminalSessionGeneration: session._terminalSessionGeneration,
+              });
             }
             ptyProcessTree.unregisterPid(sessionId);
             closeTerminalOutputSession?.(sessionId);

@@ -5,10 +5,23 @@ import {
   createSudoPasswordAutofill,
   prepareSudoAutofillInput,
 } from "./terminalSudoAutofill";
-import { recordTerminalCommandExecution } from "./terminalCommandExecution";
+import {
+  recordTerminalCommandExecution,
+  resolveSubmittedShellCommand,
+} from "./terminalCommandExecution";
 import { createPromptLineBreakState } from "./promptLineBreak";
 
-function createFakeTerm(lineText = "$ echo ok", cursorX = lineText.length) {
+function createFakeTerm(
+  lineText = "$ echo ok",
+  cursorX = lineText.length,
+  options?: {
+    ghostFrom?: number;
+    /** Per-cell fg overrides for accepted text (syntax highlighting). */
+    fgAt?: (x: number) => number;
+  },
+) {
+  const ghostFrom = options?.ghostFrom;
+  const fgAt = options?.fgAt;
   return {
     buffer: {
       active: {
@@ -21,6 +34,19 @@ function createFakeTerm(lineText = "$ echo ok", cursorX = lineText.length) {
             isWrapped: false,
             translateToString() {
               return lineText;
+            },
+            getCell(x: number) {
+              const isGhost = ghostFrom != null && x >= ghostFrom;
+              return {
+                getWidth: () => 1,
+                getChars: () => lineText[x] ?? "",
+                isDim: () => (isGhost ? 1 : 0),
+                getFgColorMode: () => 0,
+                getFgColor: () => {
+                  if (isGhost) return 8;
+                  return fgAt?.(x) ?? 15;
+                },
+              };
             },
           };
         },
@@ -120,6 +146,440 @@ test("command execution arms prompt line break even without command history call
   assert.equal(commandBufferRef.current, "");
   assert.equal(recordedCommand, "echo ok");
   assert.equal(promptState.pendingCommand, true);
+});
+
+test("sensitive terminal input never reaches command or semantic callbacks", () => {
+  const promptState = createPromptLineBreakState();
+  const commandBufferRef = { current: "correct horse battery staple" };
+  const submitted: string[] = [];
+  const executed: string[] = [];
+
+  const recordedCommand = recordTerminalCommandExecution(
+    commandBufferRef.current,
+    {
+      host: { id: "host-1", label: "Host" },
+      sessionId: "session-1",
+      commandBufferRef,
+      promptLineBreakStateRef: { current: promptState },
+      onCommandSubmitted: (command) => submitted.push(command),
+      onCommandExecuted: (command) => executed.push(command),
+    },
+    createFakeTerm("Password: correct horse battery staple") as never,
+    { sensitive: true },
+  );
+
+  assert.equal(recordedCommand, null);
+  assert.equal(commandBufferRef.current, "");
+  assert.deepEqual(submitted, []);
+  assert.deepEqual(executed, []);
+  assert.equal(promptState.pendingCommand, false);
+});
+
+test("resolveSubmittedShellCommand recovers ↑ history when keystroke buffer is empty (#2191)", () => {
+  // Shell history redraws the line remotely; commandBuffer never sees "su -".
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("user@host:~$ su -") as never),
+    "su -",
+  );
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("user@host:~$ sudo whoami") as never),
+    "sudo whoami",
+  );
+  // Prefer the typed buffer when present
+  assert.equal(
+    resolveSubmittedShellCommand("ls", createFakeTerm("user@host:~$ ls") as never),
+    "ls",
+  );
+});
+
+test("resolveSubmittedShellCommand strips themed prompt chrome without stale cache (#2191)", () => {
+  // Themed decoration must not become the command (#806); peel via reconcile.
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("➜  git su -") as never),
+    "su -",
+  );
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("➜  ~ sudo whoami") as never),
+    "sudo whoami",
+  );
+  // Cached prompt still works when present (including after prompt-changing cd).
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "",
+      createFakeTerm("➜  git su -") as never,
+      "➜  git ",
+    ),
+    "su -",
+  );
+  // Stale cache from before `cd` must not block themed history recall.
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "",
+      createFakeTerm("➜  git su -") as never,
+      "➜  ~ ",
+    ),
+    "su -",
+  );
+  // Partial cache after git status appears must peel remaining decoration.
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "",
+      createFakeTerm("➜  netcatty git:(main) ✗ su -") as never,
+      "➜  netcatty ",
+    ),
+    "su -",
+  );
+  // Complete Powerline prompts isolate multiword sudo already.
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "",
+      createFakeTerm("\uE0B6 root \uE0B0 ~ \uE0B0 sudo whoami") as never,
+    ),
+    "sudo whoami",
+  );
+  // Empty Enter on themed decoration must not invent a command (#2191 review).
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("➜  git ") as never),
+    "",
+  );
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "",
+      createFakeTerm("➜  netcatty git:(main) ✗ ") as never,
+    ),
+    "",
+  );
+  // One-word su at a glyph-only prompt must still arm (#2191 review).
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("❯ su") as never),
+    "su",
+  );
+  // Double-space after glyph must not peel "su" into decoration.
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("❯  su -") as never),
+    "su -",
+  );
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("❯  sudo whoami") as never),
+    "sudo whoami",
+  );
+  // Multi-word themed directory without cache.
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("➜  My Project su -") as never),
+    "su -",
+  );
+  // Directory token "su " with trailing pad is chrome, not a command.
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("➜  su ") as never),
+    "",
+  );
+  // Absolute path commands on normal prompts are real, not decoration.
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "",
+      createFakeTerm("user@host:~$ /bin/ls") as never,
+    ),
+    "/bin/ls",
+  );
+  // Cursor mid-line: empty buffer does not absorb post-cursor paint (autosuggest).
+  // At EOL with empty buffer, the full recalled line is already in userInput.
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "",
+      createFakeTerm("user@host:~$ sudo whoami") as never,
+    ),
+    "sudo whoami",
+  );
+  // zsh-style suggestion after the cursor must not be recorded as input.
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "git",
+      createFakeTerm("user@host:~$ git status", "user@host:~$ git".length) as never,
+    ),
+    "git",
+  );
+  // Same-token autosuggest (typed "g", paint "git status") must stay "g".
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "g",
+      createFakeTerm("user@host:~$ git status", "user@host:~$ g".length) as never,
+    ),
+    "g",
+  );
+  // Stale typed prefix after history to privilege command.
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "s",
+      createFakeTerm("user@host:~$ su -") as never,
+    ),
+    "su -",
+  );
+  // Double-space glyph + non-privilege history keeps the first word.
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("❯  git status") as never),
+    "git status",
+  );
+  // Unicode / punctuated themed directories before su.
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("➜  项目 su -") as never),
+    "su -",
+  );
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("➜  Project (old) su -") as never),
+    "su -",
+  );
+  // Ordinary commands ending in "su -" must not be peeled to privilege-only.
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("❯  echo su -") as never),
+    "echo su -",
+  );
+  // No-space prompt on first history recall (no lastPromptText cache).
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("user@host:~$su -") as never),
+    "su -",
+  );
+  // Themed multi-word dir resolves and still records for arming.
+  {
+    const commandBufferRef = { current: "" };
+    const recorded = recordTerminalCommandExecution("", {
+      host: { id: "h", label: "H" },
+      sessionId: "s",
+      commandBufferRef,
+    }, createFakeTerm("➜  My Project su -") as never);
+    assert.equal(recorded, "su -");
+  }
+  // Incomplete remote echo of a longer typed word: trust keystrokes.
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "sudo",
+      createFakeTerm("user@host:~$ su") as never,
+    ),
+    "sudo",
+  );
+  // History shortened a multi-word typed buffer to a different short command.
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "sudo whoami",
+      createFakeTerm("user@host:~$ su") as never,
+    ),
+    "su",
+  );
+  // No trailing space after $: recover via lastPromptText (#2191 review).
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "",
+      createFakeTerm("user@host:~$su -") as never,
+      "user@host:~$",
+    ),
+    "su -",
+  );
+  // Stale partial cache on empty themed prompt must not record git chrome.
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "",
+      createFakeTerm("➜  netcatty git:(main) ✗ ") as never,
+      "➜  netcatty ",
+    ),
+    "",
+  );
+  // Prefixed themed terminator + cwd token is not a command.
+  assert.equal(
+    resolveSubmittedShellCommand("", createFakeTerm("⚡ ➜  git ") as never),
+    "",
+  );
+  // Stale buffer aligned to mid-line prefix after history recall.
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "s",
+      createFakeTerm("user@host:~$ su -", "user@host:~$ s".length) as never,
+    ),
+    "su -",
+  );
+});
+
+test("resolveSubmittedShellCommand prefers live line when history replaces a typed prefix (#2191)", () => {
+  // User typed "s" then ↑ recalled "su -" — buffer still holds the stale prefix.
+  assert.equal(
+    resolveSubmittedShellCommand("s", createFakeTerm("user@host:~$ su -") as never),
+    "su -",
+  );
+  assert.equal(
+    resolveSubmittedShellCommand("s", createFakeTerm("➜  git su -") as never),
+    "su -",
+  );
+  // Echo lag: buffer ahead of live echo keeps the typed command.
+  assert.equal(
+    resolveSubmittedShellCommand("su -", createFakeTerm("user@host:~$ su") as never),
+    "su -",
+  );
+});
+
+test("resolveSubmittedShellCommand records full line after mid-line history edit (#2850)", () => {
+  // ↑ recalled "systemctl stop firewalld", cursor moved onto "stop", replaced
+  // with "start", Enter while still mid-line. Keystroke buffer only saw the
+  // replacement token; Enter still submits the whole zle line.
+  const line = "user@host:~$ systemctl start firewalld";
+  const cursorAfterStart = "user@host:~$ systemctl start".length;
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "start",
+      createFakeTerm(line, cursorAfterStart) as never,
+    ),
+    "systemctl start firewalld",
+  );
+  // Empty buffer + mid-line cursor after recall/edit (no typed suffix).
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "",
+      createFakeTerm(line, cursorAfterStart) as never,
+    ),
+    "systemctl start firewalld",
+  );
+  // Per-token syntax highlighting must not strip the accepted suffix after
+  // the cursor (command / arg / path colors differ across the line).
+  {
+    const prompt = "user@host:~$ ";
+    const cmd = "systemctl start firewalld";
+    const painted = `${prompt}${cmd}`;
+    const cursor = `${prompt}systemctl start`.length;
+    const systemctlEnd = `${prompt}systemctl`.length;
+    const startEnd = `${prompt}systemctl start`.length;
+    assert.equal(
+      resolveSubmittedShellCommand(
+        "start",
+        createFakeTerm(painted, cursor, {
+          fgAt: (x) => {
+            if (x < prompt.length) return 15;
+            if (x < systemctlEnd) return 2; // command
+            if (x < startEnd) return 3; // arg
+            return 4; // differently colored accepted suffix
+          },
+        }) as never,
+      ),
+      "systemctl start firewalld",
+    );
+  }
+  // zsh autosuggest paint past the cursor must stay on the typed prefix.
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "git",
+      createFakeTerm("user@host:~$ git status", "user@host:~$ git".length) as never,
+    ),
+    "git",
+  );
+  // ↑ recalled "git", then typed " st" with zsh ghost "atus". Enter submits
+  // "git st", not the unaccepted suggestion "git status".
+  assert.equal(
+    resolveSubmittedShellCommand(
+      " st",
+      createFakeTerm(
+        "user@host:~$ git status",
+        "user@host:~$ git st".length,
+        { ghostFrom: "user@host:~$ git st".length },
+      ) as never,
+    ),
+    "git st",
+  );
+  assert.equal(
+    resolveSubmittedShellCommand(
+      "st",
+      createFakeTerm(
+        "user@host:~$ git status",
+        "user@host:~$ git st".length,
+        { ghostFrom: "user@host:~$ git st".length },
+      ) as never,
+    ),
+    "git st",
+  );
+  // Cross-token autosuggest after history: ↑ "sudo", typed " apt", ghost
+  // " upgrade". Enter submits "sudo apt", not "sudo apt upgrade".
+  assert.equal(
+    resolveSubmittedShellCommand(
+      " apt",
+      createFakeTerm(
+        "user@host:~$ sudo apt upgrade",
+        "user@host:~$ sudo apt".length,
+        { ghostFrom: "user@host:~$ sudo apt".length },
+      ) as never,
+    ),
+    "sudo apt",
+  );
+  // End-to-end: history callback must receive the full painted command.
+  {
+    const commandBufferRef = { current: "start" };
+    const recorded: string[] = [];
+    const recordedCommand = recordTerminalCommandExecution("start", {
+      host: { id: "host-1", label: "Host" },
+      sessionId: "session-1",
+      commandBufferRef,
+      onCommandExecuted(cmd) {
+        recorded.push(cmd);
+      },
+    }, createFakeTerm(line, cursorAfterStart) as never);
+    assert.equal(recordedCommand, "systemctl start firewalld");
+    assert.deepEqual(recorded, ["systemctl start firewalld"]);
+  }
+});
+
+test("recordTerminalCommandExecution arms su after empty-buffer history recall (#2191)", () => {
+  const commandBufferRef = { current: "" };
+  const recorded: string[] = [];
+  const recordedCommand = recordTerminalCommandExecution("", {
+    host: { id: "host-1", label: "Host" },
+    sessionId: "session-1",
+    commandBufferRef,
+    onCommandExecuted(cmd) {
+      recorded.push(cmd);
+    },
+  }, createFakeTerm("user@host:~$ su -") as never);
+
+  assert.equal(recordedCommand, "su -");
+  assert.deepEqual(recorded, ["su -"]);
+  assert.equal(commandBufferRef.current, "");
+
+  // Full Enter path: empty buffer + live line still arms sudo autofill
+  const writes: string[] = [];
+  const autofill = createSudoPasswordAutofill({
+    mode: "picker",
+    candidates: [
+      { id: "host", label: "Host", password: "host-secret" },
+      { id: "identity:root", label: "Root", password: "root-secret" },
+    ],
+    write: (d) => writes.push(d),
+    onPicker: () => true,
+  });
+  prepareSudoAutofillInput("\r", recordedCommand, autofill);
+  autofill.handleOutput("Password: ");
+  assert.equal(autofill.isPickerPending(), true);
+  autofill.confirmFill("host");
+  assert.deepEqual(writes, ["host-secret\n"]);
+});
+
+test("recordTerminalCommandExecution arms su from themed history using lastPromptText (#2191)", () => {
+  const promptState = createPromptLineBreakState();
+  promptState.lastPromptText = "➜  git ";
+  const commandBufferRef = { current: "" };
+  const recordedCommand = recordTerminalCommandExecution("", {
+    host: { id: "host-1", label: "Host" },
+    sessionId: "session-1",
+    commandBufferRef,
+    promptLineBreakStateRef: { current: promptState },
+  }, createFakeTerm("➜  git su -") as never);
+
+  assert.equal(recordedCommand, "su -");
+
+  const autofill = createSudoPasswordAutofill({
+    mode: "picker",
+    candidates: [
+      { id: "host", label: "Host", password: "host-secret" },
+      { id: "identity:root", label: "Root", password: "root-secret" },
+    ],
+    write: () => {},
+    onPicker: () => true,
+  });
+  prepareSudoAutofillInput("\r", recordedCommand, autofill);
+  autofill.handleOutput("Password: ");
+  assert.equal(autofill.isPickerPending(), true);
 });
 
 test("command execution caches the current prompt instead of prompt-like command text", () => {

@@ -5,7 +5,7 @@ import type { PortForwardingRule } from "../domain/models";
 import en from "../application/i18n/locales/en";
 import zhCN from "../application/i18n/locales/zh-CN";
 import ru from "../application/i18n/locales/ru";
-import { buildRuleSummary } from "./port-forwarding/utils";
+import { buildRuleSummary, stopRuntimeTunnelBeforeDelete } from "./port-forwarding/utils";
 
 const interpolate = (template: string, vars?: Record<string, unknown>) =>
   template.replace(/\{(\w+)\}/g, (_, key) => String(vars?.[key] ?? ""));
@@ -55,4 +55,25 @@ test("bundled locales include port forwarding summary copy for every forwarding 
       assert.notEqual(messages[key], "", `${locale} has empty ${key}`);
     }
   }
+});
+
+test("delete always verifies backend cleanup and retains the rule on failure", async () => {
+  let stopCalls = 0;
+  assert.equal(await stopRuntimeTunnelBeforeDelete(
+    "rule-1",
+    async () => {
+      stopCalls++;
+      return { success: false };
+    },
+  ), false);
+  assert.equal(stopCalls, 1);
+
+  assert.equal(await stopRuntimeTunnelBeforeDelete(
+    "rule-1",
+    async () => {
+      stopCalls++;
+      return { success: true };
+    },
+  ), true);
+  assert.equal(stopCalls, 2);
 });

@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { buildSftpHostCredentials } from "./useSftpHostCredentials.ts";
+import {
+  buildSftpHostCredentials,
+} from "./useSftpHostCredentials.ts";
 import type { Host, Identity, KnownHost, SSHKey } from "../../../domain/models.ts";
 
 const host = (overrides: Partial<Host> = {}): Host => ({
@@ -12,6 +14,122 @@ const host = (overrides: Partial<Host> = {}): Host => ({
   tags: [],
   os: "linux",
   ...overrides,
+});
+
+test("buildSftpHostCredentials forwards system agent settings for target and jump hosts", () => {
+  const jump = host({
+    id: "jump-1",
+    hostname: "jump.example.com",
+    useSshAgent: true,
+    identityFilePaths: ["~/.ssh/jump"],
+    identitiesOnly: true,
+  });
+  const credentials = buildSftpHostCredentials({
+    host: host({
+      hostChain: { hostIds: ["jump-1"] },
+      useSshAgent: true,
+      identityAgent: "$SSH_AUTH_SOCK",
+      identityFilePaths: ["~/.ssh/aws_root"],
+      identitiesOnly: true,
+      addKeysToAgent: "yes",
+      useKeychain: true,
+    }),
+    hosts: [jump],
+    keys: [],
+    identities: [],
+  });
+
+  assert.deepEqual(
+    {
+      useSshAgent: credentials.useSshAgent,
+      identityAgent: credentials.identityAgent,
+      identityFilePaths: credentials.identityFilePaths,
+      identitiesOnly: credentials.identitiesOnly,
+      addKeysToAgent: credentials.addKeysToAgent,
+      useKeychain: credentials.useKeychain,
+    },
+    {
+      useSshAgent: true,
+      identityAgent: "$SSH_AUTH_SOCK",
+      identityFilePaths: ["~/.ssh/aws_root"],
+      identitiesOnly: true,
+      addKeysToAgent: "yes",
+      useKeychain: true,
+    },
+  );
+  assert.equal(credentials.jumpHosts?.[0]?.useSshAgent, true);
+  assert.deepEqual(credentials.jumpHosts?.[0]?.identityFilePaths, ["~/.ssh/jump"]);
+  assert.equal(credentials.jumpHosts?.[0]?.identitiesOnly, true);
+});
+
+test("buildSftpHostCredentials forwards target and jump-host timeouts", () => {
+  const jumpHost = host({
+    id: "jump-1",
+    sshTcpConnectTimeoutSeconds: 75,
+    sshAuthReadyTimeoutSeconds: 360,
+  });
+  const credentials = buildSftpHostCredentials({
+    host: host({
+      hostChain: { hostIds: ["jump-1"] },
+      sshTcpConnectTimeoutSeconds: 45,
+      sshAuthReadyTimeoutSeconds: 300,
+    }),
+    hosts: [jumpHost],
+    keys: [],
+    identities: [],
+  });
+
+  assert.equal(credentials.sshTcpConnectTimeoutMs, 45_000);
+  assert.equal(credentials.sshAuthReadyTimeoutMs, 300_000);
+  assert.equal(credentials.jumpHosts?.[0]?.sshTcpConnectTimeoutMs, 75_000);
+  assert.equal(credentials.jumpHosts?.[0]?.sshAuthReadyTimeoutMs, 360_000);
+});
+
+test("buildSftpHostCredentials keeps automatic auth per target and jump host", () => {
+  const jumpHost = host({ id: "jump-1", authMethod: "auto", password: "jump-secret", requiresMfa: true });
+  const credentials = buildSftpHostCredentials({
+    host: host({
+      authMethod: "auto",
+      password: "target-secret",
+      requiresMfa: true,
+      hostChain: { hostIds: ["jump-1"] },
+    }),
+    hosts: [jumpHost],
+    keys: [],
+    identities: [],
+  });
+
+  assert.equal(credentials.authMethod, "auto");
+  assert.equal(credentials.requiresMfa, true);
+  assert.equal(credentials.jumpHosts?.[0]?.authMethod, "auto");
+  assert.equal(credentials.jumpHosts?.[0]?.requiresMfa, true);
+});
+
+test("buildSftpHostCredentials drops stale identity paths for password-only hosts", () => {
+  const jumpHost = host({
+    id: "jump-1",
+    authMethod: "password",
+    password: "jump-secret",
+    useSshAgent: true,
+    identityFilePaths: ["~/.ssh/stale-jump"],
+  });
+  const credentials = buildSftpHostCredentials({
+    host: host({
+      authMethod: "password",
+      password: "target-secret",
+      useSshAgent: true,
+      identityFilePaths: ["~/.ssh/stale-target"],
+      hostChain: { hostIds: ["jump-1"] },
+    }),
+    hosts: [jumpHost],
+    keys: [],
+    identities: [],
+  });
+
+  assert.equal(credentials.identityFilePaths, undefined);
+  assert.equal(credentials.useSshAgent, false);
+  assert.equal(credentials.jumpHosts?.[0]?.identityFilePaths, undefined);
+  assert.equal(credentials.jumpHosts?.[0]?.useSshAgent, false);
 });
 
 test("buildSftpHostCredentials rejects missing jump hosts", () => {
@@ -114,7 +232,7 @@ test("buildSftpHostCredentials rejects proxy identities with blank usernames eve
         label: "Proxy login",
         username: " ",
         authMethod: "password",
-        password: "enc:v1:djEwAAAA",
+        password: "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==",
         created: 1,
       }],
     }),
@@ -167,7 +285,7 @@ test("buildSftpHostCredentials rejects incomplete proxy identities on jump hosts
         label: "Proxy login",
         username: "",
         authMethod: "password",
-        password: "enc:v1:djEwAAAA",
+        password: "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==",
         created: 1,
       }],
     }),
@@ -250,7 +368,7 @@ test("buildSftpHostCredentials rejects undecryptable proxy identity passwords", 
         label: "Proxy login",
         username: "proxy-user",
         authMethod: "password",
-        password: "enc:v1:djEwAAAA",
+        password: "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==",
         created: 1,
       }],
     }),
@@ -316,7 +434,7 @@ test("buildSftpHostCredentials rejects undecryptable jump host proxy identity pa
         label: "Proxy login",
         username: "proxy-user",
         authMethod: "password",
-        password: "enc:v1:djEwAAAA",
+        password: "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==",
         created: 1,
       }],
     }),
@@ -421,7 +539,7 @@ test("buildSftpHostCredentials rejects undecryptable saved password credentials"
     () => buildSftpHostCredentials({
       host: host({
         authMethod: "password",
-        password: "enc:v1:djEwAAAA",
+        password: "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==",
       }),
       hosts: [],
       keys: [],
@@ -429,6 +547,39 @@ test("buildSftpHostCredentials rejects undecryptable saved password credentials"
     }),
     /Saved credentials cannot be decrypted/,
   );
+});
+
+test("buildSftpHostCredentials keeps automatic target discovery available with an unreadable saved password", () => {
+  const credentials = buildSftpHostCredentials({
+    host: host({
+      authMethod: "auto",
+      password: "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==",
+    }),
+    hosts: [],
+    keys: [],
+    identities: [],
+  });
+
+  assert.equal(credentials.authMethod, "auto");
+  assert.equal(credentials.password, undefined);
+});
+
+test("buildSftpHostCredentials keeps automatic jump discovery available with an unreadable saved password", () => {
+  const jumpHost = host({
+    id: "jump-1",
+    label: "Jump",
+    authMethod: "auto",
+    password: "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==",
+  });
+  const credentials = buildSftpHostCredentials({
+    host: host({ hostChain: { hostIds: ["jump-1"] } }),
+    hosts: [jumpHost],
+    keys: [],
+    identities: [],
+  });
+
+  assert.equal(credentials.jumpHosts?.[0]?.authMethod, "auto");
+  assert.equal(credentials.jumpHosts?.[0]?.password, undefined);
 });
 
 test("buildSftpHostCredentials omits local key file paths for password auth", () => {
@@ -453,7 +604,7 @@ test("buildSftpHostCredentials rejects undecryptable saved key material without 
     id: "key-1",
     label: "Imported key",
     type: "ED25519",
-    privateKey: "enc:v1:djEwAAAA",
+    privateKey: "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==",
     source: "imported",
     category: "key",
     created: 1,
@@ -475,7 +626,7 @@ test("buildSftpHostCredentials does not use stale local key paths when a selecte
     id: "key-1",
     label: "Imported key",
     type: "ED25519",
-    privateKey: "enc:v1:djEwAAAA",
+    privateKey: "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==",
     source: "imported",
     category: "key",
     created: 1,
@@ -494,4 +645,48 @@ test("buildSftpHostCredentials does not use stale local key paths when a selecte
     }),
     /Saved credentials cannot be decrypted/,
   );
+});
+
+test("buildSftpHostCredentials uses the system agent when a synced key cannot be decrypted", () => {
+  const key: SSHKey = {
+    id: "key-1",
+    label: "Synced key",
+    type: "ED25519",
+    publicKey: "ssh-ed25519 AAAASELECTED",
+    privateKey: "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==",
+    source: "imported",
+    category: "key",
+    created: 1,
+  };
+
+  const credentials = buildSftpHostCredentials({
+    host: host({
+      authMethod: "key",
+      identityFileId: "key-1",
+      useSshAgent: true,
+    }),
+    hosts: [],
+    keys: [key],
+    identities: [],
+  });
+
+  assert.equal(credentials.useSshAgent, true);
+  assert.deepEqual(credentials.agentPublicKeys, ["ssh-ed25519 AAAASELECTED"]);
+  assert.equal(credentials.privateKey, undefined);
+});
+
+test("imported IdentityFile paths remain usable when agent login is disabled", () => {
+  const credentials = buildSftpHostCredentials({
+    host: host({
+      identityFilePaths: ["~/.ssh/id_work"],
+      useSshAgent: false,
+      identityAgent: "none",
+    }),
+    hosts: [],
+    keys: [],
+    identities: [],
+  });
+
+  assert.equal(credentials.useSshAgent, false);
+  assert.deepEqual(credentials.identityFilePaths, ["~/.ssh/id_work"]);
 });

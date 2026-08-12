@@ -1,3 +1,5 @@
+import { terminalPaneSessionsEqual } from '../domain/terminalPaneSessionsEqual';
+
 export const terminalLayerAreEqual = (
   prev: Record<string, unknown>,
   next: Record<string, unknown>,
@@ -6,17 +8,22 @@ export const terminalLayerAreEqual = (
   prev.customGroups === next.customGroups &&
   prev.groupConfigs === next.groupConfigs &&
   prev.proxyProfiles === next.proxyProfiles &&
+  prev.portForwardingRules === next.portForwardingRules &&
   prev.keys === next.keys &&
   prev.snippets === next.snippets &&
   prev.snippetPackages === next.snippetPackages &&
-  prev.notes === next.notes &&
-  prev.noteGroups === next.noteGroups &&
+  // notes / noteGroups / updateNotes / updateNoteGroups intentionally omitted —
+  // Notes + AI panels read notesStore.
   prev.openNoteRequest === next.openNoteRequest &&
   prev.onOpenVaultNoteFromChat === next.onOpenVaultNoteFromChat &&
   prev.onOpenVaultHostFromChat === next.onOpenVaultHostFromChat &&
   prev.onOpenVaultSectionFromChat === next.onOpenVaultSectionFromChat &&
   prev.onOpenVaultSnippetFromChat === next.onOpenVaultSnippetFromChat &&
-  prev.sessions === next.sessions &&
+  // Ignore TopTabs-only presentation fields (dynamicTitle / codingCliProviderId).
+  terminalPaneSessionsEqual(
+    prev.sessions as never,
+    next.sessions as never,
+  ) &&
   prev.workspaces === next.workspaces &&
   prev.knownHosts === next.knownHosts &&
   prev.draggingSessionId === next.draggingSessionId &&
@@ -25,10 +32,15 @@ export const terminalLayerAreEqual = (
   prev.followAppTerminalTheme === next.followAppTerminalTheme &&
   prev.pickTerminalTheme === next.pickTerminalTheme &&
   prev.resolveSessionAppearance === next.resolveSessionAppearance &&
-  prev.accentMode === next.accentMode &&
-  prev.customAccent === next.customAccent &&
+  // accentMode / customAccent intentionally omitted — Terminal reads
+  // appearanceChromeStore so accent drag does not rebuild TerminalLayer.
   prev.terminalSettings === next.terminalSettings &&
   prev.fontSize === next.fontSize &&
+  prev.terminalFontFamilyId === next.terminalFontFamilyId &&
+  prev.sessionLogsEnabled === next.sessionLogsEnabled &&
+  prev.sessionLogsDir === next.sessionLogsDir &&
+  prev.sessionLogsFormat === next.sessionLogsFormat &&
+  prev.sessionLogsTimestampsEnabled === next.sessionLogsTimestampsEnabled &&
   prev.hotkeyScheme === next.hotkeyScheme &&
   prev.disableTerminalFontZoom === next.disableTerminalFontZoom &&
   prev.restoreTerminalCwd === next.restoreTerminalCwd &&
@@ -51,6 +63,7 @@ export const terminalLayerAreEqual = (
   prev.onUpdateSessionRestoreCwd === next.onUpdateSessionRestoreCwd &&
   prev.onUpdateHost === next.onUpdateHost &&
   prev.onAddKnownHost === next.onAddKnownHost &&
+  prev.onDeleteShellHistoryEntry === next.onDeleteShellHistoryEntry &&
   prev.onToggleWorkspaceViewMode === next.onToggleWorkspaceViewMode &&
   prev.onSetWorkspaceFocusedSession === next.onSetWorkspaceFocusedSession &&
   prev.onReorderWorkspaceSessions === next.onReorderWorkspaceSessions &&
@@ -63,10 +76,8 @@ export const terminalLayerAreEqual = (
   prev.onToggleBroadcast === next.onToggleBroadcast &&
   prev.updateSnippets === next.updateSnippets &&
   prev.updateSnippetPackages === next.updateSnippetPackages &&
-  prev.updateNotes === next.updateNotes &&
-  prev.updateNoteGroups === next.updateNoteGroups &&
   prev.toggleScriptsSidePanelRef === next.toggleScriptsSidePanelRef &&
   prev.toggleSidePanelRef === next.toggleSidePanelRef &&
-  prev.identities === next.identities &&
-  prev.shellHistory === next.shellHistory
+  prev.identities === next.identities
+  // shellHistory intentionally omitted — History panel reads shellHistoryStore.
 );

@@ -28,3 +28,15 @@ test('system prompt prefers explicit script wait APIs', () => {
   assert.match(prompt, /waitForRegex/);
   assert.doesNotMatch(prompt, /sendLine`,\s*`waitFor`,\s*dialogs/);
 });
+
+test('system prompt does not tell Catty to call host_open', () => {
+  const prompt = buildSystemPrompt({
+    scopeType: 'workspace',
+    hosts: [],
+    permissionMode: 'confirm',
+  });
+
+  assert.doesNotMatch(prompt, /host_open/);
+  assert.match(prompt, /cannot open new terminal sessions yourself/i);
+  assert.match(prompt, /ask them to open/i);
+});

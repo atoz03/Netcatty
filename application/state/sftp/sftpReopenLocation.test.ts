@@ -4,6 +4,7 @@ import assert from "node:assert/strict";
 import {
   getSftpCurrentPathMemoryKey,
   getSftpReopenMemoryKey,
+  resolveSftpAutoConnectPath,
   resolveSftpOpenLocation,
 } from "./sftpReopenLocation.ts";
 
@@ -118,5 +119,34 @@ test("path changes for non-reusable sessions still use the focused terminal sess
       focusedSessionId: "mosh-session-1",
     }),
     "mosh-session-1",
+  );
+});
+
+test("auto-connect prefers explicit open path over remembered browse path", () => {
+  assert.equal(
+    resolveSftpAutoConnectPath({
+      explicitPath: "/tmp/upload",
+      rememberedPath: "/home/deploy/projects",
+    }),
+    "/tmp/upload",
+  );
+});
+
+test("auto-connect restores remembered path when nothing explicit is requested", () => {
+  assert.equal(
+    resolveSftpAutoConnectPath({
+      rememberedPath: "/home/deploy/projects/app",
+    }),
+    "/home/deploy/projects/app",
+  );
+});
+
+test("auto-connect ignores empty remembered paths", () => {
+  assert.equal(
+    resolveSftpAutoConnectPath({
+      explicitPath: "",
+      rememberedPath: "",
+    }),
+    undefined,
   );
 });

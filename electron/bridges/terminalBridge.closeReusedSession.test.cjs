@@ -2,12 +2,25 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const terminalBridge = require("./terminalBridge.cjs");
-const { createConnectionRef, acquireConnectionRef } = require("./sshConnectionPool.cjs");
+const {
+  createConnectionRef,
+  acquireConnectionRef,
+  discardTransport,
+  resetSshTransportRegistryForTests,
+} = require("./sshConnectionPool.cjs");
 
 // Verifies the terminalBridge close path respects connection multiplexing
 // (issue #1204): closing one tab that shares an SSH connection must only close
-// that tab's channel, and only tear the shared transport down when the last
-// tab is gone.
+// that tab's channel. Once the last tab is gone, the transport is parked briefly
+// so a later same-host open can reuse it without another authentication round.
+
+test.beforeEach(() => {
+  resetSshTransportRegistryForTests();
+});
+
+test.afterEach(() => {
+  resetSshTransportRegistryForTests();
+});
 
 function makeStream() {
   return {
@@ -55,11 +68,14 @@ test("closing a reused SSH tab keeps the shared connection alive", () => {
   assert.equal(connRef.count, 1);
   assert.equal(sessions.has("copy"), false);
 
-  // Close the owner tab — now the last holder, so the connection is ended.
+  // Close the owner tab — now the last holder, so the connection is parked.
   terminalBridge.closeSession({ sender: {} }, { sessionId: "owner" });
   assert.equal(owner.stream.closed, 1, "owner channel closed");
-  assert.equal(conn.ended, 1, "connection ended once last channel closes");
+  assert.equal(conn.ended, 0, "connection remains parked for same-host reuse");
   assert.equal(connRef.count, 0);
+  assert.equal(connRef.state, "idle");
+  assert.equal(discardTransport(connRef), true);
+  assert.equal(conn.ended, 1, "parked connection is still reclaimable");
 });
 
 test("closing the owner tab first does not strand the copy's connection", () => {
@@ -80,8 +96,11 @@ test("closing the owner tab first does not strand the copy's connection", () => 
   assert.equal(conn.ended, 0, "connection survives for the still-open copy");
   assert.equal(connRef.count, 1);
 
-  // Closing the copy (now last) ends the connection.
+  // Closing the copy (now last) parks the connection for reuse.
   terminalBridge.closeSession({ sender: {} }, { sessionId: "copy" });
+  assert.equal(conn.ended, 0);
+  assert.equal(connRef.state, "idle");
+  assert.equal(discardTransport(connRef), true);
   assert.equal(conn.ended, 1);
 });
 

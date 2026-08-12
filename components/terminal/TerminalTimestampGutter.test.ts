@@ -9,6 +9,7 @@ import {
   resolveTerminalTimestampGutterRenderSignature,
   resolveTerminalTimestampGutterColor,
   resolveTerminalTimestampGutterWidth,
+  syncTerminalTimestampGutterRows,
 } from "./TerminalTimestampGutter.tsx";
 
 test("timestamp gutter uses a bright color from the active terminal theme", () => {
@@ -117,4 +118,105 @@ test("timestamp gutter render signature is stable and changes only for visible i
     }),
     base,
   );
+});
+
+test("timestamp gutter flood throttle advances even when the paint signature is unchanged", () => {
+  const source = readFileSync(new URL("./TerminalTimestampGutter.tsx", import.meta.url), "utf8");
+  // lastFloodRenderAt must move on every render attempt, before the signature early-return.
+  const renderStart = source.indexOf("const render = () => {");
+  const signatureReturn = source.indexOf("if (signature === lastRenderSignature) return;", renderStart);
+  const floodAdvance = source.indexOf("lastFloodRenderAt = performance.now();", renderStart);
+  assert.notEqual(renderStart, -1);
+  assert.notEqual(signatureReturn, -1);
+  assert.notEqual(floodAdvance, -1);
+  assert.ok(
+    floodAdvance < signatureReturn,
+    "flood throttle clock must advance before the unchanged-signature early return",
+  );
+});
+
+test("timestamp gutter throttles output-driven scroll events under flood pressure", () => {
+  const source = readFileSync(new URL("./TerminalTimestampGutter.tsx", import.meta.url), "utf8");
+  assert.match(source, /term\.onScroll\?\.\(\(\) => \{/);
+  assert.match(source, /getTerminalOutputPressure\(term\)/);
+  // largeOutput only (time-bounded); longLine must not sticky-throttle user scrolls.
+  assert.match(source, /scheduleRender\(pressure\.largeOutput \? "normal" : "immediate"\)/);
+  assert.doesNotMatch(
+    source,
+    /onScroll[\s\S]{0,200}pressure\.largeOutput \|\| pressure\.longLine/,
+  );
+});
+
+test("timestamp gutter reuses row nodes across paints instead of rebuilding the tree", () => {
+  const gutter = {
+    children: [] as Array<Record<string, unknown>>,
+    appendChild(node: Record<string, unknown>) {
+      this.children.push(node);
+      return node;
+    },
+  };
+
+  const createElement = (tag: string) => {
+    assert.equal(tag, "div");
+    return {
+      textContent: "",
+      className: "",
+      style: {} as Record<string, string>,
+    };
+  };
+
+  const previousCreateElement = globalThis.document?.createElement;
+  (globalThis as { document?: { createElement: typeof createElement } }).document = {
+    createElement,
+  };
+
+  try {
+    const layout = {
+      screenTop: 0,
+      cellHeight: 16,
+      color: "#66e8ff",
+      fontFamily: "monospace",
+      fontSize: 14,
+      fontWeight: 400,
+    };
+
+    syncTerminalTimestampGutterRows(
+      gutter as never,
+      [
+        { row: 0, label: "10:00:00" },
+        { row: 1, label: "10:00:01" },
+      ],
+      layout,
+    );
+    assert.equal(gutter.children.length, 2);
+    const firstNode = gutter.children[0];
+    assert.equal(firstNode.textContent, "10:00:00");
+
+    syncTerminalTimestampGutterRows(
+      gutter as never,
+      [
+        { row: 0, label: "10:00:02" },
+        { row: 2, label: "10:00:03" },
+      ],
+      layout,
+    );
+    assert.equal(gutter.children.length, 2);
+    assert.equal(gutter.children[0], firstNode);
+    assert.equal(firstNode.textContent, "10:00:02");
+    assert.equal(gutter.children[1].textContent, "10:00:03");
+
+    syncTerminalTimestampGutterRows(
+      gutter as never,
+      [{ row: 0, label: "10:00:04" }],
+      layout,
+    );
+    assert.equal(gutter.children.length, 2);
+    assert.equal((gutter.children[1].style as Record<string, string>).display, "none");
+  } finally {
+    if (previousCreateElement) {
+      (globalThis as { document: { createElement: typeof previousCreateElement } }).document = {
+        createElement: previousCreateElement,
+      };
+    }
+  }
 });

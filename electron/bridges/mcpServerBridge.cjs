@@ -17,10 +17,15 @@ const { appendVaultAgentGuidance } = require("../shared/vaultAgentGuidance.cjs")
 const { execViaPty, startPtyJob, execViaChannel, execViaRawPty } = require("./ai/ptyExec.cjs");
 const { safeSend } = require("./ipcUtils.cjs");
 const { getCliDiscoveryFilePath } = require("../cli/discoveryPath.cjs");
+const { EXTERNAL_MCP_CHAT_SESSION_ID } = require("../cli/externalMcpDiscoveryPath.cjs");
 const sftpBridge = require("./sftpBridge.cjs");
 const portForwardingBridge = require("./portForwardingBridge.cjs");
 
 const DEBUG_MCP = process.env.NETCATTY_MCP_DEBUG === "1";
+
+/** Optional external-MCP activity / host-ready hooks (set by externalMcpController). */
+let externalMcpActivityHook = null;
+let externalMcpHostReadyHook = null;
 
 function debugLog(...args) {
   if (!DEBUG_MCP) return;
@@ -29,20 +34,73 @@ function debugLog(...args) {
 
 let sessions = null;   // Map<sessionId, { sshClient, stream, pty, proc, conn, ... }>
 let terminalWorkerManager = null;
+let fileTransferBridge = null;
 let tcpServer = null;
 let tcpPort = null;
 let authToken = null;  // Random token generated when TCP server starts
+// Dedicated token for External MCP discovery. Rotated on enable/disable so a
+// stale discovery file cannot keep writing after External MCP is turned off.
+let externalAuthToken = null;
 let pendingHostStart = null; // { promise, server, cancel }
 let electronModule = null;
 let cliDiscoveryFilePath = getCliDiscoveryFilePath();
 
 // Track which sockets have completed authentication
 const authenticatedSockets = new WeakSet();
+// Sockets authenticated with the External MCP token (or that used the reserved scope).
+const externalMcpSockets = new Set();
+
+function markExternalMcpSocket(socket) {
+  if (!socket || socket.destroyed) return;
+  externalMcpSockets.add(socket);
+  if (!socket.__netcattyExternalMcpCleanupBound) {
+    socket.__netcattyExternalMcpCleanupBound = true;
+    const cleanup = () => {
+      externalMcpSockets.delete(socket);
+    };
+    socket.once("close", cleanup);
+    socket.once("end", cleanup);
+    socket.once("error", cleanup);
+  }
+}
+
+function issueExternalMcpAuthToken() {
+  externalAuthToken = crypto.randomBytes(32).toString("hex");
+  return externalAuthToken;
+}
+
+function revokeExternalMcpAuthToken() {
+  externalAuthToken = null;
+}
+
+function getExternalMcpAuthToken() {
+  return externalAuthToken;
+}
+
+function disconnectExternalMcpClients() {
+  // Prefer soft revoke: keep long-lived stdio MCP TCP sockets alive so
+  // re-enable can resume without restarting Codex/Claude/Grok. Hard destroy
+  // is reserved for process shutdown paths that call this intentionally.
+  for (const socket of Array.from(externalMcpSockets)) {
+    externalMcpSockets.delete(socket);
+    try {
+      if (!socket.destroyed) socket.destroy();
+    } catch {
+      // Ignore destroy failures while revoking external clients.
+    }
+  }
+}
 
 // Per-scope metadata: chatSessionId → { sessionIds: string[], metadata: Map<sessionId, meta> }
 // Each chat session only sees the hosts registered for its scope.
 const scopedMetadata = new Map();
 const scopedAttachments = new Map(); // chatSessionId -> Map<filePath, attachment>
+const { createSessionOwnershipRegistry } = require("./mcpServerBridge/sessionOwnership.cjs");
+const {
+  createSessionIdleManager,
+  normalizeSessionIdleTimeoutMinutes,
+} = require("./mcpServerBridge/sessionIdleManager.cjs");
+const openedSessionOwnership = createSessionOwnershipRegistry();
 
 // Command safety checking (reuse from aiBridge)
 let commandBlocklist = [];
@@ -68,13 +126,16 @@ const cancelledChatSessions = new Set();
 const activeExecChatSessions = new Map(); // chatSessionId -> { sessionId, command, startedAt }
 const backgroundJobs = new Map(); // jobId -> job metadata
 const workerBackgroundJobs = new Map(); // jobId -> { chatSessionId, sessionId }
+const pendingWorkerJobStarts = new Map(); // sessionId -> Set<{ chatSessionId, cancelled }>
 const activeSessionExecutions = new Map(); // sessionId -> { kind, startedAt, token }
-const activeSessionSftpOps = new Map(); // opId -> { chatSessionId, cancel }
+const activeSessionSftpOps = new Map(); // opId -> { chatSessionId, sessionId, cancel }
+const closingTerminalSessions = new Map(); // sessionId -> overlapping close request count
 const pendingSessionWriteApprovals = new Map(); // sessionId -> method
 const DEFAULT_BACKGROUND_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_BACKGROUND_JOB_POLL_INTERVAL_MS = 30 * 1000;
 const BACKGROUND_JOB_RETENTION_MS = 10 * 60 * 1000;
 const MAX_BACKGROUND_JOB_OUTPUT_CHARS = 256 * 1024;
+const SESSION_CLOSE_CLEANUP_TIMEOUT_MS = 5000;
 let activeSftpOpSeq = 0;
 
 // ── Approval gate (for confirm mode with SDK/MCP agents) ──
@@ -100,40 +161,90 @@ function setMainWindowGetter(fn) {
 const { MCP_APPROVAL_TIMEOUT_MS } = require("../shared/approvalConstants.cjs");
 const APPROVAL_TIMEOUT_MS = MCP_APPROVAL_TIMEOUT_MS;
 
+function listApprovalTargetWindows() {
+  const windows = [];
+  const seen = new Set();
+  const push = (win) => {
+    if (!win || win.isDestroyed?.()) return;
+    const id = win.webContents?.id;
+    if (id != null && seen.has(id)) return;
+    if (id != null) seen.add(id);
+    windows.push(win);
+  };
+  try {
+    if (typeof getMainWindowFn === "function") push(getMainWindowFn());
+  } catch { /* ignore */ }
+  try {
+    const windowManager = require("./windowManager.cjs");
+    push(windowManager.getSettingsWindow?.());
+  } catch { /* ignore */ }
+  return windows;
+}
+
+function broadcastApprovalEvent(channel, payload) {
+  for (const win of listApprovalTargetWindows()) {
+    try {
+      win.webContents.send(channel, payload);
+    } catch { /* ignore */ }
+  }
+}
+
 function requestApprovalFromRenderer(toolName, args, chatSessionId) {
   return new Promise((resolve) => {
     debugLog("requestApprovalFromRenderer", { toolName, args, chatSessionId });
-    const mainWin = typeof getMainWindowFn === 'function' ? getMainWindowFn() : null;
-    if (!mainWin || mainWin.isDestroyed()) {
+    const targets = listApprovalTargetWindows();
+    if (targets.length === 0) {
       // No renderer available — deny to preserve confirm mode safety guarantee
       resolve(false);
       return;
     }
     const approvalId = `mcp_approval_${++approvalIdCounter}_${Date.now()}`;
+    // Hard ceiling from creation — must stay below external SDK tool-call
+    // timeouts (~120s). Review can cancel the idle timer but not this bound.
+    const absoluteExpiresAt = Date.now() + APPROVAL_TIMEOUT_MS;
+    let timerId = null;
 
-    // Auto-deny after timeout so SDK/MCP tool calls don't hang indefinitely
-    const timerId = setTimeout(() => {
-      if (pendingApprovals.has(approvalId)) {
-        pendingApprovals.delete(approvalId);
-        resolve(false);
-        // Notify renderer to remove the stale approval card
-        try {
-          const win = typeof getMainWindowFn === 'function' ? getMainWindowFn() : null;
-          if (win && !win.isDestroyed()) {
-            win.webContents.send('netcatty:ai:mcp:approval-cleared', { approvalIds: [approvalId] });
-          }
-        } catch { /* ignore */ }
+    const denyTimedOut = () => {
+      if (!pendingApprovals.has(approvalId)) return;
+      pendingApprovals.delete(approvalId);
+      resolve(false);
+      // Notify renderer(s) to remove the stale approval card
+      broadcastApprovalEvent('netcatty:ai:mcp:approval-cleared', { approvalIds: [approvalId] });
+    };
+
+    const clearTimer = () => {
+      if (timerId != null) {
+        clearTimeout(timerId);
+        timerId = null;
       }
-    }, APPROVAL_TIMEOUT_MS);
+    };
+
+    const armTimer = (ms) => {
+      clearTimer();
+      if (ms <= 0) {
+        denyTimedOut();
+        return;
+      }
+      timerId = setTimeout(denyTimedOut, ms);
+    };
+
+    // Auto-deny after timeout so SDK/MCP tool calls don't hang indefinitely.
+    // Idle engagement cancels this arm and re-arms the absolute remainder
+    // (never auto-approves; never extends past absoluteExpiresAt).
+    armTimer(APPROVAL_TIMEOUT_MS);
 
     pendingApprovals.set(approvalId, {
       resolve: (approved) => {
-        clearTimeout(timerId);
+        clearTimer();
         resolve(approved);
       },
+      clearTimer,
+      armAbsoluteTimeout: () => armTimer(absoluteExpiresAt - Date.now()),
+      absoluteExpiresAt,
+      idleCancelled: false,
       chatSessionId: chatSessionId || null,
     });
-    mainWin.webContents.send('netcatty:ai:mcp:approval-request', {
+    broadcastApprovalEvent('netcatty:ai:mcp:approval-request', {
       approvalId,
       toolName,
       args,
@@ -148,19 +259,28 @@ function resolveApprovalFromRenderer(approvalId, approved) {
   if (entry) {
     pendingApprovals.delete(approvalId);
     entry.resolve(approved);
+    // Main + settings both receive approval requests; clear the sibling card.
+    notifyRendererApprovalCleared([approvalId]);
   }
+}
+
+/**
+ * Drop the idle auto-deny timer after the user starts reviewing an approval card.
+ * Re-arms the absolute creation deadline so a late approve cannot outlive the
+ * external agent's tool-call timeout window.
+ */
+function cancelApprovalTimeoutFromRenderer(approvalId) {
+  const entry = pendingApprovals.get(approvalId);
+  if (!entry || entry.idleCancelled) return false;
+  entry.idleCancelled = true;
+  entry.clearTimer?.();
+  entry.armAbsoluteTimeout?.();
+  return true;
 }
 
 function notifyRendererApprovalCleared(approvalIds) {
   if (!Array.isArray(approvalIds) || approvalIds.length === 0) return;
-  try {
-    const win = typeof getMainWindowFn === "function" ? getMainWindowFn() : null;
-    if (win && !win.isDestroyed()) {
-      win.webContents.send("netcatty:ai:mcp:approval-cleared", { approvalIds });
-    }
-  } catch {
-    // Ignore renderer notification failures during approval cleanup.
-  }
+  broadcastApprovalEvent("netcatty:ai:mcp:approval-cleared", { approvalIds });
 }
 
 /**
@@ -219,15 +339,21 @@ const { createBackgroundJobApi } = require("./mcpServerBridge/backgroundJobs.cjs
 const backgroundJobApi = createBackgroundJobApi({
   get activeSftpOpSeq() { return activeSftpOpSeq; },
   set activeSftpOpSeq(value) { activeSftpOpSeq = value; },
-  backgroundJobs, activeSessionSftpOps, activeSessionExecutions, crypto,
+  backgroundJobs, activeSessionSftpOps, activeSessionExecutions, closingTerminalSessions, crypto,
   BACKGROUND_JOB_RETENTION_MS, DEFAULT_BACKGROUND_JOB_POLL_INTERVAL_MS, MAX_BACKGROUND_JOB_OUTPUT_CHARS,
+  SESSION_CLOSE_CLEANUP_TIMEOUT_MS,
   debugLog, sftpBridge,
 });
 const {
   createBackgroundJobId,
   cancelBackgroundJobsForSession,
+  cancelBackgroundJobsForTerminalSession,
+  settleBackgroundJobsForTerminalSession,
   registerSftpOp,
   cancelSftpOpsForSession,
+  cancelSftpOpsForTerminalSession,
+  beginTerminalSessionClose,
+  endTerminalSessionClose,
   cancelAllSftpOps,
   readBackgroundJobSnapshot,
   createOutputWindow,
@@ -245,12 +371,26 @@ const {
 function init(deps) {
   sessions = deps.sessions;
   terminalWorkerManager = deps.terminalWorkerManager || null;
+  fileTransferBridge = deps.transferBridge || null;
   electronModule = deps.electronModule || null;
   cliDiscoveryFilePath = deps.cliDiscoveryFilePath || getCliDiscoveryFilePath();
   debugLog("init", { hasSessions: Boolean(sessions), hasElectron: Boolean(electronModule) });
   if (deps.commandBlocklist) {
     commandBlocklist = deps.commandBlocklist;
   }
+}
+
+async function listActivePortForwards() {
+  if (terminalWorkerManager?.request) {
+    const tunnels = await terminalWorkerManager.request(
+      "netcatty:portforward:list",
+      {},
+      {},
+    );
+    return Array.isArray(tunnels) ? tunnels : [];
+  }
+  const tunnels = await portForwardingBridge.listPortForwards();
+  return Array.isArray(tunnels) ? tunnels : [];
 }
 
 function writeCliDiscoveryFile() {
@@ -310,7 +450,9 @@ function shutdownHost({ preserveScopedMetadata = false } = {}) {
     }
   }
   backgroundJobs.clear();
+  pendingWorkerJobStarts.clear();
   activeSessionExecutions.clear();
+  sessionIdleManager.clearAll();
 }
 
 function echoCommandToSession(session, sessionId, command) {
@@ -344,6 +486,16 @@ function getCommandTimeoutMs() {
   return commandTimeoutMs;
 }
 
+function setSessionIdleTimeoutMinutes(minutes) {
+  return sessionIdleManager.setTimeoutMinutes(
+    normalizeSessionIdleTimeoutMinutes(minutes),
+  );
+}
+
+function getSessionIdleTimeoutMinutes() {
+  return sessionIdleManager.getTimeoutMinutes();
+}
+
 function setMaxIterations(value) {
   maxIterations = Math.max(1, Math.min(100, value || 20));
 }
@@ -356,7 +508,118 @@ function setPermissionMode(mode) {
   if (mode === "observer" || mode === "confirm" || mode === "auto") {
     permissionMode = mode;
     writeCliDiscoveryFile();
+    try {
+      if (typeof externalMcpActivityHook?.onPermissionModeChanged === "function") {
+        externalMcpActivityHook.onPermissionModeChanged();
+      }
+    } catch {
+      // External MCP permission sync is best-effort.
+    }
   }
+}
+
+function setExternalMcpHooks(hooks = null) {
+  externalMcpActivityHook = hooks && typeof hooks === "object" ? hooks : null;
+  externalMcpHostReadyHook = typeof hooks?.onBridgeHostReady === "function"
+    ? hooks.onBridgeHostReady.bind(hooks)
+    : null;
+}
+
+function notifyExternalMcpActivity(method, params) {
+  try {
+    const chatSessionId = params?.chatSessionId || null;
+    if (chatSessionId === EXTERNAL_MCP_CHAT_SESSION_ID) {
+      externalMcpActivityHook?.recordActivity?.({ method, chatSessionId });
+    }
+  } catch {
+    // Ignore activity hook failures.
+  }
+}
+
+/**
+ * Build MCP session metadata from the live main-process session map and
+ * register it under the reserved external MCP chat scope.
+ */
+function syncLiveSessionsToExternalScope(chatSessionId = EXTERNAL_MCP_CHAT_SESSION_ID) {
+  const existingScoped = scopedMetadata.get(chatSessionId);
+  const existingMeta = existingScoped?.metadata || new Map();
+  const sessionList = [];
+  if (sessions && typeof sessions.entries === "function") {
+    for (const [sessionId, session] of sessions.entries()) {
+      if (!session || typeof session !== "object") continue;
+      const previous = existingMeta.get(sessionId) || findSessionMetaAcrossScopes(sessionId) || {};
+      sessionList.push({
+        sessionId,
+        hostId: session.hostId || previous.hostId || "",
+        hostname: session.hostname || session.host || previous.hostname || "",
+        label: session.label || session.hostname || previous.label || sessionId,
+        os: session.os || previous.os || "",
+        username: session.username || previous.username || "",
+        protocol: session.protocol || session.type || previous.protocol || "",
+        shellType: session.shellKind || session.shellType || previous.shellType || "",
+        deviceType: session.deviceType || previous.deviceType || "",
+        connected: session.connected !== false,
+        hostChain: Array.isArray(session.hostChain)
+          ? session.hostChain
+          : (Array.isArray(previous.hostChain) ? previous.hostChain : []),
+        activePortForwards: Array.isArray(session.activePortForwards)
+          ? session.activePortForwards
+          : (Array.isArray(previous.activePortForwards) ? previous.activePortForwards : []),
+      });
+    }
+  }
+  // Terminal-worker mode keeps live sessions off the main-process map. Do not
+  // wipe renderer-pushed external scope metadata with an empty live snapshot.
+  if (sessionList.length === 0) {
+    if (existingScoped?.sessionIds?.length) {
+      return {
+        ok: true,
+        count: existingScoped.sessionIds.length,
+        chatSessionId,
+        preserved: true,
+      };
+    }
+    // Only seed when the external scope key has never been written. An explicit
+    // empty updateSessionMetadata([]) must stay empty (authoritative clear).
+    if (!scopedMetadata.has(chatSessionId)) {
+      const seeded = seedExternalScopeFromOtherScopes(chatSessionId);
+      if (seeded) {
+        return {
+          ok: true,
+          count: seeded,
+          chatSessionId,
+          seeded: true,
+        };
+      }
+    }
+    return { ok: true, count: 0, chatSessionId };
+  }
+  updateSessionMetadata(sessionList, chatSessionId);
+  return { ok: true, count: sessionList.length, chatSessionId };
+}
+
+function findSessionMetaAcrossScopes(sessionId) {
+  for (const scoped of scopedMetadata.values()) {
+    const meta = scoped?.metadata?.get?.(sessionId);
+    if (meta) return meta;
+  }
+  return null;
+}
+
+function seedExternalScopeFromOtherScopes(chatSessionId) {
+  const byId = new Map();
+  for (const [scopeId, scoped] of scopedMetadata.entries()) {
+    if (scopeId === chatSessionId || !scoped?.metadata) continue;
+    for (const [sessionId, meta] of scoped.metadata.entries()) {
+      if (!sessionId || !meta) continue;
+      if (!byId.has(sessionId)) {
+        byId.set(sessionId, { sessionId, ...meta });
+      }
+    }
+  }
+  if (byId.size === 0) return 0;
+  updateSessionMetadata(Array.from(byId.values()), chatSessionId);
+  return byId.size;
 }
 
 function getPermissionMode() {
@@ -444,6 +707,46 @@ function updateSessionMetadata(sessionList, chatSessionId) {
   if (chatSessionId) {
     scopedMetadata.set(chatSessionId, { sessionIds: ids, metadata: metaMap });
   }
+}
+
+/**
+ * Merge session metadata into an existing chat scope without dropping
+ * previously known sessions. Used for the app-wide External MCP scope so a
+ * single Catty sidebar push cannot shrink the exposed host set.
+ */
+function mergeSessionMetadata(sessionList, chatSessionId) {
+  if (!chatSessionId || !Array.isArray(sessionList)) return { ok: false, count: 0 };
+  const existing = scopedMetadata.get(chatSessionId);
+  const byId = new Map();
+  if (existing?.metadata) {
+    for (const [sessionId, meta] of existing.metadata.entries()) {
+      byId.set(sessionId, { sessionId, ...meta });
+    }
+  }
+  for (const entry of sessionList) {
+    if (!entry || typeof entry !== "object" || !entry.sessionId) continue;
+    const previous = byId.get(entry.sessionId) || {};
+    byId.set(entry.sessionId, {
+      sessionId: entry.sessionId,
+      hostname: entry.hostname || previous.hostname || "",
+      label: entry.label || previous.label || "",
+      os: entry.os || previous.os || "",
+      username: entry.username || previous.username || "",
+      protocol: entry.protocol || previous.protocol || "",
+      shellType: entry.shellType || previous.shellType || "",
+      deviceType: entry.deviceType || previous.deviceType || "",
+      connected: entry.connected !== undefined ? entry.connected !== false : previous.connected !== false,
+      hostId: entry.hostId || previous.hostId || "",
+      hostChain: Array.isArray(entry.hostChain)
+        ? entry.hostChain
+        : (Array.isArray(previous.hostChain) ? previous.hostChain : []),
+      activePortForwards: Array.isArray(entry.activePortForwards)
+        ? entry.activePortForwards
+        : (Array.isArray(previous.activePortForwards) ? previous.activePortForwards : []),
+    });
+  }
+  updateSessionMetadata(Array.from(byId.values()), chatSessionId);
+  return { ok: true, count: byId.size };
 }
 
 function normalizeAttachmentEntry(attachment) {
@@ -698,6 +1001,11 @@ function getOrCreateHost() {
       tcpServer = server;
       debugLog("TCP server listening", { port: tcpPort });
       writeCliDiscoveryFile();
+      try {
+        externalMcpHostReadyHook?.({ port: tcpPort, token: authToken });
+      } catch {
+        // External MCP host-ready sync is best-effort.
+      }
       finishResolve(tcpPort);
     });
 
@@ -724,15 +1032,20 @@ function handleConnection(socket) {
       socket.destroy();
       return;
     }
+    const previousBufferLength = buffer.length;
     buffer += chunk;
+    let consumedUntil = 0;
+    let searchFrom = previousBufferLength;
     let newlineIdx;
-    while ((newlineIdx = buffer.indexOf("\n")) !== -1) {
-      const line = buffer.slice(0, newlineIdx);
-      buffer = buffer.slice(newlineIdx + 1);
+    while ((newlineIdx = buffer.indexOf("\n", searchFrom)) !== -1) {
+      const line = buffer.slice(consumedUntil, newlineIdx);
+      consumedUntil = newlineIdx + 1;
+      searchFrom = consumedUntil;
       if (!line.trim()) continue;
       debugLog("Incoming line", line);
       handleMessage(socket, line);
     }
+    if (consumedUntil > 0) buffer = buffer.slice(consumedUntil);
   });
 
   socket.on("error", () => {
@@ -756,9 +1069,32 @@ async function handleMessage(socket, line) {
   // The first message from any connection MUST be auth/verify with the correct token.
   // All other methods are rejected until the socket is authenticated.
   if (!authenticatedSockets.has(socket)) {
-    if (method === "auth/verify" && params?.token === authToken) {
-      debugLog("auth/verify success");
+    const presentedToken = typeof params?.token === "string" ? params.token : "";
+    const isCattyToken = Boolean(presentedToken && authToken && presentedToken === authToken);
+    const isExternalToken = Boolean(
+      presentedToken && externalAuthToken && presentedToken === externalAuthToken,
+    );
+    if (method === "auth/verify" && (isCattyToken || isExternalToken)) {
+      if (isExternalToken && !externalMcpActivityHook?.isEnabled?.()) {
+        const response = JSON.stringify({
+          jsonrpc: "2.0",
+          id,
+          error: {
+            code: -32001,
+            message: "External MCP is disabled. Re-enable it in Netcatty Settings → AI.",
+          },
+        }) + "\n";
+        if (!socket.destroyed) {
+          socket.write(response);
+          socket.destroy();
+        }
+        return;
+      }
+      debugLog("auth/verify success", { external: isExternalToken });
       authenticatedSockets.add(socket);
+      if (isExternalToken) {
+        markExternalMcpSocket(socket);
+      }
       const response = JSON.stringify({ jsonrpc: "2.0", id, result: { ok: true } }) + "\n";
       if (!socket.destroyed) socket.write(response);
       return;
@@ -778,7 +1114,28 @@ async function handleMessage(socket, line) {
   }
 
   try {
-    const result = await dispatch(method, params || {});
+    const callParams = { ...(params || {}) };
+    // External-token sockets always operate under the reserved app-wide scope so
+    // callers cannot omit chatSessionId and widen access via scopedSessionIds.
+    if (externalMcpSockets.has(socket)) {
+      callParams.chatSessionId = EXTERNAL_MCP_CHAT_SESSION_ID;
+    }
+    const isExternalScope = callParams.chatSessionId === EXTERNAL_MCP_CHAT_SESSION_ID;
+    if (isExternalScope) {
+      markExternalMcpSocket(socket);
+    }
+    // External MCP clients keep an authenticated TCP socket after disable unless
+    // we reject reserved-scope RPCs (and previously marked external sockets).
+    if (
+      (isExternalScope || externalMcpSockets.has(socket))
+      && !externalMcpActivityHook?.isEnabled?.()
+    ) {
+      throw new Error(
+        "External MCP is disabled. Re-enable it in Netcatty Settings → AI.",
+      );
+    }
+    notifyExternalMcpActivity(method, callParams);
+    const result = await dispatch(method, callParams);
     const response = JSON.stringify({ jsonrpc: "2.0", id, result }) + "\n";
     if (!socket.destroyed) socket.write(response);
   } catch (err) {
@@ -806,12 +1163,90 @@ const {
   UNROUTED,
 } = require("./mcpServerBridge/capabilityRpcDispatch.cjs");
 const { buildBuiltinRpcHandlerRegistry } = require("./mcpServerBridge/builtinRpcHandlers.cjs");
+const { createSessionService } = require("../capabilities/services/sessionService.cjs");
 
 let invokeVaultAgentFn = null;
 
 function setVaultAgentInvoker(fn) {
   invokeVaultAgentFn = typeof fn === "function" ? fn : null;
 }
+
+let sessionService = null;
+const sessionIdleManager = createSessionIdleManager({
+  onIdle: async ({ chatSessionId, sessionId }, activityVersion) => {
+    const hasWorkerJob = await hasActiveWorkerJobForTerminalSession(sessionId);
+    if (!sessionIdleManager.isIdleCheckCurrent(sessionId, activityVersion)) {
+      return;
+    }
+    if (activeSessionExecutions.has(sessionId) || hasWorkerJob) {
+      sessionIdleManager.resume(sessionId);
+      return;
+    }
+    if (!sessionIdleManager.beginIdleClose(sessionId, activityVersion)) {
+      return;
+    }
+    await sessionService?.closeTracked({ chatSessionId, sessionId });
+  },
+});
+
+function reportOpenedSessionActivity(event = {}) {
+  const sessionId = event?.sessionId;
+  if (!sessionId) return false;
+  if (event.phase === "begin") {
+    return sessionIdleManager.beginActivity(null, sessionId);
+  }
+  if (event.phase === "end") {
+    return sessionIdleManager.endActivity(null, sessionId);
+  }
+  return sessionIdleManager.touch(null, sessionId);
+}
+
+sessionService = createSessionService({
+  invokeSessionAgent: (...args) => {
+    if (typeof invokeVaultAgentFn !== "function") {
+      return Promise.resolve({ ok: false, error: "Vault agent bridge is unavailable." });
+    }
+    return invokeVaultAgentFn(...args);
+  },
+  validateClose: (params = {}) => {
+    const scopeErr = validateSessionScope(
+      params.sessionId,
+      params.chatSessionId,
+      params.scopedSessionIds,
+    );
+    if (scopeErr) return { ok: false, error: scopeErr };
+    if (sessionIdleManager.isClosing(params.sessionId)) {
+      return { ok: false, error: `Session "${params.sessionId}" is closing.` };
+    }
+    return openedSessionOwnership.validate(params.chatSessionId, params.sessionId);
+  },
+  beforeClose: async (params = {}) => {
+    sessionIdleManager.beginClose(params.sessionId);
+    beginTerminalSessionClose(params.sessionId);
+    cancelBackgroundJobsForTerminalSession(params.sessionId);
+    await cancelWorkerBackgroundJobsForTerminalSession(params.sessionId);
+    await cancelSftpOpsForTerminalSession(params.sessionId);
+  },
+  afterClose: (params = {}, outcome = {}) => {
+    endTerminalSessionClose(params.sessionId);
+    if (outcome.closed) return;
+    if (outcome.notFound) {
+      sessionIdleManager.forgetSession(params.sessionId);
+      openedSessionOwnership.forgetSession(params.sessionId);
+      return;
+    }
+    sessionIdleManager.resume(params.sessionId);
+  },
+  onClosed: async (sessionId) => {
+    await settleBackgroundJobsForTerminalSession(sessionId);
+    sessionIdleManager.forgetSession(sessionId);
+    openedSessionOwnership.forgetSession(sessionId);
+    for (const scoped of scopedMetadata.values()) {
+      scoped.sessionIds = scoped.sessionIds.filter((id) => id !== sessionId);
+      scoped.metadata.delete(sessionId);
+    }
+  },
+});
 
 const dispatchCapabilityRpc = createCapabilityRpcDispatcher({
   invokeVaultAgent: (...args) => {
@@ -830,6 +1265,13 @@ const dispatchCapabilityRpc = createCapabilityRpcDispatcher({
   isChatSessionCancelled,
   requestApprovalFromRenderer,
   USER_DENIED_MESSAGE,
+  listPortForwards: () => listActivePortForwards(),
+  sessionService,
+  captureHostOpenScope: (chatSessionId) => openedSessionOwnership.captureGeneration(chatSessionId),
+  onHostOpened: (chatSessionId, sessionId, generation) => {
+    openedSessionOwnership.register(chatSessionId, sessionId, generation);
+    sessionIdleManager.track(chatSessionId, sessionId);
+  },
 });
 
 /**
@@ -985,6 +1427,9 @@ async function handleWorkerJobStart(params = {}) {
   if (!terminalWorkerManager?.request) {
     return { ok: false, error: "Session not found" };
   }
+  if (closingTerminalSessions.has(sessionId)) {
+    return { ok: false, error: `Session "${sessionId}" is closing.` };
+  }
 
   const chatSessionId = params?.chatSessionId || null;
   const meta = getSessionMeta(sessionId, chatSessionId) || {};
@@ -995,6 +1440,14 @@ async function handleWorkerJobStart(params = {}) {
     }
   }
 
+  const pendingStart = { chatSessionId, cancelled: false };
+  let pendingForSession = pendingWorkerJobStarts.get(sessionId);
+  if (!pendingForSession) {
+    pendingForSession = new Set();
+    pendingWorkerJobStarts.set(sessionId, pendingForSession);
+  }
+  pendingForSession.add(pendingStart);
+
   try {
     const result = await terminalWorkerManager.request("netcatty:ai:jobStart", {
       sessionId,
@@ -1004,6 +1457,14 @@ async function handleWorkerJobStart(params = {}) {
       sessionMeta: meta,
     }, {});
     if (result?.ok && result.jobId) {
+      if (pendingStart.cancelled || closingTerminalSessions.has(sessionId)) {
+        await waitForWorkerCleanup(terminalWorkerManager.request("netcatty:ai:jobStop", {
+          jobId: result.jobId,
+          sessionId,
+          chatSessionId,
+        }, {}));
+        return { ok: false, error: "Session is closing.", jobId: result.jobId, status: "cancelled" };
+      }
       workerBackgroundJobs.set(result.jobId, {
         chatSessionId: chatSessionId || null,
         sessionId,
@@ -1012,6 +1473,9 @@ async function handleWorkerJobStart(params = {}) {
     return result;
   } catch (err) {
     return { ok: false, error: err?.message || String(err) };
+  } finally {
+    pendingForSession.delete(pendingStart);
+    if (pendingForSession.size === 0) pendingWorkerJobStarts.delete(sessionId);
   }
 }
 
@@ -1059,8 +1523,38 @@ async function handleWorkerJobStop(params = {}) {
   return result;
 }
 
+async function hasActiveWorkerJobForTerminalSession(sessionId) {
+  const matchingJobs = Array.from(workerBackgroundJobs.entries())
+    .filter(([, job]) => job?.sessionId === sessionId);
+  for (const [jobId, job] of matchingJobs) {
+    if (!terminalWorkerManager?.request) return true;
+    try {
+      const result = await terminalWorkerManager.request("netcatty:ai:jobPoll", {
+        jobId,
+        sessionId,
+        chatSessionId: job.chatSessionId || null,
+        offset: 0,
+      }, {});
+      if (result?.completed || (result?.ok === false && /not found/i.test(result?.error || ""))) {
+        workerBackgroundJobs.delete(jobId);
+        continue;
+      }
+      return true;
+    } catch {
+      // A transient worker failure should not close a possibly active session.
+      return true;
+    }
+  }
+  return false;
+}
+
 function cancelWorkerBackgroundJobsForSession(chatSessionId) {
   if (!chatSessionId) return;
+  for (const pendingStarts of pendingWorkerJobStarts.values()) {
+    for (const pendingStart of pendingStarts) {
+      if (pendingStart.chatSessionId === chatSessionId) pendingStart.cancelled = true;
+    }
+  }
   for (const [jobId, job] of workerBackgroundJobs) {
     if (job.chatSessionId === chatSessionId) {
       workerBackgroundJobs.delete(jobId);
@@ -1071,6 +1565,39 @@ function cancelWorkerBackgroundJobsForSession(chatSessionId) {
   } catch {
     // Worker may already be gone while cancelling a torn-down chat/session.
   }
+}
+
+function waitForWorkerCleanup(requestPromise) {
+  const timeoutMs = Math.max(1, Math.min(commandTimeoutMs, 5000));
+  let timer = null;
+  const timeoutPromise = new Promise((resolve) => {
+    timer = setTimeout(resolve, timeoutMs);
+  });
+  return Promise.race([requestPromise, timeoutPromise]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+async function cancelWorkerBackgroundJobsForTerminalSession(sessionId) {
+  if (!sessionId) return;
+  for (const pendingStart of pendingWorkerJobStarts.get(sessionId) || []) {
+    pendingStart.cancelled = true;
+  }
+  const matchingJobs = [];
+  const pending = [];
+  for (const [jobId, job] of workerBackgroundJobs) {
+    if (job.sessionId !== sessionId) continue;
+    matchingJobs.push(jobId);
+    if (terminalWorkerManager?.request) {
+      pending.push(waitForWorkerCleanup(terminalWorkerManager.request("netcatty:ai:jobStop", {
+        jobId,
+        sessionId,
+        chatSessionId: job.chatSessionId || null,
+      }, {})));
+    }
+  }
+  if (pending.length) await Promise.allSettled(pending);
+  for (const jobId of matchingJobs) workerBackgroundJobs.delete(jobId);
 }
 
 let builtinRpcHandlerRegistry = null;
@@ -1140,6 +1667,14 @@ async function dispatch(method, params) {
     if (scopeErr) return { ok: false, error: scopeErr };
   }
 
+  if (
+    (capability?.id === "terminal.execute" || capability?.id === "terminal.start")
+    && params?.sessionId
+    && closingTerminalSessions.has(params.sessionId)
+  ) {
+    return { ok: false, error: `Session "${params.sessionId}" is closing.` };
+  }
+
   if ((capability?.id === "terminal.execute" || capability?.id === "terminal.start") && params?.sessionId) {
     const busy = getSessionBusyError(params.sessionId);
     if (busy) return busy;
@@ -1156,6 +1691,18 @@ async function dispatch(method, params) {
     pendingSessionWriteApprovals.set(sessionWriteLockId, method);
   }
 
+  const tracksSessionActivity = Boolean(
+    params?.sessionId
+    && (
+      capability?.id === "terminal.execute"
+      || capability?.id === "terminal.start"
+      || capability?.id?.startsWith("sftp.")
+    )
+  );
+  const activityStarted = tracksSessionActivity
+    ? sessionIdleManager.beginActivity(params?.chatSessionId, params.sessionId)
+    : false;
+
   try {
     // Confirm mode: request user approval for write operations.
     // netcatty/jobStop bypasses approval — it's a stop/cancel action that
@@ -1168,24 +1715,41 @@ async function dispatch(method, params) {
         return { ok: false, error: USER_DENIED_MESSAGE };
       }
     }
+    if (
+      (capability?.id === "terminal.execute" || capability?.id === "terminal.start")
+      && params?.sessionId
+    ) {
+      const scopeErr = validateSessionScope(
+        params.sessionId,
+        params?.chatSessionId,
+        params?.scopedSessionIds,
+      );
+      if (scopeErr) return { ok: false, error: scopeErr };
+      if (closingTerminalSessions.has(params.sessionId)) {
+        return { ok: false, error: `Session "${params.sessionId}" is closing.` };
+      }
+    }
     const handler = getBuiltinRpcHandlerRegistry().get(method);
     if (!handler) {
       throw new Error(`Unknown method: ${method}`);
     }
     if (capability?.id === "terminal.execute" && params?.sessionId && !sessions?.get?.(params.sessionId)) {
-      return handleWorkerTerminalExec(params);
+      return await handleWorkerTerminalExec(params);
     }
     if (capability?.id === "terminal.start" && params?.sessionId && !sessions?.get?.(params.sessionId)) {
-      return handleWorkerJobStart(params);
+      return await handleWorkerJobStart(params);
     }
     if (capability?.id === "terminal.poll" && workerBackgroundJobs.has(params?.jobId)) {
-      return handleWorkerJobPoll(params);
+      return await handleWorkerJobPoll(params);
     }
     if (capability?.id === "terminal.stop" && workerBackgroundJobs.has(params?.jobId)) {
-      return handleWorkerJobStop(params);
+      return await handleWorkerJobStop(params);
     }
-    return handler(params);
+    return await handler(params);
   } finally {
+    if (activityStarted) {
+      sessionIdleManager.endActivity(params?.chatSessionId, params.sessionId);
+    }
     if (sessionWriteLockId) {
       pendingSessionWriteApprovals.delete(sessionWriteLockId);
     }
@@ -1207,6 +1771,22 @@ async function handleGetContext(params) {
 
   // chatSessionId may be passed via env for per-scope metadata lookup
   const chatSessionId = params?.chatSessionId || null;
+  // External MCP clients use the reserved app-wide scope; refresh from the live
+  // session map so newly opened terminals appear without waiting for a renderer push.
+  // Only sync while External MCP is enabled — otherwise a stale client could
+  // rebuild the cleared scope after disable/idle timeout.
+  if (chatSessionId === EXTERNAL_MCP_CHAT_SESSION_ID) {
+    if (!externalMcpActivityHook?.isEnabled?.()) {
+      return {
+        environment: "netcatty-terminal",
+        description: "External MCP is disabled.",
+        hosts: [],
+        hostCount: 0,
+        tools: toolHints,
+      };
+    }
+    syncLiveSessionsToExternalScope(chatSessionId);
+  }
   const explicitScopedIds = Array.isArray(params?.scopedSessionIds)
     ? params.scopedSessionIds
     : null;
@@ -1270,7 +1850,7 @@ async function handleGetContext(params) {
 
   let activePortForwardTunnels = [];
   try {
-    activePortForwardTunnels = await portForwardingBridge.listPortForwards() || [];
+    activePortForwardTunnels = await listActivePortForwards();
   } catch {
     activePortForwardTunnels = [];
   }
@@ -1356,6 +1936,9 @@ const sftpHandlerApi = createSftpHandlerApi({
   get sessions() { return sessions; },
   get terminalWorkerManager() { return terminalWorkerManager; },
   sftpBridge, registerSftpOp, setTimeout, clearTimeout, AbortController, Promise, Error,
+  createTransferId: () => require("node:crypto").randomUUID(),
+  reportTransferEvent: (payload) => broadcastApprovalEvent("netcatty:sftp:global-transfer", payload),
+  get transferBridge() { return fileTransferBridge; },
 });
 const {
   getSessionSftpEncodingStateKey,
@@ -1401,7 +1984,10 @@ const configAndCleanupApi = createConfigAndCleanupApi({
   process, existsSync, path, __dirname, toUnpackedAsarPath, DEBUG_MCP,
   getScopedSessionIds, scopedMetadata, scopedAttachments, cancelledChatSessions, cancelBackgroundJobsForSession,
   cancelWorkerBackgroundJobsForSession,
+  cancelWorkerBackgroundJobsForTerminalSession,
   clearPendingApprovals, cancelSftpOpsForSession, sftpBridge,
+  preserveIdleSessionCleanup: sessionIdleManager.scopeCleared,
+  clearOpenedSessionScope: openedSessionOwnership.clearScope,
 });
 const { resolveMcpServerRuntimeCommand, buildMcpServerConfig, cleanupScopedMetadata } = configAndCleanupApi;
 
@@ -1414,6 +2000,9 @@ module.exports = {
   setCommandBlocklist,
   setCommandTimeout,
   getCommandTimeoutMs,
+  setSessionIdleTimeoutMinutes,
+  getSessionIdleTimeoutMinutes,
+  reportOpenedSessionActivity,
   setMaxIterations,
   getMaxIterations,
   setPermissionMode,
@@ -1424,6 +2013,7 @@ module.exports = {
   applyChatSessionCancelled,
   checkCommandSafety,
   updateSessionMetadata,
+  mergeSessionMetadata,
   updateAttachmentMetadata,
   handleListAttachments,
   handleReadAttachment,
@@ -1435,6 +2025,8 @@ module.exports = {
   cancelAllPtyExecs,
   cancelPtyExecsForSession,
   cancelWorkerBackgroundJobsForSession,
+  cancelWorkerBackgroundJobsForTerminalSession,
+  hasActiveWorkerJobForTerminalSession,
   cancelSftpOpsForSession,
   getSessionMeta,
   cleanupScopedMetadata,
@@ -1442,10 +2034,19 @@ module.exports = {
   shutdownHost,
   setMainWindowGetter,
   setVaultAgentInvoker,
+  setExternalMcpHooks,
+  disconnectExternalMcpClients,
+  issueExternalMcpAuthToken,
+  revokeExternalMcpAuthToken,
+  getExternalMcpAuthToken,
+  syncLiveSessionsToExternalScope,
+  requestApprovalFromRenderer,
   resolveApprovalFromRenderer,
+  cancelApprovalTimeoutFromRenderer,
   clearPendingApprovals,
   reserveSessionExecution,
   releaseSessionExecution,
   getSessionBusyError,
   dispatchBuiltinRpc: dispatch,
+  EXTERNAL_MCP_CHAT_SESSION_ID,
 };

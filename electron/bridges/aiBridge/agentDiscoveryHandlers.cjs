@@ -8,26 +8,56 @@ function getCursorPlatformPackageName(platform = process.platform, arch = proces
 
 async function probeCursorSdkAvailability(shellEnv, options = {}) {
   const platformPackageName = getCursorPlatformPackageName();
-  if (!platformPackageName) {
-    return { installed: false, available: false, authenticated: false, authSource: null, version: null };
-  }
 
-  try {
-    await import("@cursor/sdk");
-    require.resolve(`${platformPackageName}/package.json`);
-  } catch {
-    return { installed: false, available: false, authenticated: false, authSource: null, version: null };
+  let sdkInstalled = false;
+  if (platformPackageName) {
+    try {
+      await import("@cursor/sdk");
+      require.resolve(`${platformPackageName}/package.json`);
+      sdkInstalled = true;
+    } catch {
+      sdkInstalled = false;
+    }
   }
 
   const hasEnvApiKey = Boolean(shellEnv?.CURSOR_API_KEY);
   const hasSettingsApiKey = Boolean(options?.apiKeyPresent);
-  const authenticated = hasEnvApiKey || hasSettingsApiKey;
+  const apiKeyOk = hasSettingsApiKey || hasEnvApiKey;
+  const probeCli = typeof options?.probeCursorCliAuth === "function"
+    ? options.probeCursorCliAuth
+    : null;
+  let cliAuth = { authenticated: false, authSource: null, email: null, binPath: null };
+  try {
+    if (probeCli) {
+      cliAuth = probeCli({ env: shellEnv }) || cliAuth;
+    }
+  } catch {
+    cliAuth = { authenticated: false, authSource: null, email: null, binPath: null };
+  }
+
+  const cliLoginOk = Boolean(cliAuth.authenticated);
+  const authenticated = apiKeyOk || cliLoginOk;
+  // authSource describes the primary credential for display priority; CLI UI
+  // must use cliLoginOk, not this field alone.
+  let authSource = null;
+  if (hasSettingsApiKey) authSource = "settings";
+  else if (hasEnvApiKey) authSource = "CURSOR_API_KEY";
+  else if (cliLoginOk) authSource = "cli-login";
+
+  // Available if either mode can run a turn (API key + SDK, or CLI login).
+  const available = (apiKeyOk && sdkInstalled) || cliLoginOk;
+  const installed = sdkInstalled || Boolean(cliAuth.binPath) || cliLoginOk;
   return {
-    installed: true,
-    available: authenticated,
+    installed,
+    sdkInstalled,
+    available,
     authenticated,
-    authSource: hasSettingsApiKey ? "settings" : hasEnvApiKey ? "CURSOR_API_KEY" : null,
-    version: "Cursor SDK",
+    authSource,
+    apiKeyOk,
+    cliLoginOk,
+    version: sdkInstalled ? "Cursor SDK" : (cliLoginOk || cliAuth.binPath ? "Cursor Agent CLI" : null),
+    cliBinPath: cliAuth.binPath || null,
+    cliEmail: cliAuth.email || null,
   };
 }
 
@@ -52,6 +82,8 @@ function registerAgentDiscoveryHandlers(ctx) {
         description: "Tencent's coding agent CLI (Agent SDK)", sdkBackend: "codebuddy", args: [] },
       { command: "opencode", name: "OpenCode", icon: "opencode",
         description: "Open source coding agent via the official OpenCode SDK", sdkBackend: "opencode", args: [] },
+      { command: "grok", name: "Grok Build", icon: "grok",
+        description: "xAI's Grok Build coding agent CLI", sdkBackend: "grok", args: [] },
     ];
 
     const shellEnv = await getShellEnv();
@@ -62,16 +94,19 @@ function registerAgentDiscoveryHandlers(ctx) {
       if (agent.command === "cursor") {
         cursorSdkStatus = await probeCursorSdkAvailability(shellEnv, {
           apiKeyPresent: Boolean(options?.apiKeyPresent),
+          probeCursorCliAuth,
         });
         if (!cursorSdkStatus.available) continue;
       }
 
       const resolvedPath = agent.command === "cursor"
-        ? (await resolveCliFromPathAsync(agent.command, shellEnv) || "cursor")
+        ? (cursorSdkStatus.cliLoginOk
+          ? (cursorSdkStatus.cliBinPath || "cursor")
+          : (cursorSdkStatus.sdkInstalled ? "cursor" : (cursorSdkStatus.cliBinPath || "cursor")))
         : await resolveCliFromPathAsync(agent.command, shellEnv); // Layer-1: locate
       if (!resolvedPath || seenPaths.has(resolvedPath)) continue;
 
-      const probe = agent.command === "cursor" && resolvedPath === "cursor"
+      const probe = agent.command === "cursor"
         ? { exitCode: 0, version: cursorSdkStatus.version }
         : await probeCliVersion(resolvedPath, ["--version"], shellEnv); // Layer-2: version
       const hasPlausibleVersion = agent.command === "cursor"
@@ -97,6 +132,8 @@ function registerAgentDiscoveryHandlers(ctx) {
           auth = probeCodebuddyAuth({ env: shellEnv });
         } else if (agent.command === "opencode") {
           auth = { authenticated: true, authSource: "opencode-config" };
+        } else if (agent.command === "grok") {
+          auth = probeGrokAuth({ env: shellEnv });
         }
       } catch { /* auth probe is best-effort */ }
 
@@ -114,6 +151,13 @@ function registerAgentDiscoveryHandlers(ctx) {
         available: true,
         authenticated: auth.authenticated,
         authSource: auth.authSource,
+        ...(agent.command === "cursor" ? {
+          cliEmail: cursorSdkStatus.cliEmail || null,
+          cliBinPath: cursorSdkStatus.cliBinPath || null,
+          cliLoginOk: Boolean(cursorSdkStatus.cliLoginOk),
+          apiKeyOk: Boolean(cursorSdkStatus.apiKeyOk),
+          sdkInstalled: Boolean(cursorSdkStatus.sdkInstalled),
+        } : {}),
       });
       seenPaths.add(resolvedPath);
     }
@@ -153,16 +197,27 @@ function registerAgentDiscoveryHandlers(ctx) {
     if (command === "cursor") {
       const cursorSdkStatus = await probeCursorSdkAvailability(shellEnv, {
         apiKeyPresent: Boolean(apiKeyPresent),
+        probeCursorCliAuth,
       });
-      const cursorPath = await resolveCliFromPathAsync(command, shellEnv) || "cursor";
+      // Prefer CLI bin only when CLI login is proven. Otherwise do not use a
+      // PATH `agent` binary (generic name) for API-key/SDK path identity.
+      const resolvedSdkPath = await resolveCliFromPathAsync(command, shellEnv);
+      const cursorPath = cursorSdkStatus.cliLoginOk
+        ? (cursorSdkStatus.cliBinPath || resolvedSdkPath || "cursor")
+        : (resolvedSdkPath || "cursor");
       return {
-        path: cursorSdkStatus.installed ? cursorPath : null,
-        binPath: cursorSdkStatus.installed ? cursorPath : null,
+        path: cursorSdkStatus.installed || cursorSdkStatus.available ? cursorPath : null,
+        binPath: cursorSdkStatus.installed || cursorSdkStatus.available ? cursorPath : null,
         version: cursorSdkStatus.version,
         available: cursorSdkStatus.available,
         installed: cursorSdkStatus.installed,
         authenticated: cursorSdkStatus.authenticated,
         authSource: cursorSdkStatus.authSource,
+        cliEmail: cursorSdkStatus.cliEmail || null,
+        cliBinPath: cursorSdkStatus.cliBinPath || null,
+        cliLoginOk: Boolean(cursorSdkStatus.cliLoginOk),
+        apiKeyOk: Boolean(cursorSdkStatus.apiKeyOk),
+        sdkInstalled: Boolean(cursorSdkStatus.sdkInstalled),
       };
     }
 
@@ -300,24 +355,36 @@ function registerAgentDiscoveryHandlers(ctx) {
         codexPath: codexCliPath,
       };
 
-      const handleChunk = (chunk) => {
-        appendCodexLoginOutput(session, chunk.toString("utf8"));
+      const stdoutDecoder = createCodexLoginOutputDecoder(session);
+      const stderrDecoder = createCodexLoginOutputDecoder(session);
+      let outputEnded = false;
+      const endOutput = () => {
+        if (outputEnded) return;
+        outputEnded = true;
+        stdoutDecoder.end();
+        stderrDecoder.end();
       };
 
-      child.stdout.on("data", handleChunk);
-      child.stderr.on("data", handleChunk);
+      child.stdout.on("data", (chunk) => stdoutDecoder.write(chunk));
+      child.stderr.on("data", (chunk) => stderrDecoder.write(chunk));
 
       child.once("error", (error) => {
+        endOutput();
+        clearCodexLoginKillTimer(session);
         session.state = "error";
         session.error = `[codex] Failed to start login flow: ${error.message}`;
         session.process = null;
+        recordCodexLoginSession(session);
       });
 
       child.once("close", (exitCode) => {
+        endOutput();
+        clearCodexLoginKillTimer(session);
         session.exitCode = exitCode;
         session.process = null;
 
         if (session.state === "cancelled") {
+          recordCodexLoginSession(session);
           return;
         }
 
@@ -328,9 +395,10 @@ function registerAgentDiscoveryHandlers(ctx) {
           session.state = "error";
           session.error = session.error || `Codex login exited with code ${exitCode ?? "unknown"}`;
         }
+        recordCodexLoginSession(session);
       });
 
-      codexLoginSessions.set(sessionId, session);
+      recordCodexLoginSession(session);
       invalidateCodexValidationCache();
       return { ok: true, session: toCodexLoginSessionResponse(session) };
     } catch (err) {
@@ -356,9 +424,8 @@ function registerAgentDiscoveryHandlers(ctx) {
 
     session.state = "cancelled";
     session.error = null;
-    if (session.process && !session.process.killed) {
-      session.process.kill("SIGTERM");
-    }
+    stopCodexLoginProcess(session);
+    recordCodexLoginSession(session);
 
     invalidateCodexValidationCache();
     return { ok: true, found: true, session: toCodexLoginSessionResponse(session) };

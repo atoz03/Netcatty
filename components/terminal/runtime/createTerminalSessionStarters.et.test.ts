@@ -388,6 +388,43 @@ test("startEt forwards a jump host reference key path as an identity file", asyn
   assert.deepEqual(jumpHosts[0]?.identityFilePaths, ["/Users/alice/.ssh/jump_reference_ed25519"]);
 });
 
+test("startEt keeps a jump private key when agent filtering is unavailable", async () => {
+  let captured: Record<string, unknown> | null = null;
+  const backend = makeBackend((options) => { captured = options; });
+  const ctx = {
+    ...makeCtx(
+      { hostChain: { hostIds: ["jump-1"] } },
+      [{
+        id: "jump-1",
+        label: "Jump",
+        hostname: "jump.example.test",
+        username: "jumper",
+        authMethod: "key",
+        identityFileId: "jump-key",
+        useSshAgent: true,
+      }],
+      backend,
+    ),
+    keys: [{
+      id: "jump-key",
+      label: "Jump key",
+      type: "ED25519",
+      category: "key",
+      source: "imported",
+      created: 1,
+      privateKey: "JUMP PRIVATE KEY",
+      passphrase: "jump-passphrase",
+    }],
+  };
+
+  await createTerminalSessionStarters(ctx as never).startEt(term as never);
+
+  const jumpHosts = (captured as Record<string, unknown>).jumpHosts as Array<Record<string, unknown>>;
+  assert.equal(jumpHosts[0]?.useSshAgent, false);
+  assert.equal(jumpHosts[0]?.privateKey, "JUMP PRIVATE KEY");
+  assert.equal(jumpHosts[0]?.passphrase, "jump-passphrase");
+});
+
 test("startEt connects directly when no jump host is configured", async () => {
   let captured: Record<string, unknown> | null = null;
   let error = "";

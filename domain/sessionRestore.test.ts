@@ -6,6 +6,8 @@ import {
   isRestoredDisconnectedSession,
   quoteRestoreCwdForShell,
   resolveRestoredActiveTabId,
+  resolveInheritedCwdIntent,
+  resolveInteractiveTerminalCdIntent,
   resolveRestoreCwdIntent,
   sanitizeSessionRestorePayload,
   shouldAttemptRestoreCwd,
@@ -44,6 +46,23 @@ test("buildSessionRestorePayload excludes ephemeral-host sessions and their tabs
     sessions: [
       session("s1"),
       { ...session("s2"), ephemeralHost: true },
+    ],
+    workspaces: [],
+    tabOrder: ["s1", "s2"],
+    activeTabId: "s2",
+    now: 123,
+  });
+
+  assert.deepEqual(payload.sessions.map((entry) => entry.id), ["s1"]);
+  assert.deepEqual(payload.tabOrder, ["s1"]);
+  assert.notEqual(payload.activeTabId, "s2");
+});
+
+test("buildSessionRestorePayload excludes silent MCP sessions and their tabs", () => {
+  const payload = buildSessionRestorePayload({
+    sessions: [
+      session("s1"),
+      { ...session("s2"), hiddenFromTabs: true },
     ],
     workspaces: [],
     tabOrder: ["s1", "s2"],
@@ -97,6 +116,34 @@ test("buildSessionRestorePayload preserves local terminal start directory", () =
   assert.equal(payload.sessions[0].localStartDir, "/Users/alice/project");
 });
 
+test("buildSessionRestorePayload preserves a bounded plugin connection snapshot", () => {
+  const providerId = "com.example.transport.connection";
+  const payload = buildSessionRestorePayload({
+    sessions: [{
+      ...session("plugin"),
+      protocol: `plugin:${providerId}`,
+      pluginConnection: {
+        providerId,
+        configuration: { endpoint: "saved.example", nested: { mode: "safe" } },
+        authenticationProviderId: "com.example.transport.authentication",
+        credentialId: "credential-reference-1234",
+      },
+    }],
+    workspaces: [],
+    tabOrder: ["plugin"],
+    activeTabId: "plugin",
+    now: 123,
+  });
+
+  assert.equal(payload.sessions[0].protocol, `plugin:${providerId}`);
+  assert.deepEqual(payload.sessions[0].pluginConnection, {
+    providerId,
+    configuration: { endpoint: "saved.example", nested: { mode: "safe" } },
+    authenticationProviderId: "com.example.transport.authentication",
+    credentialId: "credential-reference-1234",
+  });
+});
+
 test("buildSessionRestorePayload deeply allowlists serial config fields", () => {
   const payload = buildSessionRestorePayload({
     sessions: [{
@@ -111,6 +158,7 @@ test("buildSessionRestorePayload deeply allowlists serial config fields", () => 
         flowControl: "none",
         localEcho: true,
         lineMode: true,
+        backspaceBehavior: "ctrl-h",
         password: "do-not-store",
       },
     } as TerminalSession & { serialConfig: TerminalSession["serialConfig"] & { password: string } }],
@@ -129,6 +177,7 @@ test("buildSessionRestorePayload deeply allowlists serial config fields", () => 
     flowControl: "none",
     localEcho: true,
     lineMode: true,
+    backspaceBehavior: "ctrl-h",
   });
 });
 
@@ -152,6 +201,26 @@ test("buildSessionRestorePayload preserves serial sessions with empty usernames"
   assert.equal(payload.sessions.length, 1);
   assert.equal(payload.sessions[0].username, "");
   assert.equal(payload.sessions[0].protocol, "serial");
+});
+
+test("buildSessionRestorePayload preserves missing Backspace behavior on legacy serial sessions", () => {
+  const payload = buildSessionRestorePayload({
+    sessions: [{
+      ...session("s1"),
+      username: "",
+      protocol: "serial",
+      serialConfig: {
+        path: "/dev/tty.usbserial",
+        baudRate: 115200,
+      },
+    }],
+    workspaces: [],
+    tabOrder: ["s1"],
+    activeTabId: "s1",
+    now: 123,
+  });
+
+  assert.equal(payload.sessions[0].serialConfig?.backspaceBehavior, undefined);
 });
 
 test("buildSessionRestorePayload preserves serial-only workspaces", () => {
@@ -231,6 +300,51 @@ test("sanitizeSessionRestorePayload prunes invalid workspace panes and drops emp
   assert.deepEqual(sanitized.workspaces[0].focusSessionOrder, ["s1"]);
   assert.deepEqual(sanitized.tabOrder, ["ws-1"]);
   assert.equal(sanitized.activeTabId, "ws-1");
+});
+
+test("sanitizeSessionRestorePayload preserves explicit workspace autoTitle across restore", () => {
+  const workspace: Workspace = {
+    id: "ws-1",
+    title: "Workspace",
+    // User explicitly named this workspace "Workspace"; must not be relabeled.
+    autoTitle: false,
+    root: { id: "pane-1", type: "pane", sessionId: "s1" },
+    focusedSessionId: "s1",
+    focusSessionOrder: ["s1"],
+  };
+
+  const sanitized = sanitizeSessionRestorePayload({
+    version: 1,
+    savedAt: 1,
+    activeTabId: "ws-1",
+    tabOrder: ["ws-1"],
+    sessions: [session("s1", "ws-1")],
+    workspaces: [workspace],
+  });
+
+  assert.equal(sanitized.workspaces.length, 1);
+  assert.equal(sanitized.workspaces[0].autoTitle, false);
+});
+
+test("sanitizeSessionRestorePayload leaves legacy workspaces without an autoTitle flag", () => {
+  const workspace: Workspace = {
+    id: "ws-1",
+    title: "Workspace",
+    root: { id: "pane-1", type: "pane", sessionId: "s1" },
+    focusedSessionId: "s1",
+    focusSessionOrder: ["s1"],
+  };
+
+  const sanitized = sanitizeSessionRestorePayload({
+    version: 1,
+    savedAt: 1,
+    activeTabId: "ws-1",
+    tabOrder: ["ws-1"],
+    sessions: [session("s1", "ws-1")],
+    workspaces: [workspace],
+  });
+
+  assert.equal(sanitized.workspaces[0].autoTitle, undefined);
 });
 
 test("sanitizeSessionRestorePayload drops malformed session and workspace records", () => {
@@ -386,6 +500,7 @@ test("sanitizeSessionRestorePayload deeply allowlists unknown serial config fiel
         flowControl: "none",
         localEcho: true,
         lineMode: true,
+        backspaceBehavior: "default",
         secret: "do-not-store",
       },
     }],
@@ -401,6 +516,7 @@ test("sanitizeSessionRestorePayload deeply allowlists unknown serial config fiel
     flowControl: "none",
     localEcho: true,
     lineMode: true,
+    backspaceBehavior: "default",
   });
 });
 
@@ -565,6 +681,32 @@ test("quoteRestoreCwdForShell treats cwd as shell data", () => {
   assert.equal(quoteRestoreCwdForShell("/tmp/it's ok; $(rm -rf ~)"), "'/tmp/it'\\''s ok; $(rm -rf ~)'");
 });
 
+test("resolveInteractiveTerminalCdIntent quotes path-only cd without session transport checks", () => {
+  assert.deepEqual(resolveInteractiveTerminalCdIntent("/srv/app dir"), {
+    cwd: "/srv/app dir",
+    command: "cd -- '/srv/app dir'",
+  });
+  assert.deepEqual(resolveInteractiveTerminalCdIntent("/srv/project "), {
+    cwd: "/srv/project ",
+    command: "cd -- '/srv/project '",
+  });
+  assert.equal(resolveInteractiveTerminalCdIntent("C:\\Users\\alice"), null);
+});
+
+test("resolveInteractiveTerminalCdIntent rejects control bytes that readline would interpret", () => {
+  // Tab / ESC / Ctrl-U / newline / DEL must not be typed into an interactive PTY.
+  assert.equal(resolveInteractiveTerminalCdIntent("/srv/app\tdir"), null);
+  assert.equal(resolveInteractiveTerminalCdIntent("/srv/app\u001bdir"), null);
+  assert.equal(resolveInteractiveTerminalCdIntent("/srv/app\u0015dir"), null);
+  assert.equal(resolveInteractiveTerminalCdIntent("/srv/app\ndir"), null);
+  assert.equal(resolveInteractiveTerminalCdIntent("/srv/app\u007fdir"), null);
+  // Trailing spaces remain valid POSIX names and must still quote exactly.
+  assert.deepEqual(resolveInteractiveTerminalCdIntent("/srv/project "), {
+    cwd: "/srv/project ",
+    command: "cd -- '/srv/project '",
+  });
+});
+
 test("resolveRestoreCwdIntent captures a one-shot restore command", () => {
   assert.deepEqual(resolveRestoreCwdIntent({
     enabled: true,
@@ -609,4 +751,31 @@ test("resolveRestoreCwdIntent keeps home-relative cwd expandable", () => {
     cwd: "~",
     command: "cd -- ~",
   });
+});
+
+test("resolveInheritedCwdIntent: ssh clone gets a cd command", () => {
+  const intent = resolveInheritedCwdIntent({
+    session: { protocol: "ssh", shellType: "posix", cwd: "/var/log" },
+    isNetworkDevice: false,
+  });
+  assert.deepEqual(intent, { cwd: "/var/log", command: "cd -- '/var/log'" });
+});
+
+test("resolveInheritedCwdIntent: fires without restoreState or enabled flag", () => {
+  const intent = resolveInheritedCwdIntent({
+    session: { protocol: "ssh", cwd: "/home/me/proj" },
+    isNetworkDevice: false,
+  });
+  assert.equal(intent?.command, "cd -- '/home/me/proj'");
+});
+
+test("resolveInheritedCwdIntent: skips mosh/et and network devices and bad paths", () => {
+  assert.equal(resolveInheritedCwdIntent({ session: { protocol: "ssh", etEnabled: true, cwd: "/x" }, isNetworkDevice: false }), null);
+  assert.equal(resolveInheritedCwdIntent({ session: { protocol: "ssh", cwd: "/x" }, isNetworkDevice: true }), null);
+  assert.equal(resolveInheritedCwdIntent({ session: { protocol: "ssh", cwd: "C:\\Users" }, isNetworkDevice: false }), null);
+  assert.equal(resolveInheritedCwdIntent({ session: { protocol: "ssh", cwd: "   " }, isNetworkDevice: false }), null);
+});
+
+test("resolveInheritedCwdIntent: skips windows local shells", () => {
+  assert.equal(resolveInheritedCwdIntent({ session: { protocol: "local", shellType: "powershell", cwd: "/x" }, isNetworkDevice: false }), null);
 });

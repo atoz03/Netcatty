@@ -9,12 +9,13 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { BaseAgent } = require("ssh2/lib/agent.js");
 const { parseKey } = require("ssh2/lib/protocol/keyParser.js");
+const tempDirBridge = require("./tempDirBridge.cjs");
 
 const DEBUG_SSH = process.env.NETCATTY_SSH_DEBUG === "1";
 
 // Debug logger (disabled by default)
 const logFile = DEBUG_SSH
-  ? path.join(require("os").tmpdir(), "netcatty-agent.log")
+  ? tempDirBridge.getTempFilePath("netcatty-agent.log")
   : null;
 const log = (msg, data) => {
   if (!DEBUG_SSH) return;

@@ -88,12 +88,23 @@ const {
   writeSshDeepLinkEnabledPreference,
 } = require("./deepLink.cjs");
 const { getReusableMainWindow } = require("./mainWindowReuse.cjs");
+const { createAppContentWindowClosedHandler } = require("./appWindowLifecycle.cjs");
+const { PLUGIN_PROTOCOL_SCHEME } = require("./plugins/constants.cjs");
+const { runPluginShutdown } = require("./plugins/shutdownCoordinator.cjs");
 const {
   OPEN_TERMINAL_PATH_CHANNEL,
   collectOpenTerminalPathArgs,
   resolveOpenTerminalPath,
   resolveOpenTerminalPathsFromArgs,
 } = require("./openTerminalPath.cjs");
+const {
+  applyExplorerContextMenuPreference,
+  applyInitialExplorerContextMenuPreference,
+  resolveExplorerContextMenuEnabled,
+  resolveExplorerContextMenuLaunchSpec,
+  updateExplorerContextMenuEnabledPreference,
+  writeExplorerContextMenuEnabledPreference,
+} = require("./explorerContextMenu.cjs");
 
 try {
   protocol?.registerSchemesAsPrivileged?.([
@@ -107,9 +118,19 @@ try {
         stream: true,
       },
     },
+    {
+      scheme: PLUGIN_PROTOCOL_SCHEME,
+      privileges: {
+        standard: true,
+        secure: true,
+        supportFetchAPI: true,
+        corsEnabled: false,
+        codeCache: true,
+      },
+    },
   ]);
 } catch (err) {
-  console.warn("[Main] Failed to register app:// scheme privileges:", err);
+  console.warn("[Main] Failed to register custom scheme privileges:", err);
 }
 
 // Apply ssh2 protocol patch needed for OpenSSH sk-* signature layouts.
@@ -152,6 +173,7 @@ const getGlobalShortcutBridge = createLazyModule("./bridges/globalShortcutBridge
 const getCredentialBridge = createLazyModule("./bridges/credentialBridge.cjs");
 const getAutoUpdateBridge = createLazyModule("./bridges/autoUpdateBridge.cjs");
 const getAiBridge = createLazyModule("./bridges/aiBridge.cjs");
+const getHttpNetworkProxyBridge = createLazyModule("./bridges/httpNetworkProxyBridge.cjs");
 const getWindowManager = createLazyModule("./bridges/windowManager.cjs");
 const getVaultBackupBridge = createLazyModule("./bridges/vaultBackupBridge.cjs");
 const ptyProcessTree = require("./bridges/ptyProcessTree.cjs");
@@ -163,11 +185,16 @@ const { queryDirtyEditors } = require("./bridges/dirtyEditorGuard.cjs");
 if (process.env.NETCATTY_NO_SANDBOX === "1") {
   app.commandLine.appendSwitch("no-sandbox");
 }
-// Force hardware acceleration even on blocklisted GPUs (macs sometimes fall back to software)
-app.commandLine.appendSwitch("ignore-gpu-blocklist");
-app.commandLine.appendSwitch("ignore-gpu-blacklist"); // Some Chromium builds use this alias; keep both for safety
-app.commandLine.appendSwitch("enable-gpu-rasterization");
-app.commandLine.appendSwitch("enable-zero-copy");
+// Avoid Chromium spare renderers that inflate baseline memory for little gain.
+app.commandLine.appendSwitch("disable-features", "SpareRendererForSitePerProcess");
+// Aggressive GPU enablement can break some environments; opt out with NETCATTY_COMPAT_GPU=1.
+if (process.env.NETCATTY_COMPAT_GPU !== "1") {
+  // Force hardware acceleration even on blocklisted GPUs (macs sometimes fall back to software)
+  app.commandLine.appendSwitch("ignore-gpu-blocklist");
+  app.commandLine.appendSwitch("ignore-gpu-blacklist"); // Some Chromium builds use this alias; keep both for safety
+  app.commandLine.appendSwitch("enable-gpu-rasterization");
+  app.commandLine.appendSwitch("enable-zero-copy");
+}
 
 // Silence noisy DevTools Autofill CDP errors (Electron's backend doesn't expose this domain)
 app.on("web-contents-created", (_event, contents) => {
@@ -207,11 +234,19 @@ if (isDev) {
   app.setName("Netcatty Dev");
   app.setPath("userData", path.join(app.getPath("userData"), "dev"));
 }
+const { applyPortableDataDirectory } = require("./portableData.cjs");
+const portableData = applyPortableDataDirectory({ app });
+if (portableData) {
+  console.info(`[Main] Portable data directory: ${portableData.dataDirectory}`);
+}
 const preload = path.join(__dirname, "preload.cjs");
 const isMac = process.platform === "darwin";
 const appIconManager = require("./bridges/appIconManager.cjs");
 const appPath = path.join(__dirname, "..");
-appIconManager.initializeAppIconManager(appPath, { preferPublic: !app.isPackaged });
+appIconManager.initializeAppIconManager(appPath, {
+  preferPublic: !app.isPackaged,
+  isMac,
+});
 const electronDir = __dirname;
 
 const APP_PROTOCOL_HEADERS = {
@@ -447,6 +482,7 @@ const registerBridges = createBridgeRegistrar({
   getCredentialBridge,
   getAutoUpdateBridge,
   getAiBridge,
+  getHttpNetworkProxyBridge,
   getWindowManager,
   getVaultBackupBridge,
   isPathInside,
@@ -455,7 +491,12 @@ const registerBridges = createBridgeRegistrar({
  * Create the main application window
  */
 async function createWindow() {
-  const win = await getWindowManager().createWindow(electronModule, {
+  const windowManager = getWindowManager();
+  windowManager.setAppContentWindowClosedHandler(createAppContentWindowClosedHandler({
+    app,
+    windowManager,
+  }));
+  const win = await windowManager.createWindow(electronModule, {
     preload,
     devServerUrl: effectiveDevServerUrl,
     isDev,
@@ -552,6 +593,8 @@ const pendingJmsDeepLinkUrls = jmsDeepLinkEnabled ? collectJmsDeepLinkUrls(proce
 let flushingJmsDeepLinks = false;
 let jmsDeepLinkDeliveryGeneration = 0;
 
+let explorerContextMenuEnabled = resolveExplorerContextMenuEnabled({ app }).enabled === true;
+
 function queueSshDeepLink(rawUrl) {
   if (!sshDeepLinkEnabled) return;
   if (!isSshDeepLinkUrl(rawUrl)) return;
@@ -632,6 +675,33 @@ ipcMain?.handle?.("netcatty:deepLink:jms:setEnabled", async (_event, payload) =>
 });
 
 ipcMain?.handle?.("netcatty:deepLink:jms:getEnabled", async () => jmsDeepLinkEnabled);
+
+ipcMain?.handle?.("netcatty:explorerContextMenu:setEnabled", async (_event, payload) => {
+  const enabled = payload?.enabled !== false;
+  const launchSpec = resolveExplorerContextMenuLaunchSpec();
+  const result = updateExplorerContextMenuEnabledPreference({
+    currentEnabled: explorerContextMenuEnabled,
+    enabled,
+    applyPreference: (nextEnabled) => applyExplorerContextMenuPreference({
+      enabled: nextEnabled,
+      executablePath: launchSpec.executablePath,
+      appArgs: launchSpec.appArgs,
+    }),
+    writePreference: (nextEnabled) => writeExplorerContextMenuEnabledPreference({
+      app,
+      enabled: nextEnabled,
+      executablePath: launchSpec.executablePath,
+      appArgs: launchSpec.appArgs,
+    }),
+  });
+  explorerContextMenuEnabled = result.enabled === true;
+  return result;
+});
+
+ipcMain?.handle?.("netcatty:explorerContextMenu:getEnabled", async () => ({
+  enabled: explorerContextMenuEnabled,
+  supported: process.platform === "win32",
+}));
 
 async function deliverJmsDeepLink(rawUrl, expectedGeneration = jmsDeepLinkDeliveryGeneration) {
   if (!shouldDeliverJmsDeepLink({
@@ -898,7 +968,18 @@ if (!gotLock) {
     if (collectOpenTerminalPathArgs(argv).length > 0) {
       const baseDirectory = typeof workingDirectory === "string" ? workingDirectory : undefined;
       const openTerminalPaths = resolveOpenTerminalPathsFromArgs(argv, { baseDirectory });
-      queueResolvedOpenTerminalPaths(openTerminalPaths);
+      if (openTerminalPaths.length > 0) {
+        queueResolvedOpenTerminalPaths(openTerminalPaths);
+      } else {
+        // Still bring the app forward when Explorer launched us but the path
+        // failed validation — silent no-op feels like a broken menu item.
+        console.warn("[Main] Open-terminal-path args present but no valid path resolved:", argv);
+        if (!focusMainWindow()) {
+          void createAndShowMainWindow().catch((err) => {
+            console.error("[Main] Failed to recreate window on open-terminal-path:", err);
+          });
+        }
+      }
       return;
     }
     if (!focusMainWindow()) {
@@ -936,6 +1017,21 @@ if (!gotLock) {
       },
     });
     jmsDeepLinkEnabled = initialJmsDeepLinkPreference.enabled;
+
+    const explorerLaunchSpec = resolveExplorerContextMenuLaunchSpec();
+    const initialExplorerContextMenuPreference = applyInitialExplorerContextMenuPreference({
+      app,
+      executablePath: explorerLaunchSpec.executablePath,
+      appArgs: explorerLaunchSpec.appArgs,
+    });
+    explorerContextMenuEnabled = initialExplorerContextMenuPreference.enabled === true;
+
+    // Spellcheck dictionaries/workers are unused in Netcatty and cost memory.
+    try {
+      session?.defaultSession?.setSpellCheckerEnabled?.(false);
+    } catch {
+      // ignore
+    }
 
     // Grant only the Chromium permissions the app actually uses, and only
     // to the app's own origin. The default session is shared with in-app
@@ -1046,21 +1142,24 @@ if (!gotLock) {
       void flushPendingOpenTerminalPaths();
 
       // Trigger auto-update check 5 s after window creation.
-      // startAutoCheck() is a no-op on unsupported platforms (Linux deb/rpm/snap).
+      // startAutoCheck() is a no-op on unsupported platforms (for example Linux
+      // Snap or an unmarked development build).
       getAutoUpdateBridge().startAutoCheck(5000);
 
-      // Pre-warm the settings window in the background so it opens instantly.
-      // Delay slightly to avoid competing with main window first-paint resources.
-      setTimeout(() => {
-        getWindowManager().prewarmSettingsWindow(electronModule, {
-          preload,
-          devServerUrl: effectiveDevServerUrl,
-          isDev,
-          appIcon: appIconManager.getAppIconPath(appPath),
-          isMac,
-          electronDir,
-        });
-      }, 3000);
+      // Settings prewarm is opt-in: a hidden BrowserWindow holds a full renderer.
+      // Enable with NETCATTY_PREWARM_SETTINGS=1 (delayed so first paint is undisturbed).
+      if (process.env.NETCATTY_PREWARM_SETTINGS === "1") {
+        setTimeout(() => {
+          getWindowManager().prewarmSettingsWindow(electronModule, {
+            preload,
+            devServerUrl: effectiveDevServerUrl,
+            isDev,
+            appIcon: appIconManager.getAppIconPath(appPath),
+            isMac,
+            electronDir,
+          });
+        }, 15000);
+      }
     }).catch((err) => {
       console.error("[Main] Failed to create main window:", err);
       showStartupError(err);
@@ -1133,8 +1232,19 @@ if (!gotLock) {
   // !isQuitting would stop firing).
   const commitQuit = () => {
     getWindowManager().setIsQuitting(true);
-    quitConfirmed = true;
-    app.quit();
+    quitGuardChannelBusy = true;
+    void runPluginShutdown()
+      .then(({ timedOut }) => {
+        if (timedOut) console.warn("[Plugins] Shutdown deadline elapsed; continuing app quit");
+      })
+      .catch((error) => {
+        console.warn("[Plugins] Shutdown failed; continuing app quit:", error);
+      })
+      .finally(() => {
+        quitGuardChannelBusy = false;
+        quitConfirmed = true;
+        app.quit();
+      });
   };
 
   app.on("before-quit", (event) => {
@@ -1162,11 +1272,11 @@ if (!gotLock) {
     // BrowserWindow.getAllWindows() could pick tray/settings windows whose
     // renderers don't listen for app:query-dirty-editors and would force the
     // timeout fallback on every quit.
-    const appContentWindows = typeof getWindowManager().getAppContentWindows === "function"
-      ? getWindowManager().getAppContentWindows()
+    const dirtyEditorWindows = typeof getWindowManager().getDirtyEditorWindows === "function"
+      ? getWindowManager().getDirtyEditorWindows()
       : null;
-    const mainWindows = Array.isArray(appContentWindows)
-      ? appContentWindows
+    const mainWindows = Array.isArray(dirtyEditorWindows)
+      ? dirtyEditorWindows
       : typeof getWindowManager().getMainWindows === "function"
         ? getWindowManager().getMainWindows()
         : [getWindowManager().getMainWindow()].filter(Boolean);
@@ -1185,6 +1295,9 @@ if (!gotLock) {
       .map((candidate) => candidate.webContents)
       .filter(Boolean);
     if (queryableWebContents.length === 0) {
+      // Plugin shutdown is asynchronous, so the original quit must remain
+      // cancelled until commitQuit re-enters app.quit() after deactivation.
+      event.preventDefault();
       commitQuit();
       return;
     }
@@ -1228,7 +1341,13 @@ if (!gotLock) {
         // autoUpdateBridge's watchdog; otherwise close-to-tray and other
         // !isQuitting-gated behavior stay bypassed while the app keeps running
         // (#1215 review).
-        if (wm.isQuittingForUpdate?.()) wm.setQuittingForUpdate(false);
+        if (wm.isQuittingForUpdate?.()) {
+          // The install bridge owns its in-flight state. Clear it here as well
+          // as the window-manager flag so a cancelled update can be retried
+          // immediately instead of waiting for its watchdog.
+          getAutoUpdateBridge().cancelPendingInstall?.();
+          if (wm.isQuittingForUpdate?.()) wm.setQuittingForUpdate(false);
+        }
       })
       .catch((err) => {
         // queryDirtyEditors is written to never reject, but guard anyway: a
@@ -1253,6 +1372,13 @@ if (!gotLock) {
       console.warn("Error during terminal cleanup:", err);
     }
     try {
+      // End parked SSH transports that outlived their last tab/tunnel lease.
+      const { discardAllTransports } = require("./bridges/sshConnectionPool.cjs");
+      discardAllTransports("app-quit");
+    } catch (err) {
+      console.warn("Error during SSH transport cleanup:", err);
+    }
+    try {
       portForwardingBridge.stopAllPortForwards();
     } catch (err) {
       console.warn("Error during port forwarding cleanup:", err);
@@ -1274,17 +1400,6 @@ if (!gotLock) {
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, () => {
     console.log(`[Main] Received ${sig}, quitting…`);
-    // Force-destroy port-forward listeners synchronously before app.quit()
-    // runs the will-quit chain. If the process is killed mid-shutdown (e.g.
-    // a second SIGINT, or the OS reaping it), will-quit may never fire and
-    // the listening ports would stay bound — EADDRINUSE on next launch.
-    // socket.destroy() in cancelTunnel is synchronous, so this releases the
-    // ports immediately regardless of how far the async shutdown gets.
-    try {
-      portForwardingBridge.stopAllPortForwards();
-    } catch (err) {
-      console.warn("[Main] Port forward cleanup on signal failed:", err);
-    }
     app.quit();
   });
 }

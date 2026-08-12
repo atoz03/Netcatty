@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
@@ -32,7 +33,19 @@ import {
   ContextMenuTrigger,
 } from "../ui/context-menu.tsx";
 import { cn } from "../../lib/utils.ts";
-import { VaultHostListSection } from "./VaultHostListSection.tsx";
+import {
+  getVaultTreeAutoExpandKey,
+  VaultHostListSection,
+} from "./VaultHostListSection.tsx";
+
+Object.defineProperty(globalThis, "localStorage", {
+  configurable: true,
+  value: {
+    getItem: () => null,
+    setItem: () => {},
+    removeItem: () => {},
+  },
+});
 
 const makeHost = (id: string, label: string): Host => ({
   id,
@@ -61,14 +74,27 @@ const group: GroupNode = {
 
 const noop = () => undefined;
 
+test("tree auto-expansion covers both text and tag filters", () => {
+  assert.equal(getVaultTreeAutoExpandKey("", []), undefined);
+  assert.ok(getVaultTreeAutoExpandKey("router", []));
+  assert.ok(getVaultTreeAutoExpandKey("", ["production"]));
+  assert.equal(
+    getVaultTreeAutoExpandKey("router", ["production", "linux"]),
+    getVaultTreeAutoExpandKey("router", ["linux", "production"]),
+  );
+});
+
 type RenderHostListOptions = {
   displayedGroups?: GroupNode[];
   displayedHosts?: Host[];
   groupedDisplayHosts?: Array<{ name: string; hosts: Host[] }>;
+  isMultiSelectMode?: boolean;
   pinnedHosts?: Host[];
   pinnedRecentIds?: Set<string>;
   recentHosts?: Host[];
   showRecentHosts?: boolean;
+  selectedGroupPaths?: Set<string>;
+  selectedHostIds?: Set<string>;
   sortMode?: string;
   treeViewGroupTree?: GroupNode[];
   treeViewHosts?: Host[];
@@ -80,10 +106,13 @@ const renderHostList = ({
   displayedGroups = [group],
   displayedHosts = [mainHost],
   groupedDisplayHosts,
+  isMultiSelectMode = false,
   pinnedHosts = [],
   pinnedRecentIds = new Set<string>(),
   recentHosts = [],
   showRecentHosts = false,
+  selectedGroupPaths = new Set<string>(),
+  selectedHostIds = new Set<string>(),
   sortMode = "az",
   treeViewGroupTree = [],
   treeViewHosts = [],
@@ -118,6 +147,7 @@ const renderHostList = ({
       groupConfigs: [],
       groupedDisplayHosts,
       handleCopyCredentials: noop,
+      handleCopyHostname: noop,
       handleDuplicateHost: noop,
       handleEditGroupConfig: noop,
       handleEditHost: noop,
@@ -127,7 +157,7 @@ const renderHostList = ({
       hostListScrollRef: React.createRef<HTMLDivElement>(),
       HostTreeView,
       isHostsSectionActive: true,
-      isMultiSelectMode: false,
+      isMultiSelectMode,
       lastPinnedId: null,
       LayoutGrid,
       managedGroupPaths: new Set<string>(),
@@ -143,7 +173,8 @@ const renderHostList = ({
       reorderHost: noop,
       sanitizeHost,
       selectedGroupPath: null,
-      selectedHostIds: new Set<string>(),
+      selectedGroupPaths,
+      selectedHostIds,
       sessionCount: 0,
       setDeleteTargetPath: noop,
       setDragOverDropTarget: noop,
@@ -164,6 +195,7 @@ const renderHostList = ({
       startInlineNewGroup: noop,
       startInlineRenameGroup: noop,
       t: (key: string) => key,
+      toggleGroupSelection: noop,
       toggleHostPinned: noop,
       toggleHostSelection: noop,
       Trash2,
@@ -299,4 +331,166 @@ test("VaultHostListSection keeps list group edit action beside the group label w
   });
 
   assertGridGroupPlacement(gridMarkup, group);
+});
+
+test("VaultHostListSection exposes selectable groups to keyboard and assistive technology", () => {
+  const markup = renderHostList({
+    viewMode: "list",
+    displayedGroups: [group],
+    displayedHosts: [],
+    visibleDisplayedHosts: [],
+    isMultiSelectMode: true,
+    selectedGroupPaths: new Set([group.path]),
+  });
+
+  assert.match(markup, /data-group-path="production"[^>]*role="checkbox"/);
+  assert.match(markup, /data-group-path="production"[^>]*aria-checked="true"/);
+  assert.match(markup, /data-group-path="production"[^>]*tabindex="0"/);
+});
+
+test("VaultHostListSection exposes normal group cards to keyboard", () => {
+  const markup = renderHostList({
+    viewMode: "list",
+    displayedGroups: [group],
+    displayedHosts: [],
+    visibleDisplayedHosts: [],
+  });
+
+  assert.match(markup, /data-group-path="production"[^>]*role="button"/);
+  assert.match(markup, /data-group-path="production"[^>]*tabindex="0"/);
+});
+
+test("VaultHostListSection exposes ungrouped hosts to keyboard and assistive technology", () => {
+  const markup = renderHostList({
+    viewMode: "list",
+    displayedGroups: [],
+    displayedHosts: [mainHost],
+    visibleDisplayedHosts: [mainHost],
+    isMultiSelectMode: true,
+    selectedHostIds: new Set([mainHost.id]),
+  });
+
+  assert.match(markup, /data-host-id="main-host"[^>]*role="checkbox"/);
+  assert.match(markup, /data-host-id="main-host"[^>]*aria-checked="true"/);
+  assert.match(markup, /data-host-id="main-host"[^>]*tabindex="0"/);
+});
+
+test("VaultHostListSection exposes grouped hosts to keyboard and assistive technology", () => {
+  const markup = renderHostList({
+    viewMode: "grid",
+    displayedGroups: [],
+    displayedHosts: [groupedHost],
+    groupedDisplayHosts: [{ name: "Production", hosts: [groupedHost] }],
+    visibleDisplayedHosts: [groupedHost],
+    isMultiSelectMode: true,
+    selectedHostIds: new Set([groupedHost.id]),
+    sortMode: "group",
+  });
+
+  assert.match(markup, /data-host-id="grouped-host"[^>]*role="checkbox"/);
+  assert.match(markup, /data-host-id="grouped-host"[^>]*aria-checked="true"/);
+  assert.match(markup, /data-host-id="grouped-host"[^>]*tabindex="0"/);
+});
+
+test("VaultHostListSection virtualizes large grid collections without hiding search results", () => {
+  const hosts = Array.from({ length: 300 }, (_, index) => (
+    makeHost(`bulk-${index}`, `Bulk ${index}`)
+  ));
+  const markup = renderHostList({
+    viewMode: "grid",
+    displayedGroups: [],
+    displayedHosts: hosts,
+    visibleDisplayedHosts: hosts,
+  });
+
+  const renderedHosts = (markup.match(/data-vault-grid-item="main:/g) ?? []).length;
+  assert.ok(renderedHosts > 0);
+  assert.ok(renderedHosts < 100);
+  assert.doesNotMatch(markup, /vault\.hosts\.showMore/);
+});
+
+test("VaultHostListSection virtualizes large pinned collections", () => {
+  const hosts = Array.from({ length: 300 }, (_, index) => (
+    { ...makeHost(`pinned-${index}`, `Pinned ${index}`), pinned: true }
+  ));
+  const markup = renderHostList({
+    viewMode: "grid",
+    displayedGroups: [],
+    displayedHosts: [],
+    visibleDisplayedHosts: [],
+    pinnedHosts: hosts,
+  });
+
+  const renderedHosts = (markup.match(/data-vault-grid-item="pinned:/g) ?? []).length;
+  assert.ok(renderedHosts > 0);
+  assert.ok(renderedHosts < 100);
+  assert.match(markup, /data-vault-virtual-collection="grid"/);
+});
+
+test("VaultHostListSection virtualizes large recently connected collections", () => {
+  const hosts = Array.from({ length: 300 }, (_, index) => (
+    makeHost(`recent-${index}`, `Recent ${index}`)
+  ));
+  const markup = renderHostList({
+    viewMode: "grid",
+    displayedGroups: [],
+    displayedHosts: [],
+    visibleDisplayedHosts: [],
+    recentHosts: hosts,
+    showRecentHosts: true,
+  });
+
+  const renderedHosts = (markup.match(/data-vault-grid-item="recent:/g) ?? []).length;
+  assert.ok(renderedHosts > 0);
+  assert.ok(renderedHosts < 100);
+  assert.match(markup, /data-vault-virtual-collection="grid"/);
+});
+
+test("VaultHostListSection virtualizes large group collections", () => {
+  const groups = Array.from({ length: 300 }, (_, index): GroupNode => ({
+    name: `Group ${index}`,
+    path: `group-${index}`,
+    children: {},
+    hosts: [],
+    totalHostCount: 0,
+  }));
+  const markup = renderHostList({
+    viewMode: "grid",
+    displayedGroups: groups,
+    displayedHosts: [],
+    visibleDisplayedHosts: [],
+  });
+
+  const renderedGroups = (markup.match(/data-vault-grid-item="group:/g) ?? []).length;
+  assert.ok(renderedGroups > 0);
+  assert.ok(renderedGroups < 100);
+  assert.match(markup, /data-vault-virtual-collection="grid"/);
+});
+
+test("VaultHostListSection preserves grouped totals while virtualizing rendered cards", () => {
+  const hosts = Array.from({ length: 300 }, (_, index) => (
+    makeHost(`grouped-bulk-${index}`, `Grouped Bulk ${index}`)
+  ));
+  const markup = renderHostList({
+    viewMode: "grid",
+    displayedGroups: [],
+    displayedHosts: hosts,
+    groupedDisplayHosts: [{ name: "Large group", hosts }],
+    sortMode: "group",
+    visibleDisplayedHosts: [],
+  });
+
+  const renderedHosts = (markup.match(/data-vault-grid-item="grouped:/g) ?? []).length;
+  assert.ok(renderedHosts > 0);
+  assert.ok(renderedHosts < 100);
+  assert.match(markup, /\(300\)/);
+});
+
+test("VaultHostListSection exposes hostname copy in host context menus, not as a hover button", () => {
+  const source = readFileSync(new URL("./VaultHostListSection.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /data-vault-host-copy-hostname-button/);
+  assert.doesNotMatch(source, /renderHostCopyHostnameButton/);
+  assert.match(source, /terminal\.statusbar\.copyHostname\.label/);
+  assert.match(source, /handleCopyHostname\(host\)/);
+  assert.match(source, /!isPluginHostProtocol\(host\.protocol\)/);
 });

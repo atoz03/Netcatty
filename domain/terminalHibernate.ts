@@ -1,4 +1,4 @@
-import type { TerminalSettings } from "./models/terminal";
+import type { TerminalSession, TerminalSettings } from "./models/terminal";
 
 /** Compile-time kill switch for terminal hibernate (Settings > Terminal still controls user default). */
 export const TERMINAL_HIBERNATE_ENABLED = true;
@@ -34,6 +34,36 @@ export function resolveTerminalHibernateEnabled(
 ): boolean {
   if (!TERMINAL_HIBERNATE_ENABLED) return false;
   return settings?.hibernateHiddenTabs === true;
+}
+
+export function resolveTerminalHibernateEnabledForProtocol(
+  settings: Pick<TerminalSettings, "hibernateHiddenTabs"> | null | undefined,
+  protocol: string | null | undefined,
+): boolean {
+  return protocol !== "local" && resolveTerminalHibernateEnabled(settings);
+}
+
+/** Hidden connected and ended remote terminals can both release their xterm runtime. */
+export function canHibernateTerminalRuntimeStatus(
+  status: TerminalSession["status"],
+): boolean {
+  return status === "connected" || status === "disconnected";
+}
+
+export function canHibernateTerminalRuntimeSession(
+  status: TerminalSession["status"],
+  backendSessionId: string | null | undefined,
+): boolean {
+  if (!canHibernateTerminalRuntimeStatus(status)) return false;
+  return status === "disconnected" || Boolean(backendSessionId);
+}
+
+export function shouldKeepTerminalBackgroundWorkActive(
+  settings: Pick<TerminalSettings, "hibernateHiddenTabs"> | null | undefined,
+  protocol: string | null | undefined,
+  isVisible: boolean,
+): boolean {
+  return isVisible || !resolveTerminalHibernateEnabledForProtocol(settings, protocol);
 }
 
 /** Block hibernate while a file transfer or drag-drop session is in progress. */
@@ -130,11 +160,11 @@ export function shouldSkipHibernateForAltScreen(
 
 /** Snapshot + buffered output to replay when recreating xterm after hibernate. */
 export type TerminalHibernateWakePayload = {
-  /** Full serialized terminal state (legacy combined snapshot). */
+  /** Full serialized terminal state -- preferred wake history (coherent ANSI). */
   snapshot: string;
-  /** Visible viewport rows for fast first paint during wake. */
+  /** Visible viewport rows; used with scrollback only when snapshot is empty. */
   viewportSnapshot?: string;
-  /** Older scrollback rows replayed lazily after viewport + pending. */
+  /** Older scrollback rows; used with viewport only when snapshot is empty. */
   scrollbackSnapshot?: string;
   pendingBuffer: string;
   /** True when the pane was hibernated while a full-screen app owned the alt buffer. */

@@ -4,6 +4,7 @@ const assert = require("node:assert/strict");
 const {
   collectOpenTerminalPathArgs,
   expandHomePath,
+  normalizeOpenTerminalPathToken,
   resolveOpenTerminalPath,
   resolveOpenTerminalPathsFromArgs,
 } = require("./openTerminalPath.cjs");
@@ -19,6 +20,25 @@ test("collectOpenTerminalPathArgs extracts explicit open terminal paths", () => 
     ]),
     ["/Users/alice/project", "/tmp/demo"],
   );
+});
+
+test("collectOpenTerminalPathArgs accepts Electron-safe -- and equals forms", () => {
+  assert.deepEqual(
+    collectOpenTerminalPathArgs([
+      String.raw`C:\Program Files\Netcatty\Netcatty.exe`,
+      "--",
+      String.raw`--open-terminal-path=C:\Users\alice\project.`,
+    ]),
+    [String.raw`C:\Users\alice\project`],
+  );
+});
+
+test("normalizeOpenTerminalPathToken strips quotes and Windows shell trailing dots", () => {
+  assert.equal(
+    normalizeOpenTerminalPathToken('"C:\\Users\\alice\\Docs."'),
+    "C:\\Users\\alice\\Docs",
+  );
+  assert.equal(normalizeOpenTerminalPathToken("C:\\"), "C:\\");
 });
 
 test("resolveOpenTerminalPath accepts directories", () => {

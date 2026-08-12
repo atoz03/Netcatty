@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  PINYIN_CACHE_MAX_ENTRIES,
+  getPinyinCacheStatsForTests,
   getHostSearchMatch,
   matchesHostSearchQuery,
   matchesSearchQuery,
+  resetPinyinCacheForTests,
 } from "../lib/searchMatcher.ts";
 
 test("matches mixed Chinese and dash-separated numeric suffix with spaced query", () => {
@@ -149,4 +152,26 @@ test("host search scoring favors label over group when both match", () => {
   assert.equal(labelHit.matched, true);
   assert.equal(groupHit.matched, true);
   assert.equal(labelHit.score > groupHit.score, true);
+});
+
+test("pinyin cache covers 8000 hosts and stays hard-bounded through import/edit churn", () => {
+  resetPinyinCacheForTests();
+  const startedAt = performance.now();
+  for (let index = 0; index < 8_000; index += 1) {
+    matchesHostSearchQuery("z", { label: `主机${index}` });
+  }
+  const firstPassMs = performance.now() - startedAt;
+  assert.equal(getPinyinCacheStatsForTests().size, 8_000);
+  assert.ok(firstPassMs < 10_000, `8000-host pinyin indexing took ${firstPassMs.toFixed(1)}ms`);
+
+  matchesHostSearchQuery("z", { label: "主机0" });
+  for (let index = 8_000; index < PINYIN_CACHE_MAX_ENTRIES + 128; index += 1) {
+    matchesHostSearchQuery("z", { label: `主机${index}` });
+  }
+
+  const stats = getPinyinCacheStatsForTests();
+  assert.equal(stats.size, PINYIN_CACHE_MAX_ENTRIES);
+  assert.ok(stats.keys.includes("主机0"));
+  assert.ok(!stats.keys.includes("主机1"));
+  resetPinyinCacheForTests();
 });

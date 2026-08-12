@@ -15,10 +15,14 @@ const {
   notifyWindowWillHide,
   requestWindowCommandClose,
   sendWhenRendererReady,
+  setPluginApplicationMenuProvider,
   shouldCloseWindowFromInput,
   unregisterMainWindow,
 } = require("./windowManager.cjs");
-const { createMainWindowApi } = require("./windowManager/mainWindow.cjs");
+const {
+  createMainWindowApi,
+  setTerminalKeyboardFocusForWindow,
+} = require("./windowManager/mainWindow.cjs");
 
 function createWindowStub({ destroyed = false, webContents } = {}) {
   return {
@@ -421,6 +425,64 @@ test("buildAppMenu keeps app reload click-only so custom reload-like shortcuts r
   assert.deepEqual(calls, ["reload"]);
 });
 
+test("buildAppMenu renders localized plugin commands with checked and disabled state", () => {
+  let capturedTemplate = null;
+  const Menu = {
+    buildFromTemplate(template) {
+      capturedTemplate = template;
+      return { template };
+    },
+  };
+  const calls = [];
+  const icon = { kind: "native-image" };
+  setPluginApplicationMenuProvider(() => [
+    {
+      id: "com.example.menu.toggle",
+      label: "切换功能",
+      enabled: false,
+      checked: true,
+      icon,
+      group: "navigation",
+      click: () => calls.push("clicked"),
+    },
+    {
+      id: "com.example.menu.open",
+      label: "打开视图",
+      group: "views",
+      click: () => calls.push("opened"),
+    },
+  ]);
+  try {
+    buildAppMenu(Menu, { name: "Netcatty" }, false, "zh-CN");
+    const pluginsMenu = capturedTemplate.find((item) => item.label === "插件");
+    assert.ok(pluginsMenu);
+    assert.deepEqual(pluginsMenu.submenu.map(({ id, label, enabled, checked, type }) => ({
+      id, label, enabled, checked, type,
+    })), [
+      {
+        id: "com.example.menu.toggle",
+        label: "切换功能",
+        enabled: false,
+        checked: true,
+        type: "checkbox",
+      },
+      { id: undefined, label: undefined, enabled: undefined, checked: undefined, type: "separator" },
+      {
+        id: "com.example.menu.open",
+        label: "打开视图",
+        enabled: true,
+        checked: false,
+        type: "normal",
+      },
+    ]);
+    assert.equal(pluginsMenu.submenu[0].icon, icon);
+    pluginsMenu.submenu[0].click();
+    assert.deepEqual(calls, ["clicked"]);
+  } finally {
+    setPluginApplicationMenuProvider(null);
+  }
+});
+
 test("requestWindowCommandClose sends command-close to renderer-capable windows", () => {
   const sentChannels = [];
   const win = {
@@ -671,6 +733,514 @@ test("main window leaves primary-modifier reload-like shortcuts available to ren
 
   assert.equal(prevented, false);
   assert.deepEqual(ignoreMenuShortcutValues, [false]);
+});
+
+test("main window treats Ctrl+= as zoom-in even when Electron only reserves Ctrl++", async () => {
+  let beforeInputHandler = null;
+  const ignoreMenuShortcutValues = [];
+  const zoomFactorCalls = [];
+
+  class BrowserWindowStub {
+    constructor() {
+      this.webContents = {
+        id: 1,
+        on(channel, handler) {
+          if (channel === "before-input-event") beforeInputHandler = handler;
+        },
+        once() {},
+        isDestroyed() {
+          return false;
+        },
+        isCrashed() {
+          return false;
+        },
+        setIgnoreMenuShortcuts(value) {
+          ignoreMenuShortcutValues.push(value);
+        },
+        setWindowOpenHandler() {},
+        openDevTools() {},
+        getZoomFactor() {
+          return 1;
+        },
+        setZoomFactor(value) {
+          zoomFactorCalls.push(value);
+        },
+      };
+    }
+
+    on() {}
+    once() {}
+    isDestroyed() { return false; }
+    isMaximized() { return false; }
+    isFullScreen() { return false; }
+    getBounds() { return { x: 0, y: 0, width: 1400, height: 900 }; }
+    setBackgroundColor() {}
+    setOpacity() {}
+    async loadURL() {}
+    close() {}
+  }
+
+  const api = createMainWindowApi({
+    mainWindow: null,
+    electronApp: null,
+    currentTheme: "light",
+    isQuitting: false,
+    pendingWindowStateWrite: null,
+    queuedWindowState: null,
+    windowStateCloseRequested: false,
+    DEFAULT_WINDOW_WIDTH: 1400,
+    DEFAULT_WINDOW_HEIGHT: 900,
+    MIN_WINDOW_WIDTH: 1100,
+    MIN_WINDOW_HEIGHT: 640,
+    V8_CACHE_OPTIONS: "bypassHeatCheck",
+    THEME_COLORS: { light: { background: "#fff" } },
+    unhealthyWebContentsIds: new Set(),
+    rendererReadySeenByWebContentsId: new Set(),
+    __dirname,
+    URL,
+    require,
+    console,
+    setTimeout,
+    clearTimeout,
+    getGlobalShortcutBridge() {
+      return { handleWindowClose: () => false };
+    },
+    debugLog() {},
+    resolveFrontendBackgroundColor() { return null; },
+    loadWindowState() { return null; },
+    getDevRendererBaseUrl(url) { return url; },
+    getWindowBoundsState() { return null; },
+    queueWindowStateSave() {},
+    saveWindowStateSync() {},
+    setupDeferredShow() {},
+    createExternalOnlyWindowOpenHandler() { return {}; },
+    createAppWindowOpenHandler() { return {}; },
+    attachOAuthLoadingOverlay() {},
+    registerWindowHandlers() {},
+    requestWindowCommandClose() {
+      return true;
+    },
+    shouldCloseWindowFromInput,
+    applyWindowOpacityToWindow() {},
+    closeSettingsWindow() {},
+    hideSettingsWindow() {},
+  });
+
+  await api.createWindow(
+    {
+      BrowserWindow: BrowserWindowStub,
+      nativeTheme: {},
+      app: {},
+      screen: {},
+      shell: {},
+      ipcMain: {},
+    },
+    {
+      preload: "/tmp/preload.cjs",
+      devServerUrl: "http://localhost:5173",
+      isDev: true,
+      appIcon: null,
+      isMac: false,
+      electronDir: __dirname,
+    },
+  );
+
+  let prevented = false;
+  beforeInputHandler({ preventDefault: () => { prevented = true; } }, {
+    type: "keyDown",
+    control: true,
+    shift: false,
+    key: "=",
+  });
+
+  assert.equal(prevented, true);
+  assert.deepEqual(zoomFactorCalls, [1.1]);
+  assert.deepEqual(ignoreMenuShortcutValues, []);
+});
+
+test("main window treats Ctrl+- as zoom-out via explicit shortcut handling", async () => {
+  let beforeInputHandler = null;
+  const ignoreMenuShortcutValues = [];
+  const zoomFactorCalls = [];
+
+  class BrowserWindowStub {
+    constructor() {
+      this.webContents = {
+        id: 1,
+        on(channel, handler) {
+          if (channel === "before-input-event") beforeInputHandler = handler;
+        },
+        once() {},
+        isDestroyed() {
+          return false;
+        },
+        isCrashed() {
+          return false;
+        },
+        setIgnoreMenuShortcuts(value) {
+          ignoreMenuShortcutValues.push(value);
+        },
+        setWindowOpenHandler() {},
+        openDevTools() {},
+        getZoomFactor() {
+          return 1;
+        },
+        setZoomFactor(value) {
+          zoomFactorCalls.push(value);
+        },
+      };
+    }
+
+    on() {}
+    once() {}
+    isDestroyed() { return false; }
+    isMaximized() { return false; }
+    isFullScreen() { return false; }
+    getBounds() { return { x: 0, y: 0, width: 1400, height: 900 }; }
+    setBackgroundColor() {}
+    setOpacity() {}
+    async loadURL() {}
+    close() {}
+  }
+
+  const api = createMainWindowApi({
+    mainWindow: null,
+    electronApp: null,
+    currentTheme: "light",
+    isQuitting: false,
+    pendingWindowStateWrite: null,
+    queuedWindowState: null,
+    windowStateCloseRequested: false,
+    DEFAULT_WINDOW_WIDTH: 1400,
+    DEFAULT_WINDOW_HEIGHT: 900,
+    MIN_WINDOW_WIDTH: 1100,
+    MIN_WINDOW_HEIGHT: 640,
+    V8_CACHE_OPTIONS: "bypassHeatCheck",
+    THEME_COLORS: { light: { background: "#fff" } },
+    unhealthyWebContentsIds: new Set(),
+    rendererReadySeenByWebContentsId: new Set(),
+    __dirname,
+    URL,
+    require,
+    console,
+    setTimeout,
+    clearTimeout,
+    getGlobalShortcutBridge() {
+      return { handleWindowClose: () => false };
+    },
+    debugLog() {},
+    resolveFrontendBackgroundColor() { return null; },
+    loadWindowState() { return null; },
+    getDevRendererBaseUrl(url) { return url; },
+    getWindowBoundsState() { return null; },
+    queueWindowStateSave() {},
+    saveWindowStateSync() {},
+    setupDeferredShow() {},
+    createExternalOnlyWindowOpenHandler() { return {}; },
+    createAppWindowOpenHandler() { return {}; },
+    attachOAuthLoadingOverlay() {},
+    registerWindowHandlers() {},
+    requestWindowCommandClose() {
+      return true;
+    },
+    shouldCloseWindowFromInput,
+    applyWindowOpacityToWindow() {},
+    closeSettingsWindow() {},
+    hideSettingsWindow() {},
+  });
+
+  await api.createWindow(
+    {
+      BrowserWindow: BrowserWindowStub,
+      nativeTheme: {},
+      app: {},
+      screen: {},
+      shell: {},
+      ipcMain: {},
+    },
+    {
+      preload: "/tmp/preload.cjs",
+      devServerUrl: "http://localhost:5173",
+      isDev: true,
+      appIcon: null,
+      isMac: false,
+      electronDir: __dirname,
+    },
+  );
+
+  let prevented = false;
+  beforeInputHandler({ preventDefault: () => { prevented = true; } }, {
+    type: "keyDown",
+    control: true,
+    shift: false,
+    key: "-",
+  });
+
+  assert.equal(prevented, true);
+  assert.deepEqual(zoomFactorCalls, [0.9]);
+  assert.deepEqual(ignoreMenuShortcutValues, []);
+});
+
+test("main window treats Ctrl+0 as reset-zoom via explicit shortcut handling", async () => {
+  let beforeInputHandler = null;
+  const ignoreMenuShortcutValues = [];
+  const zoomFactorCalls = [];
+
+  class BrowserWindowStub {
+    constructor() {
+      this.webContents = {
+        id: 1,
+        on(channel, handler) {
+          if (channel === "before-input-event") beforeInputHandler = handler;
+        },
+        once() {},
+        isDestroyed() {
+          return false;
+        },
+        isCrashed() {
+          return false;
+        },
+        setIgnoreMenuShortcuts(value) {
+          ignoreMenuShortcutValues.push(value);
+        },
+        setWindowOpenHandler() {},
+        openDevTools() {},
+        getZoomFactor() {
+          return 1.5;
+        },
+        setZoomFactor(value) {
+          zoomFactorCalls.push(value);
+        },
+      };
+    }
+
+    on() {}
+    once() {}
+    isDestroyed() { return false; }
+    isMaximized() { return false; }
+    isFullScreen() { return false; }
+    getBounds() { return { x: 0, y: 0, width: 1400, height: 900 }; }
+    setBackgroundColor() {}
+    setOpacity() {}
+    async loadURL() {}
+    close() {}
+  }
+
+  const api = createMainWindowApi({
+    mainWindow: null,
+    electronApp: null,
+    currentTheme: "light",
+    isQuitting: false,
+    pendingWindowStateWrite: null,
+    queuedWindowState: null,
+    windowStateCloseRequested: false,
+    DEFAULT_WINDOW_WIDTH: 1400,
+    DEFAULT_WINDOW_HEIGHT: 900,
+    MIN_WINDOW_WIDTH: 1100,
+    MIN_WINDOW_HEIGHT: 640,
+    V8_CACHE_OPTIONS: "bypassHeatCheck",
+    THEME_COLORS: { light: { background: "#fff" } },
+    unhealthyWebContentsIds: new Set(),
+    rendererReadySeenByWebContentsId: new Set(),
+    __dirname,
+    URL,
+    require,
+    console,
+    setTimeout,
+    clearTimeout,
+    getGlobalShortcutBridge() {
+      return { handleWindowClose: () => false };
+    },
+    debugLog() {},
+    resolveFrontendBackgroundColor() { return null; },
+    loadWindowState() { return null; },
+    getDevRendererBaseUrl(url) { return url; },
+    getWindowBoundsState() { return null; },
+    queueWindowStateSave() {},
+    saveWindowStateSync() {},
+    setupDeferredShow() {},
+    createExternalOnlyWindowOpenHandler() { return {}; },
+    createAppWindowOpenHandler() { return {}; },
+    attachOAuthLoadingOverlay() {},
+    registerWindowHandlers() {},
+    requestWindowCommandClose() {
+      return true;
+    },
+    shouldCloseWindowFromInput,
+    applyWindowOpacityToWindow() {},
+    closeSettingsWindow() {},
+    hideSettingsWindow() {},
+  });
+
+  await api.createWindow(
+    {
+      BrowserWindow: BrowserWindowStub,
+      nativeTheme: {},
+      app: {},
+      screen: {},
+      shell: {},
+      ipcMain: {},
+    },
+    {
+      preload: "/tmp/preload.cjs",
+      devServerUrl: "http://localhost:5173",
+      isDev: true,
+      appIcon: null,
+      isMac: false,
+      electronDir: __dirname,
+    },
+  );
+
+  let prevented = false;
+  beforeInputHandler({ preventDefault: () => { prevented = true; } }, {
+    type: "keyDown",
+    control: true,
+    shift: false,
+    key: "0",
+  });
+
+  assert.equal(prevented, true);
+  assert.deepEqual(zoomFactorCalls, [1]);
+  assert.deepEqual(ignoreMenuShortcutValues, []);
+});
+
+test("main window leaves terminal font shortcuts for the renderer while terminal input is focused", async () => {
+  let beforeInputHandler = null;
+  const ignoreMenuShortcutValues = [];
+  const zoomFactorCalls = [];
+  let createdWindow = null;
+
+  class BrowserWindowStub {
+    constructor() {
+      createdWindow = this;
+      this.webContents = {
+        id: 1,
+        on(channel, handler) {
+          if (channel === "before-input-event") beforeInputHandler = handler;
+        },
+        once() {},
+        isDestroyed() {
+          return false;
+        },
+        isCrashed() {
+          return false;
+        },
+        setIgnoreMenuShortcuts(value) {
+          ignoreMenuShortcutValues.push(value);
+        },
+        setWindowOpenHandler() {},
+        openDevTools() {},
+        getZoomFactor() {
+          return 1;
+        },
+        setZoomFactor(value) {
+          zoomFactorCalls.push(value);
+        },
+      };
+    }
+
+    on() {}
+    once() {}
+    isDestroyed() { return false; }
+    isMaximized() { return false; }
+    isFullScreen() { return false; }
+    getBounds() { return { x: 0, y: 0, width: 1400, height: 900 }; }
+    setBackgroundColor() {}
+    setOpacity() {}
+    async loadURL() {}
+    close() {}
+  }
+
+  const api = createMainWindowApi({
+    mainWindow: null,
+    electronApp: null,
+    currentTheme: "light",
+    isQuitting: false,
+    pendingWindowStateWrite: null,
+    queuedWindowState: null,
+    windowStateCloseRequested: false,
+    DEFAULT_WINDOW_WIDTH: 1400,
+    DEFAULT_WINDOW_HEIGHT: 900,
+    MIN_WINDOW_WIDTH: 1100,
+    MIN_WINDOW_HEIGHT: 640,
+    V8_CACHE_OPTIONS: "bypassHeatCheck",
+    THEME_COLORS: { light: { background: "#fff" } },
+    unhealthyWebContentsIds: new Set(),
+    rendererReadySeenByWebContentsId: new Set(),
+    __dirname,
+    URL,
+    require,
+    console,
+    setTimeout,
+    clearTimeout,
+    getGlobalShortcutBridge() {
+      return { handleWindowClose: () => false };
+    },
+    debugLog() {},
+    resolveFrontendBackgroundColor() { return null; },
+    loadWindowState() { return null; },
+    getDevRendererBaseUrl(url) { return url; },
+    getWindowBoundsState() { return null; },
+    queueWindowStateSave() {},
+    saveWindowStateSync() {},
+    setupDeferredShow() {},
+    createExternalOnlyWindowOpenHandler() { return {}; },
+    createAppWindowOpenHandler() { return {}; },
+    attachOAuthLoadingOverlay() {},
+    registerWindowHandlers() {},
+    requestWindowCommandClose() {
+      return true;
+    },
+    shouldCloseWindowFromInput,
+    applyWindowOpacityToWindow() {},
+    closeSettingsWindow() {},
+    hideSettingsWindow() {},
+  });
+
+  await api.createWindow(
+    {
+      BrowserWindow: BrowserWindowStub,
+      nativeTheme: {},
+      app: {},
+      screen: {},
+      shell: {},
+      ipcMain: {},
+    },
+    {
+      preload: "/tmp/preload.cjs",
+      devServerUrl: "http://localhost:5173",
+      isDev: true,
+      appIcon: null,
+      isMac: false,
+      electronDir: __dirname,
+    },
+  );
+
+  setTerminalKeyboardFocusForWindow(createdWindow, true);
+  ignoreMenuShortcutValues.length = 0;
+
+  for (const key of ["=", "-", "0"]) {
+    let prevented = false;
+    beforeInputHandler({ preventDefault: () => { prevented = true; } }, {
+      type: "keyDown",
+      control: true,
+      shift: false,
+      key,
+    });
+
+    assert.equal(prevented, false);
+  }
+
+  assert.deepEqual(zoomFactorCalls, []);
+  assert.deepEqual(ignoreMenuShortcutValues, [true, true, true]);
+
+  beforeInputHandler({ preventDefault() {} }, {
+    type: "keyDown",
+    control: true,
+    shift: false,
+    key: "A",
+  });
+  assert.equal(ignoreMenuShortcutValues.at(-1), false);
 });
 
 test("main window clears renderer readiness when the main frame starts navigating", async () => {

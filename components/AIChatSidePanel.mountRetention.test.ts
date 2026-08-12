@@ -90,6 +90,7 @@ const baseProps = (overrides: Partial<AIChatSidePanelProps> = {}): AIChatSidePan
   addMessageToSession: () => undefined,
   updateLastMessage: () => undefined,
   updateMessageById: () => undefined,
+  persistContextCompaction: () => undefined,
   providers: [],
   activeProviderId: '',
   activeModelId: '',
@@ -183,6 +184,40 @@ test('AI side panel re-renders when retained content becomes visible again', () 
   ), false);
 });
 
+test('hidden retained AI side panel skips chat input and message content', () => {
+  const markup = renderToStaticMarkup(
+    React.createElement(
+      I18nProvider,
+      { locale: 'en' },
+      React.createElement(
+        TooltipProvider,
+        null,
+        React.createElement(AIChatSidePanel, baseProps({
+          isVisible: false,
+          activeSessionIdMap: { 'terminal:terminal-1': 'session-1' },
+          sessions: [
+            session({
+              messages: [
+                { id: 'm1', role: 'user', content: 'hidden-user-message', timestamp: 1 },
+                { id: 'm2', role: 'assistant', content: 'hidden-assistant-message', timestamp: 2 },
+              ],
+            }),
+          ],
+          draftsByScope: {
+            'terminal:terminal-1': draft({ text: 'draft still retained' }),
+          },
+        })),
+      ),
+    ),
+  );
+
+  assert.match(markup, /data-section="ai-chat-panel-retained"/);
+  assert.doesNotMatch(markup, /textarea/);
+  assert.doesNotMatch(markup, /hidden-user-message/);
+  assert.doesNotMatch(markup, /hidden-assistant-message/);
+  assert.doesNotMatch(markup, /draft still retained/);
+});
+
 test('AI side panel re-renders when command timeout changes', () => {
   const props = baseProps({
     isVisible: true,
@@ -193,4 +228,75 @@ test('AI side panel re-renders when command timeout changes', () => {
     props,
     { ...props, commandTimeout: 86_400 },
   ), false);
+});
+
+test('AI side panel skips re-render when only a sibling scope session object changes', () => {
+  const own = session({ id: 'session-1', scope: { type: 'terminal', targetId: 'terminal-1' } });
+  const siblingA = session({ id: 'session-2', scope: { type: 'terminal', targetId: 'terminal-2' } });
+  const siblingB = session({ id: 'session-2', scope: { type: 'terminal', targetId: 'terminal-2' } });
+  const prev = baseProps({
+    isVisible: true,
+    scopeType: 'terminal',
+    scopeTargetId: 'terminal-1',
+    sessions: [own, siblingA],
+  });
+  const next = {
+    ...prev,
+    sessions: [own, siblingB],
+  };
+  assert.equal(aiChatSidePanelPropsAreEqual(prev, next), true);
+
+  const ownStreamed = session({ id: 'session-1', scope: { type: 'terminal', targetId: 'terminal-1' } });
+  assert.equal(
+    aiChatSidePanelPropsAreEqual(prev, { ...prev, sessions: [ownStreamed, siblingA] }),
+    false,
+  );
+});
+
+test('workspace AI panel memo follows visible inherited session, not hidden terminal maps', () => {
+  const visibleMemberChat = session({
+    id: 'chat-visible',
+    scope: { type: 'terminal', targetId: 'terminal-b', hostIds: ['host-b'] },
+  });
+  const hiddenFocusedChat = session({
+    id: 'chat-hidden',
+    scope: { type: 'terminal', targetId: 'terminal-other', hostIds: ['host-other'] },
+  });
+  const prev = baseProps({
+    isVisible: true,
+    scopeType: 'workspace',
+    scopeTargetId: 'ws-1',
+    focusedSessionId: 'terminal-a',
+    terminalSessions: [
+      {
+        sessionId: 'terminal-a',
+        hostId: 'host-a',
+        hostname: 'a.example',
+        label: 'A',
+        connected: true,
+      },
+      {
+        sessionId: 'terminal-b',
+        hostId: 'host-b',
+        hostname: 'b.example',
+        label: 'B',
+        connected: true,
+      },
+    ],
+    activeSessionIdMap: {
+      'terminal:terminal-a': 'chat-hidden',
+      'terminal:terminal-b': 'chat-visible',
+    },
+    sessions: [visibleMemberChat, hiddenFocusedChat],
+  });
+  const streamedVisible = session({
+    id: 'chat-visible',
+    scope: { type: 'terminal', targetId: 'terminal-b', hostIds: ['host-b'] },
+    messages: [{ id: 'm1', role: 'assistant', content: 'stream', timestamp: 2 }],
+  });
+
+  assert.equal(
+    aiChatSidePanelPropsAreEqual(prev, { ...prev, sessions: [streamedVisible, hiddenFocusedChat] }),
+    false,
+  );
 });

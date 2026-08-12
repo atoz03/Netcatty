@@ -370,6 +370,31 @@ test("startStreamToFile can write human-readable text logs from ANSI terminal ou
   }
 });
 
+test("startStreamToFile seeds alternate-screen omission for late-started txt logs", async () => {
+  const directory = path.join(TEMP_ROOT, `manual-alt-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+  const filePath = path.join(directory, "manual.txt");
+  const sessionId = `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
+  try {
+    const result = startStreamToFile(sessionId, {
+      filePath,
+      format: "txt",
+      hostLabel: "manual",
+      alternateScreenActive: true,
+    });
+
+    assert.equal(result.ok, true);
+    appendData(sessionId, "~\nstatus line\n\x1b[?1049l$ done\n");
+    const finalPath = await stopStream(sessionId);
+
+    assert.equal(finalPath, filePath);
+    assert.equal(fs.readFileSync(filePath, "utf8"), "$ done");
+  } finally {
+    await stopStream(sessionId);
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("raw stream hides sudo autofill prompt markers and rewritten command echoes", async () => {
   const directory = path.join(TEMP_ROOT, `stream-sudo-${Date.now()}-${Math.random().toString(16).slice(2)}`);
   const sessionId = `session-${Date.now()}-${Math.random().toString(16).slice(2)}`;

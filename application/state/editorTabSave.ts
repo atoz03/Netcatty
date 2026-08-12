@@ -32,7 +32,17 @@ export const createEditorTabSaveService = ({
       onSave: async (content) => {
         const tab = store.getTab(id);
         if (!tab) throw new Error("Editor tab closed before save completed");
-        await write(tab.sessionId, tab.hostId, tab.remotePath, content);
+        const liveConnectionId = await write(
+          tab.sessionId,
+          tab.hostId,
+          tab.remotePath,
+          content,
+          undefined,
+          tab.sftpTabId,
+        );
+        if (liveConnectionId !== tab.sessionId) {
+          store.remapSessionId(tab.sessionId, liveConnectionId);
+        }
       },
       onSaveStart: () => {
         store.setSavingState(id, "saving");

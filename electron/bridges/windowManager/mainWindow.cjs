@@ -1,4 +1,26 @@
 /* eslint-disable no-undef */
+const {
+  windowsFramelessContentChromeOptions,
+} = require("./windowsWindowChrome.cjs");
+
+const TERMINAL_KEYBOARD_FOCUS = Symbol("netcattyTerminalKeyboardFocus");
+
+function setTerminalKeyboardFocusForWindow(win, focused) {
+  if (!win || win.isDestroyed?.() || !win.webContents) return false;
+  const isFocused = focused === true;
+  try {
+    win[TERMINAL_KEYBOARD_FOCUS] = isFocused;
+    win.webContents.setIgnoreMenuShortcuts?.(isFocused);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasTerminalKeyboardFocus(win) {
+  return win?.[TERMINAL_KEYBOARD_FOCUS] === true;
+}
+
 function createMainWindowApi(ctx) {
   with (ctx) {
     async function createWindow(electronModule, options) {
@@ -12,6 +34,7 @@ function createMainWindowApi(ctx) {
         onRegisterBridge,
         electronDir,
         route,
+        onAppContentWindowClosed,
         registerAsMainWindow = true,
         persistWindowState = registerAsMainWindow,
         registerAsAppContentWindow = true,
@@ -19,6 +42,58 @@ function createMainWindowApi(ctx) {
       const rendererHash = typeof route === "string" && route.trim()
         ? `#/${route.trim().replace(/^#?\/*/, "")}`
         : "";
+      const CHROMIUM_ZOOM_FACTORS = [
+        0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5,
+      ];
+
+      const isPrimaryZoomInEqualInput = (input) => {
+        if (input?.type !== "keyDown") return false;
+        if (input.alt) return false;
+        const hasPrimaryModifier = isMac
+          ? Boolean(input.meta) && !input.control
+          : Boolean(input.control) && !input.meta;
+        if (!hasPrimaryModifier || input.shift) return false;
+        return String(input.key || "") === "=";
+      };
+
+      const isPrimaryZoomOutMinusInput = (input) => {
+        if (input?.type !== "keyDown") return false;
+        if (input.alt) return false;
+        const hasPrimaryModifier = isMac
+          ? Boolean(input.meta) && !input.control
+          : Boolean(input.control) && !input.meta;
+        if (!hasPrimaryModifier || input.shift) return false;
+        return String(input.key || "") === "-";
+      };
+
+      const isPrimaryResetZoomInput = (input) => {
+        if (input?.type !== "keyDown") return false;
+        if (input.alt) return false;
+        const hasPrimaryModifier = isMac
+          ? Boolean(input.meta) && !input.control
+          : Boolean(input.control) && !input.meta;
+        if (!hasPrimaryModifier || input.shift) return false;
+        return String(input.key || "") === "0";
+      };
+
+      const adjustWindowZoom = (mode) => {
+        const webContents = win?.webContents;
+        if (!webContents || webContents.isDestroyed?.()) return false;
+        const currentFactor = Number(webContents.getZoomFactor?.());
+        const safeCurrentFactor = Number.isFinite(currentFactor) ? currentFactor : 1;
+        const nextFactor = mode === "in"
+          ? CHROMIUM_ZOOM_FACTORS.find((factor) => factor > safeCurrentFactor + 0.0001)
+          : mode === "out"
+            ? [...CHROMIUM_ZOOM_FACTORS].reverse().find((factor) => factor < safeCurrentFactor - 0.0001)
+            : 1;
+        if (!nextFactor) return false;
+        try {
+          webContents.setZoomFactor?.(nextFactor);
+          return true;
+        } catch {
+          return false;
+        }
+      };
     
       // Store app reference for window state persistence
       electronApp = app;
@@ -68,6 +143,8 @@ function createMainWindowApi(ctx) {
         }
       }
     
+      const windowsChrome = !isMac ? windowsFramelessContentChromeOptions() : {};
+
       const win = new BrowserWindow({
         ...windowBounds,
         minWidth: MIN_WINDOW_WIDTH,
@@ -78,11 +155,14 @@ function createMainWindowApi(ctx) {
         frame: isMac,
         titleBarStyle: isMac ? "hiddenInset" : undefined,
         trafficLightPosition: isMac ? { x: 12, y: 12 } : undefined,
+        ...windowsChrome,
         webPreferences: {
           preload,
           contextIsolation: true,
           nodeIntegration: false,
           sandbox: false,
+          spellcheck: false,
+          backgroundThrottling: false,
           v8CacheOptions: V8_CACHE_OPTIONS,
         },
       });
@@ -94,7 +174,7 @@ function createMainWindowApi(ctx) {
           mainWindow = win;
         }
       } else if (registerAsAppContentWindow && typeof registerAppContentWindow === "function") {
-        registerAppContentWindow(win);
+        registerAppContentWindow(win, { queryDirtyEditors: true });
       }
     
       // Clear reference when the main window is destroyed
@@ -115,6 +195,17 @@ function createMainWindowApi(ctx) {
           }
         } else if (registerAsAppContentWindow && typeof unregisterAppContentWindow === "function") {
           unregisterAppContentWindow(win);
+        }
+        if (registerAsAppContentWindow) {
+          try {
+            if (typeof notifyAppContentWindowClosed === "function") {
+              notifyAppContentWindowClosed(win);
+            } else {
+              onAppContentWindowClosed?.(win);
+            }
+          } catch {
+            // The application-level close fallback must not disrupt teardown.
+          }
         }
       });
     
@@ -186,6 +277,30 @@ function createMainWindowApi(ctx) {
         if (isMac && shouldCloseWindowFromInput(input)) {
           event.preventDefault();
           requestWindowCommandClose(win);
+          return;
+        }
+
+        const isTerminalFontShortcut =
+          isPrimaryZoomInEqualInput(input)
+          || isPrimaryZoomOutMinusInput(input)
+          || isPrimaryResetZoomInput(input);
+        if (hasTerminalKeyboardFocus(win) && isTerminalFontShortcut) {
+          win.webContents.setIgnoreMenuShortcuts(true);
+          return;
+        }
+
+        if (isPrimaryZoomInEqualInput(input) && adjustWindowZoom("in")) {
+          event.preventDefault();
+          return;
+        }
+
+        if (isPrimaryZoomOutMinusInput(input) && adjustWindowZoom("out")) {
+          event.preventDefault();
+          return;
+        }
+
+        if (isPrimaryResetZoomInput(input) && adjustWindowZoom("reset")) {
+          event.preventDefault();
           return;
         }
 
@@ -425,4 +540,7 @@ function createMainWindowApi(ctx) {
   }
 }
 
-module.exports = { createMainWindowApi };
+module.exports = {
+  createMainWindowApi,
+  setTerminalKeyboardFocusForWindow,
+};

@@ -8,13 +8,21 @@ import { useI18n } from '../../application/i18n/I18nProvider';
 import { Host,PortForwardingRule } from '../../domain/models';
 import { DistroAvatar } from '../DistroAvatar';
 import { TrafficDiagram } from '../TrafficDiagram';
-import { AsideActionMenu,AsideActionMenuItem,AsidePanel,AsidePanelContent,AsidePanelFooter } from '../ui/aside-panel';
+import {
+    AsideActionMenu,
+    AsideActionMenuItem,
+    AsidePanel,
+    AsidePanelContent,
+    AsidePanelFooter,
+    type AsidePanelLayout,
+    type AsidePanelResizeProps,
+} from '../ui/aside-panel';
 import { Button } from '../ui/button';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import { Switch } from '../ui/switch';
 
-export interface EditPanelProps {
+export interface EditPanelProps extends AsidePanelResizeProps {
     rule: PortForwardingRule;
     draft: Partial<PortForwardingRule>;
     hosts: Host[];
@@ -24,6 +32,7 @@ export interface EditPanelProps {
     onDuplicate: () => void;
     onDelete: () => void;
     onOpenHostSelector: () => void;
+    layout?: AsidePanelLayout;
 }
 
 export const EditPanel: React.FC<EditPanelProps> = ({
@@ -36,6 +45,10 @@ export const EditPanel: React.FC<EditPanelProps> = ({
     onDuplicate,
     onDelete,
     onOpenHostSelector,
+    layout = 'inline',
+    resizable = false,
+    persistWidthStorageKey,
+    resizeAriaLabel,
 }) => {
     const { t } = useI18n();
     const selectedHost = hosts.find(h => h.id === draft.hostId);
@@ -46,6 +59,10 @@ export const EditPanel: React.FC<EditPanelProps> = ({
             onClose={onClose}
             title={t('pf.wizard.editTitle')}
             width="w-[360px]"
+            layout={layout}
+            resizable={resizable}
+            persistWidthStorageKey={persistWidthStorageKey}
+            resizeAriaLabel={resizeAriaLabel}
             actions={
                 <AsideActionMenu>
                     <AsideActionMenuItem
@@ -117,7 +134,7 @@ export const EditPanel: React.FC<EditPanelProps> = ({
                                 <DistroAvatar
                                     host={selectedHost}
                                     fallback={selectedHost.os[0].toUpperCase()}
-                                    className="h-6 w-6"
+                                    size="tree"
                                 />
                                 <span>{selectedHost.label}</span>
                             </div>

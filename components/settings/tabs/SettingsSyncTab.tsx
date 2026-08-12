@@ -2,11 +2,10 @@ import React, { useCallback } from "react";
 import type { PortForwardingRule } from "../../../domain/models";
 import type { SyncPayload } from "../../../domain/sync";
 import {
-  applyLocalVaultPayload,
   buildCloudSyncPayload,
-  buildLocalVaultPayload,
   applySyncPayload,
   getEffectivePortForwardingRulesForSync,
+  prepareLocalVaultPayloadApply,
 } from "../../../application/syncPayload";
 import { applyProtectedSyncPayload } from "../../../application/localVaultBackups";
 import type { SyncableVaultData } from "../../../application/syncPayload";
@@ -41,37 +40,58 @@ export default function SettingsSyncTab(props: {
     return buildCloudSyncPayload(vault, getEffectivePortForwardingRules());
   }, [vault, getEffectivePortForwardingRules]);
 
-  const onBuildLocalPayload = useCallback((): SyncPayload => {
+  const onBuildLocalPayload = useCallback(async (): Promise<SyncPayload> => {
     const effectiveKnownHosts = getEffectiveKnownHosts(vault.knownHosts);
-
-    return buildLocalVaultPayload(
+    const { buildLocalVaultPayloadAsync } = await import('../../../application/syncPayload');
+    return buildLocalVaultPayloadAsync(
       { ...vault, knownHosts: effectiveKnownHosts ?? [] },
       getEffectivePortForwardingRules(),
     );
   }, [vault, getEffectivePortForwardingRules]);
 
+  const onApplyMigrationPayload = useCallback(
+    (payload: SyncPayload) =>
+      applySyncPayload(payload, {
+        importVaultData: importDataFromString,
+        importPortForwardingRules,
+        onSettingsApplied,
+      }),
+    [importDataFromString, importPortForwardingRules, onSettingsApplied],
+  );
+
   const onApplyPayload = useCallback(
     (payload: SyncPayload) =>
       applyProtectedSyncPayload({
         buildPreApplyPayload: onBuildLocalPayload,
-        applyPayload: () =>
-          applySyncPayload(payload, {
-            importVaultData: importDataFromString,
-            importPortForwardingRules,
-            onSettingsApplied,
-          }),
+        applyPayload: () => onApplyMigrationPayload(payload),
         translateProtectiveBackupFailure: (message) =>
           t("cloudSync.localBackups.protectiveBackupFailed", { message }),
       }),
-    [importDataFromString, importPortForwardingRules, onBuildLocalPayload, onSettingsApplied, t],
+    [onApplyMigrationPayload, onBuildLocalPayload, t],
+  );
+
+  const onApplyConvergentPayload = useCallback(
+    (
+      payload: SyncPayload,
+      commitReplica: () => Promise<void>,
+    ) => applyProtectedSyncPayload({
+      buildPreApplyPayload: onBuildLocalPayload,
+      applyPayload: async () => {
+        await onApplyMigrationPayload(payload);
+        await commitReplica();
+      },
+      translateProtectiveBackupFailure: (message) =>
+        t("cloudSync.localBackups.protectiveBackupFailed", { message }),
+    }),
+    [onApplyMigrationPayload, onBuildLocalPayload, t],
   );
 
   const onApplyLocalPayload = useCallback(
     (payload: SyncPayload) =>
       applyProtectedSyncPayload({
         buildPreApplyPayload: onBuildLocalPayload,
-        applyPayload: () =>
-          applyLocalVaultPayload(payload, {
+        prepareApply: () =>
+          prepareLocalVaultPayloadApply(payload, {
             importVaultData: importDataFromString,
             importPortForwardingRules,
             onSettingsApplied,
@@ -91,7 +111,10 @@ export default function SettingsSyncTab(props: {
     <SettingsTabContent value="sync">
       <CloudSyncSettings
         onBuildPayload={onBuildPayload}
+        onBuildLocalPayload={onBuildLocalPayload}
+        onApplyMigrationPayload={onApplyMigrationPayload}
         onApplyPayload={onApplyPayload}
+        onApplyConvergentPayload={onApplyConvergentPayload}
         onApplyLocalPayload={onApplyLocalPayload}
         onClearLocalData={clearAllLocalData}
       />

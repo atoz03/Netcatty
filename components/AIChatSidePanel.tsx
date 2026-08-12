@@ -1,6 +1,6 @@
 
 
-import React, { useCallback, useEffect, useDeferredValue, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { useI18n } from '../application/i18n/I18nProvider';
 import { useWindowControls } from '../application/state/useWindowControls';
@@ -13,7 +13,12 @@ import type {
   ExternalAgentConfig,
 } from '../infrastructure/ai/types';
 import type { ExecutorContext } from '../infrastructure/ai/cattyAgent/executor';
-import { getAgentModelPresets } from '../infrastructure/ai/types';
+import {
+  filterAgentModelPresetsForCliVersion,
+  getAgentModelPresets,
+  resolveAgentCliVersion,
+  resolveAgentModelSelection,
+} from '../infrastructure/ai/types';
 import { getExternalAgentSdkBackend, getManualAgentCommand, matchesManagedAgentConfig } from '../infrastructure/ai/managedAgents';
 import { useAgentDiscovery } from '../application/state/useAgentDiscovery';
 import {
@@ -25,13 +30,13 @@ import { subscribeUserSkillsStatusChanged } from './ai/userSkillsStatusEvents';
 import {
   applyDraftEntrySelection,
   applyHistorySessionSelection,
-  panelViewsEqual,
   resolveDisplayedPanelView,
   resolveDisplayedSession,
+  shouldForceDraftViewSync,
 } from './ai/aiPanelViewState';
 import {
-  endDraftSend,
-  tryBeginDraftSend,
+  endSendForKey,
+  tryBeginSendForKey,
 } from './ai/draftSendGate';
 import { selectDraftForAgentSwitch } from '../application/state/aiDraftState';
 import {
@@ -44,8 +49,10 @@ import {
   getNetcattyBridge,
   isAIChatSessionStreaming,
   type DefaultTargetSessionHint,
-} from './ai/hooks/useAIChatStreaming';
+} from '../application/state/useAIChatStreaming';
 import { getScopedHistorySessions } from './ai/scopedHistorySessions';
+import { resolveInheritedAIActiveSessionId } from '../domain/aiWorkspaceScopeInherit';
+import { aiSessionIdSetEqual, exactScopeAISessionsEqual } from '../domain/aiSessionsForScope';
 import { buildExternalAgentHistoryMessagesForBridge } from './ai/externalAgentHistory';
 import { canSendWithAgent, findEnabledExternalAgent } from './ai/agentSendEligibility';
 import { registerGrantPersister } from '../infrastructure/ai/shared/approvalGate';
@@ -53,8 +60,10 @@ import { stopAgentTurn } from '../infrastructure/ai/harness/agentStop';
 import { getAgentRuntime } from '../infrastructure/ai/harness/globalAgentRuntime';
 import { useAIPermissionGrantsState } from '../application/state/useAIPermissionGrantsState';
 import { useConversationExport } from './ai/hooks/useConversationExport';
+import { useAgentContextUsage } from '../application/state/useAgentCompactionUi';
 import type { AIChatSidePanelProps } from './AIChatSidePanel.types';
 import {
+  buildCursorListModelsAgentEnv,
   buildSdkRuntimeModelCacheKey,
   sdkRuntimeModelCache,
   generateId,
@@ -65,6 +74,7 @@ import {
   type SdkRuntimeModelCatalog,
 } from './AIChatSidePanelHelpers';
 import { AIChatPanelContent } from './AIChatPanelContent';
+import { TERMINAL_SIDE_PANEL_INNER_HEADER_CLASS } from './terminalLayer/terminalSidePanelChrome';
 import {
   getAIPanelProfilerProps,
   profileAIPanelCalculation,
@@ -84,6 +94,11 @@ type SdkRuntimeModelTarget = {
   sdkBackend: string;
   agentEnv?: Record<string, string>;
   agentCommand?: string;
+  codexRuntime?: 'sdk' | 'app-server';
+};
+type SteerWarning = {
+  reason: 'not-steerable' | 'busy' | 'inactive' | 'unsupported' | 'cancelled' | 'failed';
+  turnKind?: 'review' | 'compact';
 };
 
 const USER_SKILLS_STATUS_CACHE_TTL_MS = 60_000;
@@ -248,8 +263,8 @@ const AIChatSidePanelPreparing = React.memo(function AIChatSidePanelPreparing() 
   const { t } = useI18n();
   return (
     <div className="flex h-full flex-col bg-background" data-section="ai-chat-panel-preparing">
-      <div className="shrink-0 border-b border-border/50 px-2.5 py-1.5">
-        <div className="h-8 w-36 rounded-md bg-muted/45" />
+      <div className={`${TERMINAL_SIDE_PANEL_INNER_HEADER_CLASS} border-b border-border/50 px-2 flex items-center`}>
+        <div className="h-6 w-32 rounded-md bg-muted/45" />
       </div>
       <div className="flex flex-1 items-center justify-center text-xs text-muted-foreground">
         <div className="flex items-center gap-2">
@@ -281,6 +296,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
   addMessageToSession,
   updateLastMessage,
   updateMessageById,
+  persistContextCompaction,
   providers,
   activeProviderId,
   activeModelId,
@@ -303,6 +319,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
   scopeTargetId,
   scopeHostIds,
   scopeLabel,
+  focusedSessionId,
   terminalSessions = [],
   resolveExecutorContext,
   isVisible = true,
@@ -319,6 +336,9 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
 
   const [showHistory, setShowHistory] = useState(false);
   const [runtimeAgentModelPresets, setRuntimeAgentModelPresets] = useState<Record<string, AgentModelPreset[]>>({});
+  const [runtimeModelWarnings, setRuntimeModelWarnings] = useState<Record<string, string>>({});
+  const [steerWarnings, setSteerWarnings] = useState<Record<string, SteerWarning>>({});
+  const [steeringSessionId, setSteeringSessionId] = useState<string | null>(null);
   const [userSkillOptions, setUserSkillOptions] = useState<UserSkillOption[]>([]);
   const [userSkillsStatusVersion, setUserSkillsStatusVersion] = useState(0);
   const { openSettingsWindow } = useWindowControls();
@@ -333,6 +353,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     abortControllersRef,
     sendToCattyAgent,
     sendToExternalAgent,
+    steerExternalAgent,
     reportStreamError,
     activeCompaction,
   } = useAIChatStreaming({
@@ -340,6 +361,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     addMessageToSession,
     updateLastMessage,
     updateMessageById,
+    persistContextCompaction,
   });
 
   const setActiveSessionId = useCallback((id: string | null) => {
@@ -357,24 +379,48 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     return sessionIds;
   }, [activeSessionIdMap, scopeKey]);
 
-  const deferredSessions = useDeferredValue(sessions);
+  const workspaceMemberTerminalIds = useMemo(() => {
+    if (scopeType !== 'workspace') return undefined;
+    return new Set(
+      terminalSessions
+        .map((session) => session.sessionId)
+        .filter((sessionId): sessionId is string => Boolean(sessionId)),
+    );
+  }, [scopeType, terminalSessions]);
+
+  // Use live sessions for history + view resolution. Deferring the list used to
+  // lag one paint behind createSession, so normalizePanelView treated the new
+  // chat as missing and the draft-sync effect forced showDraftView — which
+  // parked the just-sent session into history under StrictMode.
   const historySessions = useMemo(
     () => profileAIPanelCalculation(
       'AIChatSidePanel.historySessions',
       () => getScopedHistorySessions(
-        deferredSessions,
+        sessions,
         scopeType,
         scopeTargetId,
         scopeHostIds,
         activeTerminalSessionIds,
+        workspaceMemberTerminalIds,
       ),
     ),
-    [deferredSessions, scopeType, scopeTargetId, scopeHostIds, activeTerminalSessionIds],
+    [sessions, scopeType, scopeTargetId, scopeHostIds, activeTerminalSessionIds, workspaceMemberTerminalIds],
   );
 
   const explicitPanelView = panelViewByScope[scopeKey];
   const currentDraft = draftsByScope[scopeKey] ?? null;
-  const persistedSessionId = activeSessionIdMap[scopeKey] ?? null;
+  const visibleHistorySessionIds = useMemo(
+    () => new Set(historySessions.map((session) => session.id)),
+    [historySessions],
+  );
+  const persistedSessionId = resolveInheritedAIActiveSessionId({
+    scopeType,
+    scopeTargetId,
+    activeSessionIdMap,
+    memberTerminalIds: terminalSessions.map((session) => session.sessionId).filter(Boolean),
+    preferredTerminalId: focusedSessionId,
+    visibleSessionIds: visibleHistorySessionIds,
+  });
   const normalizedPanelView = useMemo<AIPanelView>(
     () => resolveDisplayedPanelView(explicitPanelView, currentDraft != null, historySessions, persistedSessionId, scopeType),
     [explicitPanelView, currentDraft, historySessions, persistedSessionId, scopeType],
@@ -385,7 +431,9 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
   );
   const activeSessionId = normalizedPanelView.mode === 'session' ? normalizedPanelView.sessionId : null;
   const isStreaming = activeSessionId ? streamingSessionIds.has(activeSessionId) : false;
+  const isSteering = activeSessionId != null && steeringSessionId === activeSessionId;
   const currentAgentId = activeSession?.agentId ?? currentDraft?.agentId ?? defaultAgentId;
+  const observedContextUsage = useAgentContextUsage(activeSessionId);
   const inputValue = currentDraft?.text ?? '';
   const files = currentDraft?.attachments ?? [];
   const panelViewRef = useRef(normalizedPanelView);
@@ -394,7 +442,6 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
   currentDraftRef.current = currentDraft;
   const activeSessionRef = useRef(activeSession);
   activeSessionRef.current = activeSession;
-  const draftSendInFlightRef = useRef(false);
 
   const defaultTargetSession = useMemo<DefaultTargetSessionHint | undefined>(() => {
     const connectedSessions = terminalSessions.filter((session) => session.connected !== false);
@@ -435,9 +482,17 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
 
   useEffect(() => {
     if (!isVisible) return;
-    if (!explicitPanelView || panelViewsEqual(normalizedPanelView, explicitPanelView)) return;
+    // Predicate must match normalizePanelView's list (scoped history), not the
+    // global store — out-of-scope sessions must still demote to draft.
+    if (!shouldForceDraftViewSync(
+      explicitPanelView,
+      normalizedPanelView,
+      (sessionId) => historySessions.some((session) => session.id === sessionId),
+    )) {
+      return;
+    }
     showDraftView(scopeKey);
-  }, [isVisible, normalizedPanelView, explicitPanelView, scopeKey, showDraftView]);
+  }, [isVisible, normalizedPanelView, explicitPanelView, scopeKey, historySessions, showDraftView]);
 
   useEffect(() => {
     if (!activeSession) return;
@@ -456,9 +511,24 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
   useEffect(() => {
     if (!isVisible) return;
     if (normalizedPanelView.mode !== 'draft') return;
+    // Keep ownership while an explicit session is still displayable in this
+    // scope (normalize has not demoted it). Out-of-scope / missing ids clear.
+    if (
+      explicitPanelView?.mode === 'session'
+      && historySessions.some((session) => session.id === explicitPanelView.sessionId)
+    ) {
+      return;
+    }
     if (persistedSessionId == null) return;
     setActiveSessionId(null);
-  }, [isVisible, normalizedPanelView.mode, persistedSessionId, setActiveSessionId]);
+  }, [
+    isVisible,
+    normalizedPanelView.mode,
+    explicitPanelView,
+    historySessions,
+    persistedSessionId,
+    setActiveSessionId,
+  ]);
 
   const ensureScopeDraft = useCallback((agentId: string) => {
     ensureDraftForScope(scopeKey, agentId);
@@ -649,6 +719,19 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     [currentAgentId, providers],
   );
 
+  // Hide the ring until a real context_snapshot arrives. A synthetic 0% fallback
+  // misleads users when reopening long sessions (looks empty until the next turn).
+  const contextUsage = currentAgentId === 'catty' ? observedContextUsage : null;
+
+  // Catty-only manual compact. External agents own their own compaction.
+  // No minimum message count: short sessions may still run /compact (even if
+  // there is little to summarize).
+  const canCompact = currentAgentId === 'catty'
+    && Boolean(activeSessionId)
+    && !isStreaming
+    && Boolean(effectiveActiveProvider)
+    && Boolean(effectiveActiveModelId.trim());
+
   const handleAgentProviderModelSelect = useCallback(
     (providerId: string, modelId: string) => {
       setAgentProvider(currentAgentId, providerId);
@@ -704,30 +787,19 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     if (!agent) return null;
     const sdkBackend = getExternalAgentSdkBackend(agent);
     if (!sdkBackend) return null;
+    // Cursor: re-inject auth mode for list-models (same as run-turn). Persisted
+    // agent.env strips NETCATTY_CURSOR_*; without this, main defaults to api-key
+    // and the UI falls back to curated CURSOR_MODEL_PRESETS (#2562).
+    const agentEnv = sdkBackend === 'cursor'
+      ? buildCursorListModelsAgentEnv(agent)
+      : agent.env;
     return {
       agentId: agent.id,
-      cacheKey: buildSdkRuntimeModelCacheKey(agent),
+      cacheKey: buildSdkRuntimeModelCacheKey({ ...agent, env: agentEnv }),
       sdkBackend,
-      agentEnv: agent.env,
+      agentEnv,
       agentCommand: getManualAgentCommand(agent),
-    };
-  }, []);
-
-  const buildDiscoveredAgentRuntimeModelTarget = useCallback((agent: DiscoveredAgent): SdkRuntimeModelTarget | null => {
-    const sdkBackend = agent.sdkBackend ?? agent.command;
-    if (sdkBackend !== 'opencode') return null;
-    const command = agent.binPath || agent.path || agent.command;
-    const agentId = `discovered_${agent.command}`;
-    return {
-      agentId,
-      cacheKey: buildSdkRuntimeModelCacheKey({
-        id: agentId,
-        command,
-        sdkBackend,
-        env: command ? { OPENCODE_BIN: command } : undefined,
-      }),
-      sdkBackend,
-      agentCommand: command,
+      codexRuntime: sdkBackend === 'codex' ? (agent.codexRuntime ?? 'sdk') : undefined,
     };
   }, []);
 
@@ -777,10 +849,21 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
           `models_${target.agentId}`,
           target.agentEnv,
           target.agentCommand,
+          target.codexRuntime,
         );
         if (!result?.ok || !Array.isArray(result.models)) {
           throw new Error(result?.error || 'Failed to load SDK agent models');
         }
+        setRuntimeModelWarnings((current) => {
+          const next = { ...current };
+          if (result.warning && target.codexRuntime === 'app-server') {
+            next[target.agentId] = t('ai.codex.appServer.modelCatalogWarning');
+            console.warn('[AIChatSidePanel] Codex App Server model catalog unavailable:', result.warning);
+          } else {
+            delete next[target.agentId];
+          }
+          return next;
+        });
         return {
           currentModelId: result.currentModelId ?? null,
           models: result.models,
@@ -788,12 +871,18 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       },
       { force: options.force },
     ).catch((err) => {
+      if (target.codexRuntime === 'app-server') {
+        setRuntimeModelWarnings((current) => ({
+          ...current,
+          [target.agentId]: t('ai.codex.appServer.modelCatalogWarning'),
+        }));
+      }
       if (options.logErrors !== false) {
         console.warn('[AIChatSidePanel] Failed to load SDK agent models:', err);
       }
       return null;
     });
-  }, []);
+  }, [t]);
 
   useEffect(() => {
     if (!isVisible) return;
@@ -808,10 +897,12 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       applySdkRuntimeModelCatalog(target.agentId, cached);
     }
 
+    // Respect renderer TTL / in-flight coalescing for all SDK agents including
+    // OpenCode. Forced refresh used to re-spawn opencode on every effect re-run
+    // even when the user never selected OpenCode (#2184). Manual refresh still
+    // passes force via the model selector path.
     let cancelled = false;
-    void loadSdkRuntimeModelCatalog(target, {
-      force: target.sdkBackend === 'opencode',
-    }).then((catalog) => {
+    void loadSdkRuntimeModelCatalog(target).then((catalog) => {
       if (cancelled || !catalog) return;
       applySdkRuntimeModelCatalog(target.agentId, catalog, { adoptCurrentModel: true });
     });
@@ -828,52 +919,9 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     applySdkRuntimeModelCatalog,
   ]);
 
-  useEffect(() => {
-    if (!isVisible) return;
-    const targets = new Map<string, SdkRuntimeModelTarget>();
-    const configuredTargetCacheKeys = new Set<string>();
-
-    for (const agent of externalAgents) {
-      if (!agent.enabled || getExternalAgentSdkBackend(agent) !== 'opencode') continue;
-      const target = buildExternalAgentRuntimeModelTarget(agent);
-      if (target) {
-        targets.set(target.cacheKey, target);
-        configuredTargetCacheKeys.add(target.cacheKey);
-      }
-    }
-
-    for (const agent of discoveredAgents) {
-      const target = buildDiscoveredAgentRuntimeModelTarget(agent);
-      if (target) targets.set(target.cacheKey, target);
-    }
-
-    if (targets.size === 0) return;
-
-    let cancelled = false;
-    for (const target of targets.values()) {
-      void loadSdkRuntimeModelCatalog(target, { logErrors: false })
-        .then((catalog) => {
-          if (cancelled || !catalog) return;
-          if (configuredTargetCacheKeys.has(target.cacheKey)) {
-            applySdkRuntimeModelCatalog(target.agentId, catalog);
-          }
-        });
-    }
-
-    return () => {
-      cancelled = true;
-    };
-  }, [
-    isVisible,
-    externalAgents,
-    discoveredAgents,
-    buildExternalAgentRuntimeModelTarget,
-    buildDiscoveredAgentRuntimeModelTarget,
-    loadSdkRuntimeModelCatalog,
-    applySdkRuntimeModelCatalog,
-  ]);
-
-  const hasCodexCustomConfig = codexCustomConfigResolved && isCodexManagedAgent;
+  const isCodexAppServer = isCodexManagedAgent && currentAgentConfig?.codexRuntime === 'app-server';
+  const canSteerCurrentTurn = Boolean(activeSessionId && isStreaming && isCodexAppServer);
+  const hasCodexCustomConfig = codexCustomConfigResolved && isCodexManagedAgent && !isCodexAppServer;
 
   const agentModelPresets = useMemo(() => {
     const runtimePresets = runtimeAgentModelPresets[currentAgentId];
@@ -886,8 +934,22 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       }
       return [];
     }
-    return runtimePresets ?? getAgentModelPresets(currentAgentConfig?.command);
-  }, [currentAgentConfig?.command, currentAgentId, runtimeAgentModelPresets, hasCodexCustomConfig, codexConfigModel]);
+    if (runtimePresets) return runtimePresets;
+    const presets = getAgentModelPresets(
+      currentAgentConfig?.command,
+      getExternalAgentSdkBackend(currentAgentConfig),
+    );
+    // BYO Codex CLI: hide GPT-5.6 when CLI < 0.144.0 (stored probe or discovery).
+    const cliVersion = resolveAgentCliVersion(currentAgentConfig, discoveredAgents);
+    return filterAgentModelPresetsForCliVersion(presets, cliVersion);
+  }, [
+    currentAgentConfig,
+    currentAgentId,
+    runtimeAgentModelPresets,
+    hasCodexCustomConfig,
+    codexConfigModel,
+    discoveredAgents,
+  ]);
 
   const selectedAgentModel = useMemo(() => {
     const stored = agentModelMap[currentAgentId];
@@ -895,11 +957,14 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       return stored;
     }
     if (agentModelPresets.length > 0) {
-      const first = agentModelPresets[0];
-      if (first.thinkingLevels?.length) {
-        return `${first.id}/${first.thinkingLevels[first.thinkingLevels.length - 1]}`;
+      // Cursor CLI login defaults to `auto` (subscription quota routing).
+      if (currentAgentConfig?.cursorAuthMode === 'cli-login') {
+        const autoPreset = agentModelPresets.find((preset) => preset.id === 'auto');
+        if (autoPreset) return resolveAgentModelSelection(autoPreset);
       }
-      return first.id;
+      // Use catalog defaultThinkingLevel — do not pick last array entry
+      // (that made GPT-5.6 Sol default to ultra).
+      return resolveAgentModelSelection(agentModelPresets[0]);
     }
     return undefined;
   }, [currentAgentConfig, currentAgentId, agentModelMap, agentModelPresets]);
@@ -1019,9 +1084,11 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     const modelAttachments = attachments.filter((attachment) => !isTerminalSelectionAttachment(attachment));
     const isDraftMode = currentPanelView.mode === 'draft';
 
-    if (isDraftMode && !tryBeginDraftSend(draftSendInFlightRef)) {
+    const sendGateKey = currentSessionView?.id ?? `draft:${scopeKey}`;
+    if (!tryBeginSendForKey(sendGateKey)) {
       return;
     }
+    let sessionSendGateKey: string | null = null;
 
     try {
       let sessionId = currentSessionView?.id ?? null;
@@ -1034,9 +1101,17 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
         clearScopeDraft();
         showScopeSessionView(createdSession.id);
         setActiveSessionId(createdSession.id);
+        sessionSendGateKey = sessionId;
+        if (!tryBeginSendForKey(sessionSendGateKey)) {
+          return;
+        }
       }
 
       if (!sessionId) {
+        return;
+      }
+
+      if (isAIChatSessionStreaming(sessionId)) {
         return;
       }
 
@@ -1104,7 +1179,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
         }
         try {
           const existingExternalSessionId = currentSession?.externalSessionId;
-          await sendToExternalAgent(sessionId, modelPrompt, agentConfig, abortController, modelAttachments, {
+          await sendToExternalAgent(sessionId, assistantMsgId, modelPrompt, agentConfig, abortController, modelAttachments, {
             existingSessionId: existingExternalSessionId,
             updateExternalSessionId: updateSessionExternalSessionId,
             historyMessages: buildExternalAgentHistoryMessagesForBridge(currentSession?.messages ?? [], existingExternalSessionId),
@@ -1114,6 +1189,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
             selectedAgentModel,
             toolIntegrationMode,
             selectedUserSkillSlugs: selectedSkillSlugs,
+            permissionMode: globalPermissionMode,
           });
         } catch (err) {
           reportStreamError(sessionId, abortController.signal, err);
@@ -1146,8 +1222,9 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
         }, modelAttachments.length > 0 ? modelAttachments : undefined);
       }
     } finally {
-      if (isDraftMode) {
-        endDraftSend(draftSendInFlightRef);
+      endSendForKey(sendGateKey);
+      if (sessionSendGateKey && sessionSendGateKey !== sendGateKey) {
+        endSendForKey(sessionSendGateKey);
       }
     }
   }, [
@@ -1161,6 +1238,131 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     toolIntegrationMode,
     clearScopeDraft, showScopeSessionView, setActiveSessionId,
   ]);
+
+  const handleCompact = useCallback(async () => {
+    const session = activeSessionRef.current;
+    if (
+      currentAgentId !== 'catty'
+      || !session
+      || isStreaming
+      || isAIChatSessionStreaming(session.id)
+      || !effectiveActiveProvider
+      || !effectiveActiveModelId.trim()
+    ) {
+      return;
+    }
+
+    if (!tryBeginSendForKey(session.id)) return;
+
+    const controller = new AbortController();
+    abortControllersRef.current.set(session.id, controller);
+    setStreamingForScope(session.id, true);
+    try {
+      await sendToCattyAgent(
+        session.id,
+        scopeKey,
+        '',
+        controller,
+        session,
+        '',
+        {
+          activeProvider: effectiveActiveProvider,
+          activeModelId: effectiveActiveModelId,
+          scopeType,
+          scopeTargetId,
+          scopeLabel,
+          globalPermissionMode,
+          commandBlocklist,
+          commandTimeout,
+          terminalSessions,
+          webSearchConfig,
+          getExecutorContext: () => buildExecutorContextForScope({
+            type: scopeType,
+            targetId: scopeTargetId,
+            label: scopeLabel,
+          }),
+          autoTitleSession: () => {},
+          selectedUserSkillSlugs: [],
+          forceCompaction: true,
+        },
+      );
+    } finally {
+      setStreamingForScope(session.id, false);
+      if (abortControllersRef.current.get(session.id) === controller) {
+        abortControllersRef.current.delete(session.id);
+      }
+      endSendForKey(session.id);
+    }
+  }, [
+    abortControllersRef,
+    buildExecutorContextForScope,
+    commandBlocklist,
+    commandTimeout,
+    currentAgentId,
+    effectiveActiveModelId,
+    effectiveActiveProvider,
+    globalPermissionMode,
+    isStreaming,
+    scopeKey,
+    scopeLabel,
+    scopeTargetId,
+    scopeType,
+    sendToCattyAgent,
+    setStreamingForScope,
+    terminalSessions,
+    webSearchConfig,
+  ]);
+
+  const handleSteer = useCallback(async () => {
+    const sessionId = activeSessionRef.current?.id;
+    const draft = currentDraftRef.current;
+    if (!sessionId || !draft || steeringSessionId || !canSteerCurrentTurn) return;
+
+    const trimmed = draft.text.trim();
+    const attachments = draft.attachments.map((file) => ({
+      base64Data: file.base64Data,
+      mediaType: file.mediaType,
+      filename: file.filename,
+      filePath: file.filePath,
+      terminalSelection: file.terminalSelection,
+      previewText: file.previewText,
+      lineCount: file.lineCount,
+    }));
+    const hasTerminalSelectionAttachments = attachments.some(isTerminalSelectionAttachment);
+    if (!trimmed && !hasTerminalSelectionAttachments) return;
+
+    const userMessageId = generateId();
+    const modelPrompt = buildPromptWithTerminalSelectionAttachments(trimmed, attachments);
+    const modelAttachments = attachments.filter((attachment) => !isTerminalSelectionAttachment(attachment));
+    setSteerWarnings(current => {
+      const next = { ...current };
+      delete next[sessionId];
+      return next;
+    });
+    setSteeringSessionId(sessionId);
+    try {
+      const result = await steerExternalAgent({
+        chatSessionId: sessionId,
+        userMessageId,
+        userText: trimmed,
+        prompt: modelPrompt,
+        attachments,
+        attachedImages: modelAttachments,
+      });
+      if (result.status === 'accepted') {
+        if (currentDraftRef.current === draft) clearScopeDraft();
+        return;
+      }
+      if (result.status !== 'cancelled') {
+        setSteerWarnings(current => ({
+          ...current,
+          [sessionId]: { reason: result.status, turnKind: result.turnKind },
+        }));
+      }
+    } finally {
+      setSteeringSessionId(current => current === sessionId ? null : current);
+    }
+  }, [canSteerCurrentTurn, clearScopeDraft, steerExternalAgent, steeringSessionId]);
 
   const stopStreamingForSession = useCallback(async (sessionId: string) => {
     const controller = abortControllersRef.current.get(sessionId);
@@ -1190,8 +1392,41 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
 
   const handleStop = useCallback(() => {
     if (!activeSessionId) return;
+    setSteeringSessionId(current => current === activeSessionId ? null : current);
+    setSteerWarnings(current => {
+      const next = { ...current };
+      delete next[activeSessionId];
+      return next;
+    });
     stopStreamingForSession(activeSessionId);
   }, [activeSessionId, stopStreamingForSession]);
+
+  useEffect(() => {
+    if (!activeSessionId || isStreaming) return;
+    setSteeringSessionId(current => current === activeSessionId ? null : current);
+    setSteerWarnings(current => {
+      if (!current[activeSessionId]) return current;
+      const next = { ...current };
+      delete next[activeSessionId];
+      return next;
+    });
+  }, [activeSessionId, isStreaming]);
+
+  const steerWarning = useMemo(() => {
+    if (!activeSessionId) return undefined;
+    const warning = steerWarnings[activeSessionId];
+    if (!warning) return undefined;
+    if (warning.reason === 'not-steerable' && warning.turnKind === 'review') {
+      return t('ai.codex.steer.notSteerableReview');
+    }
+    if (warning.reason === 'not-steerable' && warning.turnKind === 'compact') {
+      return t('ai.codex.steer.notSteerableCompact');
+    }
+    if (warning.reason === 'busy') return t('ai.codex.steer.busy');
+    if (warning.reason === 'inactive') return t('ai.codex.steer.inactive');
+    if (warning.reason === 'unsupported') return t('ai.codex.steer.unsupported');
+    return t('ai.codex.steer.failed');
+  }, [activeSessionId, steerWarnings, t]);
 
   const handleSelectSession = useCallback(
     (sessionId: string) => {
@@ -1225,7 +1460,6 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       }
 
       deleteSession(sessionId, scopeKey);
-      getAgentRuntime().clearChatSession(sessionId);
 
       if (deletingActiveSession || deletingLastScopedSession) {
         setShowHistory(false);
@@ -1260,6 +1494,41 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     setShowHistory(false);
   }, [ensureScopeDraft, showScopeDraftView, updateScopeDraft]);
 
+  // Warm the Streamdown/markdown chunk while the panel is visible but idle, so
+  // the first completed assistant reply does not pay the full parse cost mid-interaction.
+  useEffect(() => {
+    if (!isVisible) return;
+    let cancelled = false;
+    const loadMarkdown = () => {
+      if (cancelled) return;
+      void import('./ai-elements/messageResponse');
+    };
+    if (typeof requestIdleCallback === 'function') {
+      const idleId = requestIdleCallback(loadMarkdown, { timeout: 2500 });
+      return () => {
+        cancelled = true;
+        cancelIdleCallback(idleId);
+      };
+    }
+    const timeoutId = window.setTimeout(loadMarkdown, 0);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timeoutId);
+    };
+  }, [isVisible]);
+
+  // Keep streaming/session hooks alive for retained hidden panels, but do not
+  // mount ChatMessageList / Streamdown / ChatInput while CSS-hidden — those trees
+  // are the main tab-switch and cross-tab re-render cost.
+  if (!isVisible) {
+    return (
+      <div
+        className="h-full min-h-0 bg-background"
+        data-section="ai-chat-panel-retained"
+        aria-hidden="true"
+      />
+    );
+  }
 
   return (
     <React.Profiler {...getAIPanelProfilerProps('AIChatSidePanel.Active')}>
@@ -1287,13 +1556,22 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
         activeCompaction={
           activeCompaction?.sessionId === activeSessionId ? activeCompaction : null
         }
+        contextUsage={contextUsage}
+        canCompact={canCompact}
         inputValue={inputValue}
         setInputValue={setInputValue}
         handleSend={handleSend}
+        handleCompact={handleCompact}
+        handleSteer={handleSteer}
         handleStop={handleStop}
+        canSteer={canSteerCurrentTurn}
+        isSteering={isSteering}
+        steerWarning={steerWarning}
+        lockTurnConfiguration={Boolean(isStreaming && isCodexAppServer)}
         canSendCurrentAgent={canSendCurrentAgent}
         providerDisplayName={providerDisplayName}
         modelDisplayName={modelDisplayName}
+        modelCatalogWarning={runtimeModelWarnings[currentAgentId]}
         agentModelPresets={agentModelPresets}
         selectedAgentModel={selectedAgentModel}
         handleAgentModelSelect={handleAgentModelSelect}
@@ -1345,6 +1623,7 @@ const AI_CHAT_SIDE_PANEL_AI_STATE_KEYS = [
   'addMessageToSession',
   'updateLastMessage',
   'updateMessageById',
+  'persistContextCompaction',
   'providers',
   'activeProviderId',
   'activeModelId',
@@ -1381,6 +1660,7 @@ export function aiChatSidePanelPropsAreEqual(
   if (prev.scopeType !== next.scopeType) return false;
   if (prev.scopeTargetId !== next.scopeTargetId) return false;
   if (prev.scopeLabel !== next.scopeLabel) return false;
+  if ((prev.focusedSessionId ?? '') !== (next.focusedSessionId ?? '')) return false;
   if ((prev.isVisible ?? true) !== (next.isVisible ?? true)) return false;
   if (prev.scopeHostIds !== next.scopeHostIds) return false;
   if (prev.terminalSessions !== next.terminalSessions) return false;
@@ -1393,7 +1673,71 @@ export function aiChatSidePanelPropsAreEqual(
   if (prev.onOpenVaultSnippet !== next.onOpenVaultSnippet) return false;
   if (prev.onOpenVaultSection !== next.onOpenVaultSection) return false;
 
+  // Sibling stream thrash: full sessions array identity always changes. Only
+  // exact-scope session object refs matter for this panel's active chat —
+  // plus the currently selected session, which may be a host-matched history
+  // resume whose stored scope.targetId is an older terminal.
+  // Fuzzy history still receives the full list; drawer open forces re-render
+  // via isVisible / other prop paths when the user actually needs it.
+  // Keep visibleSessionIds in sync with the live panel so inheritance that
+  // skips non-history chats does not leave memo pinned to a different id.
+  const resolveSelectedSessionId = (
+    props: AIChatSidePanelProps,
+  ): string | null => {
+    const scopeKey = `${props.scopeType}:${props.scopeTargetId ?? ''}`;
+    const memberTerminalIds = (props.terminalSessions ?? [])
+      .map((session) => session.sessionId)
+      .filter((sessionId): sessionId is string => Boolean(sessionId));
+    const workspaceMemberTerminalIds = props.scopeType === 'workspace'
+      ? new Set(memberTerminalIds)
+      : undefined;
+    const activeTerminalSessionIds = new Set<string>();
+    for (const [sessionScopeKey, sessionId] of Object.entries(props.activeSessionIdMap) as Array<[string, string | null]>) {
+      if (!sessionScopeKey.startsWith('terminal:') || !sessionId) continue;
+      if (sessionScopeKey === scopeKey) continue;
+      activeTerminalSessionIds.add(sessionId);
+    }
+    const visibleSessionIds = new Set(
+      getScopedHistorySessions(
+        props.sessions,
+        props.scopeType,
+        props.scopeTargetId,
+        props.scopeHostIds,
+        activeTerminalSessionIds,
+        workspaceMemberTerminalIds,
+      ).map((session) => session.id),
+    );
+    return resolveInheritedAIActiveSessionId({
+      scopeType: props.scopeType,
+      scopeTargetId: props.scopeTargetId,
+      activeSessionIdMap: props.activeSessionIdMap,
+      memberTerminalIds,
+      preferredTerminalId: props.focusedSessionId,
+      visibleSessionIds,
+    });
+  };
+  const selectedSessionId = resolveSelectedSessionId(prev)
+    ?? resolveSelectedSessionId(next);
+  if (!exactScopeAISessionsEqual(
+    prev.sessions,
+    next.sessions,
+    prev.scopeType,
+    prev.scopeTargetId,
+    selectedSessionId,
+  )) {
+    return false;
+  }
+  // History drawer / recent list need create/delete/title/updatedAt chrome.
+  // Only when the panel is (or becomes) visible so hidden retained panels do
+  // not re-render on every sibling stream that bumps updatedAt.
+  const prevVisible = prev.isVisible ?? true;
+  const nextVisible = next.isVisible ?? true;
+  if ((prevVisible || nextVisible) && !aiSessionIdSetEqual(prev.sessions, next.sessions)) {
+    return false;
+  }
+
   for (const key of AI_CHAT_SIDE_PANEL_AI_STATE_KEYS) {
+    if (key === 'sessions') continue;
     if (prev[key] !== next[key]) return false;
   }
   return true;

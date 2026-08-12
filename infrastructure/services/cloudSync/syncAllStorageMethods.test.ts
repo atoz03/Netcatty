@@ -2,14 +2,28 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { EncryptionService } from "../EncryptionService.ts";
-import { commitRemoteInspectionImpl } from "./authMethods.ts";
-import { syncToProviderImpl, uploadToProviderImpl } from "./providerSyncMethods.ts";
 import {
+  clearProviderMergeStateImpl,
+  commitRemoteInspectionImpl,
+} from "./authMethods.ts";
+import {
+  selectConvergentSyncToProviderResult,
+  syncToProviderImpl,
+  uploadToProviderImpl,
+} from "./providerSyncMethods.ts";
+import {
+  clearSyncBaseImpl,
   loadSyncSnapshotsImpl,
   saveSyncBaseImpl,
   syncAllProvidersImpl,
 } from "./syncAllStorageMethods.ts";
-import type { CloudProvider, SyncedFile, SyncPayload } from "../../../domain/sync.ts";
+import type {
+  CloudProvider,
+  SyncedFile,
+  SyncPayload,
+  SyncResult,
+} from "../../../domain/sync.ts";
+import { setConvergentSyncLocalConfig } from "../convergentSyncConfig.ts";
 
 function payload(hostId: string): SyncPayload {
   return payloadWithHosts([hostId]);
@@ -56,6 +70,38 @@ function remoteFile(provider: CloudProvider, version: number, updatedAt: number)
     payload: provider,
   };
 }
+
+test("provider identity changes clear v1 base, v2 baseline, and remote anchor together", () => {
+  const removed: string[] = [];
+  const manager = {
+    syncBaseKey: (provider: CloudProvider) => `base:${provider}`,
+    convergentProviderBaselineKey: (provider: CloudProvider) => `convergent:${provider}`,
+    removeFromStorage: (key: string) => removed.push(key),
+    clearSyncAnchor: (provider: CloudProvider) => removed.push(`anchor:${provider}`),
+  };
+
+  clearProviderMergeStateImpl.call(manager, "github");
+
+  assert.deepEqual(removed, ["base:github", "convergent:github", "anchor:github"]);
+});
+
+test("clearing all merge bases also removes every convergent provider baseline", () => {
+  const removed = new Set<string>();
+  const providers: CloudProvider[] = ["github", "google", "onedrive", "webdav", "s3"];
+  const manager = {
+    removeFromStorage: (key: string) => removed.add(key),
+    syncBaseKey: (provider?: CloudProvider) => `base:${provider ?? "default"}`,
+    syncSnapshotsKey: (provider?: CloudProvider) => `snapshots:${provider ?? "default"}`,
+    convergentProviderBaselineKey: (provider: CloudProvider) => `convergent:${provider}`,
+    clearSyncAnchor: () => {},
+  };
+
+  clearSyncBaseImpl.call(manager);
+
+  for (const provider of providers) {
+    assert.equal(removed.has(`convergent:${provider}`), true);
+  }
+});
 
 test("syncAllProviders uses the newest cloud payload without merging other remotes when cloud wins", async () => {
   const originalDecryptPayload = EncryptionService.decryptPayload;
@@ -119,7 +165,7 @@ test("syncAllProviders uses the newest cloud payload without merging other remot
     const results = await syncAllProvidersImpl.call(manager, localPayload);
 
     assert.equal(results.get("github")?.action, "download");
-    assert.equal(results.get("github")?.mergedPayload, githubPayload);
+    assert.deepEqual(results.get("github")?.mergedPayload, githubPayload);
     assert.equal(results.get("github")?.remoteFile, githubRemote);
     assert.equal(uploaded.length, 1);
     assert.equal(uploaded[0].provider, "google");
@@ -189,6 +235,46 @@ test("syncToProvider uses the checked remote as metadata base when no stored bas
     }]);
   } finally {
     EncryptionService.decryptPayload = originalDecryptPayload;
+    EncryptionService.encryptPayload = originalEncryptPayload;
+  }
+});
+
+test("syncToProvider refuses to downgrade a checked convergent remote", async () => {
+  const checkedRemote = remoteFile("github", 3, 300);
+  checkedRemote.meta.syncSchemaVersion = 2;
+  let encrypted = false;
+  const originalEncryptPayload = EncryptionService.encryptPayload;
+  EncryptionService.encryptPayload = async () => {
+    encrypted = true;
+    return checkedRemote;
+  };
+  try {
+    const manager = {
+      masterPassword: "pw",
+      adapters: new Map(),
+      state: {
+        securityState: "UNLOCKED",
+        providers: { github: { status: "connected" } },
+        lastError: null,
+        syncState: "IDLE",
+        syncStrategy: "smartMerge",
+        localVersion: 1,
+        deviceId: "local-device",
+        deviceName: "Local",
+      },
+      getConnectedAdapter: async () => ({ provider: "github" }),
+      updateProviderStatus: () => {},
+      emit: () => {},
+      checkProviderConflict: async () => ({ conflict: false, remoteFile: checkedRemote }),
+      addSyncHistoryEntry: () => {},
+    };
+
+    const result = await syncToProviderImpl.call(manager, "github", payload("local"));
+
+    assert.equal(result.success, false);
+    assert.equal(encrypted, false);
+    assert.match(result.error ?? "", /Enable or migrate convergent sync/);
+  } finally {
     EncryptionService.encryptPayload = originalEncryptPayload;
   }
 });
@@ -575,6 +661,248 @@ test("syncAllProviders builds provider-specific sync metadata from each provider
       deviceId: "local-device",
     }]);
   } finally {
+    EncryptionService.encryptPayload = originalEncryptPayload;
+  }
+});
+
+test("syncAllProviders upload-local override overwrites remote without decrypting when password differs", async () => {
+  const originalDecryptPayload = EncryptionService.decryptPayload;
+  const originalEncryptPayload = EncryptionService.encryptPayload;
+  const checkedRemote = remoteFile("github", 5, 500);
+  const localPayload = payload("local-after-reinstall");
+  const uploaded: Array<{ provider: CloudProvider; payload: SyncPayload }> = [];
+  const encryptBaseVersions: number[] = [];
+  let decryptCalls = 0;
+
+  EncryptionService.decryptPayload = async () => {
+    decryptCalls += 1;
+    throw new Error("OperationError: unable to authenticate data");
+  };
+  EncryptionService.encryptPayload = async (
+    outgoing: SyncPayload,
+    _password: string,
+    _deviceId: string,
+    _deviceName: string,
+    _appVersion: string,
+    existingVersion?: number,
+  ) => {
+    encryptBaseVersions.push(existingVersion ?? 0);
+    return {
+      ...remoteFile("github", (existingVersion ?? 0) + 1, 600),
+      payload: JSON.stringify(outgoing),
+    };
+  };
+
+  try {
+    const manager = {
+      masterPassword: "new-master-password",
+      adapters: new Map(),
+      state: {
+        securityState: "UNLOCKED",
+        providers: {
+          github: { enabled: true, connected: true, status: "connected" },
+          google: { enabled: false, connected: false, status: "disconnected" },
+          onedrive: { enabled: false, connected: false, status: "disconnected" },
+          webdav: { enabled: false, connected: false, status: "disconnected" },
+          s3: { enabled: false, connected: false, status: "disconnected" },
+        },
+        lastError: null,
+        syncState: "IDLE",
+        syncStrategy: "smartMerge",
+        localVersion: 1,
+        deviceId: "local-device",
+        deviceName: "Local",
+      },
+      getConnectedAdapter: async (provider: CloudProvider) => ({ provider }),
+      updateProviderStatus: () => {},
+      emit: () => {},
+      checkProviderConflict: async () => ({ conflict: true, remoteFile: checkedRemote }),
+      loadSyncBase: async () => null,
+      uploadToProvider: async (provider: CloudProvider, _adapter: unknown, _file: SyncedFile, outgoing: SyncPayload) => {
+        uploaded.push({ provider, payload: outgoing });
+        return { success: true, provider, action: "upload" as const, version: 6 };
+      },
+      exitBlockedState: () => {},
+      notifyStateChange: () => {},
+    };
+
+    const conflicted = await syncAllProvidersImpl.call(manager, localPayload);
+    assert.equal(conflicted.get("github")?.success, false);
+    assert.equal(conflicted.get("github")?.conflictDetected, true);
+    assert.equal(conflicted.get("github")?.error, undefined);
+    assert.equal(uploaded.length, 0);
+
+    const forced = await syncAllProvidersImpl.call(manager, localPayload, {
+      conflictActionOverride: "upload-local",
+      overrideShrink: true,
+    });
+    assert.equal(forced.get("github")?.success, true);
+    assert.equal(forced.get("github")?.action, "upload");
+    assert.equal(uploaded.length, 1);
+    assert.equal(uploaded[0]?.payload.hosts[0]?.id, "local-after-reinstall");
+    // Keep-local under smartMerge must base on the conflicting remote version
+    // (v5 → encrypted as v6), matching single-provider upload-local.
+    assert.deepEqual(encryptBaseVersions, [5]);
+    // Shrink-guard may attempt decrypt and ignore failure; merge path must not run.
+    assert.ok(decryptCalls >= 1);
+  } finally {
+    EncryptionService.decryptPayload = originalDecryptPayload;
+    EncryptionService.encryptPayload = originalEncryptPayload;
+  }
+});
+
+test("an initialized but paused v2 replica cannot fall through to legacy provider writes", async () => {
+  const originalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const values = new Map<string, string>();
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+      removeItem: (key: string) => values.delete(key),
+    },
+  });
+  try {
+    setConvergentSyncLocalConfig({ enabled: false, initialized: true });
+    let adapterRequested = false;
+    const manager = {
+      state: {
+        providers: {
+          github: { provider: "github", status: "connected" },
+        },
+      },
+      getConnectedAdapter: async () => {
+        adapterRequested = true;
+        throw new Error("legacy path must not run");
+      },
+    };
+
+    const all = await syncAllProvidersImpl.call(manager, payload("local"));
+    const one = await syncToProviderImpl.call(manager, "github", payload("local"));
+
+    assert.equal(all.get("github")?.success, false);
+    assert.match(all.get("github")?.error ?? "", /paused/i);
+    assert.equal(one.success, false);
+    assert.match(one.error ?? "", /paused/i);
+    assert.equal(adapterRequested, false);
+  } finally {
+    if (originalStorage) Object.defineProperty(globalThis, "localStorage", originalStorage);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  }
+});
+
+test("syncToProvider preserves a merged payload discovered by a non-target provider", () => {
+  const mergedPayload = payload("remote-merged");
+  const results = new Map<CloudProvider, SyncResult>([
+    ["github", {
+      success: false,
+      provider: "github",
+      action: "none",
+      error: "github unavailable",
+    }],
+    ["google", {
+      success: true,
+      provider: "google",
+      action: "merge",
+      mergedPayload,
+    }],
+  ]);
+
+  const selected = selectConvergentSyncToProviderResult("github", results);
+
+  assert.equal(selected.success, false);
+  assert.equal(selected.provider, "github");
+  assert.equal(selected.error, "github unavailable");
+  assert.equal(selected.mergedPayload, mergedPayload);
+  assert.equal(selected.remoteFile, undefined);
+});
+
+test("syncAllProviders smart-merge strips device-bound enc:v1 secrets before upload", async () => {
+  const originalDecryptPayload = EncryptionService.decryptPayload;
+  const originalEncryptPayload = EncryptionService.encryptPayload;
+  const completeBlob = Buffer.alloc(31, 0);
+  Buffer.from("v10", "utf8").copy(completeBlob, 0);
+  const ENC = `enc:v1:${completeBlob.toString("base64")}`;
+  const checkedRemote = remoteFile("github", 5, 500);
+  const localPayload = {
+    ...payload("shared"),
+    hosts: [{
+      ...payload("shared").hosts[0]!,
+      password: "kept-secret",
+    }],
+  };
+  const remotePoisoned: SyncPayload = {
+    ...payload("shared"),
+    hosts: [
+      {
+        ...payload("shared").hosts[0]!,
+        label: "remote-label",
+        password: ENC,
+      },
+    ],
+  };
+  const uploaded: SyncPayload[] = [];
+
+  EncryptionService.decryptPayload = async () => remotePoisoned;
+  EncryptionService.encryptPayload = async (outgoing: SyncPayload) => ({
+    ...remoteFile("github", 6, 600),
+    payload: JSON.stringify(outgoing),
+  });
+
+  try {
+    const manager = {
+      masterPassword: "pw",
+      adapters: new Map(),
+      state: {
+        securityState: "UNLOCKED",
+        providers: {
+          github: { enabled: true, connected: true, status: "connected" },
+          google: { enabled: false, connected: false, status: "disconnected" },
+          onedrive: { enabled: false, connected: false, status: "disconnected" },
+          webdav: { enabled: false, connected: false, status: "disconnected" },
+          s3: { enabled: false, connected: false, status: "disconnected" },
+        },
+        lastError: null,
+        syncState: "IDLE",
+        syncStrategy: "smartMerge",
+        localVersion: 1,
+        deviceId: "local-device",
+        deviceName: "Local",
+      },
+      getConnectedAdapter: async (provider: CloudProvider) => ({ provider }),
+      updateProviderStatus: () => {},
+      emit: () => {},
+      checkProviderConflict: async () => ({ conflict: true, remoteFile: checkedRemote }),
+      loadSyncBase: async () => ({
+        ...payload("shared"),
+        hosts: [{
+          ...payload("shared").hosts[0]!,
+          password: "kept-secret",
+        }],
+      }),
+      uploadToProvider: async (
+        _provider: CloudProvider,
+        _adapter: unknown,
+        _file: SyncedFile,
+        outgoing: SyncPayload,
+      ) => {
+        uploaded.push(outgoing);
+        return { success: true, provider: "github" as const, action: "upload" as const, version: 6 };
+      },
+      exitBlockedState: () => {},
+      notifyStateChange: () => {},
+    };
+
+    const results = await syncAllProvidersImpl.call(manager, localPayload);
+    assert.equal(results.get("github")?.success, true);
+    assert.equal(uploaded.length, 1);
+    const sharedHost = uploaded[0]?.hosts.find((host) => host.id === "shared");
+    assert.ok(sharedHost);
+    // Local/base usable secret must survive; remote non-secret edits can still apply.
+    assert.equal(sharedHost?.password, "kept-secret");
+    assert.equal(sharedHost?.label, "remote-label");
+  } finally {
+    EncryptionService.decryptPayload = originalDecryptPayload;
     EncryptionService.encryptPayload = originalEncryptPayload;
   }
 });

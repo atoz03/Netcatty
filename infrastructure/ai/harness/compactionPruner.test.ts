@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { ModelMessage } from 'ai';
-import { pruneLastModelMessage, pruneUntilFitsCompaction } from './compactionPruner.ts';
+import { pruneFirstModelMessage, pruneLastModelMessage, pruneUntilFitsCompaction } from './compactionPruner.ts';
 
 test('pruneLastModelMessage removes trailing user and assistant pair', () => {
   const messages: ModelMessage[] = [
@@ -31,6 +31,35 @@ test('pruneLastModelMessage removes trailing user and assistant pair', () => {
   assert.equal(pruned.length, 3);
   assert.equal(pruned[0]?.content, 'old');
   assert.equal(pruned.at(-1)?.role, 'tool');
+});
+
+test('message pruning removes complete parallel tool-result batches', () => {
+  const calls = ['a', 'b', 'c'].map((toolCallId) => ({
+    type: 'tool-call' as const,
+    toolCallId,
+    toolName: 'terminal_poll',
+    input: { jobId: toolCallId },
+  }));
+  const results = calls.map((call) => ({
+    role: 'tool' as const,
+    content: [{
+      type: 'tool-result' as const,
+      toolCallId: call.toolCallId,
+      toolName: call.toolName,
+      output: { type: 'text' as const, value: `result ${call.toolCallId}` },
+    }],
+  }));
+  const batch: ModelMessage[] = [
+    { role: 'assistant', content: calls },
+    ...results,
+  ];
+
+  assert.deepEqual(pruneFirstModelMessage([...batch, { role: 'user', content: 'next' }]), [
+    { role: 'user', content: 'next' },
+  ]);
+  assert.deepEqual(pruneLastModelMessage([{ role: 'user', content: 'before' }, ...batch]), [
+    { role: 'user', content: 'before' },
+  ]);
 });
 
 test('pruneUntilFitsCompaction shrinks history to fit budget', () => {

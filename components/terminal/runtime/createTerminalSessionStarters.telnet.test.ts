@@ -8,7 +8,7 @@ import {
 } from "./createTerminalSessionStarters";
 
 const noop = () => undefined;
-const ENCRYPTED_CREDENTIAL_PLACEHOLDER = "enc:v1:djEwAAAA";
+const ENCRYPTED_CREDENTIAL_PLACEHOLDER = "enc:v1:djEwdGVzdAAAAAAAAAAAAAAAAA==";
 
 test("startTelnet rejects missing saved proxy profiles", async () => {
   let started = false;

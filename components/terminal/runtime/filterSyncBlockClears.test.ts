@@ -5,6 +5,7 @@ import {
   createSyncBlockFilterState,
   filterSyncBlockClears,
   isTerminalViewportScrolledUp,
+  SYNC_BLOCK_SCROLLBACK_STRIP_MIN_ROWS,
 } from "./filterSyncBlockClears.ts";
 
 const SYNC_START = "\x1b[?2026h";
@@ -22,6 +23,23 @@ const liveBottomTerm = {
   buffer: { active: { type: "normal" as const, viewportY: 10, baseY: 10 } },
 };
 
+/** One row behind bottom — sticky lag / trackpad jitter, must not strip (#2291). */
+const nearBottomLagTerm = {
+  rows: 24,
+  buffer: { active: { type: "normal" as const, viewportY: 9, baseY: 10 } },
+};
+
+/** Exact strip threshold: baseY - viewportY === SYNC_BLOCK_SCROLLBACK_STRIP_MIN_ROWS. */
+const thresholdScrollTerm = {
+  rows: 24,
+  buffer: { active: { type: "normal" as const, viewportY: 8, baseY: 10 } },
+};
+
+const alternateScreenTerm = {
+  rows: 24,
+  buffer: { active: { type: "alternate" as const, viewportY: 0, baseY: 5 } },
+};
+
 test("passes through data with no synchronized-output sequences", () => {
   const state = createSyncBlockFilterState();
   const input = "hello\r\n\x1b[2Jworld\r\n";
@@ -30,13 +48,13 @@ test("passes through data with no synchronized-output sequences", () => {
   assert.equal(state.inSyncBlock, false);
 });
 
-test("strips home and clear for full-screen redraw sync blocks", () => {
+test("keeps cursor-home and strips clear for full-screen redraw while scrolled up", () => {
   const state = createSyncBlockFilterState();
   const input = `${SYNC_START}${CURSOR_HOME}${CLEAR}frame${SYNC_END}`;
 
   assert.equal(
     filterSyncBlockClears(input, state, scrolledUpTerm as never),
-    `${SYNC_START}frame${SYNC_END}`,
+    `${SYNC_START}${CURSOR_HOME}frame${SYNC_END}`,
   );
   assert.equal(state.inSyncBlock, false);
 });
@@ -46,6 +64,67 @@ test("passes full-screen redraw clears through at the live bottom", () => {
   const input = `${SYNC_START}${CURSOR_HOME}${CLEAR}frame${SYNC_END}`;
 
   assert.equal(filterSyncBlockClears(input, state, liveBottomTerm as never), input);
+});
+
+test("does not strip full redraw when only one row behind the live bottom (#2291)", () => {
+  const state = createSyncBlockFilterState();
+  const input = `${SYNC_START}${CURSOR_HOME}${CLEAR}frame${SYNC_END}`;
+
+  assert.equal(filterSyncBlockClears(input, state, nearBottomLagTerm as never), input);
+});
+
+test("strips clear at exactly the scrollback threshold boundary", () => {
+  const state = createSyncBlockFilterState();
+  const input = `${SYNC_START}${CURSOR_HOME}${CLEAR}frame${SYNC_END}`;
+
+  assert.equal(isTerminalViewportScrolledUp(thresholdScrollTerm as never), true);
+  assert.equal(
+    filterSyncBlockClears(input, state, thresholdScrollTerm as never),
+    `${SYNC_START}${CURSOR_HOME}frame${SYNC_END}`,
+  );
+});
+
+test("re-checks scroll when clear arrives after held home (return to bottom)", () => {
+  const mutableTerm = {
+    rows: 24,
+    buffer: { active: { type: "normal" as const, viewportY: 0, baseY: 5 } },
+  };
+  const state = createSyncBlockFilterState();
+
+  assert.equal(filterSyncBlockClears(SYNC_START, state, mutableTerm as never), SYNC_START);
+  assert.equal(filterSyncBlockClears(CURSOR_HOME, state, mutableTerm as never), "");
+  assert.equal(state.pendingCursorHome, CURSOR_HOME);
+
+  // User returns to the live bottom before the clear chunk arrives.
+  mutableTerm.buffer.active.viewportY = 5;
+  mutableTerm.buffer.active.baseY = 5;
+
+  assert.equal(
+    filterSyncBlockClears(`${CLEAR}frame${SYNC_END}`, state, mutableTerm as never),
+    `${CURSOR_HOME}${CLEAR}frame${SYNC_END}`,
+  );
+});
+
+test("does not strip full redraw on the alternate screen", () => {
+  const state = createSyncBlockFilterState();
+  const input = `${SYNC_START}${CURSOR_HOME}${CLEAR}frame${SYNC_END}`;
+
+  assert.equal(filterSyncBlockClears(input, state, alternateScreenTerm as never), input);
+});
+
+test("stacked agent frames keep home so the second frame cannot append under the first (#2291)", () => {
+  const state = createSyncBlockFilterState();
+  const frameA = `${SYNC_START}${CURSOR_HOME}${CLEAR}AAA${SYNC_END}`;
+  const frameB = `${SYNC_START}${CURSOR_HOME}${CLEAR}BBB${SYNC_END}`;
+
+  assert.equal(
+    filterSyncBlockClears(frameA, state, scrolledUpTerm as never),
+    `${SYNC_START}${CURSOR_HOME}AAA${SYNC_END}`,
+  );
+  assert.equal(
+    filterSyncBlockClears(frameB, state, scrolledUpTerm as never),
+    `${SYNC_START}${CURSOR_HOME}BBB${SYNC_END}`,
+  );
 });
 
 test("passes incremental sync blocks through unchanged", () => {
@@ -76,7 +155,7 @@ test("tracks full redraw state across chunks", () => {
   assert.equal(filterSyncBlockClears(CURSOR_HOME, state, scrolledUpTerm as never), "");
   assert.equal(state.pendingCursorHome, CURSOR_HOME);
 
-  assert.equal(filterSyncBlockClears(CLEAR, state, scrolledUpTerm as never), "");
+  assert.equal(filterSyncBlockClears(CLEAR, state, scrolledUpTerm as never), CURSOR_HOME);
   assert.equal(
     filterSyncBlockClears(`frame${SYNC_END}`, state, scrolledUpTerm as never),
     `frame${SYNC_END}`,
@@ -106,7 +185,7 @@ test("handles sync markers split across chunks", () => {
       state,
       scrolledUpTerm as never,
     ),
-    `${SYNC_START}frame${SYNC_END}`,
+    `${SYNC_START}${CURSOR_HOME}frame${SYNC_END}`,
   );
 });
 
@@ -120,18 +199,18 @@ test("handles clear-screen marker split across chunks inside full redraw block",
   assert.equal(filterSyncBlockClears(clearPrefix, state, scrolledUpTerm as never), "");
   assert.equal(
     filterSyncBlockClears(`${clearSuffix}frame${SYNC_END}`, state, scrolledUpTerm as never),
-    `frame${SYNC_END}`,
+    `${CURSOR_HOME}frame${SYNC_END}`,
   );
 });
 
-test("leaves non-home redraw sequences inside full redraw blocks intact", () => {
+test("keeps explicit home and strips clear inside full redraw blocks while scrolled up", () => {
   const state = createSyncBlockFilterState();
   const cursorHome = "\x1b[1;1H";
   const input = `${SYNC_START}${cursorHome}${CLEAR}text${SYNC_END}`;
 
   assert.equal(
     filterSyncBlockClears(input, state, scrolledUpTerm as never),
-    `${SYNC_START}text${SYNC_END}`,
+    `${SYNC_START}${cursorHome}text${SYNC_END}`,
   );
 });
 
@@ -139,6 +218,27 @@ test("isTerminalViewportScrolledUp is false at the live bottom", () => {
   assert.equal(isTerminalViewportScrolledUp(liveBottomTerm as never), false);
 });
 
+test("isTerminalViewportScrolledUp is false for a one-row lag (#2291)", () => {
+  assert.equal(isTerminalViewportScrolledUp(nearBottomLagTerm as never), false);
+});
+
+test("isTerminalViewportScrolledUp becomes true at the configured row threshold", () => {
+  assert.equal(
+    thresholdScrollTerm.buffer.active.baseY - thresholdScrollTerm.buffer.active.viewportY,
+    SYNC_BLOCK_SCROLLBACK_STRIP_MIN_ROWS,
+  );
+  assert.equal(isTerminalViewportScrolledUp(thresholdScrollTerm as never), true);
+  assert.equal(isTerminalViewportScrolledUp(nearBottomLagTerm as never), false);
+});
+
 test("isTerminalViewportScrolledUp is true when reading scrollback", () => {
   assert.equal(isTerminalViewportScrolledUp(scrolledUpTerm as never), true);
+});
+
+test("isTerminalViewportScrolledUp is false on alternate screen", () => {
+  assert.equal(isTerminalViewportScrolledUp(alternateScreenTerm as never), false);
+});
+
+test("isTerminalViewportScrolledUp is false when buffer is missing", () => {
+  assert.equal(isTerminalViewportScrolledUp({ rows: 24 } as never), false);
 });

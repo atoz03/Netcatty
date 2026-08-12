@@ -176,6 +176,53 @@ test("proxy profile shrink is protected like other synced vault entities", () =>
   }
 });
 
+test("wiping group configs while other vault data remains is suspicious (#2757)", () => {
+  // Group defaults often hold startup commands / host appearance for a small
+  // number of folders. A hydration race that uploads hosts + groupConfigs:[]
+  // must not clear the cloud copy just because lost < BULK_SHRINK_MIN_ABSOLUTE.
+  const base = payload({
+    hosts: hosts(1),
+    groupConfigs: [
+      {
+        path: "prod",
+        startupCommand: "tmux attach || tmux",
+        theme: "solarized-dark",
+        themeOverride: true,
+      },
+    ],
+  } as Partial<SyncPayload>);
+  const out = payload({ hosts: hosts(1), groupConfigs: [] });
+  const result = detectSuspiciousShrink(out, base);
+  assert.equal(result.suspicious, true);
+  if (result.suspicious) {
+    assert.equal(result.entityType, "groupConfigs");
+    assert.equal(result.lost, 1);
+    assert.equal(result.reason, "bulk-shrink");
+  }
+});
+
+test("wiping the last snippet while hosts remain is still a normal delete", () => {
+  // The groupConfigs complete-wipe guard must not broaden to every entity —
+  // deleting your only snippet with hosts present is intentional.
+  const snippets = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({ id: `s${i}`, label: `s${i}`, command: "" })) as SyncPayload["snippets"];
+  const base = payload({ hosts: hosts(1), snippets: snippets(1) });
+  const out = payload({ hosts: hosts(1), snippets: snippets(0) });
+  assert.deepEqual(detectSuspiciousShrink(out, base), { suspicious: false });
+});
+
+test("a fully empty outgoing snapshot is not a partial wipe (#2757)", () => {
+  // Empty-everything against a trusted baseline is a real deletion path
+  // (convergent migration). Do not flag complete wipes when no other vault
+  // content remains on the outgoing payload.
+  const base = payload({
+    hosts: hosts(1),
+    groupConfigs: [{ path: "prod", startupCommand: "echo hi" }],
+  } as Partial<SyncPayload>);
+  const out = payload();
+  assert.deepEqual(detectSuspiciousShrink(out, base), { suspicious: false });
+});
+
 test("knownHosts shrink is ignored because known hosts are local-only", () => {
   const kh = (n: number) => Array.from({ length: n }, (_, i) => ({ id: `kh${i}`, hostname: `h${i}`, port: 22, keyType: "rsa", fingerprint: "x" })) as unknown as SyncPayload["knownHosts"];
   const base = payload({ knownHosts: kh(12) });

@@ -1,7 +1,12 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { createProcessTree } = require("./ptyProcessTree.cjs");
+const {
+  POSIX_PROCESS_LIST_TIMEOUT_MS,
+  POSIX_PROCESS_LIST_MAX_BUFFER_BYTES,
+  createProcessTree,
+  defaultListPosix,
+} = require("./ptyProcessTree.cjs");
 
 test("getChildProcesses returns [] when session has no registered pid", async () => {
   const tree = createProcessTree({ platform: "darwin", listPosix: async () => [] });
@@ -76,4 +81,37 @@ test("registerPid warns when overwriting an existing sessionId with a different 
   } finally {
     console.warn = origWarn;
   }
+});
+
+test("default posix process listing bounds the child lifetime and captured output", async () => {
+  let invocation = null;
+  const processes = await defaultListPosix(1234, {
+    execFileFn(command, args, options, callback) {
+      invocation = { command, args, options };
+      callback(null, [
+        "2001 1234 node server.js",
+        "2002 9999 sleep 100",
+        "2003 1234 python worker.py",
+      ].join("\n"));
+    },
+  });
+
+  assert.deepEqual(processes, [
+    { pid: 2001, command: "node server.js" },
+    { pid: 2003, command: "python worker.py" },
+  ]);
+  assert.equal(invocation.command, "ps");
+  assert.deepEqual(invocation.args, ["-A", "-o", "pid=,ppid=,args="]);
+  assert.equal(invocation.options.timeout, POSIX_PROCESS_LIST_TIMEOUT_MS);
+  assert.equal(invocation.options.maxBuffer, POSIX_PROCESS_LIST_MAX_BUFFER_BYTES);
+  assert.equal(invocation.options.windowsHide, true);
+});
+
+test("default posix process listing returns an empty result after command failure", async () => {
+  const processes = await defaultListPosix(1234, {
+    execFileFn(_command, _args, _options, callback) {
+      callback(Object.assign(new Error("timed out"), { killed: true }), "");
+    },
+  });
+  assert.deepEqual(processes, []);
 });

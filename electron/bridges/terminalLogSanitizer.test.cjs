@@ -151,3 +151,100 @@ test("standalone ED3 preserves current visible screen", () => {
     "before\n\nscreen\nafter",
   );
 });
+
+test("alternate screen body is omitted from plain text session logs", () => {
+  assert.equal(
+    terminalDataToPlainText(
+      "$ vim file\n\x1b[?1049h\x1b[H~\n~\n\"file\" 0L, 0B\x1b[?1049l$ ls\n",
+    ),
+    "$ vim file\n$ ls",
+  );
+});
+
+test("alternate screen omit tracks enter/leave split across chunks", () => {
+  const renderer = createTerminalTextRenderer();
+  renderer.feed("$ vim\n\x1b[?1049");
+  renderer.feed("h\x1b[H~\nstatus line");
+  renderer.feed("\x1b[?1049l$ done\n");
+  assert.equal(renderer.finish(), "$ vim\n$ done");
+});
+
+test("seeded alternate screen omits TUI paint until leave", () => {
+  const renderer = createTerminalTextRenderer({ alternateScreenActive: true });
+  renderer.feed("~\nstatus line\n");
+  renderer.feed("\x1b[?1049l$ done\n");
+  assert.equal(renderer.finish(), "$ done");
+});
+
+test("legacy smcup/rmcup alternate screen modes are omitted", () => {
+  assert.equal(
+    terminalDataToPlainText("shell\n\x1b[?47hTUI\n\x1b[?47lafter\n"),
+    "shell\nafter",
+  );
+  assert.equal(
+    terminalDataToPlainText("shell\n\x1b[?1047hTUI\n\x1b[?1047lafter\n"),
+    "shell\nafter",
+  );
+});
+
+test("RIS during alternate screen restores logging of later shell output", () => {
+  assert.equal(
+    terminalDataToPlainText("before\n\x1b[?1049hTUI\x1bcshell-after\n"),
+    "before\nshell-after",
+  );
+});
+
+test("split RIS during alternate screen restores logging of later shell output", () => {
+  const renderer = createTerminalTextRenderer();
+  renderer.feed("before\n\x1b[?1049hTUI\x1b");
+  renderer.feed("cshell-after\n");
+  assert.equal(renderer.finish(), "before\nshell-after");
+});
+
+test("RIS after mid-line TUI does not glue post-reset shell text", () => {
+  assert.equal(
+    terminalDataToPlainText("before\x1b[?1049hTUI\x1bcshell-after\n"),
+    "before\nshell-after",
+  );
+});
+
+test("RIS resets SGR so post-reset text is not colored from pre-entry style", () => {
+  const renderer = createTerminalTextRenderer();
+  renderer.feed("\x1b[31mbefore\x1b[?1049hTUI\x1bcshell-after\n");
+  const html = renderer.toHtmlContent();
+  assert.match(html, /shell-after/);
+  // Pre-entry red SGR must not wrap post-RIS shell text.
+  assert.equal(/color:\s*#cd3131[^"]*"[^>]*>shell-after/.test(html), false);
+  assert.match(html, /color:\s*#cd3131[^"]*"[^>]*>before/);
+});
+
+test("RIS rebases screen so later cursor-home does not overwrite history", () => {
+  // Post-reset "shell" can be partially overwritten by home+write on the new
+  // screen ("newll"), but pre-RIS history ("before") must remain intact.
+  // Without rebasing, CSI H would rewrite history into something like "newore".
+  const log = terminalDataToPlainText("before\x1bcshell\x1b[Hnew");
+  assert.equal(log.startsWith("before\n"), true);
+  assert.equal(log.includes("new"), true);
+  assert.equal(log.startsWith("newore"), false);
+  assert.equal(log, "before\nnewll");
+});
+
+
+test("C1 CSI alternate-screen modes are omitted like ESC [ forms", () => {
+  assert.equal(
+    terminalDataToPlainText("before\n\x9b?1049hTUI\n\x9b?1049lafter\n"),
+    "before\nafter",
+  );
+  assert.equal(
+    terminalDataToPlainText("before\n\x9b?47hTUI\n\x9b?47lafter\n"),
+    "before\nafter",
+  );
+});
+
+test("split C1 CSI alternate-screen enter still omits TUI paint", () => {
+  const renderer = createTerminalTextRenderer();
+  renderer.feed("before\n\x9b?1049");
+  renderer.feed("h~\nstatus\n");
+  renderer.feed("\x9b?1049l$ done\n");
+  assert.equal(renderer.finish(), "before\n$ done");
+});

@@ -77,3 +77,36 @@ export const useSessionActivityMap = () => {
     sessionActivityStore.getSnapshot,
   );
 };
+
+/**
+ * Per-tab activity boolean. Store notify is still global, but React skips re-render
+ * when this tab's boolean is unchanged (Object.is on the snapshot primitive).
+ */
+export const useSessionActivity = (tabId: string): boolean => {
+  return useSyncExternalStore(
+    sessionActivityStore.subscribe,
+    () => !!sessionActivityStore.getSnapshot()[tabId],
+    () => !!sessionActivityStore.getSnapshot()[tabId],
+  );
+};
+
+/** True if any of the given session ids currently has activity. */
+export const useAnySessionActivity = (sessionIds: readonly string[]): boolean => {
+  return useSyncExternalStore(
+    sessionActivityStore.subscribe,
+    () => {
+      const snap = sessionActivityStore.getSnapshot();
+      for (const id of sessionIds) {
+        if (snap[id]) return true;
+      }
+      return false;
+    },
+    () => {
+      const snap = sessionActivityStore.getSnapshot();
+      for (const id of sessionIds) {
+        if (snap[id]) return true;
+      }
+      return false;
+    },
+  );
+};

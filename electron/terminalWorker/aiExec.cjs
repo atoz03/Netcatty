@@ -8,6 +8,10 @@ const {
   execViaRawPty,
 } = require("../bridges/ai/ptyExec.cjs");
 const { getFreshIdlePrompt, formatSyntheticEcho } = require("../bridges/ai/shellUtils.cjs");
+const {
+  ensureSessionShellKind,
+  ensureSessionShellKindForExec,
+} = require("../bridges/ai/sessionShellKind.cjs");
 
 const DEFAULT_BACKGROUND_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_BACKGROUND_JOB_POLL_INTERVAL_MS = 30 * 1000;
@@ -259,11 +263,20 @@ function createWorkerAiExecHandler({
     }
 
     if (ptyStream && typeof ptyStream.write === "function") {
+      // Remote sessions may not set shellKind at connect time; probe once so
+      // fish login shells get the fish wrapper (issue #1854). Cancellable so
+      // Stop during the probe window does not still type the command.
+      const probed = await ensureSessionShellKindForExec(session, {
+        trackForCancellation: activePtyExecs,
+        chatSessionId,
+      });
+      if (!probed.ok) return probed;
       return execViaPty(ptyStream, command, {
         stripMarkers: true,
         trackForCancellation: activePtyExecs,
         timeoutMs,
         shellKind: session.shellKind,
+        loginShellHint: session._loginShellKind,
         chatSessionId,
         expectedPrompt: getFreshIdlePrompt(session),
         typedInput: true,
@@ -312,7 +325,7 @@ function createWorkerAiJobStartHandler({
   backgroundJobs = new Map(),
   activeSessionJobs = new Map(),
 }) {
-  return function handleWorkerAiJobStart(event, payload = {}) {
+  return async function handleWorkerAiJobStart(event, payload = {}) {
     const {
       sessionId,
       command,
@@ -360,33 +373,15 @@ function createWorkerAiJobStartHandler({
     }
 
     const jobId = createWorkerBackgroundJobId();
-    const timeoutMs = Math.max(
-      Number.isFinite(commandTimeoutMs) ? commandTimeoutMs : 60000,
-      DEFAULT_BACKGROUND_JOB_TIMEOUT_MS,
-    );
-    let handle;
-    try {
-      handle = startPtyJob(ptyStream, command, {
-        timeoutMs,
-        shellKind: session.shellKind,
-        chatSessionId,
-        expectedPrompt: getFreshIdlePrompt(session),
-        typedInput: true,
-        echoCommand: (rawCommand) => {
-          event?.sender?.send?.("netcatty:data", {
-            sessionId,
-            data: formatSyntheticEcho(rawCommand),
-            syntheticEcho: true,
-          });
-        },
-        maxBufferedChars: MAX_BACKGROUND_JOB_OUTPUT_CHARS,
-        normalizeFinalOutput: false,
-      });
-    } catch (err) {
-      return { ok: false, error: err?.message || String(err) };
-    }
-
     const startedAt = Date.now();
+    activeSessionJobs.set(sessionId, jobId);
+
+    // Insert into backgroundJobs *before* the shell-kind probe so
+    // netcatty:ai:catty:cancel / cancelWorkerBackgroundJobsForSession can
+    // latch cancellation while we await. Without this, the first job on an
+    // unprobed remote session has no map entry during the probe and still
+    // writes to the PTY after chat cancel (Codex P2 on #2061).
+    let probeCancelRequested = false;
     const job = {
       id: jobId,
       sessionId,
@@ -401,10 +396,78 @@ function createWorkerAiJobStartHandler({
       outputBaseOffset: 0,
       totalOutputChars: 0,
       outputTruncated: false,
-      handle,
+      pendingShellProbe: true,
+      handle: {
+        cancel: () => {
+          probeCancelRequested = true;
+        },
+      },
     };
     backgroundJobs.set(jobId, job);
-    activeSessionJobs.set(sessionId, jobId);
+
+    // Same shellKind probe as foreground exec so background jobs on fish
+    // remote shells are not wrapped as posix (issue #1854). Session is
+    // reserved above so concurrent starts cannot pass the busy check.
+    try {
+      await ensureSessionShellKind(session);
+    } catch (err) {
+      job.status = "failed";
+      job.error = err?.message || String(err);
+      job.updatedAt = Date.now();
+      job.pendingShellProbe = false;
+      if (activeSessionJobs.get(sessionId) === jobId) activeSessionJobs.delete(sessionId);
+      return { ok: false, error: err?.message || String(err) };
+    }
+
+    if (probeCancelRequested || job.status === "stopping") {
+      job.status = "cancelled";
+      job.error = "Cancelled";
+      job.updatedAt = Date.now();
+      job.pendingShellProbe = false;
+      if (activeSessionJobs.get(sessionId) === jobId) activeSessionJobs.delete(sessionId);
+      return {
+        ok: false,
+        error: "Cancelled",
+        jobId,
+        sessionId,
+        status: "cancelled",
+      };
+    }
+
+    const timeoutMs = Math.max(
+      Number.isFinite(commandTimeoutMs) ? commandTimeoutMs : 60000,
+      DEFAULT_BACKGROUND_JOB_TIMEOUT_MS,
+    );
+    let handle;
+    try {
+      handle = startPtyJob(ptyStream, command, {
+        timeoutMs,
+        shellKind: session.shellKind,
+        loginShellHint: session._loginShellKind,
+        chatSessionId,
+        expectedPrompt: getFreshIdlePrompt(session),
+        typedInput: true,
+        echoCommand: (rawCommand) => {
+          event?.sender?.send?.("netcatty:data", {
+            sessionId,
+            data: formatSyntheticEcho(rawCommand),
+            syntheticEcho: true,
+          });
+        },
+        maxBufferedChars: MAX_BACKGROUND_JOB_OUTPUT_CHARS,
+        normalizeFinalOutput: false,
+      });
+    } catch (err) {
+      job.status = "failed";
+      job.error = err?.message || String(err);
+      job.updatedAt = Date.now();
+      job.pendingShellProbe = false;
+      if (activeSessionJobs.get(sessionId) === jobId) activeSessionJobs.delete(sessionId);
+      return { ok: false, error: err?.message || String(err) };
+    }
+
+    job.handle = handle;
+    job.pendingShellProbe = false;
 
     handle.resultPromise.then((result) => {
       job.updatedAt = Date.now();

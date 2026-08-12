@@ -2,8 +2,7 @@
 
 let bridgesRegistered = false;
 let cloudSyncSessionPassword = null;
-const { readClipboardFiles, readClipboardImage } = require("../bridges/clipboardFiles.cjs");
-const { TRANSFER_CHUNK_SIZE, TRANSFER_CONCURRENCY } = require("../bridges/transferLimits.cjs");
+const { readClipboardFiles, readClipboardImage, hasClipboardImage } = require("../bridges/clipboardFiles.cjs");
 
 const excludedFigSpecPrefixes = ["aws", "gcloud", "az"];
 
@@ -13,6 +12,34 @@ function isExcludedFigSpec(commandName) {
 
 function filterExcludedFigSpecs(specNames) {
   return specNames.filter((name) => !isExcludedFigSpec(name));
+}
+
+function waitForApplicationSpawn(child, requireCleanLauncherExit = false) {
+  return new Promise((resolve, reject) => {
+    const onSpawn = () => {
+      if (requireCleanLauncherExit) return;
+      cleanup();
+      resolve();
+    };
+    const onClose = (code) => {
+      if (!requireCleanLauncherExit) return;
+      cleanup();
+      if (code === 0) resolve();
+      else reject(new Error(`Application launcher exited with code ${code}`));
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const cleanup = () => {
+      child.removeListener("spawn", onSpawn);
+      child.removeListener("error", onError);
+      child.removeListener("close", onClose);
+    };
+    child.once("spawn", onSpawn);
+    child.once("error", onError);
+    if (requireCleanLauncherExit) child.once("close", onClose);
+  });
 }
 
 function createBridgeRegistrar(context) {
@@ -57,6 +84,7 @@ function createBridgeRegistrar(context) {
     getCredentialBridge,
     getAutoUpdateBridge,
     getAiBridge,
+    getHttpNetworkProxyBridge,
     getWindowManager,
     getVaultBackupBridge,
     isPathInside,
@@ -86,7 +114,191 @@ function createBridgeRegistrar(context) {
     const credentialBridge = getCredentialBridge();
     const autoUpdateBridge = getAutoUpdateBridge();
     const aiBridge = getAiBridge();
+    const httpNetworkProxyBridge = getHttpNetworkProxyBridge();
     const vaultBackupBridge = getVaultBackupBridge();
+    const {
+      createTrustedPluginBridgeSender,
+      registerPluginBridge,
+    } = require("../plugins/pluginBridge.cjs");
+    let terminalWorkerManager = null;
+    const { toElectronAccelerator } = require("../plugins/keybindings.cjs");
+    const { startDevelopmentPluginHost } = require("../plugins/hostBootstrap.cjs");
+    const pluginHostService = startDevelopmentPluginHost({
+      env: process.env,
+      createService: () => {
+        const { createPluginHostService } = require("../plugins/hostService.cjs");
+        const {
+          createNativePermissionDecisionProvider,
+        } = require("../plugins/nativePermissionDecision.cjs");
+        const {
+          terminalInterceptorChoiceLabel,
+          terminalInterceptorIdentifier,
+          terminalInterceptorMessages,
+        } = require("../plugins/terminalInterceptorMessages.cjs");
+        return createPluginHostService({
+          app,
+          electron: electronModule,
+          safeStorage,
+          requestPermissionDecision: createNativePermissionDecisionProvider({
+            dialog: electronModule.dialog,
+            window: win,
+          }),
+          getLocale: () => getWindowManager().getCurrentLanguage?.() ?? "en",
+          requestTerminalInterceptorSelection: async ({ direction, providers }) => {
+            const messages = terminalInterceptorMessages(getWindowManager().getCurrentLanguage?.() ?? "en");
+            const buttons = [
+              ...providers.map(terminalInterceptorChoiceLabel),
+              messages.noInterceptor,
+            ];
+            const result = await electronModule.dialog.showMessageBox(win, {
+              type: "question",
+              title: messages.selectTitle(direction),
+              message: messages.selectMessage(direction),
+              buttons,
+              cancelId: buttons.length - 1,
+              defaultId: buttons.length - 1,
+              noLink: true,
+            });
+            return result.response >= 0 && result.response < providers.length
+              ? providers[result.response].provider.id
+              : null;
+          },
+          showTerminalInterceptorWarning: (warning) => {
+            const messages = terminalInterceptorMessages(getWindowManager().getCurrentLanguage?.() ?? "en");
+            void electronModule.dialog.showMessageBox(win, {
+              type: "warning",
+              title: messages.warningTitle,
+              message: messages.warningMessage,
+              detail: warning?.providerId
+                ? `${messages.warningDetail}\n${terminalInterceptorIdentifier(warning.providerId)}`
+                : messages.warningDetail,
+            }).catch(() => {});
+          },
+        });
+      },
+      registerShutdown: (handler) => {
+        const { registerPluginShutdown } = require("../plugins/shutdownCoordinator.cjs");
+        return registerPluginShutdown(handler);
+      },
+      logger: console,
+    });
+    registerPluginBridge(ipcMain, {
+      manager: pluginHostService?.manager,
+      contributionService: pluginHostService?.contributionService,
+      terminalProviderService: pluginHostService?.terminalProviderService,
+      terminalDataPipelineService: pluginHostService?.terminalDataPipelineService,
+      extensionProviderService: pluginHostService?.extensionProviderService,
+      syncSidecarService: pluginHostService?.syncSidecarService,
+      credentialResolver: pluginHostService?.credentialResolver,
+      secretStore: pluginHostService?.secretStore,
+      getTerminalWorkerManager: () => terminalWorkerManager,
+      selectImporterFile: async (event) => {
+        const owner = electronModule.BrowserWindow.fromWebContents(event.sender);
+        const result = await electronModule.dialog.showOpenDialog(owner || undefined, {
+          title: "Select file to import",
+          properties: ["openFile", "showHiddenFiles"],
+          filters: [{ name: "All Files", extensions: ["*"] }],
+        });
+        return result.canceled ? null : result.filePaths[0] ?? null;
+      },
+      resolveContributionIcon: (payload) => pluginHostService?.contributionIconService?.resolve(payload),
+      viewHost: pluginHostService?.viewHost,
+      env: process.env,
+      isTrustedSender: createTrustedPluginBridgeSender({ devServerUrl: effectiveDevServerUrl }),
+      broadcast: (channel, payload) => {
+        for (const window of electronModule.BrowserWindow.getAllWindows()) {
+          if (!window.isDestroyed()) window.webContents.send(channel, payload);
+        }
+      },
+    });
+    if (pluginHostService?.contributionService) {
+      const windowManager = getWindowManager();
+      const {
+        createThemeContributionNativeImage,
+        resolveApplicationMenuIconReference,
+      } = require("../plugins/themeContributionIcon.cjs");
+      const applicationMenuPackageIcons = new Map();
+      const pendingApplicationMenuPackageIcons = new Map();
+      let applicationMenuIconGeneration = 0;
+      const applicationMenuProvider = () => {
+          const snapshot = pluginHostService.contributionService.snapshot({
+            locale: windowManager.getCurrentLanguage?.() ?? "en",
+            context: { "netcatty.surface": "application" },
+          });
+          return snapshot.plugins.flatMap((plugin) => {
+            const commandById = new Map(plugin.commands.map((command) => [command.id, command]));
+            return plugin.menus
+            .filter((menu) => menu.location === "application" && menu.visible)
+            .sort((left, right) => (left.order ?? 0) - (right.order ?? 0))
+            .map((menu) => {
+              const iconReference = resolveApplicationMenuIconReference(menu, commandById);
+              let icon;
+              if (iconReference?.kind === "theme") {
+                icon = createThemeContributionNativeImage(
+                  electronModule.nativeImage,
+                  iconReference,
+                  electronModule.nativeTheme?.shouldUseDarkColors === true,
+                );
+              } else if (iconReference?.kind === "package" && pluginHostService.contributionIconService) {
+                const iconKey = JSON.stringify([plugin.id, iconReference.light, iconReference.dark ?? null]);
+                const resolved = applicationMenuPackageIcons.get(iconKey);
+                if (resolved) {
+                  const dataUrl = electronModule.nativeTheme?.shouldUseDarkColors && resolved.dark
+                    ? resolved.dark
+                    : resolved.light;
+                  const candidate = electronModule.nativeImage?.createFromDataURL?.(dataUrl);
+                  if (candidate && !candidate.isEmpty?.()) icon = candidate;
+                } else if (!pendingApplicationMenuPackageIcons.has(iconKey)) {
+                  const generation = applicationMenuIconGeneration;
+                  const pending = pluginHostService.contributionIconService.resolve({
+                    pluginId: plugin.id,
+                    icon: iconReference,
+                  }).then((next) => {
+                    if (generation !== applicationMenuIconGeneration) return;
+                    applicationMenuPackageIcons.set(iconKey, next);
+                    windowManager.setPluginApplicationMenuProvider?.(applicationMenuProvider);
+                  }).catch(() => {}).finally(() => {
+                    if (pendingApplicationMenuPackageIcons.get(iconKey) === pending) {
+                      pendingApplicationMenuPackageIcons.delete(iconKey);
+                    }
+                  });
+                  pendingApplicationMenuPackageIcons.set(iconKey, pending);
+                }
+              }
+              return {
+              id: menu.id,
+              label: menu.title,
+              icon,
+              enabled: menu.enabled,
+              checked: menu.checked,
+              group: menu.group ?? "",
+              order: menu.order ?? 0,
+              accelerator: toElectronAccelerator(menu.shortcut),
+              click: (_menuItem, _window, event) => {
+                const command = event?.altKey && menu.alt ? menu.alt : menu.command;
+                void pluginHostService.contributionService.executeCommand(command, undefined, {
+                  source: "application-menu",
+                  context: { "netcatty.surface": "application" },
+                }).catch((error) => console.warn("[Plugins] Application command failed:", error?.message ?? error));
+              },
+              };
+            });
+          });
+      };
+      const refreshPluginApplicationMenu = ({ invalidateIcons = false } = {}) => {
+        if (invalidateIcons) {
+          applicationMenuIconGeneration += 1;
+          applicationMenuPackageIcons.clear();
+          pendingApplicationMenuPackageIcons.clear();
+        }
+        windowManager.setPluginApplicationMenuProvider?.(applicationMenuProvider);
+      };
+      refreshPluginApplicationMenu();
+      pluginHostService.contributionService.onDidChange(() => refreshPluginApplicationMenu({ invalidateIcons: true }));
+      electronModule.nativeTheme?.on?.("updated", () => {
+        windowManager.setPluginApplicationMenuProvider?.(applicationMenuProvider);
+      });
+    }
   
     const getCloudSyncPasswordPath = () => {
       try {
@@ -138,16 +350,18 @@ function createBridgeRegistrar(context) {
     };
   
     // Initialize bridges with shared dependencies
-    const cliDiscoveryFilePath = getCliDiscoveryFilePath({ userDataDir: app.getPath("userData") });
+    const userDataDir = app.getPath("userData");
+    const cliDiscoveryFilePath = getCliDiscoveryFilePath({ userDataDir });
     const { createTerminalOutputChannel } = require("../bridges/terminalOutputChannel.cjs");
     const {
       createTerminalWorkerManager,
       isTerminalWorkerEnabled,
+      registerTransportIdleTtlSettingsSync,
     } = require("../bridges/terminalWorkerManager.cjs");
     const terminalOutputChannel = createTerminalOutputChannel({
       MessageChannelMain: electronModule.MessageChannelMain,
     });
-    const terminalWorkerManager = isTerminalWorkerEnabled({ env: process.env }) && electronModule.utilityProcess
+    terminalWorkerManager = isTerminalWorkerEnabled({ env: process.env }) && electronModule.utilityProcess
       ? createTerminalWorkerManager({
           utilityProcess: electronModule.utilityProcess,
           electronModule,
@@ -155,6 +369,34 @@ function createBridgeRegistrar(context) {
           MessageChannelMain: electronModule.MessageChannelMain,
         })
       : null;
+    registerTransportIdleTtlSettingsSync(ipcMain, terminalWorkerManager);
+    if (terminalWorkerManager) {
+      const { registerPluginShutdown } = require("../plugins/shutdownCoordinator.cjs");
+      registerPluginShutdown(async () => {
+        try {
+          await terminalWorkerManager.request("netcatty:portforward:stopAll", {}, {});
+        } catch (error) {
+          console.warn("[PortForward] Worker shutdown cleanup failed:", error?.message || error);
+        }
+      });
+    }
+    const terminalPipelineSessionManager = terminalWorkerManager ?? {
+      getSessionOwnerWebContentsId(sessionId) {
+        const owner = sessions.get(sessionId)?.webContentsId;
+        return Number.isSafeInteger(owner) ? owner : null;
+      },
+      ownsSession(sessionId, webContentsId) {
+        return Number.isSafeInteger(webContentsId)
+          && sessions.get(sessionId)?.webContentsId === webContentsId;
+      },
+    };
+    pluginHostService?.terminalDataPipelineService?.bindTerminalWorkerManager(
+      terminalPipelineSessionManager,
+    );
+    const reportOpenedSessionActivity = (event) => aiBridge.reportOpenedSessionActivity?.(event);
+    terminalWorkerManager?.addOutputTap?.((sessionId) => {
+      reportOpenedSessionActivity({ sessionId, phase: "touch" });
+    });
     const deps = {
       sessions,
       sftpClients,
@@ -163,8 +405,11 @@ function createBridgeRegistrar(context) {
       getMainWindow: () => getWindowManager().getMainWindow?.(),
       sendWhenRendererReady: (...args) => getWindowManager().sendWhenRendererReady?.(...args),
       cliDiscoveryFilePath,
+      userDataDir,
       terminalOutputChannel,
       terminalWorkerManager,
+      reportOpenedSessionActivity,
+      transferBridge,
     };
   
     sshBridge.init(deps);
@@ -190,7 +435,7 @@ function createBridgeRegistrar(context) {
     sftpBridge.registerHandlers(ipcMain, { terminalWorkerManager });
     localFsBridge.registerHandlers(ipcMain);
     transferBridge.registerHandlers(ipcMain, { terminalWorkerManager });
-    portForwardingBridge.registerHandlers(ipcMain);
+    portForwardingBridge.registerHandlers(ipcMain, { terminalWorkerManager });
     terminalBridge.registerHandlers(ipcMain, { terminalWorkerManager });
 
     const scriptBridge = require("../bridges/scriptBridge.cjs");
@@ -212,12 +457,12 @@ function createBridgeRegistrar(context) {
     });
     systemManagerBridge.registerHandlers(ipcMain, { terminalWorkerManager });
     oauthBridge.setupOAuthBridge(ipcMain);
-    githubAuthBridge.registerHandlers(ipcMain);
+    githubAuthBridge.registerHandlers(ipcMain, electronModule);
     googleAuthBridge.registerHandlers(ipcMain, electronModule);
     onedriveAuthBridge.registerHandlers(ipcMain, electronModule);
-    cloudSyncBridge.registerHandlers(ipcMain);
+    cloudSyncBridge.registerHandlers(ipcMain, electronModule);
     fileWatcherBridge.registerHandlers(ipcMain, { terminalWorkerManager });
-    tempDirBridge.registerHandlers(ipcMain, shell);
+    tempDirBridge.registerHandlers(ipcMain, shell, electronModule);
     sessionLogsBridge.registerHandlers(ipcMain, { terminalWorkerManager });
     compressUploadBridge.registerHandlers(ipcMain, { terminalWorkerManager });
     globalShortcutBridge.registerHandlers(ipcMain);
@@ -225,6 +470,7 @@ function createBridgeRegistrar(context) {
     autoUpdateBridge.init(deps);
     autoUpdateBridge.registerHandlers(ipcMain);
     aiBridge.registerHandlers(ipcMain);
+    httpNetworkProxyBridge.registerHandlers(ipcMain, electronModule);
     crashLogBridge.registerHandlers(ipcMain);
     vaultBackupBridge.registerHandlers(ipcMain, electronModule);
   
@@ -290,7 +536,7 @@ function createBridgeRegistrar(context) {
         session.zmodemSentry.queueDragDropUpload({
           filePaths,
           remoteNames,
-          uploadCommand: uploadCommand || "rz\r",
+          uploadCommand: uploadCommand || "rz -y\r",
           tempPaths,
         });
         return { success: true };
@@ -627,6 +873,10 @@ function createBridgeRegistrar(context) {
     ipcMain.handle("netcatty:clipboard:readImage", async () => {
       return readClipboardImage({ clipboard, fsImpl: fs, tempDirBridge });
     });
+
+    ipcMain.handle("netcatty:clipboard:hasImage", async () => {
+      return hasClipboardImage({ clipboard });
+    });
   
     // Select an application from system file picker
     ipcMain.handle("netcatty:selectApplication", async () => {
@@ -681,11 +931,10 @@ function createBridgeRegistrar(context) {
           console.log(`[Main]   Command: open ${args.join(' ')}`);
           child = cpSpawn("open", args, { detached: true, stdio: "pipe" });
         } else if (process.platform === "win32") {
-          // On Windows, use cmd /c start to properly handle paths with spaces
-          // The empty string "" as window title is required when the first arg has quotes
-          const args = ["/c", "start", "\"\"", `"${appPath}"`, `"${filePath}"`];
-          console.log(`[Main]   Command: cmd ${args.join(' ')}`);
-          child = cpSpawn("cmd", args, { detached: true, stdio: "pipe", windowsVerbatimArguments: true });
+          // Spawn the selected executable directly. This preserves paths with
+          // spaces without a shell and reports an invalid app path as ENOENT.
+          console.log(`[Main]   Command: ${appPath} ${filePath}`);
+          child = cpSpawn(appPath, [filePath], { detached: true, stdio: "pipe" });
         } else {
           // On Linux, spawn the app with the file
           console.log(`[Main]   Command: ${appPath} ${filePath}`);
@@ -728,7 +977,11 @@ function createBridgeRegistrar(context) {
             console.log(`[Main] Application started successfully`);
           }
         });
-        
+
+        // spawn() reports ENOENT and similar launch failures asynchronously.
+        // Do not acknowledge success until the child has actually started, so
+        // the renderer can unregister and delete its downloaded temp file.
+        await waitForApplicationSpawn(child, process.platform === "darwin");
         child.unref();
         return true;
       } catch (err) {
@@ -803,70 +1056,6 @@ function createBridgeRegistrar(context) {
       return result.filePaths[0];
     });
   
-    // Download SFTP file to temp and return local path
-    ipcMain.handle("netcatty:sftp:downloadToTemp", async (event, { sftpId, remotePath, fileName, encoding }) => {
-      console.log(`[Main] Downloading SFTP file to temp:`);
-      console.log(`[Main]   SFTP ID: ${sftpId}`);
-      console.log(`[Main]   Remote path: ${remotePath}`);
-      console.log(`[Main]   File name: ${fileName}`);
-      
-      const client = require("../bridges/sftpBridge.cjs");
-      // Use tempDirBridge for dedicated Netcatty temp directory
-      const localPath = await getTempDirBridge().getTempFilePath(fileName);
-      
-      console.log(`[Main]   Local temp path: ${localPath}`);
-
-      if (terminalWorkerManager) {
-        try {
-          const result = await terminalWorkerManager.request("netcatty:sftp:downloadToLocal", {
-            sftpId,
-            remotePath,
-            localPath,
-            encoding,
-          }, {
-            webContentsId: event?.sender?.id,
-          });
-          if (result?.error) throw new Error(result.error);
-          console.log(`[Main]   File downloaded successfully via terminal worker`);
-          return localPath;
-        } catch (err) {
-          try { await fs.promises.rm(localPath, { force: true }); } catch { /* ignore */ }
-          throw err;
-        }
-      }
-      
-      // Get the sftp client and download file
-      const sftpClients = client.getSftpClients ? client.getSftpClients() : null;
-      if (!sftpClients) {
-        console.log(`[Main]   Using fallback readSftp method`);
-        // Fallback: use readSftp and write to temp file
-        const content = await client.readSftp(null, { sftpId, path: remotePath, encoding });
-        if (typeof content === "string") {
-          await fs.promises.writeFile(localPath, content, "utf-8");
-        } else {
-          await fs.promises.writeFile(localPath, content);
-        }
-        console.log(`[Main]   File downloaded successfully (fallback)`);
-        return localPath;
-      }
-      
-      const sftpClient = sftpClients.get(sftpId);
-      if (!sftpClient) {
-        console.error(`[Main]   SFTP session not found: ${sftpId}`);
-        throw new Error("SFTP session not found");
-      }
-      
-      const encodedPath = client.encodePathForSession
-        ? client.encodePathForSession(sftpId, remotePath, encoding)
-        : remotePath;
-      await sftpClient.fastGet(encodedPath, localPath, {
-        chunkSize: TRANSFER_CHUNK_SIZE,
-        concurrency: TRANSFER_CONCURRENCY,
-      });
-      console.log(`[Main]   File downloaded successfully`);
-      return localPath;
-    });
-  
     // Download SFTP file to temp with progress reporting via transfer events.
     // Progress/complete/cancelled events are delivered via the netcatty:transfer:*
     // channels (handled by transferBridge.startTransfer), so the IPC return value
@@ -883,6 +1072,8 @@ function createBridgeRegistrar(context) {
       };
   
       try {
+        // Omit totalBytes so transferBridge STATs the remote size. Explicit 0
+        // means a planned empty snapshot and skips the remote body (#2787).
         const payload = {
           transferId,
           sourcePath: remotePath,
@@ -891,13 +1082,22 @@ function createBridgeRegistrar(context) {
           targetType: "local",
           sourceSftpId: sftpId,
           sourceEncoding: encoding,
-          totalBytes: 0,
         };
   
         const result = terminalWorkerManager
-          ? await terminalWorkerManager.request("netcatty:transfer:start", payload, {
+          ? await (transferBridge.runAdmittedTransfer ? transferBridge.runAdmittedTransfer(
+              event,
+              payload,
+              undefined,
+              () => terminalWorkerManager.request("netcatty:transfer:start", {
+                ...payload,
+                skipAdmission: true,
+              }, {
+                webContentsId: event?.sender?.id,
+              }),
+            ) : terminalWorkerManager.request("netcatty:transfer:start", payload, {
               webContentsId: event?.sender?.id,
-            })
+            }))
           : await transferBridge.startTransfer(event, payload);
   
         if (result.error) {
@@ -941,4 +1141,9 @@ function createBridgeRegistrar(context) {
   return registerBridges;
 }
 
-module.exports = { createBridgeRegistrar, filterExcludedFigSpecs, isExcludedFigSpec };
+module.exports = {
+  createBridgeRegistrar,
+  filterExcludedFigSpecs,
+  isExcludedFigSpec,
+  _waitForApplicationSpawnForTests: waitForApplicationSpawn,
+};

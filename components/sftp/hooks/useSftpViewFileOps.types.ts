@@ -1,6 +1,6 @@
 import type React from "react";
 import type { MutableRefObject } from "react";
-import type { SftpFileEntry, SftpFilenameEncoding } from "../../../types";
+import type { SftpFileEntry } from "../../../types";
 import type { SftpStateApi } from "../../../application/state/useSftpState";
 import type { FileOpenerType, SystemAppInfo } from "../../../lib/sftpFileUtils";
 import type { TextEditorModalSnapshot } from "../../TextEditorModal";
@@ -20,23 +20,6 @@ export interface UseSftpViewFileOpsParams {
   t: (key: string, vars?: Record<string, string | number>) => string;
   showSaveDialog?: (defaultPath: string, filters?: Array<{ name: string; extensions: string[] }>) => Promise<string | null>;
   selectDirectory?: (title?: string, defaultPath?: string) => Promise<string | null>;
-  startStreamTransfer?: (
-    options: {
-      transferId: string;
-      sourcePath: string;
-      targetPath: string;
-      sourceType: 'local' | 'sftp';
-      targetType: 'local' | 'sftp';
-      sourceSftpId?: string;
-      targetSftpId?: string;
-      totalBytes?: number;
-      sourceEncoding?: SftpFilenameEncoding;
-      targetEncoding?: SftpFilenameEncoding;
-    },
-    onProgress?: (transferred: number, total: number, speed: number) => void,
-    onComplete?: () => void,
-    onError?: (error: string) => void
-  ) => Promise<{ transferId: string; totalBytes?: number; error?: string }>;
   getSftpIdForConnection?: (connectionId: string) => string | undefined;
 }
 

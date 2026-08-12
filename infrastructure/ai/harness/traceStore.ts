@@ -1,6 +1,7 @@
 import type { AgentEvent, CompactionTrace } from './types';
 
 const DEFAULT_MAX_EVENTS = 2_000;
+const DEFAULT_MAX_COMPACTIONS = 500;
 
 export interface TraceExport {
   sessionId: string;
@@ -13,9 +14,14 @@ export class TraceStore {
   private readonly events = new Map<string, AgentEvent[]>();
   private readonly compactions = new Map<string, CompactionTrace[]>();
   private readonly maxEvents: number;
+  private readonly maxCompactions: number;
 
-  constructor(maxEvents = DEFAULT_MAX_EVENTS) {
-    this.maxEvents = maxEvents;
+  constructor(
+    maxEvents = DEFAULT_MAX_EVENTS,
+    maxCompactions = Math.min(DEFAULT_MAX_COMPACTIONS, maxEvents),
+  ) {
+    this.maxEvents = Math.max(1, Math.floor(maxEvents));
+    this.maxCompactions = Math.max(1, Math.floor(maxCompactions));
   }
 
   append(event: AgentEvent): void {
@@ -29,6 +35,9 @@ export class TraceStore {
     if (event.type === 'compaction') {
       const traces = this.compactions.get(event.sessionId) ?? [];
       traces.push(event.trace);
+      if (traces.length > this.maxCompactions) {
+        traces.splice(0, traces.length - this.maxCompactions);
+      }
       this.compactions.set(event.sessionId, traces);
     }
   }

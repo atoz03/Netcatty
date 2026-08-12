@@ -7,10 +7,15 @@ import {
   onTerminalLineTimestampsChange,
 } from "./runtime/terminalLineTimestamps";
 import type { TerminalTimestampGutterRow } from "./runtime/terminalLineTimestamps";
+import { getTerminalOutputPressure } from "./runtime/terminalOutputPressure";
 
 export const TERMINAL_TIMESTAMP_GUTTER_MIN_WIDTH = 56;
 export const TERMINAL_TIMESTAMP_GUTTER_HORIZONTAL_PADDING = 16;
 export const TERMINAL_TIMESTAMP_SAMPLE_LABEL = "88:88:88";
+/** Cap gutter paint rate while large-output pressure is active (rAF still coalesces). */
+export const TERMINAL_TIMESTAMP_GUTTER_FLOOD_MIN_INTERVAL_MS = 100;
+const GUTTER_ROW_CLASS =
+  "absolute left-0 right-0 px-2 text-right tabular-nums whitespace-nowrap";
 
 type TerminalTimestampGutterProps = {
   termRef: RefObject<XTerm | null>;
@@ -46,6 +51,86 @@ const clearElement = (element: HTMLElement) => {
   while (element.firstChild) {
     element.removeChild(element.firstChild);
   }
+};
+
+const applyGutterRowStyles = (
+  item: HTMLElement,
+  {
+    row,
+    label,
+    screenTop,
+    cellHeight,
+    color,
+    fontFamily,
+    fontSize,
+    fontWeight,
+  }: {
+    row: number;
+    label: string;
+    screenTop: number;
+    cellHeight: number;
+    color: string;
+    fontFamily: string;
+    fontSize: number;
+    fontWeight: string | number;
+  },
+) => {
+  if (item.textContent !== label) {
+    item.textContent = label;
+  }
+  item.style.top = `${screenTop + row * cellHeight}px`;
+  item.style.height = `${cellHeight}px`;
+  item.style.lineHeight = `${cellHeight}px`;
+  item.style.color = color;
+  item.style.fontFamily = fontFamily;
+  item.style.fontSize = `${fontSize}px`;
+  item.style.fontWeight = String(fontWeight);
+  item.style.fontVariantNumeric = "tabular-nums";
+  item.style.display = "";
+};
+
+/**
+ * Reuse a fixed pool of row divs instead of clear+create on every paint.
+ * Returns the number of visible nodes kept after the update.
+ */
+export const syncTerminalTimestampGutterRows = (
+  gutter: HTMLElement,
+  rows: readonly TerminalTimestampGutterRow[],
+  layout: {
+    screenTop: number;
+    cellHeight: number;
+    color: string;
+    fontFamily: string;
+    fontSize: number;
+    fontWeight: string | number;
+  },
+): number => {
+  const existing = gutter.children;
+  let index = 0;
+  for (; index < rows.length; index += 1) {
+    const { row, label } = rows[index];
+    let item = existing[index] as HTMLElement | undefined;
+    if (!item) {
+      item = document.createElement("div");
+      item.className = GUTTER_ROW_CLASS;
+      gutter.appendChild(item);
+    }
+    applyGutterRowStyles(item, {
+      row,
+      label,
+      screenTop: layout.screenTop,
+      cellHeight: layout.cellHeight,
+      color: layout.color,
+      fontFamily: layout.fontFamily,
+      fontSize: layout.fontSize,
+      fontWeight: layout.fontWeight,
+    });
+  }
+  // Hide surplus pooled nodes (keep them for the next paint).
+  for (; index < existing.length; index += 1) {
+    (existing[index] as HTMLElement).style.display = "none";
+  }
+  return rows.length;
 };
 
 export const resolveTerminalTimestampGutterColor = (
@@ -184,9 +269,11 @@ export function TerminalTimestampGutter({
     let disposed = false;
     let rafId: number | null = null;
     let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let floodThrottleTimer: ReturnType<typeof setTimeout> | null = null;
     let disposables: DisposableLike[] = [];
     let resizeObserver: ResizeObserver | null = null;
     let lastRenderSignature = "";
+    let lastFloodRenderAt = 0;
 
     const clearGutter = () => {
       lastRenderSignature = "";
@@ -195,6 +282,10 @@ export function TerminalTimestampGutter({
 
     const render = () => {
       rafId = null;
+      // Always advance the flood clock when a render attempt runs — even if the
+      // signature is unchanged. Otherwise same-second labels during sustained
+      // output leave lastFloodRenderAt stale and the throttle stops limiting work.
+      lastFloodRenderAt = performance.now();
       const term = termRef.current;
       const container = containerRef.current;
       if (!enabled || !term || !container) {
@@ -226,34 +317,54 @@ export function TerminalTimestampGutter({
       if (signature === lastRenderSignature) return;
       lastRenderSignature = signature;
 
-      const fragment = document.createDocumentFragment();
-
-      for (const { row, label } of visibleRows) {
-        const item = document.createElement("div");
-        item.textContent = label;
-        item.className = "absolute left-0 right-0 px-2 text-right tabular-nums whitespace-nowrap";
-        item.style.top = `${screenTop + row * cellHeight}px`;
-        item.style.height = `${cellHeight}px`;
-        item.style.lineHeight = `${cellHeight}px`;
-        item.style.color = color;
-        item.style.fontFamily = typography.fontFamily;
-        item.style.fontSize = `${typography.fontSize}px`;
-        item.style.fontWeight = String(typography.fontWeight);
-        item.style.fontVariantNumeric = "tabular-nums";
-        fragment.appendChild(item);
-      }
-
-      clearElement(gutter);
-      gutter.appendChild(fragment);
+      syncTerminalTimestampGutterRows(gutter, visibleRows, {
+        screenTop,
+        cellHeight,
+        color,
+        fontFamily: typography.fontFamily,
+        fontSize: typography.fontSize,
+        fontWeight: typography.fontWeight,
+      });
     };
 
-    const scheduleRender = () => {
+    const queueRafRender = () => {
       if (disposed || rafId !== null) return;
       if (typeof requestAnimationFrame === "function") {
         rafId = requestAnimationFrame(render);
       } else {
         render();
       }
+    };
+
+    /**
+     * immediate: user scroll/resize — paint ASAP.
+     * normal: output/render pressure — throttle while flood pressure is active.
+     */
+    const scheduleRender = (priority: "immediate" | "normal" = "normal") => {
+      if (disposed) return;
+      if (priority === "normal") {
+        const term = termRef.current;
+        if (term) {
+          const pressure = getTerminalOutputPressure(term);
+          if (pressure.largeOutput || pressure.longLine) {
+            const now = performance.now();
+            const elapsed = now - lastFloodRenderAt;
+            if (elapsed < TERMINAL_TIMESTAMP_GUTTER_FLOOD_MIN_INTERVAL_MS) {
+              if (floodThrottleTimer === null) {
+                floodThrottleTimer = setTimeout(() => {
+                  floodThrottleTimer = null;
+                  queueRafRender();
+                }, TERMINAL_TIMESTAMP_GUTTER_FLOOD_MIN_INTERVAL_MS - elapsed);
+              }
+              return;
+            }
+          }
+        }
+      } else if (floodThrottleTimer !== null) {
+        clearTimeout(floodThrottleTimer);
+        floodThrottleTimer = null;
+      }
+      queueRafRender();
     };
 
     const attach = () => {
@@ -269,19 +380,28 @@ export function TerminalTimestampGutter({
       }
 
       disposables = [
-        term.onScroll?.(scheduleRender),
-        term.onRender?.(scheduleRender),
-        term.onResize?.(scheduleRender),
+        // xterm fires onScroll for output-driven scrolling too (not only user
+        // wheel/trackpad). Throttle only while large-output pressure is active
+        // (time-bounded). Do not use longLine here — it sticks until the next
+        // data chunk and would lag genuine user scrolling after output stops.
+        term.onScroll?.(() => {
+          const pressure = getTerminalOutputPressure(term);
+          scheduleRender(pressure.largeOutput ? "normal" : "immediate");
+        }),
+        term.onRender?.(() => scheduleRender("normal")),
+        term.onResize?.(() => scheduleRender("immediate")),
       ].filter(Boolean) as DisposableLike[];
-      disposables.push({ dispose: onTerminalLineTimestampsChange(term, scheduleRender) });
+      disposables.push({
+        dispose: onTerminalLineTimestampsChange(term, () => scheduleRender("normal")),
+      });
 
       if (typeof ResizeObserver !== "undefined") {
-        resizeObserver = new ResizeObserver(scheduleRender);
+        resizeObserver = new ResizeObserver(() => scheduleRender("immediate"));
         resizeObserver.observe(container);
         resizeObserver.observe(getTerminalScreen(container));
       }
 
-      scheduleRender();
+      scheduleRender("immediate");
     };
 
     attach();
@@ -293,6 +413,9 @@ export function TerminalTimestampGutter({
       }
       if (retryTimer) {
         clearTimeout(retryTimer);
+      }
+      if (floodThrottleTimer !== null) {
+        clearTimeout(floodThrottleTimer);
       }
       for (const disposable of disposables) {
         disposable.dispose();

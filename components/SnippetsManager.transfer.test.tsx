@@ -47,7 +47,6 @@ test("SnippetsManager renders import and multi-select controls", () => {
         snippets={[snippet]}
         packages={["ops"]}
         hosts={[]}
-        shellHistory={[]}
         hotkeyScheme="mac"
         keyBindings={[]}
         onSave={noop}

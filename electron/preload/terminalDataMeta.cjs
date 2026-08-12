@@ -26,6 +26,25 @@ function mergeTerminalDataMeta(first, second, options = {}) {
   const droppedOutputAlternateScreenAction = second?.droppedOutputMayAffectTerminalState
     ? second?.droppedOutputAlternateScreenAction
     : (second?.droppedOutputAlternateScreenAction ?? first?.droppedOutputAlternateScreenAction);
+  const firstHasPluginPipelineIngress = Number.isFinite(first?.pluginPipelineIngressBytes);
+  const secondHasPluginPipelineIngress = Number.isFinite(second?.pluginPipelineIngressBytes);
+  const pluginPipelineIngressBytes = Math.max(
+    0,
+    Number(first?.pluginPipelineIngressBytes ?? 0)
+      + Number(second?.pluginPipelineIngressBytes ?? 0),
+  );
+
+  if (typeof second?.pluginPipelineSensitiveInput === "boolean") {
+    merged.pluginPipelineSensitiveInput = second.pluginPipelineSensitiveInput;
+  } else {
+    delete merged.pluginPipelineSensitiveInput;
+  }
+
+  if (second?.pluginPipelineProcessed === true) {
+    merged.pluginPipelineProcessed = true;
+  } else {
+    delete merged.pluginPipelineProcessed;
+  }
 
   if (droppedOutputMayAffectTerminalState) {
     merged.droppedOutputMayAffectTerminalState = true;
@@ -37,6 +56,12 @@ function mergeTerminalDataMeta(first, second, options = {}) {
     merged.droppedOutputAlternateScreenAction = droppedOutputAlternateScreenAction;
   } else {
     delete merged.droppedOutputAlternateScreenAction;
+  }
+
+  if (firstHasPluginPipelineIngress || secondHasPluginPipelineIngress) {
+    merged.pluginPipelineIngressBytes = pluginPipelineIngressBytes;
+  } else {
+    delete merged.pluginPipelineIngressBytes;
   }
 
   if (options.preserveTerminalPerf !== true) {

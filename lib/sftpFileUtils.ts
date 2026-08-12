@@ -242,16 +242,69 @@ export interface DropEntry {
   isDirectory: boolean;
 }
 
+/** Local tree row from main-process `listLocalTree`. */
+export interface LocalTreeListEntry {
+  localPath: string;
+  relativePath: string;
+  type: "file" | "directory";
+  size: number;
+  lastModified: number;
+}
+
+/** Live scan counters while expanding a dropped folder. */
+export interface DropScanProgress {
+  fileCount: number;
+  directoryCount: number;
+  entryCount: number;
+  /** Optional UI label (e.g. root folder names). */
+  label?: string;
+}
+
+/**
+ * Sync snapshot of a drop. DataTransfer must be read before any await —
+ * after that, items/files may be empty.
+ */
+export interface CapturedDropRoot {
+  name: string;
+  isDirectory: boolean;
+  localPath?: string;
+  file?: File | null;
+  size?: number;
+  /** Folder-picker relative path when the File carries webkitRelativePath */
+  relativePath?: string;
+  /** webkit entry for Chromium walk fallback when no local path is available */
+  fsEntry?: FileSystemEntry;
+}
+
+export interface CapturedDropPayload {
+  roots: CapturedDropRoot[];
+  filesFallback: File[];
+}
+
+export interface MaterializeDropOptions {
+  listLocalTree?: (
+    path: string,
+    options?: {
+      onProgress?: (progress: DropScanProgress) => void;
+      abortSignal?: AbortSignal;
+    },
+  ) => Promise<LocalTreeListEntry[]>;
+  onProgress?: (progress: DropScanProgress) => void;
+  /** Cooperative cancel for webkit walks and native listLocalTree. */
+  abortSignal?: AbortSignal;
+  isCancelled?: () => boolean;
+}
+
+export const getDropEntryLocalPath = (entry: DropEntry): string | undefined =>
+  entry.localPath ?? (entry.file ? getPathForFile(entry.file) : undefined);
+
 const createDropEntriesFromFiles = (files: FileList | File[]): DropEntry[] => {
   const results: DropEntry[] = [];
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
-    const path = getPathForFile(file);
-    if (path) {
-      (file as File & { path?: string }).path = path;
-    }
     results.push({
       file,
+      localPath: getPathForFile(file),
       relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
       isDirectory: false,
     });
@@ -291,74 +344,133 @@ async function readAllDirectoryEntries(
   return allEntries;
 }
 
+function joinLocalRelativePath(rootPath: string, relativePath: string): string {
+  const normalizedRelative = relativePath.replace(/\\/g, "/");
+  const parts = normalizedRelative.split("/");
+  // relativePath is rooted at the drop root name; local path already points at that root.
+  const nested = parts.length > 1 ? parts.slice(1).join("/") : "";
+  if (!nested) return rootPath;
+  const separator = rootPath.includes("\\") ? "\\" : "/";
+  return rootPath + separator + nested.replace(/\//g, separator);
+}
+
 /**
- * Process file system entries iteratively (non-recursive) to handle large folders
- * Uses a queue-based approach to avoid stack overflow
- * @param rootEntries - The root entries to process
- * @returns Array of DropEntry objects with files and their relative paths
+ * Process file system entries iteratively (non-recursive) to handle large folders.
+ * Prefer reconstructing local paths from the drop root so we can skip per-file
+ * `entry.file()` when Electron already exposed the folder path.
  */
+export function isDropScanCancelledError(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const code = (error as { code?: string }).code;
+  return code === "ERR_DROP_SCAN_CANCELLED" || code === "ERR_LOCAL_TREE_CANCELLED";
+}
+
+function throwIfDropScanCancelled(options: {
+  abortSignal?: AbortSignal;
+  isCancelled?: () => boolean;
+}): void {
+  if (options.abortSignal?.aborted || options.isCancelled?.()) {
+    const error = new Error("Drop scan cancelled");
+    (error as Error & { code?: string }).code = "ERR_DROP_SCAN_CANCELLED";
+    throw error;
+  }
+}
+
 async function processEntriesIteratively(
-  rootEntries: FileSystemEntry[]
+  rootEntries: FileSystemEntry[],
+  options: {
+    rootPathByName?: Map<string, string>;
+    onProgress?: (progress: DropScanProgress) => void;
+    abortSignal?: AbortSignal;
+    isCancelled?: () => boolean;
+  } = {},
 ): Promise<DropEntry[]> {
   const results: DropEntry[] = [];
+  const rootPathByName = options.rootPathByName ?? new Map<string, string>();
 
-  // Queue of entries to process: [entry, basePath]
+  // Index-based queue avoids O(n²) Array.shift on huge trees.
   const queue: Array<{ entry: FileSystemEntry; basePath: string }> = [];
-
-  // Initialize queue with root entries
   for (const entry of rootEntries) {
     queue.push({ entry, basePath: "" });
   }
 
+  let queueIndex = 0;
   let processedCount = 0;
-  const YIELD_INTERVAL = 100; // Yield to main thread every N items
+  let fileCount = 0;
+  let directoryCount = 0;
+  const YIELD_INTERVAL = 100;
+  const PROGRESS_INTERVAL = 32;
 
-  while (queue.length > 0) {
-    const { entry, basePath } = queue.shift()!;
+  const reportProgress = (force = false) => {
+    if (!options.onProgress) return;
+    if (!force && processedCount % PROGRESS_INTERVAL !== 0) return;
+    options.onProgress({
+      fileCount,
+      directoryCount,
+      entryCount: fileCount + directoryCount,
+    });
+  };
+
+  while (queueIndex < queue.length) {
+    throwIfDropScanCancelled(options);
+    const { entry, basePath } = queue[queueIndex++];
+    const relativePath = basePath ? `${basePath}/${entry.name}` : entry.name;
+    const rootName = relativePath.split("/")[0] ?? entry.name;
+    const rootLocalPath = rootPathByName.get(rootName);
 
     if (entry.isFile) {
       const fileEntry = entry as FileSystemFileEntry;
-      try {
-        const file = await entryToFile(fileEntry);
+      if (rootLocalPath) {
+        // Native path is enough for stream upload; avoid Chromium File materialization.
         results.push({
-          file,
-          relativePath: basePath ? `${basePath}/${entry.name}` : entry.name,
+          file: null,
+          localPath: joinLocalRelativePath(rootLocalPath, relativePath),
+          relativePath,
           isDirectory: false,
         });
-      } catch (error) {
-        console.warn(`Failed to read file entry: ${entry.name}`, error);
+        fileCount++;
+      } else {
+        try {
+          const file = await entryToFile(fileEntry);
+          results.push({
+            file,
+            relativePath,
+            isDirectory: false,
+          });
+          fileCount++;
+        } catch (error) {
+          console.warn(`Failed to read file entry: ${entry.name}`, error);
+        }
       }
     } else if (entry.isDirectory) {
       const dirEntry = entry as FileSystemDirectoryEntry;
-      const currentPath = basePath ? `${basePath}/${entry.name}` : entry.name;
-
-      // Add directory entry
       results.push({
         file: null,
-        relativePath: currentPath,
+        localPath: rootLocalPath ? joinLocalRelativePath(rootLocalPath, relativePath) : undefined,
+        relativePath,
         isDirectory: true,
       });
+      directoryCount++;
 
       try {
         const reader = dirEntry.createReader();
         const childEntries = await readAllDirectoryEntries(reader);
-
-        // Add child entries to the queue (not recursive!)
         for (const childEntry of childEntries) {
-          queue.push({ entry: childEntry, basePath: currentPath });
+          queue.push({ entry: childEntry, basePath: relativePath });
         }
       } catch (error) {
         console.warn(`Failed to read directory: ${entry.name}`, error);
       }
     }
 
-    // Yield to main thread periodically to keep UI responsive
     processedCount++;
+    reportProgress();
     if (processedCount % YIELD_INTERVAL === 0) {
-      await new Promise<void>(resolve => setTimeout(resolve, 0));
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
     }
   }
 
+  reportProgress(true);
   return results;
 }
 
@@ -378,88 +490,323 @@ export function getPathForFile(file: File): string | undefined {
   }
 }
 
+/** Build a short label for the scanning task (folder names visible immediately). */
+export function formatDropScanLabel(roots: readonly CapturedDropRoot[]): string {
+  const names = roots.map((root) => root.name).filter(Boolean);
+  if (names.length === 0) return "Scanning files...";
+  if (names.length === 1) return names[0];
+  if (names.length === 2) return `${names[0]}, ${names[1]}`;
+  return `${names[0]}, ${names[1]} +${names.length - 2}`;
+}
+
 /**
- * Extract all files and directories from a DataTransfer object
- * Supports both regular files and folders dropped from the OS
- *
- * Uses the webkitGetAsEntry() API for folder access, with fallback
- * to regular FileList for browsers that don't support it.
- *
- * @param dataTransfer - The DataTransfer object from a drop event
- * @returns Array of DropEntry objects with files and relative paths
+ * Synchronously capture drop roots. Must run during the drop/paste event —
+ * before any await — or DataTransfer becomes empty.
  */
-export async function extractDropEntries(
-  dataTransfer: DataTransfer
-): Promise<DropEntry[]> {
+export function captureDropPayload(dataTransfer: DataTransfer): CapturedDropPayload {
+  const filesFallback: File[] = [];
+  const files = dataTransfer.files;
+  for (let i = 0; i < files.length; i++) {
+    filesFallback.push(files[i]);
+  }
+
+  const roots: CapturedDropRoot[] = [];
   const items = dataTransfer.items;
 
-  // Build a map of file/folder name to path from the original files in DataTransfer.files
-  const filePathMap = new Map<string, string>();
-  const filesWithPath = dataTransfer.files;
-  for (let i = 0; i < filesWithPath.length; i++) {
-    const f = filesWithPath[i];
-    const path = getPathForFile(f);
-    if (path) {
-      filePathMap.set(f.name, path);
-    }
-  }
+  const relativePathForFile = (file: File): string | undefined => {
+    const relative = (file as File & { webkitRelativePath?: string }).webkitRelativePath;
+    return relative && relative.length > 0 ? relative : undefined;
+  };
 
-  // Check if webkitGetAsEntry is supported (for folder access)
-  if (items && items.length > 0 && typeof items[0].webkitGetAsEntry === 'function') {
-    // Collect all entries first (getAsEntry must be called synchronously)
-    const entries: FileSystemEntry[] = [];
+  if (items && items.length > 0 && typeof items[0].webkitGetAsEntry === "function") {
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
-      if (item.kind === 'file') {
-        const entry = item.webkitGetAsEntry();
-        if (entry) {
-          entries.push(entry);
-        }
+      if (item.kind !== "file") continue;
+
+      const entry = item.webkitGetAsEntry();
+      const file = typeof item.getAsFile === "function" ? item.getAsFile() : (filesFallback[i] ?? null);
+      const localPath = file ? getPathForFile(file) : undefined;
+      const relativePath = file ? relativePathForFile(file) : undefined;
+
+      if (entry) {
+        roots.push({
+          name: entry.name,
+          isDirectory: entry.isDirectory,
+          localPath,
+          file: entry.isFile ? file : null,
+          size: file?.size,
+          relativePath: entry.isFile ? relativePath : undefined,
+          fsEntry: entry,
+        });
+        continue;
+      }
+
+      if (file) {
+        roots.push({
+          name: file.name,
+          isDirectory: false,
+          localPath: getPathForFile(file),
+          file,
+          size: file.size,
+          relativePath,
+        });
       }
     }
-
-    // Process entries iteratively (non-recursive) to avoid stack overflow
-    const results = await processEntriesIteratively(entries);
-    if (results.length === 0) {
-      return createDropEntriesFromFiles(dataTransfer.files);
-    }
-
-    // Restore the 'path' property for all files
-    // Try to get the path directly from webUtils.getPathForFile for each file
-    // This is more reliable than trying to reconstruct from folder paths
-    for (const result of results) {
-      if (result.file) {
-        // First try to get path directly from the file
-        const directPath = getPathForFile(result.file);
-        if (directPath) {
-          (result.file as File & { path?: string }).path = directPath;
-        } else {
-          // Fallback: try to reconstruct from root folder path
-          const pathParts = result.relativePath.split('/');
-          const rootName = pathParts[0];
-          const rootPath = filePathMap.get(rootName);
-
-          if (rootPath) {
-            if (pathParts.length === 1) {
-              // Root-level file: use the path directly
-              (result.file as File & { path?: string }).path = rootPath;
-            } else {
-              // Nested file in a folder: construct full path
-              // rootPath is the path to the root folder, we need to append the rest
-              const restOfPath = pathParts.slice(1).join('/');
-              const separator = rootPath.includes('\\') ? '\\' : '/';
-              const fullPath = rootPath + separator + restOfPath.replace(/\//g, separator);
-              (result.file as File & { path?: string }).path = fullPath;
-            }
-          }
-        }
-      }
-    }
-
-    return results;
   } else {
-    // Fallback: use regular FileList (no folder support)
-    // Files from FileList in Electron already have the 'path' property
-    return createDropEntriesFromFiles(dataTransfer.files);
+    for (const file of filesFallback) {
+      roots.push({
+        name: file.name,
+        isDirectory: false,
+        localPath: getPathForFile(file),
+        file,
+        size: file.size,
+        relativePath: relativePathForFile(file),
+      });
+    }
   }
+
+  return { roots, filesFallback };
+}
+
+/** Map main-process local tree rows into upload DropEntry records. */
+export function localTreeToDropEntries(tree: readonly LocalTreeListEntry[]): DropEntry[] {
+  return tree.map((entry) => {
+    if (entry.type === "directory") {
+      return {
+        file: null,
+        localPath: entry.localPath,
+        relativePath: entry.relativePath,
+        isDirectory: true,
+        // Do not use directory metadata size in conflict / compressed totals.
+      };
+    }
+    return {
+      file: null,
+      localPath: entry.localPath,
+      relativePath: entry.relativePath,
+      isDirectory: false,
+      size: entry.size,
+    };
+  });
+}
+
+function countDropEntries(entries: readonly DropEntry[]): DropScanProgress {
+  let fileCount = 0;
+  let directoryCount = 0;
+  for (const entry of entries) {
+    if (entry.isDirectory) directoryCount += 1;
+    else fileCount += 1;
+  }
+  return {
+    fileCount,
+    directoryCount,
+    entryCount: fileCount + directoryCount,
+  };
+}
+
+/**
+ * Expand a captured drop into full DropEntry rows.
+ * Prefer Electron `listLocalTree` (native fs) for directory roots with a local
+ * path; fall back to Chromium FileSystemEntry walk only when necessary.
+ */
+export async function materializeDropEntries(
+  payload: CapturedDropPayload,
+  options: MaterializeDropOptions = {},
+): Promise<DropEntry[]> {
+  const { listLocalTree, onProgress, abortSignal, isCancelled } = options;
+  const results: DropEntry[] = [];
+  let fileCount = 0;
+  let directoryCount = 0;
+
+  const report = (label?: string, forcePartial?: DropScanProgress) => {
+    if (!onProgress) return;
+    if (forcePartial) {
+      onProgress({
+        ...forcePartial,
+        label,
+      });
+      return;
+    }
+    onProgress({
+      fileCount,
+      directoryCount,
+      entryCount: fileCount + directoryCount,
+      label,
+    });
+  };
+
+  const nativeDirectoryRoots: CapturedDropRoot[] = [];
+  const webkitDirectoryRoots: CapturedDropRoot[] = [];
+  const fileRoots: CapturedDropRoot[] = [];
+
+  for (const root of payload.roots) {
+    if (root.isDirectory) {
+      if (root.localPath && listLocalTree) {
+        nativeDirectoryRoots.push(root);
+      } else if (root.fsEntry) {
+        webkitDirectoryRoots.push(root);
+      } else {
+        console.warn(`[SFTP] Skipping directory drop root without path or entry: ${root.name}`);
+      }
+      continue;
+    }
+    fileRoots.push(root);
+  }
+
+  throwIfDropScanCancelled({ abortSignal, isCancelled });
+
+  // Parallel native walks — one IPC per root folder, much faster than webkit.
+  if (nativeDirectoryRoots.length > 0 && listLocalTree) {
+    // Cumulative progress across roots: each walk reports its own counts.
+    const partialByRoot = new Map<string, DropScanProgress>();
+    const emitCombined = (label?: string) => {
+      let files = fileCount;
+      let dirs = directoryCount;
+      for (const partial of partialByRoot.values()) {
+        files += partial.fileCount;
+        dirs += partial.directoryCount;
+      }
+      report(label, { fileCount: files, directoryCount: dirs, entryCount: files + dirs });
+    };
+
+    // Local controller so a single root failure aborts sibling walks too.
+    const siblingAbort = new AbortController();
+    const stopSiblingScans = () => {
+      try {
+        siblingAbort.abort();
+      } catch {
+        // ignore
+      }
+    };
+    if (abortSignal) {
+      if (abortSignal.aborted) stopSiblingScans();
+      else abortSignal.addEventListener("abort", stopSiblingScans, { once: true });
+    }
+    const walkSignal = siblingAbort.signal;
+    const walkCancelled = () => (
+      walkSignal.aborted || abortSignal?.aborted === true || isCancelled?.() === true
+    );
+
+    const walkPromises = nativeDirectoryRoots.map(async (root) => {
+      throwIfDropScanCancelled({ abortSignal: walkSignal, isCancelled: walkCancelled });
+      const tree = await listLocalTree(root.localPath!, {
+        abortSignal: walkSignal,
+        onProgress: (partial) => {
+          partialByRoot.set(root.localPath!, partial);
+          emitCombined(root.name);
+        },
+      });
+      return { root, tree };
+    });
+
+    let trees: Array<{ root: CapturedDropRoot; tree: LocalTreeListEntry[] }>;
+    try {
+      trees = await Promise.all(walkPromises);
+    } catch (error) {
+      stopSiblingScans();
+      // Drain remaining native walks so retry does not pile more I/O on top.
+      await Promise.allSettled(walkPromises);
+      throw error;
+    } finally {
+      abortSignal?.removeEventListener("abort", stopSiblingScans);
+    }
+
+    for (const { root, tree } of trees) {
+      const entries = localTreeToDropEntries(tree);
+      for (const entry of entries) {
+        results.push(entry);
+        if (entry.isDirectory) directoryCount += 1;
+        else fileCount += 1;
+      }
+      partialByRoot.delete(root.localPath!);
+      report(root.name);
+    }
+  }
+
+  for (const root of fileRoots) {
+    results.push({
+      file: root.file ?? null,
+      localPath: root.localPath,
+      relativePath: root.relativePath || root.name,
+      isDirectory: false,
+      size: root.size ?? root.file?.size,
+    });
+    fileCount += 1;
+  }
+  if (fileRoots.length > 0) {
+    report();
+  }
+
+  if (webkitDirectoryRoots.length > 0) {
+    const rootPathByName = new Map<string, string>();
+    for (const root of webkitDirectoryRoots) {
+      if (root.localPath) rootPathByName.set(root.name, root.localPath);
+    }
+    const walked = await processEntriesIteratively(
+      webkitDirectoryRoots.map((root) => root.fsEntry!).filter(Boolean),
+      {
+        rootPathByName,
+        abortSignal,
+        isCancelled,
+        onProgress: (partial) => {
+          report(undefined, {
+            fileCount: fileCount + partial.fileCount,
+            directoryCount: directoryCount + partial.directoryCount,
+            entryCount: fileCount + directoryCount + partial.entryCount,
+          });
+        },
+      },
+    );
+
+    // Attach reconstructed paths when we only know the root path.
+    for (const entry of walked) {
+      if (!entry.localPath) {
+        const rootName = entry.relativePath.split("/")[0];
+        const rootPath = rootPathByName.get(rootName);
+        if (rootPath) {
+          entry.localPath = joinLocalRelativePath(rootPath, entry.relativePath);
+        } else if (entry.file) {
+          entry.localPath = getPathForFile(entry.file);
+        }
+      }
+      results.push(entry);
+      if (entry.isDirectory) directoryCount += 1;
+      else fileCount += 1;
+    }
+    report();
+  }
+
+  if (results.length === 0 && payload.filesFallback.length > 0) {
+    const fallback = createDropEntriesFromFiles(payload.filesFallback);
+    const counts = countDropEntries(fallback);
+    report(undefined, counts);
+    return fallback;
+  }
+
+  report(undefined, { fileCount, directoryCount, entryCount: fileCount + directoryCount });
+  return results;
+}
+
+/**
+ * Extract all files and directories from a DataTransfer object.
+ * Supports both regular files and folders dropped from the OS.
+ *
+ * Prefer Electron native tree walk when local paths are available; otherwise
+ * use webkitGetAsEntry with a path-reconstruction fast path.
+ */
+export async function extractDropEntries(
+  dataTransfer: DataTransfer,
+  options: MaterializeDropOptions = {},
+): Promise<DropEntry[]> {
+  const payload = captureDropPayload(dataTransfer);
+  const bridge = netcattyBridge.get();
+  return materializeDropEntries(payload, {
+    listLocalTree: options.listLocalTree
+      ?? (bridge?.listLocalTree
+        ? (path, treeOptions) => bridge.listLocalTree!(path, treeOptions)
+        : undefined),
+    onProgress: options.onProgress,
+    abortSignal: options.abortSignal,
+    isCancelled: options.isCancelled,
+  });
 }

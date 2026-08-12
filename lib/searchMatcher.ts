@@ -5,6 +5,7 @@ const SEARCH_REMOVE_REGEX = /[\s\p{Pd}_/\\|.,，。;；:：!！?？()（）[\]{}
 const SEARCH_QUERY_SEGMENT_SPLIT_REGEX = /\s+/u;
 const SEARCH_QUERY_PUNCT_REGEX = /[\p{Pd}_/\\|.,，。;；:：!！?？()（）[\]{}<>《》、"'`~·]/u;
 const DASH_SEPARATOR_REGEX = /[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/gu;
+export const PINYIN_CACHE_MAX_ENTRIES = 16_384;
 const PINYIN_CACHE = new Map<string, { full: string; initials: string }>();
 const IPV4_LIKE_REGEX = /^\d{1,3}(?:\.\d{1,3})+$/;
 const HOST_PHASE_SCORE_BONUS = {
@@ -35,7 +36,11 @@ function compactText(input: string): string {
 function getPinyinVariants(sourceText: string): { full: string; initials: string } {
   const cacheKey = normalizeText(sourceText);
   const cached = PINYIN_CACHE.get(cacheKey);
-  if (cached) return cached;
+  if (cached) {
+    PINYIN_CACHE.delete(cacheKey);
+    PINYIN_CACHE.set(cacheKey, cached);
+    return cached;
+  }
 
   let full = "";
   let initials = "";
@@ -57,8 +62,22 @@ function getPinyinVariants(sourceText: string): { full: string; initials: string
   }
 
   const next = { full, initials };
+  PINYIN_CACHE.delete(cacheKey);
   PINYIN_CACHE.set(cacheKey, next);
+  while (PINYIN_CACHE.size > PINYIN_CACHE_MAX_ENTRIES) {
+    const oldestKey = PINYIN_CACHE.keys().next().value as string | undefined;
+    if (oldestKey === undefined) break;
+    PINYIN_CACHE.delete(oldestKey);
+  }
   return next;
+}
+
+export function resetPinyinCacheForTests(): void {
+  PINYIN_CACHE.clear();
+}
+
+export function getPinyinCacheStatsForTests(): { size: number; keys: string[] } {
+  return { size: PINYIN_CACHE.size, keys: [...PINYIN_CACHE.keys()] };
 }
 
 export function tokenizeSearchQuery(query: string): string[] {

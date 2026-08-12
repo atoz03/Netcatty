@@ -84,7 +84,7 @@ test("bundledMoshClient uses .exe basename on win32 (when running on a POSIX hos
   assert.equal(result, winBin);
 });
 
-test("bundledMoshClient ignores non-executable matches", () => {
+test("bundledMoshClient ignores non-executable matches", { skip: process.platform === "win32" }, () => {
   const projectRoot = makeTmp();
   const candidate = path.join(projectRoot, "resources", "mosh", "linux-x64", "mosh-client");
   fs.mkdirSync(path.dirname(candidate), { recursive: true });

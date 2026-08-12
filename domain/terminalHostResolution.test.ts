@@ -120,6 +120,59 @@ test("resolveTerminalSessionHost keeps explicit missing local sessions local", (
   assert.equal(resolved.os, "macos");
 });
 
+test("resolveTerminalSessionHost restores a missing plugin host from the session snapshot", () => {
+  const providerId = "com.example.transport.connection";
+  const pluginConnection = {
+    providerId,
+    configuration: { endpoint: "saved.example", mode: "opaque" },
+  };
+  const resolved = resolveTerminalSessionHost({
+    session: {
+      ...baseSession,
+      hostId: "missing-plugin-host",
+      protocol: `plugin:${providerId}`,
+      pluginConnection,
+    },
+    hosts: [],
+    groupConfigs: [],
+    proxyProfiles,
+    localOs: "macos",
+  });
+
+  assert.equal(resolved.protocol, `plugin:${providerId}`);
+  assert.deepEqual(resolved.pluginConnection, pluginConnection);
+});
+
+test("resolveTerminalSessionHost keeps the session plugin configuration when the Vault host changes", () => {
+  const providerId = "com.example.transport.connection";
+  const protocol = `plugin:${providerId}` as const;
+  const resolved = resolveTerminalSessionHost({
+    session: {
+      ...baseSession,
+      protocol,
+      pluginConnection: { providerId, configuration: { endpoint: "session.example" } },
+    },
+    hosts: [{
+      id: "target",
+      label: "Target",
+      hostname: providerId,
+      username: "",
+      tags: [],
+      os: "linux",
+      protocol,
+      pluginConnection: { providerId, configuration: { endpoint: "vault.example" } },
+    }],
+    groupConfigs: [],
+    proxyProfiles,
+    localOs: "linux",
+  });
+
+  assert.deepEqual(resolved.pluginConnection, {
+    providerId,
+    configuration: { endpoint: "session.example" },
+  });
+});
+
 test("resolveTerminalSessionHost carries local session start directory into fallback host", () => {
   const resolved = resolveTerminalSessionHost({
     session: {
@@ -137,6 +190,169 @@ test("resolveTerminalSessionHost carries local session start directory into fall
 
   assert.equal(resolved.protocol, "local");
   assert.equal(resolved.localStartDir, "/Users/alice/project");
+});
+
+test("resolveTerminalSessionHost carries serial Ctrl-H backspace behavior into quick sessions", () => {
+  const resolved = resolveTerminalSessionHost({
+    session: {
+      ...baseSession,
+      hostId: "serial-session-1",
+      hostLabel: "Serial: COM3",
+      hostname: "COM3",
+      username: "",
+      protocol: "serial",
+      serialConfig: {
+        path: "COM3",
+        baudRate: 115200,
+        backspaceBehavior: "ctrl-h",
+      },
+    },
+    hosts: [],
+    groupConfigs: [],
+    proxyProfiles,
+    localOs: "windows",
+  });
+
+  assert.equal(resolved.protocol, "serial");
+  assert.equal(resolved.backspaceBehavior, "ctrl-h");
+});
+
+test("resolveTerminalSessionHost applies serial Ctrl-H backspace behavior from saved hosts", () => {
+  const host: Host = {
+    id: "target",
+    label: "Serial: COM3",
+    hostname: "COM3",
+    username: "",
+    port: 115200,
+    protocol: "serial",
+    tags: [],
+    os: "linux",
+    serialConfig: {
+      path: "COM3",
+      baudRate: 115200,
+      backspaceBehavior: "ctrl-h",
+    },
+  };
+
+  const resolved = resolveTerminalSessionHost({
+    session: {
+      ...baseSession,
+      hostLabel: "Serial: COM3",
+      hostname: "COM3",
+      username: "",
+      port: undefined,
+      protocol: "serial",
+    },
+    hosts: [host],
+    groupConfigs: [],
+    proxyProfiles,
+    localOs: "windows",
+  });
+
+  assert.equal(resolved.protocol, "serial");
+  assert.equal(resolved.backspaceBehavior, "ctrl-h");
+});
+
+test("resolveTerminalSessionHost preserves inherited Ctrl-H for legacy restored serial sessions", () => {
+  const host: Host = {
+    id: "target",
+    label: "Serial: COM3",
+    hostname: "COM3",
+    username: "",
+    port: 115200,
+    protocol: "serial",
+    tags: [],
+    os: "linux",
+    group: "serial-devices",
+    serialConfig: {
+      path: "COM3",
+      baudRate: 115200,
+    },
+  };
+
+  const resolved = resolveTerminalSessionHost({
+    session: {
+      ...baseSession,
+      hostLabel: "Serial: COM3",
+      hostname: "COM3",
+      username: "",
+      port: undefined,
+      protocol: "serial",
+      serialConfig: {
+        path: "COM3",
+        baudRate: 115200,
+      },
+    },
+    hosts: [host],
+    groupConfigs: [{ path: "serial-devices", backspaceBehavior: "ctrl-h" }],
+    proxyProfiles,
+    localOs: "windows",
+  });
+
+  assert.equal(resolved.backspaceBehavior, "ctrl-h");
+});
+
+test("resolveTerminalSessionHost keeps the serial Backspace behavior captured by the session", () => {
+  const host: Host = {
+    id: "target",
+    label: "Serial: COM3",
+    hostname: "COM3",
+    username: "",
+    port: 115200,
+    protocol: "serial",
+    tags: [],
+    os: "linux",
+    serialConfig: {
+      path: "COM3",
+      baudRate: 115200,
+      backspaceBehavior: "default",
+    },
+  };
+
+  const ctrlHSession = resolveTerminalSessionHost({
+    session: {
+      ...baseSession,
+      hostname: "COM3",
+      username: "",
+      protocol: "serial",
+      serialConfig: {
+        path: "COM3",
+        baudRate: 115200,
+        backspaceBehavior: "ctrl-h",
+      },
+    },
+    hosts: [host],
+    groupConfigs: [],
+    proxyProfiles,
+    localOs: "windows",
+  });
+
+  const defaultSession = resolveTerminalSessionHost({
+    session: {
+      ...baseSession,
+      hostname: "COM3",
+      username: "",
+      protocol: "serial",
+      serialConfig: {
+        path: "COM3",
+        baudRate: 115200,
+        backspaceBehavior: "default",
+      },
+    },
+    hosts: [{
+      ...host,
+      serialConfig: {
+        ...host.serialConfig!,
+        backspaceBehavior: "ctrl-h",
+      },
+    }],
+    groupConfigs: [],
+    proxyProfiles,
+    localOs: "windows",
+  });
+
+  assert.equal(ctrlHSession.backspaceBehavior, "ctrl-h");
+  assert.equal(defaultSession.backspaceBehavior, undefined);
 });
 
 test("resolveTerminalSessionHost suppresses inherited network device mode for Mosh sessions", () => {

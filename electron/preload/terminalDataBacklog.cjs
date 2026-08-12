@@ -2,6 +2,16 @@
 
 const { mergeTerminalDataMeta } = require("./terminalDataMeta.cjs");
 
+function hasPluginPipelineIngress(meta) {
+  return Number.isFinite(meta?.pluginPipelineIngressBytes)
+    && Number(meta.pluginPipelineIngressBytes) > 0;
+}
+
+function hasPluginPipelineIngressMarker(meta) {
+  return Number.isFinite(meta?.pluginPipelineIngressBytes)
+    && Number(meta.pluginPipelineIngressBytes) >= 0;
+}
+
 function createTerminalDataBacklog(options = {}) {
   const maxBytesPerSession = options.maxBytesPerSession ?? 64 * 1024;
   const pendingBySession = new Map();
@@ -12,11 +22,32 @@ function createTerminalDataBacklog(options = {}) {
   }
 
   function append(sessionId, data, meta) {
-    if (!sessionId || !data) return;
+    if (!sessionId || (!data && !hasPluginPipelineIngressMarker(meta))) return;
     const previous = pendingBySession.get(sessionId) || { data: "", meta: undefined };
     const nextData = trimToLimit(previous.data + data);
     const preserveTerminalPerf = previous.data.length === 0 && nextData === data;
-    const nextMeta = mergeTerminalDataMeta(previous.meta, meta, { preserveTerminalPerf });
+    let previousMeta = previous.meta;
+    let nextChunkMeta = meta;
+    const previousHasIngress = Number.isFinite(previousMeta?.pluginPipelineIngressBytes);
+    const nextChunkHasIngress = Number.isFinite(nextChunkMeta?.pluginPipelineIngressBytes);
+    // Once one merged chunk carries explicit original-ingress accounting, the
+    // metadata must cover every raw flow unit in the same replay entry. Flow
+    // control is intentionally charged in JavaScript string length, not UTF-8
+    // bytes, throughout the terminal renderer/worker path. Otherwise a
+    // processed chunk followed or preceded by ordinary output would cause the
+    // renderer to acknowledge only the annotated subset.
+    if (previousHasIngress && !nextChunkHasIngress && data) {
+      nextChunkMeta = {
+        ...(nextChunkMeta || {}),
+        pluginPipelineIngressBytes: data.length,
+      };
+    } else if (!previousHasIngress && nextChunkHasIngress && previous.data) {
+      previousMeta = {
+        ...(previousMeta || {}),
+        pluginPipelineIngressBytes: previous.data.length,
+      };
+    }
+    const nextMeta = mergeTerminalDataMeta(previousMeta, nextChunkMeta, { preserveTerminalPerf });
     pendingBySession.set(sessionId, {
       data: nextData,
       meta: nextMeta,
@@ -62,7 +93,7 @@ function createTerminalDataDispatcher({
   shouldDropSession = () => false,
 }) {
   return function deliverToListeners(sessionId, data, meta) {
-    if (!data) return;
+    if (!data && !hasPluginPipelineIngressMarker(meta)) return;
     if (shouldDropSession(sessionId)) return;
 
     if (!hasSessionListeners(displayDataListeners, sessionId)) {
@@ -103,4 +134,6 @@ module.exports = {
   createTerminalDataBacklog,
   createTerminalDataDispatcher,
   clearTerminalDataSession,
+  hasPluginPipelineIngress,
+  hasPluginPipelineIngressMarker,
 };

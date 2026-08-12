@@ -8,8 +8,9 @@ import {
 } from 'lucide-react';
 import React, { memo, useEffect, useMemo, useState } from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
+import { aggregateMountedDiskUsage } from '../../domain/systemDiskUsage';
 import { cn } from '../../lib/utils';
-import { useServerStats } from '../terminal/hooks/useServerStats';
+import { useServerStats } from '../../application/state/useServerStats';
 import { ResourceBar } from './ResourceBar';
 import {
   SystemPanelEmpty,
@@ -221,16 +222,18 @@ export const SystemOverviewTab = memo(function SystemOverviewTab({
     refresh,
   } = useServerStats({
     sessionId,
-    enabled: true,
+    enabled: isVisible,
     refreshInterval: refreshIntervalSec,
     isSupportedOs,
     isConnected: true,
-    isVisible,
   });
   const hasStats = Boolean(stats.lastUpdated);
 
   const memoryPercent = ratioPercent(stats?.memUsed, stats?.memTotal);
-  const diskPercent = clampPercent(stats?.diskPercent);
+  const mountedDiskUsage = aggregateMountedDiskUsage(stats.disks);
+  const diskUsed = mountedDiskUsage?.used ?? stats.diskUsed;
+  const diskTotal = mountedDiskUsage?.total ?? stats.diskTotal;
+  const diskPercent = mountedDiskUsage?.percent ?? clampPercent(stats.diskPercent);
   const networkSpeed = (stats?.netRxSpeed ?? 0) + (stats?.netTxSpeed ?? 0);
   const networkGauge = Math.min(100, Math.log10(networkSpeed + 1) * 14);
   const loadOne = stats?.loadAverage?.[0] ?? null;
@@ -264,8 +267,11 @@ export const SystemOverviewTab = memo(function SystemOverviewTab({
     network: history.map((sample) => sample.network),
   }), [history]);
 
+  // Prefer cached stats over empty/loading so tab switches never flash the
+  // empty placeholder when we already have a successful sample.
   const showBlockingError = Boolean(error && !hasStats && !loading);
   const showInitialLoading = Boolean(loading && !hasStats);
+  const showEmpty = Boolean(!hasStats && !loading && !error);
 
   return (
     <SystemPanelShell section="system-manager-overview">
@@ -282,9 +288,9 @@ export const SystemOverviewTab = memo(function SystemOverviewTab({
         <SystemPanelError message={error} onRetry={() => void refresh()} retryLabel={t('history.action.retry')} loading={loading} />
       ) : showInitialLoading ? (
         <SystemPanelLoading message={t('systemManager.overview.loading')} />
-      ) : !hasStats ? (
+      ) : showEmpty ? (
         <SystemPanelEmpty icon={Activity} message={t('systemManager.overview.empty')} />
-      ) : (
+      ) : hasStats ? (
         <div className="flex-1 min-h-0 overflow-y-auto px-3 py-3">
           <div className="grid grid-cols-2 gap-2">
             <MetricCard
@@ -310,7 +316,7 @@ export const SystemOverviewTab = memo(function SystemOverviewTab({
             <MetricCard
               label={t('systemManager.overview.disk')}
               value={formatPercent(diskPercent)}
-              detail={`${formatStorageGb(stats.diskUsed)} / ${formatStorageGb(stats.diskTotal)}`}
+              detail={`${formatStorageGb(diskUsed)} / ${formatStorageGb(diskTotal)}`}
               icon={HardDrive}
               gaugeValue={diskPercent}
               trendValues={trends.disk}
@@ -365,7 +371,7 @@ export const SystemOverviewTab = memo(function SystemOverviewTab({
             </div>
             {stats.disks.length > 0 ? (
               <div className="space-y-2">
-                {stats.disks.slice(0, 5).map((disk) => (
+                {stats.disks.map((disk) => (
                   <div key={disk.mountPoint} className="space-y-1">
                     <div className="flex items-center justify-between gap-2 text-[11px]">
                       <span className="min-w-0 truncate text-foreground">{disk.mountPoint}</span>
@@ -425,7 +431,7 @@ export const SystemOverviewTab = memo(function SystemOverviewTab({
             )}
           </section>
         </div>
-      )}
+      ) : null}
     </SystemPanelShell>
   );
 });

@@ -50,6 +50,10 @@ export interface AIChatSidePanelProps {
     messageId: string,
     updater: (msg: ChatMessage) => ChatMessage,
   ) => void;
+  persistContextCompaction: (
+    sessionId: string,
+    compaction: import('../infrastructure/ai/types').AISessionContextCompaction,
+  ) => void;
   // Provider config
   providers: ProviderConfig[];
   activeProviderId: string;
@@ -83,6 +87,8 @@ export interface AIChatSidePanelProps {
   scopeTargetId?: string;
   scopeHostIds?: string[];
   scopeLabel?: string;
+  /** Workspace focused pane; preferred when inheriting AI chat after merge. */
+  focusedSessionId?: string;
 
   // Terminal session context (from parent)
   terminalSessions?: Array<{

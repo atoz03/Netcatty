@@ -1,5 +1,6 @@
 import { CheckSquare, Edit2, FileSymlink, Server, Square, Expand, Minimize2 } from 'lucide-react';
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../application/i18n/I18nProvider';
 import {
   hostTreeInlineGroupEditStore,
@@ -9,6 +10,10 @@ import { useVaultHostTreeActions } from '../application/state/vaultHostTreeActio
 import { useTreeExpandedState } from '../application/state/useTreeExpandedState';
 import { applyGroupDefaults, resolveGroupDefaults } from '../domain/groupConfig';
 import { resolveTelnetPort, resolveTelnetUsername, sanitizeHost } from '../domain/host';
+import {
+  resolveHostActivateAction,
+  type HostClickBehavior,
+} from '../domain/hostClickBehavior';
 import { sortByVaultOrder } from '../domain/vaultOrder';
 import { STORAGE_KEY_VAULT_HOSTS_TREE_EXPANDED } from '../infrastructure/config/storageKeys';
 import { GroupConfig, GroupNode, Host } from '../types';
@@ -34,10 +39,241 @@ const getTreeGroupDropIntent = (
 const hasDragType = (dataTransfer: DataTransfer, type: string) =>
   Array.from(dataTransfer.types).includes(type);
 
+type HostTreeSortMode = 'manual' | 'az' | 'za' | 'newest' | 'oldest' | 'group';
+
+export type VisibleHostTreeItem =
+  | {
+    kind: 'group';
+    key: string;
+    depth: number;
+    node: GroupNode;
+    posInSet: number;
+    setSize: number;
+  }
+  | {
+    kind: 'host';
+    key: string;
+    depth: number;
+    host: Host;
+    posInSet: number;
+    setSize: number;
+  };
+
+const sortHostTreeGroups = (
+  nodes: GroupNode[],
+  sortMode: HostTreeSortMode,
+  groupConfigs: GroupConfig[],
+): GroupNode[] => {
+  const originalIndex = new Map(nodes.map((node, index) => [node.path, index]));
+  const orderByPath = new Map(
+    groupConfigs
+      .filter((config) => typeof config.order === 'number' && Number.isFinite(config.order))
+      .map((config) => [config.path, config.order as number]),
+  );
+  return [...nodes].sort((a, b) => {
+    if (sortMode === 'za') return b.name.localeCompare(a.name);
+    if (sortMode === 'manual') {
+      const orderA = orderByPath.get(a.path);
+      const orderB = orderByPath.get(b.path);
+      if (orderA !== undefined && orderB !== undefined && orderA !== orderB) return orderA - orderB;
+      if (orderA !== undefined) return -1;
+      if (orderB !== undefined) return 1;
+      return (originalIndex.get(a.path) ?? 0) - (originalIndex.get(b.path) ?? 0);
+    }
+    return a.name.localeCompare(b.name);
+  });
+};
+
+const sortHostTreeHosts = (hosts: Host[], sortMode: HostTreeSortMode): Host[] => {
+  const sorted = [...hosts].sort((a, b) => {
+    if (sortMode === 'za') return b.label.localeCompare(a.label);
+    if (sortMode === 'newest') return (b.createdAt || 0) - (a.createdAt || 0);
+    if (sortMode === 'oldest') return (a.createdAt || 0) - (b.createdAt || 0);
+    if (sortMode === 'manual') return 0;
+    return a.label.localeCompare(b.label);
+  });
+  return sortMode === 'manual' ? sortByVaultOrder(sorted) : sorted;
+};
+
+export function buildVisibleHostTreeItems({
+  groupTree,
+  ungroupedHosts,
+  expandedPaths,
+  sortMode,
+  groupConfigs,
+}: {
+  groupTree: GroupNode[];
+  ungroupedHosts: Host[];
+  expandedPaths: Set<string>;
+  sortMode: HostTreeSortMode;
+  groupConfigs: GroupConfig[];
+}): VisibleHostTreeItem[] {
+  const items: VisibleHostTreeItem[] = [];
+  const visitGroups = (nodes: GroupNode[], depth: number) => {
+    const sortedGroups = sortHostTreeGroups(nodes, sortMode, groupConfigs);
+    // Root-level ungrouped hosts are siblings of top-level groups.
+    const rootUngrouped = depth === 0 ? sortHostTreeHosts(ungroupedHosts, sortMode) : [];
+    const siblingSetSize = sortedGroups.length + rootUngrouped.length;
+    sortedGroups.forEach((node, groupIndex) => {
+      items.push({
+        kind: 'group',
+        key: `group:${node.path}`,
+        depth,
+        node,
+        posInSet: groupIndex + 1,
+        setSize: siblingSetSize,
+      });
+      if (!expandedPaths.has(node.path)) return;
+      const childGroups = sortHostTreeGroups(
+        Object.values(node.children ?? {}) as GroupNode[],
+        sortMode,
+        groupConfigs,
+      );
+      const childHosts = sortHostTreeHosts(node.hosts, sortMode);
+      const childSetSize = childGroups.length + childHosts.length;
+      // Recurse for nested groups first so expanded descendants stay contiguous
+      // under each child group, then emit this node's direct host siblings.
+      visitChildGroups(childGroups, depth + 1, childSetSize);
+      childHosts.forEach((host, hostIndex) => {
+        items.push({
+          kind: 'host',
+          key: `host:${host.id}`,
+          depth: depth + 1,
+          host,
+          posInSet: childGroups.length + hostIndex + 1,
+          setSize: childSetSize,
+        });
+      });
+    });
+    if (depth === 0) {
+      rootUngrouped.forEach((host, hostIndex) => {
+        items.push({
+          kind: 'host',
+          key: `host:${host.id}`,
+          depth: 0,
+          host,
+          posInSet: sortedGroups.length + hostIndex + 1,
+          setSize: siblingSetSize,
+        });
+      });
+    }
+  };
+  const visitChildGroups = (
+    sortedGroups: GroupNode[],
+    depth: number,
+    siblingSetSize: number,
+  ) => {
+    sortedGroups.forEach((node, groupIndex) => {
+      items.push({
+        kind: 'group',
+        key: `group:${node.path}`,
+        depth,
+        node,
+        posInSet: groupIndex + 1,
+        setSize: siblingSetSize,
+      });
+      if (!expandedPaths.has(node.path)) return;
+      const childGroups = sortHostTreeGroups(
+        Object.values(node.children ?? {}) as GroupNode[],
+        sortMode,
+        groupConfigs,
+      );
+      const childHosts = sortHostTreeHosts(node.hosts, sortMode);
+      const childSetSize = childGroups.length + childHosts.length;
+      visitChildGroups(childGroups, depth + 1, childSetSize);
+      childHosts.forEach((host, hostIndex) => {
+        items.push({
+          kind: 'host',
+          key: `host:${host.id}`,
+          depth: depth + 1,
+          host,
+          posInSet: childGroups.length + hostIndex + 1,
+          setSize: childSetSize,
+        });
+      });
+    });
+  };
+  visitGroups(groupTree, 0);
+  return items;
+}
+
+export function useHostTreeExpandedPaths({
+  persistentExpandedPaths,
+  allGroupPaths,
+  autoExpandGroupsKey,
+  onTogglePath,
+  onExpandAll,
+  onCollapseAll,
+}: {
+  persistentExpandedPaths: Set<string>;
+  allGroupPaths: string[];
+  autoExpandGroupsKey?: string;
+  onTogglePath: (path: string) => void;
+  onExpandAll: (paths: string[]) => void;
+  onCollapseAll: () => void;
+}) {
+  const [temporaryExpandedPaths, setTemporaryExpandedPaths] = useState<Set<string> | null>(null);
+  const lastAutoExpandGroupsKeyRef = useRef<string | undefined>(undefined);
+  const lastAutoExpandGroupPathsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!autoExpandGroupsKey) {
+      lastAutoExpandGroupsKeyRef.current = undefined;
+      lastAutoExpandGroupPathsRef.current = new Set();
+      setTemporaryExpandedPaths(null);
+      return;
+    }
+    const nextGroupPaths = new Set(allGroupPaths);
+    if (lastAutoExpandGroupsKeyRef.current !== autoExpandGroupsKey) {
+      lastAutoExpandGroupsKeyRef.current = autoExpandGroupsKey;
+      lastAutoExpandGroupPathsRef.current = nextGroupPaths;
+      setTemporaryExpandedPaths(nextGroupPaths);
+      return;
+    }
+    const newlyVisiblePaths = allGroupPaths.filter(
+      (path) => !lastAutoExpandGroupPathsRef.current.has(path),
+    );
+    lastAutoExpandGroupPathsRef.current = nextGroupPaths;
+    if (newlyVisiblePaths.length === 0) return;
+    setTemporaryExpandedPaths((current) => new Set([
+      ...(current ?? []),
+      ...newlyVisiblePaths,
+    ]));
+  }, [allGroupPaths, autoExpandGroupsKey]);
+
+  const togglePath = useCallback((path: string) => {
+    if (temporaryExpandedPaths === null) {
+      onTogglePath(path);
+      return;
+    }
+    setTemporaryExpandedPaths((current) => {
+      const next = new Set(current ?? []);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, [onTogglePath, temporaryExpandedPaths]);
+  const expandAll = useCallback((paths: string[]) => {
+    if (temporaryExpandedPaths === null) onExpandAll(paths);
+    else setTemporaryExpandedPaths(new Set(paths));
+  }, [onExpandAll, temporaryExpandedPaths]);
+  const collapseAll = useCallback(() => {
+    if (temporaryExpandedPaths === null) onCollapseAll();
+    else setTemporaryExpandedPaths(new Set());
+  }, [onCollapseAll, temporaryExpandedPaths]);
+
+  return {
+    expandedPaths: temporaryExpandedPaths ?? persistentExpandedPaths,
+    togglePath,
+    expandAll,
+    collapseAll,
+  };
+}
+
 interface HostTreeViewProps {
   groupTree: GroupNode[];
   hosts: Host[];
-  sortMode?: 'manual' | 'az' | 'za' | 'newest' | 'oldest' | 'group';
+  sortMode?: HostTreeSortMode;
   expandedPaths?: Set<string>;
   onTogglePath?: (path: string) => void;
   onExpandAll?: (paths: string[]) => void;
@@ -47,6 +283,7 @@ interface HostTreeViewProps {
   onDuplicateHost: (host: Host) => void;
   onDeleteHost: (host: Host) => void;
   onCopyCredentials: (host: Host) => void;
+  onCopyHostname?: (host: Host) => void;
   onNewGroup: (parentPath?: string) => void;
   onRenameGroup: (groupPath: string) => void;
   onEditGroup: (groupPath: string) => void;
@@ -60,16 +297,25 @@ interface HostTreeViewProps {
 
   isMultiSelectMode?: boolean;
   selectedHostIds?: Set<string>;
+  selectedGroupPaths?: Set<string>;
   toggleHostSelection?: (hostId: string) => void;
+  toggleGroupSelection?: (groupPath: string) => void;
+  hostClickBehavior?: HostClickBehavior;
+  focusedHostId?: string | null;
+  onFocusHost?: (hostId: string | null) => void;
+  focusedGroupPath?: string | null;
+  onFocusGroup?: (groupPath: string | null) => void;
   getDropTargetClasses?: (target: string) => string;
   setDragOverDropTarget?: (target: string | null) => void;
   groupConfigs?: GroupConfig[];
+  scrollRef?: React.RefObject<HTMLDivElement | null>;
+  autoExpandGroupsKey?: string;
 }
 
 interface TreeNodeProps {
   node: GroupNode;
   depth: number;
-  sortMode: 'manual' | 'az' | 'za' | 'newest' | 'oldest' | 'group';
+  sortMode: HostTreeSortMode;
   expandedPaths: Set<string>;
   onToggle: (path: string) => void;
   onConnect: (host: Host) => void;
@@ -77,6 +323,7 @@ interface TreeNodeProps {
   onDuplicateHost: (host: Host) => void;
   onDeleteHost: (host: Host) => void;
   onCopyCredentials: (host: Host) => void;
+  onCopyHostname?: (host: Host) => void;
   onNewGroup: (parentPath?: string) => void;
   onRenameGroup: (groupPath: string) => void;
   onEditGroup: (groupPath: string) => void;
@@ -90,11 +337,24 @@ interface TreeNodeProps {
 
   isMultiSelectMode?: boolean;
   selectedHostIds?: Set<string>;
+  selectedGroupPaths?: Set<string>;
   toggleHostSelection?: (hostId: string) => void;
+  toggleGroupSelection?: (groupPath: string) => void;
+  hostClickBehavior?: HostClickBehavior;
+  focusedHostId?: string | null;
+  onFocusHost?: (hostId: string | null) => void;
+  focusedGroupPath?: string | null;
+  onFocusGroup?: (groupPath: string | null) => void;
   getDropTargetClasses?: (target: string) => string;
   setDragOverDropTarget?: (target: string | null) => void;
   groupConfigs: GroupConfig[];
   groupDefaultsByPath: ReadonlyMap<string, Partial<GroupConfig>>;
+  activeTreeItemKey: string | null;
+  initialTreeItemKey: string | null;
+  onActiveTreeItemChange: (key: string) => void;
+  renderDescendants?: boolean;
+  treePosInSet?: number;
+  treeSetSize?: number;
 }
 
 
@@ -109,6 +369,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   onDuplicateHost,
   onDeleteHost,
   onCopyCredentials,
+  onCopyHostname,
   onNewGroup,
   onRenameGroup,
   onEditGroup,
@@ -122,11 +383,24 @@ const TreeNode: React.FC<TreeNodeProps> = ({
 
   isMultiSelectMode,
   selectedHostIds,
+  selectedGroupPaths,
   toggleHostSelection,
+  toggleGroupSelection,
+  hostClickBehavior = 'connect',
+  focusedHostId,
+  onFocusHost,
+  focusedGroupPath,
+  onFocusGroup,
   getDropTargetClasses,
   setDragOverDropTarget,
   groupConfigs,
   groupDefaultsByPath,
+  activeTreeItemKey,
+  initialTreeItemKey,
+  onActiveTreeItemChange,
+  renderDescendants = true,
+  treePosInSet,
+  treeSetSize,
 }) => {
   const inlineEdit = useHostTreeInlineGroupEdit();
   const vaultTreeActions = useVaultHostTreeActions();
@@ -135,6 +409,8 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   const isInlineEditing = inlineEdit?.groupPath === node.path;
   const groupRowRef = useRef<HTMLDivElement>(null);
   const isExpanded = expandedPaths.has(node.path);
+  const isGroupFocused = hostClickBehavior === 'select' && focusedGroupPath === node.path;
+  const isGroupMultiSelected = Boolean(isMultiSelectMode && selectedGroupPaths?.has(node.path));
 
   useEffect(() => {
     if (!isInlineEditing || !inlineEdit?.shouldScrollIntoView) return;
@@ -148,60 +424,15 @@ const TreeNode: React.FC<TreeNodeProps> = ({
   const isManaged = managedGroupPaths?.has(node.path) ?? false;
   const hostsCountInNode = node.totalHostCount ?? node.hosts.length;
 
-  const childNodes = useMemo(() => {
-    if (!node.children) return [];
-    const nodes = Object.values(node.children) as unknown as GroupNode[];
-    const originalIndex = new Map(nodes.map((child, index) => [child.path, index]));
-    const orderByPath = new Map(
-      groupConfigs
-        .filter((config) => typeof config.order === 'number' && Number.isFinite(config.order))
-        .map((config) => [config.path, config.order as number]),
-    );
-    return nodes.sort((a, b) => {
-      switch (sortMode) {
-        case 'za':
-          return b.name.localeCompare(a.name);
-        case 'manual': {
-          const orderA = orderByPath.get(a.path);
-          const orderB = orderByPath.get(b.path);
-          const hasOrderA = typeof orderA === 'number' && Number.isFinite(orderA);
-          const hasOrderB = typeof orderB === 'number' && Number.isFinite(orderB);
-          if (hasOrderA && hasOrderB && orderA !== orderB) return orderA - orderB;
-          if (hasOrderA) return -1;
-          if (hasOrderB) return 1;
-          return (originalIndex.get(a.path) ?? 0) - (originalIndex.get(b.path) ?? 0);
-        }
-        case 'newest':
-        case 'oldest':
-          // For groups, fall back to name sorting since groups don't have creation dates
-          return a.name.localeCompare(b.name);
-        case 'az':
-        default:
-          return a.name.localeCompare(b.name);
-      }
-    });
-  }, [groupConfigs, node.children, sortMode]);
-
-  const sortedHosts = useMemo(() => {
-    const sorted = [...node.hosts].sort((a, b) => {
-      switch (sortMode) {
-        case 'az':
-          return a.label.localeCompare(b.label);
-        case 'za':
-          return b.label.localeCompare(a.label);
-        case 'newest':
-          return (b.createdAt || 0) - (a.createdAt || 0);
-        case 'oldest':
-          return (a.createdAt || 0) - (b.createdAt || 0);
-        case 'manual':
-          return 0;
-        default:
-          return a.label.localeCompare(b.label);
-      }
-    });
-    if (sortMode === 'manual') return sortByVaultOrder(sorted);
-    return sorted;
-  }, [node.hosts, sortMode]);
+  const childNodes = useMemo(() => sortHostTreeGroups(
+    Object.values(node.children ?? {}) as GroupNode[],
+    sortMode,
+    groupConfigs,
+  ), [groupConfigs, node.children, sortMode]);
+  const sortedHosts = useMemo(
+    () => sortHostTreeHosts(node.hosts, sortMode),
+    [node.hosts, sortMode],
+  );
 
   return (
     <div>
@@ -210,6 +441,15 @@ const TreeNode: React.FC<TreeNodeProps> = ({
         open={isExpanded}
         onOpenChange={() => {
           if (isInlineEditing) return;
+          if (isMultiSelectMode) {
+            toggleGroupSelection?.(node.path);
+            return;
+          }
+          if (hostClickBehavior === 'select' && focusedGroupPath !== node.path) {
+            onFocusGroup?.(node.path);
+            onFocusHost?.(null);
+            return;
+          }
           onToggle(node.path);
         }}
       >
@@ -221,6 +461,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
                 name={node.name}
                 depth={depth}
                 expanded={isExpanded}
+                selected={isGroupFocused || isGroupMultiSelected}
                 hasChildren={hasChildren || node.hosts.length > 0}
                 count={hostsCountInNode}
                 editing={isInlineEditing}
@@ -231,7 +472,27 @@ const TreeNode: React.FC<TreeNodeProps> = ({
                 data-section="host-tree-row"
                 data-row-type="group"
                 data-group-path={node.path}
-                draggable={!isInlineEditing}
+                data-tree-item-key={`group:${node.path}`}
+                data-tree-depth={depth}
+                role="treeitem"
+                aria-level={depth + 1}
+                aria-posinset={treePosInSet}
+                aria-setsize={treeSetSize}
+                aria-selected={isMultiSelectMode ? isGroupMultiSelected : isGroupFocused}
+                aria-expanded={hasChildren || node.hosts.length > 0 ? isExpanded : undefined}
+                tabIndex={activeTreeItemKey === `group:${node.path}`
+                  || (!activeTreeItemKey && initialTreeItemKey === `group:${node.path}`)
+                  ? 0
+                  : -1}
+                onFocus={() => onActiveTreeItemChange(`group:${node.path}`)}
+                draggable={!isInlineEditing && !isMultiSelectMode}
+                onKeyDown={(event) => {
+                  if (!isMultiSelectMode) return;
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  event.stopPropagation();
+                  toggleGroupSelection?.(node.path);
+                }}
                 onDragStart={(e) => {
                   if (isInlineEditing) return;
                   e.dataTransfer.setData("group-path", node.path);
@@ -272,9 +533,15 @@ const TreeNode: React.FC<TreeNodeProps> = ({
                     Managed
                   </span>
                 )}
-                labelActions={(
+                icon={isMultiSelectMode
+                  ? isGroupMultiSelected
+                    ? <CheckSquare size={16} />
+                    : <Square size={16} />
+                  : undefined}
+                labelActions={!isMultiSelectMode && (
                   <button
                     aria-label={`Edit ${node.name}`}
+                    tabIndex={-1}
                     data-host-tree-group-edit-button={node.path}
                     className="flex h-5 w-5 shrink-0 items-center justify-center rounded opacity-0 transition-colors hover:bg-secondary/80 group-hover:opacity-100"
                     onClick={(e) => {
@@ -298,7 +565,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
           />
         </ContextMenu>
 
-        <CollapsibleContent>
+        {renderDescendants && <CollapsibleContent role="group">
           {/* Child Groups */}
           {childNodes.map((child) => (
             <TreeNode
@@ -313,6 +580,7 @@ const TreeNode: React.FC<TreeNodeProps> = ({
               onDuplicateHost={onDuplicateHost}
               onDeleteHost={onDeleteHost}
               onCopyCredentials={onCopyCredentials}
+              onCopyHostname={onCopyHostname}
               onNewGroup={onNewGroup}
               onRenameGroup={onRenameGroup}
               onEditGroup={onEditGroup}
@@ -326,11 +594,21 @@ const TreeNode: React.FC<TreeNodeProps> = ({
 
 	              isMultiSelectMode={isMultiSelectMode}
 	              selectedHostIds={selectedHostIds}
+	              selectedGroupPaths={selectedGroupPaths}
 	              toggleHostSelection={toggleHostSelection}
+	              toggleGroupSelection={toggleGroupSelection}
+	              hostClickBehavior={hostClickBehavior}
+	              focusedHostId={focusedHostId}
+	              onFocusHost={onFocusHost}
+	              focusedGroupPath={focusedGroupPath}
+	              onFocusGroup={onFocusGroup}
 	              getDropTargetClasses={getDropTargetClasses}
 	              setDragOverDropTarget={setDragOverDropTarget}
 	              groupConfigs={groupConfigs}
 	              groupDefaultsByPath={groupDefaultsByPath}
+	              activeTreeItemKey={activeTreeItemKey}
+	              initialTreeItemKey={initialTreeItemKey}
+	              onActiveTreeItemChange={onActiveTreeItemChange}
 	            />
 	          ))}
 
@@ -345,16 +623,26 @@ const TreeNode: React.FC<TreeNodeProps> = ({
               onDuplicateHost={onDuplicateHost}
               onDeleteHost={onDeleteHost}
               onCopyCredentials={onCopyCredentials}
+              onCopyHostname={onCopyHostname}
               moveHostToGroup={moveHostToGroup}
 
 	              isMultiSelectMode={isMultiSelectMode}
 	              selectedHostIds={selectedHostIds}
 	              toggleHostSelection={toggleHostSelection}
+	              hostClickBehavior={hostClickBehavior}
+	              focusedHostId={focusedHostId}
+	              onFocusHost={(hostId) => {
+	                onFocusHost?.(hostId);
+	                if (hostId) onFocusGroup?.(null);
+	              }}
 	              groupConfigs={groupConfigs}
 	              groupDefaultsByPath={groupDefaultsByPath}
+	              activeTreeItemKey={activeTreeItemKey}
+	              initialTreeItemKey={initialTreeItemKey}
+	              onActiveTreeItemChange={onActiveTreeItemChange}
 	            />
 	          ))}
-        </CollapsibleContent>
+        </CollapsibleContent>}
       </Collapsible>
     </div>
   );
@@ -368,13 +656,22 @@ interface HostTreeItemProps {
   onDuplicateHost: (host: Host) => void;
   onDeleteHost: (host: Host) => void;
   onCopyCredentials: (host: Host) => void;
+  onCopyHostname?: (host: Host) => void;
   moveHostToGroup: (hostId: string, groupPath: string | null) => void;
 
   isMultiSelectMode?: boolean;
   selectedHostIds?: Set<string>;
   toggleHostSelection?: (hostId: string) => void;
+  hostClickBehavior?: HostClickBehavior;
+  focusedHostId?: string | null;
+  onFocusHost?: (hostId: string | null) => void;
   groupConfigs: GroupConfig[];
   groupDefaultsByPath: ReadonlyMap<string, Partial<GroupConfig>>;
+  activeTreeItemKey: string | null;
+  initialTreeItemKey: string | null;
+  onActiveTreeItemChange: (key: string) => void;
+  treePosInSet?: number;
+  treeSetSize?: number;
 }
 
 export const getHostTreeDisplayDetails = (
@@ -405,13 +702,22 @@ const HostTreeItem: React.FC<HostTreeItemProps> = ({
   onDuplicateHost,
   onDeleteHost,
   onCopyCredentials,
+  onCopyHostname,
   moveHostToGroup: _moveHostToGroup,
 
   isMultiSelectMode,
   selectedHostIds,
   toggleHostSelection,
+  hostClickBehavior = 'connect',
+  focusedHostId,
+  onFocusHost,
   groupConfigs,
+  treePosInSet,
+  treeSetSize,
   groupDefaultsByPath,
+  activeTreeItemKey,
+  initialTreeItemKey,
+  onActiveTreeItemChange,
 }) => {
   const safeHost = sanitizeHost(host);
   const tags = host.tags || [];
@@ -422,7 +728,12 @@ const HostTreeItem: React.FC<HostTreeItemProps> = ({
   const displayProtocol = displayDetails.protocol;
   const displayUsername = displayDetails.username;
   const displayPort = displayDetails.port;
-  const isSelected = isMultiSelectMode && selectedHostIds?.has(host.id);
+  const isMultiSelected = Boolean(isMultiSelectMode && selectedHostIds?.has(host.id));
+  const isFocusSelected = !isMultiSelectMode && hostClickBehavior === 'select' && focusedHostId === host.id;
+  const isSelected = isMultiSelected || isFocusSelected;
+  const normalizedHostClickBehavior: HostClickBehavior = hostClickBehavior === 'select'
+    ? 'select'
+    : 'connect';
 
   return (
     <ContextMenu>
@@ -435,21 +746,66 @@ const HostTreeItem: React.FC<HostTreeItemProps> = ({
           data-section="host-tree-row"
           data-row-type="host"
           data-host-id={host.id}
+          data-tree-item-key={`host:${host.id}`}
+          data-tree-depth={depth}
+          role="treeitem"
+          aria-level={depth + 1}
+          aria-posinset={treePosInSet}
+          aria-setsize={treeSetSize}
+          aria-selected={Boolean(isSelected)}
+          tabIndex={activeTreeItemKey === `host:${host.id}`
+            || (!activeTreeItemKey && initialTreeItemKey === `host:${host.id}`)
+            ? 0
+            : -1}
+          onFocus={() => onActiveTreeItemChange(`host:${host.id}`)}
           draggable={!isMultiSelectMode}
-          onDragStart={(e) => e.dataTransfer.setData("host-id", host.id)}
+          onDragStart={(e) => {
+            // copyMove: vault reorder uses move; focus-sidebar append uses copy.
+            e.dataTransfer.effectAllowed = "copyMove";
+            e.dataTransfer.setData("host-id", host.id);
+          }}
           onClick={() => {
-            if (isMultiSelectMode && toggleHostSelection) {
-              toggleHostSelection(host.id);
-            } else {
-              onConnect(safeHost);
+            const action = resolveHostActivateAction({
+              behavior: normalizedHostClickBehavior,
+              isMultiSelectMode: Boolean(isMultiSelectMode),
+              focusedHostId,
+              hostId: host.id,
+            });
+            if (action === 'toggle-multi') {
+              toggleHostSelection?.(host.id);
+              return;
             }
+            if (action === 'select') {
+              onFocusHost?.(host.id);
+              return;
+            }
+            onConnect(safeHost);
+          }}
+          onKeyDown={(event) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            const action = resolveHostActivateAction({
+              behavior: normalizedHostClickBehavior,
+              isMultiSelectMode: Boolean(isMultiSelectMode),
+              focusedHostId,
+              hostId: host.id,
+            });
+            if (action === 'toggle-multi') {
+              toggleHostSelection?.(host.id);
+              return;
+            }
+            if (action === 'select') {
+              onFocusHost?.(host.id);
+              return;
+            }
+            onConnect(safeHost);
           }}
           leading={isMultiSelectMode ? (
-            <div className="mr-2 flex h-5 w-4 flex-shrink-0 items-center justify-center" onClick={(e) => {
-              e.stopPropagation();
-              toggleHostSelection?.(host.id);
-            }}>
-              {isSelected ? (
+            <div
+              className="mr-2 flex h-5 w-4 flex-shrink-0 items-center justify-center"
+              aria-hidden="true"
+            >
+              {isMultiSelected ? (
                 <CheckSquare size={15} className="text-primary" />
               ) : (
                 <Square size={15} className="text-muted-foreground" />
@@ -462,11 +818,12 @@ const HostTreeItem: React.FC<HostTreeItemProps> = ({
             <DistroAvatar host={host} fallback={(host.os || "L")[0].toUpperCase()} size="tree" />
           )}
           content={(
-            <div className="min-w-0 flex-1 leading-tight">
-              <div className="flex items-center gap-1.5 truncate font-medium leading-4">
-                <span className="truncate">{host.label}</span>
+            <div className="min-w-0 flex-1">
+              <div className="flex min-w-0 items-center gap-1.5 font-medium leading-5">
+                <span className="min-w-0 truncate">{host.label}</span>
                 <button
                   aria-label={`Edit ${host.label}`}
+                  tabIndex={-1}
                   data-host-tree-host-edit-button={host.id}
                   className="flex h-5 w-5 shrink-0 items-center justify-center rounded transition-colors opacity-0 hover:bg-secondary/80 group-hover:opacity-100"
                   onClick={(e) => {
@@ -503,7 +860,9 @@ const HostTreeItem: React.FC<HostTreeItemProps> = ({
       <HostTreeHostContextMenuContent
         host={host}
         onConnect={onConnect}
+        onEditHost={onEditHost}
         onDuplicateHost={onDuplicateHost}
+        onCopyHostname={onCopyHostname}
         onCopyCredentials={onCopyCredentials}
         onDeleteHost={onDeleteHost}
       />
@@ -511,7 +870,7 @@ const HostTreeItem: React.FC<HostTreeItemProps> = ({
   );
 };
 
-export const HostTreeView: React.FC<HostTreeViewProps> = ({
+const HostTreeViewInner: React.FC<HostTreeViewProps> = ({
   groupTree,
   hosts,
   sortMode = 'az',
@@ -524,6 +883,7 @@ export const HostTreeView: React.FC<HostTreeViewProps> = ({
   onDuplicateHost,
   onDeleteHost,
   onCopyCredentials,
+  onCopyHostname,
   onNewGroup,
   onRenameGroup,
   onEditGroup,
@@ -537,12 +897,22 @@ export const HostTreeView: React.FC<HostTreeViewProps> = ({
 
   isMultiSelectMode,
   selectedHostIds,
+  selectedGroupPaths,
   toggleHostSelection,
+  toggleGroupSelection,
+  hostClickBehavior,
+  focusedHostId,
+  onFocusHost,
+  focusedGroupPath,
+  onFocusGroup,
   getDropTargetClasses,
   setDragOverDropTarget,
   groupConfigs = [],
+  scrollRef,
+  autoExpandGroupsKey,
 }) => {
   const { t } = useI18n();
+  const treeSortMode = sortMode as HostTreeSortMode;
   const inlineEdit = useHostTreeInlineGroupEdit();
   const vaultTreeActions = useVaultHostTreeActions();
   const cancelRename = cancelInlineGroupEdit ?? vaultTreeActions?.cancelInlineGroupEdit;
@@ -561,10 +931,9 @@ export const HostTreeView: React.FC<HostTreeViewProps> = ({
   // Use external state if provided, otherwise use local persistent state
   const localTreeState = useTreeExpandedState(STORAGE_KEY_VAULT_HOSTS_TREE_EXPANDED);
   
-  const expandedPaths = externalExpandedPaths || localTreeState.expandedPaths;
-  const togglePath = externalOnTogglePath || localTreeState.togglePath;
-  const expandAll = externalOnExpandAll || localTreeState.expandAll;
-  const collapseAll = externalOnCollapseAll || localTreeState.collapseAll;
+  const persistentTogglePath = externalOnTogglePath || localTreeState.togglePath;
+  const persistentExpandAll = externalOnExpandAll || localTreeState.expandAll;
+  const persistentCollapseAll = externalOnCollapseAll || localTreeState.collapseAll;
 
   // Get all possible group paths for expand/collapse all functionality
   const getAllGroupPaths = (nodes: GroupNode[]): string[] => {
@@ -582,9 +951,18 @@ export const HostTreeView: React.FC<HostTreeViewProps> = ({
   };
 
   const allGroupPaths = useMemo(() => getAllGroupPaths(groupTree), [groupTree]);
+  const persistentExpandedPaths = externalExpandedPaths || localTreeState.expandedPaths;
+  const { expandedPaths, togglePath, expandAll, collapseAll } = useHostTreeExpandedPaths({
+    persistentExpandedPaths,
+    allGroupPaths,
+    autoExpandGroupsKey,
+    onTogglePath: persistentTogglePath,
+    onExpandAll: persistentExpandAll,
+    onCollapseAll: persistentCollapseAll,
+  });
 
   const groupDefaultsByPath = useMemo(() => {
-    const paths = new Set(allGroupPaths);
+    const paths = new Set<string>(allGroupPaths as string[]);
     for (const host of hosts) {
       if (host.group) {
         paths.add(host.group);
@@ -606,47 +984,152 @@ export const HostTreeView: React.FC<HostTreeViewProps> = ({
     collapseAll();
   };
 
-  // Get ungrouped hosts (hosts without a group or with empty group) and sort them
-  const ungroupedHosts = useMemo(() => {
-    const hosts_without_group = hosts.filter(host => !host.group || host.group === '');
-    const sorted = hosts_without_group.sort((a, b) => {
-      switch (sortMode) {
-        case 'az':
-          return a.label.localeCompare(b.label);
-        case 'za':
-          return b.label.localeCompare(a.label);
-        case 'newest':
-          return (b.createdAt || 0) - (a.createdAt || 0);
-        case 'oldest':
-          return (a.createdAt || 0) - (b.createdAt || 0);
-        case 'manual':
-          return 0;
-        default:
-          return a.label.localeCompare(b.label);
-      }
-    });
-    if (sortMode === 'manual') return sortByVaultOrder(sorted);
-    return sorted;
-  }, [hosts, sortMode]);
+  const ungroupedHosts = useMemo(
+    () => hosts.filter((host) => !host.group || host.group === ''),
+    [hosts],
+  );
+  const visibleTreeItems = useMemo(() => buildVisibleHostTreeItems({
+    groupTree,
+    ungroupedHosts,
+    expandedPaths,
+    sortMode: treeSortMode,
+    groupConfigs,
+  }), [expandedPaths, groupConfigs, groupTree, treeSortMode, ungroupedHosts]);
 
-  // Sort group tree based on sort mode
-  const sortedGroupTree = useMemo(() => {
-    return [...groupTree].sort((a, b) => {
-      switch (sortMode) {
-        case 'za':
-          return b.name.localeCompare(a.name);
-        case 'manual':
-          return 0;
-        case 'newest':
-        case 'oldest':
-          // For groups, fall back to name sorting since groups don't have creation dates
-          return a.name.localeCompare(b.name);
-        case 'az':
-        default:
-          return a.name.localeCompare(b.name);
-      }
+  const treeRef = useRef<HTMLDivElement>(null);
+  const pendingTreeFocusKeyRef = useRef<string | null>(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
+  const [activeTreeItemKey, setActiveTreeItemKey] = useState<string | null>(null);
+  const initialTreeItemKey = visibleTreeItems[0]?.key ?? null;
+  const treeItemIndexByKey = useMemo(() => new Map(
+    visibleTreeItems.map((item, index) => [item.key, index]),
+  ), [visibleTreeItems]);
+  const virtualizer = useVirtualizer({
+    count: visibleTreeItems.length,
+    getScrollElement: () => scrollRef?.current ?? null,
+    estimateSize: () => 40,
+    getItemKey: (index) => visibleTreeItems[index]?.key ?? index,
+    overscan: 10,
+    scrollMargin,
+    initialRect: typeof window === 'undefined'
+      ? { width: 1280, height: 800 }
+      : undefined,
+  });
+
+  React.useLayoutEffect(() => {
+    const root = treeRef.current;
+    const scrollElement = scrollRef?.current;
+    if (!root || !scrollElement) return;
+    const measure = () => {
+      const nextMargin = root.getBoundingClientRect().top
+        - scrollElement.getBoundingClientRect().top
+        + scrollElement.scrollTop;
+      setScrollMargin((current) => current === nextMargin ? current : nextMargin);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(root);
+    observer.observe(scrollElement);
+    return () => observer.disconnect();
+  }, [scrollRef, visibleTreeItems.length]);
+
+  React.useLayoutEffect(() => {
+    virtualizer.measure();
+  }, [virtualizer, visibleTreeItems.length]);
+
+  const focusRenderedTreeItem = useCallback((key: string) => {
+    const target = [...(treeRef.current?.querySelectorAll<HTMLElement>('[data-tree-item-key]') ?? [])]
+      .find((item) => item.dataset.treeItemKey === key);
+    if (!target) return false;
+    target.focus();
+    return true;
+  }, []);
+
+  React.useLayoutEffect(() => {
+    const key = pendingTreeFocusKeyRef.current;
+    if (!key || !focusRenderedTreeItem(key)) return;
+    pendingTreeFocusKeyRef.current = null;
+  });
+
+  useEffect(() => {
+    if (!activeTreeItemKey) return;
+    if (!treeItemIndexByKey.has(activeTreeItemKey)) {
+      setActiveTreeItemKey(null);
+    }
+  }, [activeTreeItemKey, treeItemIndexByKey]);
+
+  const focusTreeItem = useCallback((index: number) => {
+    const item = visibleTreeItems[index];
+    if (!item) return;
+    const key = item.key;
+    pendingTreeFocusKeyRef.current = key;
+    setActiveTreeItemKey(key);
+    virtualizer.scrollToIndex(index, { align: 'auto' });
+    queueMicrotask(() => {
+      if (focusRenderedTreeItem(key)) pendingTreeFocusKeyRef.current = null;
     });
-  }, [groupTree, sortMode]);
+  }, [focusRenderedTreeItem, virtualizer, visibleTreeItems]);
+
+  const handleTreeKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+      return;
+    }
+    const target = event.target instanceof Element
+      ? event.target.closest<HTMLElement>('[role="treeitem"]')
+      : null;
+    if (!target || !treeRef.current?.contains(target)) return;
+
+    const key = target.dataset.treeItemKey;
+    const index = key ? treeItemIndexByKey.get(key) : undefined;
+    if (index === undefined) return;
+    const currentItem = visibleTreeItems[index];
+    const depth = currentItem.depth;
+
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp' || event.key === 'Home' || event.key === 'End') {
+      event.preventDefault();
+      const nextIndex = event.key === 'Home'
+        ? 0
+        : event.key === 'End'
+          ? visibleTreeItems.length - 1
+          : Math.max(0, Math.min(
+            visibleTreeItems.length - 1,
+            index + (event.key === 'ArrowDown' ? 1 : -1),
+          ));
+      focusTreeItem(nextIndex);
+      return;
+    }
+
+    const isGroup = target.dataset.rowType === 'group';
+    const groupPath = target.dataset.groupPath;
+    const isExpandable = target.hasAttribute('aria-expanded');
+    const isExpanded = target.getAttribute('aria-expanded') === 'true';
+    if (event.key === 'ArrowRight') {
+      if (!isGroup || !isExpandable) return;
+      event.preventDefault();
+      if (!isExpanded && groupPath) {
+        togglePath(groupPath);
+        return;
+      }
+      const child = visibleTreeItems[index + 1];
+      if (child && child.depth > depth) {
+        focusTreeItem(index + 1);
+      }
+      return;
+    }
+
+    event.preventDefault();
+    if (isGroup && isExpandable && isExpanded && groupPath) {
+      togglePath(groupPath);
+      return;
+    }
+    for (let parentIndex = index - 1; parentIndex >= 0; parentIndex -= 1) {
+      const parent = visibleTreeItems[parentIndex];
+      if (parent.kind === 'group' && parent.depth < depth) {
+        focusTreeItem(parentIndex);
+        return;
+      }
+    }
+  }, [focusTreeItem, togglePath, treeItemIndexByKey, visibleTreeItems]);
 
   return (
     <div className="space-y-1" onPointerDownCapture={handleTreePointerDownCapture}>
@@ -674,59 +1157,106 @@ export const HostTreeView: React.FC<HostTreeViewProps> = ({
         </div>
       )}
 
-      {/* Group tree */}
-      {sortedGroupTree.map((node) => (
-        <TreeNode
-          key={node.path}
-          node={node}
-          depth={0}
-          sortMode={sortMode}
-          expandedPaths={expandedPaths}
-          onToggle={togglePath}
-          onConnect={onConnect}
-          onEditHost={onEditHost}
-          onDuplicateHost={onDuplicateHost}
-          onDeleteHost={onDeleteHost}
-          onCopyCredentials={onCopyCredentials}
-          onNewGroup={onNewGroup}
-          onRenameGroup={onRenameGroup}
-          onEditGroup={onEditGroup}
-          onDeleteGroup={onDeleteGroup}
-          moveHostToGroup={moveHostToGroup}
-          moveGroup={moveGroup}
-          managedGroupPaths={managedGroupPaths}
-          onUnmanageGroup={onUnmanageGroup}
-          commitInlineGroupRename={commitInlineGroupRename}
-          cancelInlineGroupEdit={cancelInlineGroupEdit}
-          isMultiSelectMode={isMultiSelectMode}
-          selectedHostIds={selectedHostIds}
-          toggleHostSelection={toggleHostSelection}
-	          getDropTargetClasses={getDropTargetClasses}
-	          setDragOverDropTarget={setDragOverDropTarget}
-	          groupConfigs={groupConfigs}
-	          groupDefaultsByPath={groupDefaultsByPath}
-	        />
-      ))}
-
-      {/* Ungrouped hosts at root level */}
-      {ungroupedHosts.map((host) => (
-        <HostTreeItem
-          key={host.id}
-          host={host}
-          depth={0}
-          onConnect={onConnect}
-          onEditHost={onEditHost}
-          onDuplicateHost={onDuplicateHost}
-          onDeleteHost={onDeleteHost}
-          onCopyCredentials={onCopyCredentials}
-          moveHostToGroup={moveHostToGroup}
-          isMultiSelectMode={isMultiSelectMode}
-	          selectedHostIds={selectedHostIds}
-	          toggleHostSelection={toggleHostSelection}
-	          groupConfigs={groupConfigs}
-	          groupDefaultsByPath={groupDefaultsByPath}
-	        />
-      ))}
+      <div
+        ref={treeRef}
+        className="relative min-w-0"
+        style={{ height: virtualizer.getTotalSize() }}
+        data-vault-virtual-tree="true"
+        role="tree"
+        aria-label={t("vault.nav.hosts")}
+        aria-multiselectable={isMultiSelectMode || undefined}
+        onKeyDownCapture={handleTreeKeyDown}
+      >
+      {virtualizer.getVirtualItems().map((virtualRow) => {
+        const item = visibleTreeItems[virtualRow.index];
+        if (!item) return null;
+        return (
+          <div
+            key={item.key}
+            data-vault-virtual-tree-row={virtualRow.index}
+            className="absolute left-0 top-0 w-full"
+            style={{
+              height: virtualRow.size,
+              transform: `translateY(${virtualRow.start - scrollMargin}px)`,
+            }}
+          >
+            {item.kind === 'group' ? (
+              <TreeNode
+                node={item.node}
+                depth={item.depth}
+                sortMode={sortMode}
+                expandedPaths={expandedPaths}
+                onToggle={togglePath}
+                onConnect={onConnect}
+                onEditHost={onEditHost}
+                onDuplicateHost={onDuplicateHost}
+                onDeleteHost={onDeleteHost}
+                onCopyCredentials={onCopyCredentials}
+                onCopyHostname={onCopyHostname}
+                onNewGroup={onNewGroup}
+                onRenameGroup={onRenameGroup}
+                onEditGroup={onEditGroup}
+                onDeleteGroup={onDeleteGroup}
+                moveHostToGroup={moveHostToGroup}
+                moveGroup={moveGroup}
+                managedGroupPaths={managedGroupPaths}
+                onUnmanageGroup={onUnmanageGroup}
+                commitInlineGroupRename={commitInlineGroupRename}
+                cancelInlineGroupEdit={cancelInlineGroupEdit}
+                isMultiSelectMode={isMultiSelectMode}
+                selectedHostIds={selectedHostIds}
+                selectedGroupPaths={selectedGroupPaths}
+                toggleHostSelection={toggleHostSelection}
+                toggleGroupSelection={toggleGroupSelection}
+                hostClickBehavior={hostClickBehavior}
+                focusedHostId={focusedHostId}
+                onFocusHost={onFocusHost}
+                focusedGroupPath={focusedGroupPath}
+                onFocusGroup={onFocusGroup}
+                getDropTargetClasses={getDropTargetClasses}
+                setDragOverDropTarget={setDragOverDropTarget}
+                groupConfigs={groupConfigs}
+                groupDefaultsByPath={groupDefaultsByPath}
+                activeTreeItemKey={activeTreeItemKey}
+                initialTreeItemKey={initialTreeItemKey}
+                onActiveTreeItemChange={setActiveTreeItemKey}
+                renderDescendants={false}
+                treePosInSet={item.posInSet}
+                treeSetSize={item.setSize}
+              />
+            ) : (
+              <HostTreeItem
+                host={item.host}
+                depth={item.depth}
+                onConnect={onConnect}
+                onEditHost={onEditHost}
+                onDuplicateHost={onDuplicateHost}
+                onDeleteHost={onDeleteHost}
+                onCopyCredentials={onCopyCredentials}
+                onCopyHostname={onCopyHostname}
+                moveHostToGroup={moveHostToGroup}
+                isMultiSelectMode={isMultiSelectMode}
+                selectedHostIds={selectedHostIds}
+                toggleHostSelection={toggleHostSelection}
+                hostClickBehavior={hostClickBehavior}
+                focusedHostId={focusedHostId}
+                onFocusHost={(hostId) => {
+                  onFocusHost?.(hostId);
+                  if (hostId) onFocusGroup?.(null);
+                }}
+                groupConfigs={groupConfigs}
+                groupDefaultsByPath={groupDefaultsByPath}
+                activeTreeItemKey={activeTreeItemKey}
+                initialTreeItemKey={initialTreeItemKey}
+                onActiveTreeItemChange={setActiveTreeItemKey}
+                treePosInSet={item.posInSet}
+                treeSetSize={item.setSize}
+              />
+            )}
+          </div>
+        );
+      })}
+      </div>
       
       {/* Empty state */}
       {ungroupedHosts.length === 0 && groupTree.length === 0 && (
@@ -738,3 +1268,47 @@ export const HostTreeView: React.FC<HostTreeViewProps> = ({
     </div>
   );
 };
+
+function hostTreeViewAreEqual(prev: HostTreeViewProps, next: HostTreeViewProps): boolean {
+  return prev.groupTree === next.groupTree
+    && prev.hosts === next.hosts
+    && prev.sortMode === next.sortMode
+    && prev.expandedPaths === next.expandedPaths
+    && prev.onTogglePath === next.onTogglePath
+    && prev.onExpandAll === next.onExpandAll
+    && prev.onCollapseAll === next.onCollapseAll
+    && prev.onConnect === next.onConnect
+    && prev.onEditHost === next.onEditHost
+    && prev.onDuplicateHost === next.onDuplicateHost
+    && prev.onDeleteHost === next.onDeleteHost
+    && prev.onCopyCredentials === next.onCopyCredentials
+    && prev.onCopyHostname === next.onCopyHostname
+    && prev.onNewGroup === next.onNewGroup
+    && prev.onRenameGroup === next.onRenameGroup
+    && prev.onEditGroup === next.onEditGroup
+    && prev.onDeleteGroup === next.onDeleteGroup
+    && prev.moveHostToGroup === next.moveHostToGroup
+    && prev.moveGroup === next.moveGroup
+    && prev.commitInlineGroupRename === next.commitInlineGroupRename
+    && prev.cancelInlineGroupEdit === next.cancelInlineGroupEdit
+    && prev.managedGroupPaths === next.managedGroupPaths
+    && prev.onUnmanageGroup === next.onUnmanageGroup
+    && prev.isMultiSelectMode === next.isMultiSelectMode
+    && prev.selectedHostIds === next.selectedHostIds
+    && prev.selectedGroupPaths === next.selectedGroupPaths
+    && prev.toggleHostSelection === next.toggleHostSelection
+    && prev.toggleGroupSelection === next.toggleGroupSelection
+    && prev.hostClickBehavior === next.hostClickBehavior
+    && prev.focusedHostId === next.focusedHostId
+    && prev.onFocusHost === next.onFocusHost
+    && prev.focusedGroupPath === next.focusedGroupPath
+    && prev.onFocusGroup === next.onFocusGroup
+    && prev.getDropTargetClasses === next.getDropTargetClasses
+    && prev.setDragOverDropTarget === next.setDragOverDropTarget
+    && prev.groupConfigs === next.groupConfigs
+    && prev.scrollRef === next.scrollRef
+    && prev.autoExpandGroupsKey === next.autoExpandGroupsKey;
+}
+
+export const HostTreeView = memo(HostTreeViewInner, hostTreeViewAreEqual);
+HostTreeView.displayName = 'HostTreeView';

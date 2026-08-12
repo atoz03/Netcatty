@@ -1,20 +1,12 @@
 import { AlertTriangle, Fingerprint } from 'lucide-react';
 import React from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
+import type { HostKeyInfo } from '../../domain/hostKey';
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { TerminalConnectionLogList } from './TerminalConnectionProgress';
 
-export interface HostKeyInfo {
-    hostname: string;
-    port: number;
-    keyType: string;
-    fingerprint: string;
-    publicKey?: string;
-    status?: 'unknown' | 'changed';
-    knownHostId?: string;
-    knownFingerprint?: string;
-}
+export type { HostKeyInfo } from '../../domain/hostKey';
 
 export interface TerminalHostKeyVerificationProps {
     hostKeyInfo: HostKeyInfo;

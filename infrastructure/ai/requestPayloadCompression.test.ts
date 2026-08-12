@@ -15,6 +15,24 @@ test("compressVerboseText collapses repeated blank lines and duplicate runs", ()
   assert.ok(output.split("\nsame\n").length <= 3);
 });
 
+test("compressVerboseText normalizes terminal control noise and huge payload lines", () => {
+  const ansiProgress = "\u001b[31mstarting\u001b[0m\r10%\r20%\r100%\n";
+  const longLine = "x".repeat(8_000);
+  const base64 = "QUJDREVGR0hJSktMTU5PUFFSU1RVVldYWVo=".repeat(100);
+  const output = compressVerboseText(`${ansiProgress}${longLine}\n${base64}`);
+
+  assert.equal(output.includes("\u001b["), false);
+  assert.doesNotMatch(output, /10%|20%/);
+  assert.match(output, /100%/);
+  assert.match(output, /long line shortened/);
+  assert.match(output, /base64-like payload omitted/);
+  assert.ok(output.length < 5_000);
+});
+
+test("compressVerboseText preserves CRLF-delimited lines", () => {
+  assert.equal(compressVerboseText("alpha\r\nbeta\r\n"), "alpha\nbeta\n");
+});
+
 test("truncateTextWithHeadAndTail keeps both ends of long terminal output", () => {
   const value = `${"A".repeat(500)}${"B".repeat(20_000)}${"C".repeat(500)}`;
   const truncated = truncateTextWithHeadAndTail(value, 2_000);

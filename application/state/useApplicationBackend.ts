@@ -33,12 +33,17 @@ export const useApplicationBackend = () => {
     return info ?? null;
   }, []);
 
-  const checkSshAgent = useCallback(async (): Promise<SshAgentStatus | null> => {
+  const checkSshAgent = useCallback(async (options?: {
+    identityAgent?: string;
+    agentForwarding?: boolean;
+    hostname?: string;
+    port?: number;
+    username?: string;
+  }): Promise<SshAgentStatus | null> => {
     const bridge = netcattyBridge.get();
-    const status = await bridge?.checkSshAgent?.();
+    const status = await bridge?.checkSshAgent?.(options);
     return status ?? null;
   }, []);
 
   return { openExternal, getApplicationInfo, checkSshAgent };
 };
-

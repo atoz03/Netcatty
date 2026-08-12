@@ -21,6 +21,7 @@ import { cn } from '../../lib/utils';
 import { TerminalTheme } from '../../domain/models';
 import { ScrollArea } from '../ui/scroll-area';
 import { isFollowAppTerminalThemeId } from '../../domain/terminalAppearance';
+import { TERMINAL_SIDE_PANEL_INNER_HEADER_CLASS } from '../terminalLayer/terminalSidePanelChrome';
 
 type TabType = 'theme' | 'font' | 'custom';
 
@@ -309,10 +310,13 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
         }}
       >
         {/* Tab Bar */}
-        <div className="flex p-1.5 gap-0.5 shrink-0 border-b" style={{ borderColor: 'var(--terminal-panel-border)' }}>
+        <div
+          className={cn(TERMINAL_SIDE_PANEL_INNER_HEADER_CLASS, 'flex px-1.5 gap-0.5 border-b')}
+          style={{ borderColor: 'var(--terminal-panel-border)' }}
+        >
           <button
             onClick={() => { setActiveTab('theme'); setEditingTheme(null); }}
-            className="flex-1 flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-md text-[11px] font-medium transition-all"
+            className="h-6 flex-1 flex items-center justify-center gap-1 px-1.5 rounded-md text-[11px] font-medium transition-all"
             style={{
               backgroundColor: activeTab === 'theme' ? 'var(--terminal-panel-active)' : 'transparent',
               color: activeTab === 'theme' ? 'var(--terminal-panel-fg)' : 'var(--terminal-panel-muted)',
@@ -323,7 +327,7 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
           </button>
           <button
             onClick={() => setActiveTab('font')}
-            className="flex-1 flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-md text-[11px] font-medium transition-all"
+            className="h-6 flex-1 flex items-center justify-center gap-1 px-1.5 rounded-md text-[11px] font-medium transition-all"
             style={{
               backgroundColor: activeTab === 'font' ? 'var(--terminal-panel-active)' : 'transparent',
               color: activeTab === 'font' ? 'var(--terminal-panel-fg)' : 'var(--terminal-panel-muted)',
@@ -335,7 +339,7 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
           {!followAppTerminalTheme && (
             <button
               onClick={() => setActiveTab('custom')}
-              className="flex-1 flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-md text-[11px] font-medium transition-all"
+              className="h-6 flex-1 flex items-center justify-center gap-1 px-1.5 rounded-md text-[11px] font-medium transition-all"
               style={{
                 backgroundColor: activeTab === 'custom' ? 'var(--terminal-panel-active)' : 'transparent',
                 color: activeTab === 'custom' ? 'var(--terminal-panel-fg)' : 'var(--terminal-panel-muted)',

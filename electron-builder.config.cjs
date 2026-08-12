@@ -63,6 +63,10 @@ module.exports = {
     files: [
         'dist/**/*',
         'electron/**/*',
+        // Runtime smoke fixtures are built test packages, not host resources.
+        // Keep them out of production ASARs so no example plugin can be
+        // mistaken for an installed or host-trusted package.
+        '!electron/plugins/fixtures/**/*',
         // Main-process terminal flow control reads shared thresholds from here
         // (terminalFlowAck.cjs). Must ship beside electron/ in app.asar.
         'infrastructure/config/terminalFlowConstants.cjs',
@@ -99,6 +103,23 @@ module.exports = {
         '!node_modules/monaco-editor/**/*',
         '!node_modules/react/**/*',
         '!node_modules/react-dom/**/*',
+        '!node_modules/ai/**/*',
+        '!node_modules/@ai-sdk/**/*',
+        '!node_modules/@mdxeditor/**/*',
+        '!node_modules/streamdown/**/*',
+        '!node_modules/@streamdown/**/*',
+        '!node_modules/@tanstack/react-virtual/**/*',
+        '!node_modules/pinyin-pro/**/*',
+        '!node_modules/re2js/**/*',
+        '!node_modules/@eslint-community/regexpp/**/*',
+        '!node_modules/clsx/**/*',
+        '!node_modules/tailwind-merge/**/*',
+        '!node_modules/use-stick-to-bottom/**/*',
+        '!node_modules/lexical/**/*',
+        '!node_modules/@lexical/**/*',
+        '!node_modules/@codemirror/**/*',
+        '!node_modules/shiki/**/*',
+        '!node_modules/@shiki/**/*',
         // Heavy cloud completion specs are intentionally not bundled. The main
         // process filters the same prefixes so dev and packaged builds behave
         // consistently.
@@ -158,6 +179,10 @@ module.exports = {
         'lib/**/*.json',
         'node_modules/zod/**/*',
         'node_modules/zod-to-json-schema/**/*',
+        'node_modules/@netcatty/plugin-cli/**/*',
+        'node_modules/@netcatty/plugin-contract/**/*',
+        'node_modules/@netcatty/plugin-sdk/**/*',
+        'electron/plugins/runtime/**/*',
         'node_modules/ajv/**/*',
         'node_modules/ajv-formats/**/*',
         'node_modules/fast-deep-equal/**/*',
@@ -170,6 +195,11 @@ module.exports = {
         'skills/**/*'
     ],
     mac: {
+        // app-builder's PNG-to-ICNS conversion can corrupt the 16px/32px 1x
+        // representations even though the source PNG is valid RGBA. Use the
+        // iconutil-generated bundle instead so Finder and app switchers do not
+        // render those representations as colored noise.
+        icon: 'build/icon.icns',
         target: [
             {
                 target: 'dmg',
@@ -217,25 +247,21 @@ module.exports = {
     },
     win: {
         icon: 'public/icon-win.png',
-        target: [
-            {
-                target: 'nsis',
-                arch: ['x64', 'arm64']
-            },
-            {
-                target: 'portable',
-                arch: ['x64', 'arm64']
-            },
-            {
-                target: 'zip'
-            }
-        ],
+        // Do not hard-code arch here. pack:win-x64 / pack:win pass --x64/--arm64,
+        // and electron-builder unions config arch with the CLI set. Hard-coding
+        // ['x64', 'arm64'] made the official x64 CI job also emit win-arm64 and
+        // a universal win.exe whose 32-bit NSIS stub can mis-detect on ARM
+        // Windows, install to Program Files (x86), and leave Netcatty.exe
+        // missing (#2570). Keep official releases on pack:win-x64 until win32
+        // arm64 bundled mosh/et + native rebuilds are ready.
+        target: ['nsis', 'portable', 'zip'],
         extraResources: [...moshExtraResources('win32'), ...etExtraResources('win32')]
     },
     portable: {
         artifactName: '${productName}-${version}-portable-${os}-${arch}.${ext}',
     },
     nsis: {
+        include: 'build/installer.nsh',
         oneClick: false,
         perMachine: false,
         allowElevation: true,
@@ -259,12 +285,25 @@ module.exports = {
     deb: {
         // Use gzip instead of default xz(lzma) for better compatibility with
         // Deepin OS and other distros that have issues with lzma decompression
-        compression: 'gz'
+        compression: 'gz',
+        afterInstall: 'scripts/linux/after-install.tpl'
     },
     rpm: {
-        // Avoid rpm's generated /usr/lib/.build-id symlinks. Those hashes are
-        // global on the host, so owning them can conflict with other RPMs.
-        fpm: ['--rpm-rpmbuild-define', '_build_id_links none']
+        // Default fpm/electron-builder RPM compression is "xzmt" (multi-threaded
+        // xz). AlmaLinux/RHEL 8 images provide `xz` but not the `xzmt` shim, so
+        // rpmbuild fails with exit 127 during packaging. gzip is portable and
+        // matches our deb preference for older distros.
+        compression: 'gzip',
+        afterInstall: 'scripts/linux/after-install.tpl',
+        fpm: [
+            // Avoid rpm's generated /usr/lib/.build-id symlinks. Those hashes
+            // are global on the host, so owning them can conflict with other RPMs.
+            '--rpm-rpmbuild-define', '_build_id_links none',
+            // Electron ships prebuilt binaries. RHEL/Alma brp post-install
+            // scripts (strip/compress/etc.) can exit 127 when a helper is
+            // missing or a gcc-toolset `strip` is on PATH; skip them.
+            '--rpm-rpmbuild-define', '__os_install_post %{nil}',
+        ]
     },
     pacman: {
         // FPM-generated .pacman packages bypass Arch's alpm hooks that

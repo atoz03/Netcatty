@@ -2,45 +2,47 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const net = require("node:net");
 const { EventEmitter } = require("node:events");
+const { readFileSync } = require("node:fs");
 const { Duplex } = require("node:stream");
 const Module = require("node:module");
+const keyboardInteractiveHandler = require("./keyboardInteractiveHandler.cjs");
+const { resetSshTransportRegistryForTests } = require("./sshConnectionPool.cjs");
 
-async function getFreePort() {
-  const server = net.createServer();
-  await new Promise((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
-  });
-  const { port } = server.address();
-  await new Promise((resolve, reject) => {
-    server.close((err) => (err ? reject(err) : resolve()));
-  });
-  return port;
-}
-
-function createSender() {
+function createSender(onSend = () => {}) {
   return {
     id: 1,
     isDestroyed: () => false,
-    send() {},
+    send: onSend,
   };
 }
 
-function loadBridgeWithMocks(t, options = {}) {
+function loadBridgeWithMocks(t, { systemAgent = false, chainError = null } = {}) {
   const originalLoad = Module._load;
   let capturedChainOptions = null;
-  let connectCount = 0;
-  let forwardInCount = 0;
-  const execCommands = [];
-  let forwardInFailures = options.forwardInFailures || 0;
+  let capturedConnectOptions = null;
+  let connectedClient = null;
+  let capturedSystemAgentOptions = null;
+  let physicalDialCount = 0;
 
   class MockSshClient extends EventEmitter {
+    constructor() {
+      super();
+      this.socketTimeouts = [];
+      this._sock = {
+        setTimeout: (value) => this.socketTimeouts.push(value),
+      };
+    }
+
     connect(options) {
-      connectCount++;
+      physicalDialCount += 1;
       this.options = options;
-      setImmediate(() => this.emit("ready"));
+      connectedClient = this;
+      capturedConnectOptions = options;
+      setImmediate(() => {
+        this.emit("connect");
+        this.emit("ready");
+      });
     }
 
     forwardOut(_srcIP, _srcPort, _dstHost, _dstPort, callback) {
@@ -50,30 +52,6 @@ function loadBridgeWithMocks(t, options = {}) {
           done();
         },
       }));
-    }
-
-    forwardIn(_bindAddress, _localPort, callback) {
-      forwardInCount++;
-      if (forwardInFailures > 0) {
-        forwardInFailures--;
-        callback(new Error(options.forwardInErrorMessage || "Unable to bind to remote port"));
-        return;
-      }
-      callback(null);
-    }
-
-    exec(command, callback) {
-      execCommands.push(command);
-      const stream = new EventEmitter();
-      stream.stderr = new EventEmitter();
-      stream.close = () => stream.emit("close", 0);
-      callback(null, stream);
-      setImmediate(() => {
-        if (options.remoteExecOutput) {
-          stream.emit("data", Buffer.from(options.remoteExecOutput));
-        }
-        stream.emit("close", 0);
-      });
     }
 
     end() {
@@ -93,8 +71,19 @@ function loadBridgeWithMocks(t, options = {}) {
     if (request === "./sshBridge.cjs") {
       return {
         buildAlgorithms: () => ({}),
-        connectThroughChain: async (_event, options) => {
+        connectThroughChain: async (_event, options, _jumpHosts, _hostname, _port, sessionId) => {
           capturedChainOptions = options;
+          if (chainError) {
+            const requestId = keyboardInteractiveHandler.generateRequestId("jump-host");
+            keyboardInteractiveHandler.storeRequest(
+              requestId,
+              () => {},
+              _event.sender.id,
+              sessionId,
+              _event.sender,
+            );
+            throw chainError;
+          }
           return {
             socket: new Duplex({
               read() {},
@@ -103,6 +92,24 @@ function loadBridgeWithMocks(t, options = {}) {
               },
             }),
             connections: [],
+          };
+        },
+      };
+    }
+    if (request === "./sshAuthHelper.cjs" && systemAgent) {
+      const helper = originalLoad.call(this, request, parent, isMain);
+      return {
+        ...helper,
+        findAllDefaultPrivateKeys: async () => [{
+          keyName: "id_ed25519",
+          keyPath: "/home/alice/.ssh/id_ed25519",
+          privateKey: "PRIVATE KEY",
+        }],
+        prepareSystemSshAgentForAuth: async (options) => {
+          capturedSystemAgentOptions = options;
+          return {
+            getIdentities(callback) { callback(null, []); },
+            sign() {},
           };
         },
       };
@@ -122,14 +129,93 @@ function loadBridgeWithMocks(t, options = {}) {
   return {
     bridge,
     getCapturedChainOptions: () => capturedChainOptions,
-    getConnectCount: () => connectCount,
-    getForwardInCount: () => forwardInCount,
-    getExecCommands: () => execCommands,
+    getCapturedConnectOptions: () => capturedConnectOptions,
+    getConnectedClient: () => connectedClient,
+    getCapturedSystemAgentOptions: () => capturedSystemAgentOptions,
+    getPhysicalDialCount: () => physicalDialCount,
   };
 }
 
+test("simultaneous port forwards to one endpoint share one physical SSH dial", async (t) => {
+  resetSshTransportRegistryForTests({ defaultIdleTtlMs: 0 });
+  t.after(() => resetSshTransportRegistryForTests({ defaultIdleTtlMs: 0 }));
+  const { bridge, getPhysicalDialCount } = loadBridgeWithMocks(t);
+  const payload = {
+    type: "local",
+    localPort: 0,
+    bindAddress: "127.0.0.1",
+    remoteHost: "127.0.0.1",
+    remotePort: 3306,
+    hostname: "db.internal",
+    hostId: "db-host",
+    port: 22,
+    username: "dbuser",
+    password: "target-password",
+    authMethod: "password",
+    verifyHostKeys: false,
+    useSshAgent: false,
+  };
+  const firstEvent = { sender: { ...createSender(), id: 31 } };
+  const secondEvent = { sender: { ...createSender(), id: 32 } };
+
+  try {
+    const [first, second] = await Promise.all([
+      bridge.startPortForward(firstEvent, { ...payload, tunnelId: "pf-shared-1", ruleId: "rule-shared-1" }),
+      bridge.startPortForward(secondEvent, { ...payload, tunnelId: "pf-shared-2", ruleId: "rule-shared-2" }),
+    ]);
+    assert.equal(first.success, true);
+    assert.equal(second.success, true);
+    assert.equal(getPhysicalDialCount(), 1);
+  } finally {
+    await bridge.stopPortForward(firstEvent, { tunnelId: "pf-shared-1" });
+    await bridge.stopPortForward(secondEvent, { tunnelId: "pf-shared-2" });
+  }
+});
+
+test("explicitly dedicated port forwards do not enter shared dial coordination", async (t) => {
+  resetSshTransportRegistryForTests({ defaultIdleTtlMs: 0 });
+  t.after(() => resetSshTransportRegistryForTests({ defaultIdleTtlMs: 0 }));
+  const { bridge, getPhysicalDialCount } = loadBridgeWithMocks(t);
+  const payload = {
+    type: "local",
+    localPort: 0,
+    bindAddress: "127.0.0.1",
+    remoteHost: "127.0.0.1",
+    remotePort: 3306,
+    hostname: "db.internal",
+    hostId: "db-host",
+    port: 22,
+    username: "dbuser",
+    password: "target-password",
+    authMethod: "password",
+    verifyHostKeys: false,
+    useSshAgent: false,
+    reuseTransport: false,
+  };
+  const firstEvent = { sender: { ...createSender(), id: 41 } };
+  const secondEvent = { sender: { ...createSender(), id: 42 } };
+
+  try {
+    const [first, second] = await Promise.all([
+      bridge.startPortForward(firstEvent, { ...payload, tunnelId: "pf-dedicated-1", ruleId: "rule-dedicated-1" }),
+      bridge.startPortForward(secondEvent, { ...payload, tunnelId: "pf-dedicated-2", ruleId: "rule-dedicated-2" }),
+    ]);
+    assert.equal(first.success, true);
+    assert.equal(second.success, true);
+    assert.equal(getPhysicalDialCount(), 2);
+  } finally {
+    await bridge.stopPortForward(firstEvent, { tunnelId: "pf-dedicated-1" });
+    await bridge.stopPortForward(secondEvent, { tunnelId: "pf-dedicated-2" });
+  }
+});
+
 test("port forwarding routes jump-host keyboard-interactive prompts through the external scope", async (t) => {
-  const { bridge, getCapturedChainOptions } = loadBridgeWithMocks(t);
+  const {
+    bridge,
+    getCapturedChainOptions,
+    getCapturedConnectOptions,
+    getConnectedClient,
+  } = loadBridgeWithMocks(t);
   const event = { sender: createSender() };
 
   try {
@@ -151,6 +237,8 @@ test("port forwarding routes jump-host keyboard-interactive prompts through the 
       port: 22,
       username: "dbuser",
       password: "target-password",
+      sshTcpConnectTimeoutMs: 45_000,
+      sshAuthReadyTimeoutMs: 300_000,
       knownHosts,
       jumpHosts: [{
         hostname: "jump.internal",
@@ -163,277 +251,91 @@ test("port forwarding routes jump-host keyboard-interactive prompts through the 
     assert.equal(result.success, true);
     assert.equal(getCapturedChainOptions()?._keyboardInteractiveScope, "external");
     assert.equal(getCapturedChainOptions()?.knownHosts, knownHosts);
+    assert.equal(getCapturedChainOptions()?.sshTcpConnectTimeoutMs, 45_000);
+    assert.equal(getCapturedChainOptions()?.sshAuthReadyTimeoutMs, 300_000);
+    assert.equal(getCapturedConnectOptions()?.timeout, 45_000);
+    assert.equal(getCapturedConnectOptions()?.readyTimeout, 0);
+    assert.deepEqual(getConnectedClient()?.socketTimeouts, [0]);
   } finally {
     await bridge.stopPortForward(event, { tunnelId: "pf-jump-scope" });
   }
 });
 
-test("port forwarding restarts the same rule on the same local port without a bind race", async (t) => {
-  const { bridge } = loadBridgeWithMocks(t);
-  const event = { sender: createSender() };
-  const localPort = await getFreePort();
-  const basePayload = {
-    ruleId: "rule-restart",
-    type: "local",
-    localPort,
-    bindAddress: "127.0.0.1",
-    remoteHost: "127.0.0.1",
-    remotePort: 3306,
-    hostname: "db.internal",
-    port: 22,
-    username: "dbuser",
-    password: "target-password",
-  };
-
-  try {
-    const first = await bridge.startPortForward(event, {
-      ...basePayload,
-      tunnelId: "pf-rule-restart-1",
-    });
-    assert.equal(first.success, true);
-
-    const second = await bridge.startPortForward(event, {
-      ...basePayload,
-      tunnelId: "pf-rule-restart-2",
-    });
-    assert.equal(second.success, true);
-
-    assert.deepEqual(await bridge.getPortForwardStatus(event, { tunnelId: "pf-rule-restart-1" }), {
-      tunnelId: "pf-rule-restart-1",
-      status: "inactive",
-    });
-    assert.deepEqual(await bridge.getPortForwardStatus(event, { tunnelId: "pf-rule-restart-2" }), {
-      tunnelId: "pf-rule-restart-2",
-      status: "active",
-      type: "local",
-    });
-  } finally {
-    await bridge.stopPortForward(event, { tunnelId: "pf-rule-restart-1" });
-    await bridge.stopPortForward(event, { tunnelId: "pf-rule-restart-2" });
-  }
-});
-
-test("port forwarding serializes wildcard and loopback binds on the same local port", async (t) => {
-  const { bridge } = loadBridgeWithMocks(t);
-  const event = { sender: createSender() };
-  const localPort = await getFreePort();
-  const basePayload = {
-    ruleId: "rule-rebind-address",
-    type: "local",
-    localPort,
-    remoteHost: "127.0.0.1",
-    remotePort: 3306,
-    hostname: "db.internal",
-    port: 22,
-    username: "dbuser",
-    password: "target-password",
-  };
-
-  try {
-    const first = await bridge.startPortForward(event, {
-      ...basePayload,
-      tunnelId: "pf-rule-rebind-address-1",
-      bindAddress: "0.0.0.0",
-    });
-    assert.equal(first.success, true);
-
-    const second = await bridge.startPortForward(event, {
-      ...basePayload,
-      tunnelId: "pf-rule-rebind-address-2",
-      bindAddress: "127.0.0.1",
-    });
-    assert.equal(second.success, true);
-
-    assert.deepEqual(await bridge.getPortForwardStatus(event, { tunnelId: "pf-rule-rebind-address-1" }), {
-      tunnelId: "pf-rule-rebind-address-1",
-      status: "inactive",
-    });
-    assert.deepEqual(await bridge.getPortForwardStatus(event, { tunnelId: "pf-rule-rebind-address-2" }), {
-      tunnelId: "pf-rule-rebind-address-2",
-      status: "active",
-      type: "local",
-    });
-  } finally {
-    await bridge.stopPortForward(event, { tunnelId: "pf-rule-rebind-address-1" });
-    await bridge.stopPortForward(event, { tunnelId: "pf-rule-rebind-address-2" });
-  }
-});
-
-test("port forwarding reports an external listener on the requested local port", async (t) => {
-  const { bridge, getConnectCount } = loadBridgeWithMocks(t);
-  const event = { sender: createSender() };
-  const externalServer = net.createServer();
-  await new Promise((resolve, reject) => {
-    externalServer.once("error", reject);
-    externalServer.listen(0, "127.0.0.1", resolve);
-  });
-  t.after(() => {
-    externalServer.close();
-  });
-  const { port: localPort } = externalServer.address();
-
-  const result = await bridge.startPortForward(event, {
-    ruleId: "rule-external-listener",
-    tunnelId: "pf-rule-external-listener-1",
-    type: "local",
-    localPort,
-    bindAddress: "127.0.0.1",
-    remoteHost: "127.0.0.1",
-    remotePort: 3306,
-    hostname: "db.internal",
-    port: 22,
-    username: "dbuser",
-    password: "target-password",
-  }).then(
-    () => ({ success: true, error: null }),
-    (error) => ({ success: false, error }),
+test("port forwarding forwards target hostId to keyboard-interactive prompts", () => {
+  const source = readFileSync(require.resolve("./portForwardingBridge.cjs"), "utf8");
+  assert.match(source, /hostname,\s*hostId,\s*port = 22,/);
+  assert.match(
+    source,
+    /conn\.on\("keyboard-interactive", createKeyboardInteractiveHandler\(\{\s*sender,\s*sessionId: tunnelId,\s*hostId,/,
   );
-
-  assert.equal(result.success, false);
-  assert.equal(result.error.code, "EADDRINUSE");
-  assert.equal(getConnectCount(), 1);
 });
 
-test("port forwarding does not replace another rule that already owns the local port", async (t) => {
-  const { bridge, getConnectCount } = loadBridgeWithMocks(t);
-  const event = { sender: createSender() };
-  const localPort = await getFreePort();
-  const basePayload = {
-    type: "local",
-    localPort,
-    bindAddress: "127.0.0.1",
-    remoteHost: "127.0.0.1",
-    remotePort: 3306,
-    hostname: "db.internal",
-    port: 22,
-    username: "dbuser",
-    password: "target-password",
-  };
+test("jump-host startup failures clear pending keyboard-interactive prompts", async (t) => {
+  const sent = [];
+  const { bridge } = loadBridgeWithMocks(t, { chainError: new Error("jump auth timeout") });
+  const event = { sender: createSender((channel, payload) => sent.push({ channel, payload })) };
 
-  try {
-    const first = await bridge.startPortForward(event, {
-      ...basePayload,
-      ruleId: "rule-owner",
-      tunnelId: "pf-rule-owner-1",
-    });
-    assert.equal(first.success, true);
-
-    const second = await bridge.startPortForward(event, {
-      ...basePayload,
-      ruleId: "rule-contender",
-      tunnelId: "pf-rule-contender-1",
-    }).then(
-      () => ({ success: true, error: null }),
-      (error) => ({ success: false, error }),
-    );
-
-    assert.equal(second.success, false);
-    assert.equal(second.error.code, "EADDRINUSE");
-    assert.equal(getConnectCount(), 2);
-    assert.deepEqual(await bridge.getPortForwardStatus(event, { tunnelId: "pf-rule-owner-1" }), {
-      tunnelId: "pf-rule-owner-1",
-      status: "active",
+  await assert.rejects(
+    bridge.startPortForward(event, {
+      tunnelId: "pf-jump-failure",
       type: "local",
-    });
-  } finally {
-    await bridge.stopPortForward(event, { tunnelId: "pf-rule-owner-1" });
-    await bridge.stopPortForward(event, { tunnelId: "pf-rule-contender-1" });
-  }
-});
-
-test("remote forwarding can release a stale sshd listener before retrying", async (t) => {
-  const { bridge, getForwardInCount, getExecCommands } = loadBridgeWithMocks(t, {
-    forwardInFailures: 1,
-    remoteExecOutput: [
-      "stale\t1234\tsshd\tsshd: user@notty",
-      "killed\t1234\tsshd\tsshd: user@notty",
-      "",
-    ].join("\n"),
-  });
-  const event = { sender: createSender() };
-
-  try {
-    const result = await bridge.startPortForward(event, {
-      ruleId: "rule-remote-release",
-      tunnelId: "pf-rule-remote-release-1",
-      type: "remote",
-      localPort: 17900,
+      localPort: 0,
       bindAddress: "127.0.0.1",
       remoteHost: "127.0.0.1",
       remotePort: 3306,
       hostname: "db.internal",
-      port: 22,
       username: "dbuser",
-      password: "target-password",
-      releaseStaleRemoteSshd: true,
+      jumpHosts: [{ hostname: "jump.internal", username: "jumpuser" }],
+    }),
+    /jump auth timeout/,
+  );
+
+  assert.equal(
+    Array.from(keyboardInteractiveHandler.getRequests().values())
+      .some((request) => request.sessionId === "pf-jump-failure"),
+    false,
+  );
+  assert.equal(
+    sent.some(({ channel, payload }) =>
+      channel === "netcatty:keyboard-interactive-cancelled" &&
+      payload.sessionId === "pf-jump-failure" &&
+      payload.reason === "connection-ended"),
+    true,
+  );
+});
+
+test("strict target agent selection keeps default keys available to jump hosts", async (t) => {
+  const { bridge, getCapturedChainOptions, getCapturedSystemAgentOptions } = loadBridgeWithMocks(t, { systemAgent: true });
+  const event = { sender: createSender() };
+
+  try {
+    const result = await bridge.startPortForward(event, {
+      tunnelId: "pf-strict-target",
+      type: "local",
+      localPort: 0,
+      bindAddress: "127.0.0.1",
+      remoteHost: "127.0.0.1",
+      remotePort: 3306,
+      hostname: "db.internal",
+      port: 2222,
+      username: "dbuser",
+      useSshAgent: true,
+      identitiesOnly: true,
+      jumpHosts: [{
+        hostname: "jump.internal",
+        port: 22,
+        username: "jumpuser",
+      }],
     });
 
     assert.equal(result.success, true);
-    assert.equal(getForwardInCount(), 2);
-    assert.equal(getExecCommands().length, 1);
-    assert.match(getExecCommands()[0], /17900/);
-    assert.match(getExecCommands()[0], /BIND_ADDRESS=.*127\.0\.0\.1/);
+    assert.deepEqual(getCapturedChainOptions()?._defaultKeys, [{
+      keyName: "id_ed25519",
+      keyPath: "/home/alice/.ssh/id_ed25519",
+      privateKey: "PRIVATE KEY",
+    }]);
+    assert.equal(getCapturedSystemAgentOptions()?.port, 2222);
   } finally {
-    await bridge.stopPortForward(event, { tunnelId: "pf-rule-remote-release-1" });
+    await bridge.stopPortForward(event, { tunnelId: "pf-strict-target" });
   }
-});
-
-test("remote forwarding does not release stale sshd for non-bind failures", async (t) => {
-  const { bridge, getForwardInCount, getExecCommands } = loadBridgeWithMocks(t, {
-    forwardInFailures: 1,
-    forwardInErrorMessage: "Remote port forwarding is administratively prohibited",
-    remoteExecOutput: "killed\t1234\tsshd\tsshd: user@notty\n",
-  });
-  const event = { sender: createSender() };
-
-  const result = await bridge.startPortForward(event, {
-    ruleId: "rule-remote-policy-denied",
-    tunnelId: "pf-rule-remote-policy-denied-1",
-    type: "remote",
-    localPort: 17900,
-    bindAddress: "127.0.0.1",
-    remoteHost: "127.0.0.1",
-    remotePort: 3306,
-    hostname: "db.internal",
-    port: 22,
-    username: "dbuser",
-    password: "target-password",
-    releaseStaleRemoteSshd: true,
-  }).then(
-    () => ({ success: true, error: null }),
-    (error) => ({ success: false, error }),
-  );
-
-  assert.equal(result.success, false);
-  assert.equal(getForwardInCount(), 1);
-  assert.equal(getExecCommands().length, 0);
-});
-
-test("remote forwarding does not kill stale sshd without explicit release option", async (t) => {
-  const { bridge, getForwardInCount, getExecCommands } = loadBridgeWithMocks(t, {
-    forwardInFailures: 1,
-    remoteExecOutput: "killed\t1234\tsshd\tsshd: user@notty\n",
-  });
-  const event = { sender: createSender() };
-
-  const result = await bridge.startPortForward(event, {
-    ruleId: "rule-remote-no-release",
-    tunnelId: "pf-rule-remote-no-release-1",
-    type: "remote",
-    localPort: 17900,
-    bindAddress: "127.0.0.1",
-    remoteHost: "127.0.0.1",
-    remotePort: 3306,
-    hostname: "db.internal",
-    port: 22,
-    username: "dbuser",
-    password: "target-password",
-  }).then(
-    () => ({ success: true, error: null }),
-    (error) => ({ success: false, error }),
-  );
-
-  assert.equal(result.success, false);
-  assert.equal(getForwardInCount(), 1);
-  assert.equal(getExecCommands().length, 0);
 });

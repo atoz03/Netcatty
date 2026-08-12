@@ -1,10 +1,14 @@
 import { CheckSquare, ChevronDown, Clock, Copy, Download, Edit2, FileCode, FolderPlus, LayoutGrid, List as ListIcon, Package, Play, Plus, Search, Square, Trash2, Upload, X, Zap } from 'lucide-react';
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import { useI18n } from '../application/i18n/I18nProvider';
 import { useStoredViewMode } from '../application/state/useStoredViewMode';
 import { STORAGE_KEY_VAULT_SNIPPETS_VIEW_MODE } from '../infrastructure/config/storageKeys';
 import { cn, isMacPlatform } from '../lib/utils';
 import { Host, ProxyProfile, ShellHistoryEntry, Snippet, SSHKey } from '../types';
+import {
+  getShellHistorySnapshot,
+  subscribeShellHistory,
+} from '../application/state/shellHistoryStore';
 import { HotkeyScheme, KeyBinding, keyEventToString, ManagedSource, matchesKeyBinding, parseKeyCombo } from '../domain/models';
 import {
   buildSnippetExportPayload,
@@ -17,6 +21,7 @@ import {
 import { getRunnableHostsForSnippet, snippetHasRunTargets } from '../domain/snippetTargets.ts';
 import { removeHostConnectScript, syncHostsForSnippetTargetChange } from '../domain/hostConnectScripts.ts';
 import { flattenSnippetCommandPreview } from '../domain/snippetPreview.ts';
+import { deleteSelectedSnippetsFromVault } from '../domain/snippetSelection.ts';
 import { DEFAULT_SCRIPT_TEMPLATE, isScriptSnippet } from '../domain/snippetScript.ts';
 import { reorderVaultItems, reorderVaultStrings, sortByVaultOrder } from '../domain/vaultOrder';
 import { Button } from './ui/button';
@@ -59,7 +64,8 @@ interface SnippetsManagerProps {
   packages: string[];
   hosts: Host[];
   customGroups?: string[];
-  shellHistory: ShellHistoryEntry[];
+  /** @deprecated Prefer shellHistoryStore; optional override for tests only. */
+  shellHistory?: ShellHistoryEntry[];
   hotkeyScheme: HotkeyScheme;
   keyBindings: KeyBinding[];
   onSave: (snippet: Snippet) => void;
@@ -447,7 +453,7 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
   packages,
   hosts,
   customGroups = [],
-  shellHistory,
+  shellHistory: shellHistoryProp,
   hotkeyScheme,
   keyBindings,
   onSave,
@@ -466,6 +472,12 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
   onOpenSnippetIdHandled,
 }) => {
   const { t } = useI18n();
+  const shellHistoryFromStore = useSyncExternalStore(
+    subscribeShellHistory,
+    getShellHistorySnapshot,
+    getShellHistorySnapshot,
+  );
+  const shellHistory = shellHistoryProp ?? (shellHistoryFromStore as ShellHistoryEntry[]);
   const [rightPanelMode, setRightPanelMode] = useState<RightPanelMode>('none');
   const [editingSnippet, setEditingSnippet] = useState<Partial<Snippet>>({
     label: '',
@@ -499,11 +511,11 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
   const [draggingPackagePath, setDraggingPackagePath] = useState<string | null>(null);
   const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
   const [selectedSnippetIds, setSelectedSnippetIds] = useState<Set<string>>(new Set());
-  const [deleteTarget, setDeleteTarget] = useState<{
-    type: 'snippet' | 'package';
-    id: string;
-    name: string;
-  } | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<
+    | { type: 'snippet' | 'package'; id: string; name: string }
+    | { type: 'selection'; ids: string[] }
+    | null
+  >(null);
   const [isSnippetImportDialogOpen, setIsSnippetImportDialogOpen] = useState(false);
   const [pendingImport, setPendingImport] = useState<PendingSnippetImport | null>(null);
   const prepareGridLayoutAnimation = useVaultGridLayoutAnimation(listRef);
@@ -874,6 +886,15 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
     });
   };
 
+  const handleTargetSelectionChange = (nextSelectedHostIds: string[]) => {
+    setTargetSelection(nextSelectedHostIds);
+    setEditingSnippet((snippet) => ({
+      ...snippet,
+      targetsAllHosts: undefined,
+      targets: nextSelectedHostIds,
+    }));
+  };
+
   const handleTargetPickerBack = () => {
     setRightPanelMode('edit-snippet');
   };
@@ -1232,11 +1253,38 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
     });
   };
 
+  const requestDeleteSelectedSnippets = () => {
+    const ids = snippets
+      .filter((snippet) => selectedSnippetIds.has(snippet.id))
+      .map((snippet) => snippet.id);
+    if (ids.length === 0) return;
+    setDeleteTarget({ type: 'selection', ids });
+  };
+
+  const existingDeleteSelectionIds = deleteTarget?.type === 'selection'
+    ? deleteTarget.ids.filter((id) => snippets.some((snippet) => snippet.id === id))
+    : [];
+
   const confirmDeleteTarget = () => {
     if (!deleteTarget) return;
 
     if (deleteTarget.type === 'package') {
       performDeletePackage(deleteTarget.id);
+    } else if (deleteTarget.type === 'selection') {
+      const deletedIds = new Set(deleteTarget.ids);
+      const result = deleteSelectedSnippetsFromVault(snippets, hosts, deletedIds);
+      if (result.deletedCount === 0) {
+        clearSnippetSelection();
+        setDeleteTarget(null);
+        return;
+      }
+      onBulkSave(result.snippets);
+      onUpdateHosts?.(result.hosts);
+      if (editingSnippet.id && deletedIds.has(editingSnippet.id)) {
+        handleClosePanel();
+      }
+      toast.success(t('snippets.selection.deleteSuccess', { count: result.deletedCount }));
+      clearSnippetSelection();
     } else {
       onDelete(deleteTarget.id);
       setSelectedSnippetIds((prev) => {
@@ -1616,6 +1664,7 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
       targetSelection={targetSelection}
       setTargetSelection={setTargetSelection}
       handleTargetSelect={handleTargetSelect}
+      handleTargetSelectionChange={handleTargetSelectionChange}
       handleTargetPickerBack={handleTargetPickerBack}
       availableKeys={availableKeys}
       proxyProfiles={proxyProfiles}
@@ -1769,7 +1818,7 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
 
         {isMultiSelectMode && (
           <div className="px-4 py-1.5 bg-background border-b border-border/40 flex items-center gap-2">
-            <span className="flex items-center h-7 text-xs text-muted-foreground leading-none">
+            <span className="flex h-7 items-center text-xs leading-4 text-muted-foreground">
               {t('snippets.selection.selected', { count: selectedSnippetIds.size })}
             </span>
             <div className="flex-1" />
@@ -1798,6 +1847,16 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
             >
               <Download size={12} className="mr-1" />
               {t('snippets.selection.exportSelected', { count: selectedSnippetIds.size })}
+            </Button>
+            <Button
+              variant="destructive"
+              size="sm"
+              className="h-7 px-2 text-xs"
+              disabled={selectedSnippetIds.size === 0}
+              onClick={requestDeleteSelectedSnippets}
+            >
+              <Trash2 size={12} className="mr-1" />
+              {t('snippets.selection.deleteSelected', { count: selectedSnippetIds.size })}
             </Button>
             <Button
               variant="ghost"
@@ -2117,12 +2176,14 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
 
       <VaultDeleteConfirmDialog
         open={Boolean(deleteTarget)}
-        title={t('vault.deleteConfirm.title', {
-          name: deleteTarget?.name ?? '',
-        })}
+        title={deleteTarget?.type === 'selection'
+          ? t('snippets.selection.deleteConfirmTitle', { count: existingDeleteSelectionIds.length })
+          : t('vault.deleteConfirm.title', { name: deleteTarget?.name ?? '' })}
         description={
           deleteTarget?.type === 'package'
             ? t('vault.deleteConfirm.packageDesc')
+            : deleteTarget?.type === 'selection'
+              ? t('snippets.selection.deleteConfirmDesc')
             : t('vault.deleteConfirm.desc')
         }
         onOpenChange={(open) => {

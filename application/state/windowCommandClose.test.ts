@@ -42,6 +42,20 @@ test("Cmd+W closes an editor tab through the existing close flow", () => {
   );
 });
 
+test("Cmd+W closes a native plugin view tab before the window", () => {
+  assert.deepEqual(
+    resolveWindowCommandCloseIntent({
+      activeTabId: "plugin-view:com.example.view:com.example.view.panel",
+      editorTabIds: [],
+      sessionIds: [],
+      workspaceIds: [],
+      logViewIds: [],
+      pluginViewTabIds: ["plugin-view:com.example.view:com.example.view.panel"],
+    }),
+    { kind: "closeTab" },
+  );
+});
+
 test("Cmd+W closes the window from the Vault page", () => {
   assert.deepEqual(
     resolveWindowCommandCloseIntent({

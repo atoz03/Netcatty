@@ -1,10 +1,18 @@
-import type { SerialConfig, Snippet } from './connection';
+import type { HostProtocol, PluginConnectionConfig, SerialConfig, Snippet } from './connection';
 import type { CodingCliProviderId } from '../codingCliProviders';
 import {
   normalizeHibernateHiddenTabsDelaySec,
   normalizeHibernateKeepRendererCount,
   normalizeHibernateReplayChunkBytes,
 } from '../terminalHibernate';
+import {
+  normalizeInlineImageMaxMegapixels,
+  normalizeInlineImageSequenceLimitMb,
+  normalizeInlineImageStorageLimitMb,
+  TERMINAL_INLINE_IMAGE_MAX_MEGAPIXELS_DEFAULT,
+  TERMINAL_INLINE_IMAGE_SEQUENCE_LIMIT_MB_DEFAULT,
+  TERMINAL_INLINE_IMAGE_STORAGE_LIMIT_MB_DEFAULT,
+} from '../terminalInlineImages';
 
 // Terminal appearance settings
 export type CursorShape = 'block' | 'bar' | 'underline';
@@ -14,6 +22,25 @@ export type MiddleClickBehavior = 'context-menu' | 'paste' | 'disabled';
 export type LinkModifier = 'none' | 'ctrl' | 'alt' | 'meta';
 export type TerminalEmulationType = 'xterm-256color' | 'xterm-16color' | 'xterm';
 export type DynamicTabTitleMode = 'off' | 'agent' | 'all';
+/**
+ * What the terminal host info bar shows as its primary title (#2708).
+ * - address: user@host:port when available (historical default)
+ * - label: vault host label / display name
+ */
+export type HostInfoBarTitleMode = 'address' | 'label';
+/**
+ * How to assist when a sudo/su password prompt appears (#2156).
+ * - off: no assist
+ * - hint: ghost "press Enter" fill of the host session password
+ * - picker: WindTerm-like list of host + keychain password identities
+ */
+export type PasswordPromptAssistMode = 'off' | 'hint' | 'picker';
+/**
+ * Which command-history pool autocomplete suggestions draw from (#2595).
+ * - host: only the current host's recorded commands (default; avoids cross-device noise)
+ * - global: commands recorded across all hosts
+ */
+export type AutocompleteHistoryScope = 'host' | 'global';
 
 export const DEFAULT_TERMINAL_WORD_SEPARATORS = ' ()[]{}\'"';
 
@@ -49,6 +76,8 @@ export interface TerminalSettings {
   // Cursor
   cursorShape: CursorShape;
   cursorBlink: boolean;
+  /** Highlight the buffer row under the cursor (WindTerm-style decoration). */
+  highlightCursorLine: boolean;
 
   // Accessibility
   minimumContrastRatio: number; // Minimum contrast ratio (1-21)
@@ -58,6 +87,7 @@ export interface TerminalSettings {
   optionArrowWordJump: boolean; // macOS: Option+←/→ send Meta-b/f for word jump
   shiftEnterNewlineEnabled: boolean; // Send configured text on Shift+Enter
   shiftEnterNewlineText: string; // Backslash-escaped text sent by Shift+Enter
+  kittyKeyboardProtocolEnabled: boolean; // Enable Kitty keyboard protocol support
   scrollOnInput: boolean; // Scroll terminal to bottom on input
   scrollOnOutput: boolean; // Scroll terminal to bottom on output
   scrollOnKeyPress: boolean; // Scroll terminal to bottom on key press
@@ -67,11 +97,20 @@ export interface TerminalSettings {
 
   // Mouse
   rightClickBehavior: RightClickBehavior;
+  // Show the app context menu even when a fullscreen app (tmux/vim) holds mouse tracking
+  showContextMenuOverFullscreenApps: boolean;
   middleClickBehavior: MiddleClickBehavior;
   copyOnSelect: boolean; // Automatically copy selected text
+  /**
+   * When true, terminal copy paths strip display-padding spaces and join
+   * soft-wrapped rows before writing the clipboard. When false, use raw
+   * xterm getSelection() (screen-cell layout as-is).
+   */
+  normalizeTextOnCopy: boolean;
   middleClickPaste: boolean; // Legacy mirror for older settings payloads
   wordSeparators: string; // Characters for word selection
   linkModifier: LinkModifier; // Modifier key to click links
+  autoCloseOnExit: boolean; // Automatically close terminal UI after eligible session exits
 
   // Keyword Highlighting
   keywordHighlightEnabled: boolean;
@@ -95,6 +134,9 @@ export interface TerminalSettings {
   moshClientPath: string;
 
   // Server Stats Display (Linux only)
+  showHostInfoBar: boolean; // Show host identity and server stats above the terminal
+  /** Primary title in the host info bar: connection address or vault label. */
+  hostInfoBarTitleMode: HostInfoBarTitleMode;
   showServerStats: boolean; // Show CPU/Memory/Disk in terminal statusbar
   serverStatsRefreshInterval: number; // Seconds between stats refresh (default: 30)
 
@@ -106,6 +148,11 @@ export interface TerminalSettings {
 
   // Paste
   disableBracketedPaste: boolean; // Disable bracketed paste mode (avoid ^[[200~ artifacts)
+
+  // When true, pasting while the clipboard holds an image automatically runs
+  // the "Upload clipboard image" action (SFTP upload + remote-path paste)
+  // instead of falling back to a text paste. Remote SSH sessions only.
+  autoUploadClipboardImageOnPaste: boolean;
 
   // Shell `clear` command behavior — controls whether CSI 3 J (erase scrollback)
   // from the shell is honored. Default true matches POSIX/ncurses since 2013:
@@ -144,6 +191,20 @@ export interface TerminalSettings {
   hibernateReplayChunkBytes: number;
   /** Prefer WASM terminal serialize when available (falls back to JS). */
   hibernatePreferWasmSerialize: boolean;
+  /** Render inline raster images (Kitty graphics / SIXEL / iTerm IIP) emitted by remote programs. */
+  inlineImagesEnabled: boolean;
+  /** Kitty graphics protocol (APC G) support; requires inlineImagesEnabled. */
+  inlineImageKittyEnabled: boolean;
+  /** SIXEL (DCS q) support; requires inlineImagesEnabled. */
+  inlineImageSixelEnabled: boolean;
+  /** iTerm inline image protocol (OSC 1337 File=) support; requires inlineImagesEnabled. */
+  inlineImageIipEnabled: boolean;
+  /** Per-terminal inline image cache size in MB (FIFO eviction). */
+  inlineImageStorageLimitMb: number;
+  /** Largest single decoded inline image, in megapixels. */
+  inlineImageMaxMegapixels: number;
+  /** Largest single inline image escape sequence, in MB, before decoding. */
+  inlineImageSequenceLimitMb: number;
   showLineTimestamps: boolean; // Show output timestamps in a side gutter
 
   // Autocomplete
@@ -153,6 +214,14 @@ export interface TerminalSettings {
   autocompleteDebounceMs: number; // Debounce delay for fetching suggestions (ms)
   autocompleteMinChars: number; // Minimum characters before showing suggestions
   autocompleteMaxSuggestions: number; // Maximum suggestions in popup menu
+  /** Scope for history-backed autocomplete suggestions (host vs all hosts). */
+  autocompleteHistoryScope: AutocompleteHistoryScope;
+
+  /**
+   * Assist for sudo/su password prompts: off, quick Enter-to-paste (hint),
+   * or multi-credential picker. Default hint preserves historical sudo UX.
+   */
+  passwordPromptAssist: PasswordPromptAssistMode;
 }
 
 const STRICT_IPV4_OCTET_PATTERN = '(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)';
@@ -275,6 +344,22 @@ const isDynamicTabTitleMode = (value: unknown): value is DynamicTabTitleMode => 
   value === 'all'
 );
 
+const isHostInfoBarTitleMode = (value: unknown): value is HostInfoBarTitleMode => (
+  value === 'address' ||
+  value === 'label'
+);
+
+const isPasswordPromptAssistMode = (value: unknown): value is PasswordPromptAssistMode => (
+  value === 'off' ||
+  value === 'hint' ||
+  value === 'picker'
+);
+
+const isAutocompleteHistoryScope = (value: unknown): value is AutocompleteHistoryScope => (
+  value === 'host' ||
+  value === 'global'
+);
+
 export const normalizeTerminalSettings = (
   settings?: Partial<TerminalSettings> | null,
 ): TerminalSettings => {
@@ -295,6 +380,15 @@ export const normalizeTerminalSettings = (
     dynamicTabTitleMode: isDynamicTabTitleMode(settings?.dynamicTabTitleMode)
       ? settings.dynamicTabTitleMode
       : DEFAULT_TERMINAL_SETTINGS.dynamicTabTitleMode,
+    hostInfoBarTitleMode: isHostInfoBarTitleMode(settings?.hostInfoBarTitleMode)
+      ? settings.hostInfoBarTitleMode
+      : DEFAULT_TERMINAL_SETTINGS.hostInfoBarTitleMode,
+    passwordPromptAssist: isPasswordPromptAssistMode(settings?.passwordPromptAssist)
+      ? settings.passwordPromptAssist
+      : DEFAULT_TERMINAL_SETTINGS.passwordPromptAssist,
+    autocompleteHistoryScope: isAutocompleteHistoryScope(settings?.autocompleteHistoryScope)
+      ? settings.autocompleteHistoryScope
+      : DEFAULT_TERMINAL_SETTINGS.autocompleteHistoryScope,
   };
 
   // Migrate legacy 'canvas' renderer to 'dom' (canvas removed in xterm.js 6.0)
@@ -302,9 +396,16 @@ export const normalizeTerminalSettings = (
     ? 'dom' as const
     : mergedSettings.rendererType;
 
+  // Persisted installs wrote the old default (8) into localStorage with no UI
+  // to change it; bump that sentinel to the new default while keeping custom caps.
+  const autocompleteMaxSuggestions = mergedSettings.autocompleteMaxSuggestions === 8
+    ? DEFAULT_TERMINAL_SETTINGS.autocompleteMaxSuggestions
+    : mergedSettings.autocompleteMaxSuggestions;
+
   return {
     ...mergedSettings,
     rendererType,
+    autocompleteMaxSuggestions,
     hibernateHiddenTabsDelaySec: normalizeHibernateHiddenTabsDelaySec(
       mergedSettings.hibernateHiddenTabsDelaySec,
     ),
@@ -313,6 +414,15 @@ export const normalizeTerminalSettings = (
     ),
     hibernateReplayChunkBytes: normalizeHibernateReplayChunkBytes(
       mergedSettings.hibernateReplayChunkBytes,
+    ),
+    inlineImageStorageLimitMb: normalizeInlineImageStorageLimitMb(
+      mergedSettings.inlineImageStorageLimitMb,
+    ),
+    inlineImageMaxMegapixels: normalizeInlineImageMaxMegapixels(
+      mergedSettings.inlineImageMaxMegapixels,
+    ),
+    inlineImageSequenceLimitMb: normalizeInlineImageSequenceLimitMb(
+      mergedSettings.inlineImageSequenceLimitMb,
     ),
     autocompleteGhostText: mergedSettings.autocompletePopupMenu
       ? false
@@ -323,8 +433,11 @@ export const normalizeTerminalSettings = (
   };
 };
 
+/** Default scrollback rows for new installs (VS Code uses 1000; we keep a modest headroom). */
+export const DEFAULT_TERMINAL_SCROLLBACK = 3000;
+
 const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
-  scrollback: 10000,
+  scrollback: DEFAULT_TERMINAL_SCROLLBACK,
   drawBoldInBrightColors: true,
   terminalEmulationType: 'xterm-256color',
   startupCommandDelayMs: 600,
@@ -336,22 +449,27 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   fallbackFont: '',
   cursorShape: 'block',
   cursorBlink: true,
+  highlightCursorLine: false,
   minimumContrastRatio: 1,
   altAsMeta: false,
   optionArrowWordJump: false,
   shiftEnterNewlineEnabled: true,
   shiftEnterNewlineText: '\\n',
+  kittyKeyboardProtocolEnabled: false,
   scrollOnInput: true,
   scrollOnOutput: false,
   scrollOnKeyPress: false,
   scrollOnPaste: true,
   smoothScrolling: false,
   rightClickBehavior: 'context-menu',
+  showContextMenuOverFullscreenApps: false,
   middleClickBehavior: 'paste',
   copyOnSelect: false,
+  normalizeTextOnCopy: true, // Clean soft wraps + padding on copy (opt-out available)
   middleClickPaste: true,
   wordSeparators: DEFAULT_TERMINAL_WORD_SEPARATORS,
   linkModifier: 'none',
+  autoCloseOnExit: true,
   keywordHighlightEnabled: true,
   keywordHighlightRules: DEFAULT_KEYWORD_HIGHLIGHT_RULES,
   localShell: '', // Empty = use system default
@@ -368,6 +486,8 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   sshAutoReconnectEnabled: false,
   x11Display: '', // Empty = use DISPLAY/default local X server
   moshClientPath: '', // Legacy mosh-client override; normal UI uses bundled mosh-client
+  showHostInfoBar: true, // Preserve the existing host information bar by default
+  hostInfoBarTitleMode: 'address', // Historical default: prefer user@host:port
   showServerStats: true, // Show server stats by default
   serverStatsRefreshInterval: 5, // Refresh every 5 seconds
   systemManagerProcessRefreshInterval: 3,
@@ -375,6 +495,7 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   systemManagerDockerListRefreshInterval: 5,
   systemManagerDockerStatsRefreshInterval: 3,
   disableBracketedPaste: false, // Bracketed paste enabled by default
+  autoUploadClipboardImageOnPaste: false, // Opt-in: image in clipboard auto-uploads on paste (remote sessions)
   clearWipesScrollback: true, // POSIX-standard: shell `clear` clears scrollback too
   preserveSelectionOnInput: false, // Opt-in: keep selection alive when typing
   forcePromptNewLine: false, // Opt-in: keep the next shell prompt visually separated from unterminated final output lines
@@ -387,13 +508,25 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   hibernateKeepRendererCount: 2,
   hibernateReplayChunkBytes: 16 * 1024,
   hibernatePreferWasmSerialize: false,
+  // Opt-in: loading the image addon has bundle/parser cost, and sessions that
+  // have drawn images cannot full-hibernate. Protocols stay enabled so turning
+  // the master switch on is a single click.
+  inlineImagesEnabled: false,
+  inlineImageKittyEnabled: true,
+  inlineImageSixelEnabled: true,
+  inlineImageIipEnabled: true,
+  inlineImageStorageLimitMb: TERMINAL_INLINE_IMAGE_STORAGE_LIMIT_MB_DEFAULT,
+  inlineImageMaxMegapixels: TERMINAL_INLINE_IMAGE_MAX_MEGAPIXELS_DEFAULT,
+  inlineImageSequenceLimitMb: TERMINAL_INLINE_IMAGE_SEQUENCE_LIMIT_MB_DEFAULT,
   showLineTimestamps: false, // Opt-in: shows output timestamps beside terminal lines
   autocompleteEnabled: true, // Autocomplete enabled by default
   autocompleteGhostText: false, // Mutually exclusive with popup menu
   autocompletePopupMenu: true, // Popup menu enabled by default
   autocompleteDebounceMs: 100, // 100ms debounce
   autocompleteMinChars: 1, // Start suggesting after 1 character
-  autocompleteMaxSuggestions: 8, // Show up to 8 suggestions
+  autocompleteMaxSuggestions: 50, // Show up to 50 suggestions (popup scrolls)
+  autocompleteHistoryScope: 'host', // Per-host history suggestions by default (#2595)
+  passwordPromptAssist: 'hint', // Historical sudo confirm-to-fill; picker is opt-in (#2156)
 };
 
 export interface TerminalTheme {
@@ -441,7 +574,8 @@ export interface TerminalSession {
   noAutoRun?: boolean;     // If true, paste command without auto-executing
   multiLineRunMode?: Snippet['multiLineRunMode'];
   // Connection-time protocol overrides (used instead of looking up from hosts)
-  protocol?: 'ssh' | 'telnet' | 'local' | 'serial';
+  protocol?: HostProtocol;
+  pluginConnection?: PluginConnectionConfig;
   port?: number;
   moshEnabled?: boolean;
   etEnabled?: boolean;
@@ -478,8 +612,27 @@ export interface TerminalSession {
    * the one-time credentials cannot survive a relaunch.
    */
   ephemeralHost?: boolean;
+  /**
+   * Runtime marker for sessions opened via MCP host_open while "silent
+   * sessions" is enabled. Hidden from the main window's tab bar (TopTabs,
+   * QuickSwitcher, orphan tab ordering) and excluded from session-restore
+   * persistence, but remains a fully live session reachable by terminal
+   * exec/sftp/session-close tools, and still visible in TrayPanel and the
+   * external MCP session list.
+   */
+  hiddenFromTabs?: boolean;
   /** Runtime hint to auto-open a side panel once the session connects. */
   autoOpenSidePanel?: 'sftp';
   /** Latest known working directory captured from terminal cwd tracking. */
   lastCwd?: string;
+  /**
+   * Transient one-shot: a directory a freshly-cloned/split REMOTE session
+   * should `cd` into on its first connect. Set by the clone factory when a
+   * copy/split inherits the source pane's cwd; the terminal's restore-cwd
+   * injection path applies it on connect, and it is cleared from the session as
+   * soon as a live cwd is tracked (see `updateSessionRestoreCwd`) so a later
+   * remount + reconnect does not re-inject a stale `cd`. Not persisted across
+   * relaunch. Local clones use `localStartDir` instead of this field.
+   */
+  pendingInitialCwd?: string;
 }

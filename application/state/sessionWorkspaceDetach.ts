@@ -17,6 +17,13 @@ export type CloseSessionWorkspaceLayoutResult = {
   lastRemainingSessionId?: string;
 };
 
+export type CloseSessionsStateResult = {
+  sessions: TerminalSession[];
+  workspaces: Workspace[];
+  tabOrder: string[];
+  activeTabId?: string;
+};
+
 type DetachSessionFromWorkspaceStateOptions = {
   sessions: TerminalSession[];
   workspaces: Workspace[];
@@ -98,6 +105,165 @@ export function closeSessionWorkspaceLayoutState(
     removedWorkspaceId,
     dissolvedWorkspaceId,
     lastRemainingSessionId,
+  };
+}
+
+/**
+ * Apply a close-session action to the session list using the layout result.
+ * When a 2-pane workspace dissolves to one terminal, that remaining session
+ * must become an orphan tab — not stay bound to a deleted workspaceId.
+ */
+export function applyCloseSessionToSessions(
+  sessions: readonly TerminalSession[],
+  sessionId: string,
+  layoutResult: Pick<CloseSessionWorkspaceLayoutResult, "lastRemainingSessionId">,
+): TerminalSession[] {
+  const remaining = sessions.filter((session) => session.id !== sessionId);
+  const lastRemainingSessionId = layoutResult.lastRemainingSessionId;
+  if (!lastRemainingSessionId) return remaining;
+
+  return remaining.map((session) => (
+    session.id === lastRemainingSessionId
+      ? { ...session, workspaceId: undefined }
+      : session
+  ));
+}
+
+export function isPreferredTabAvailableAfterClose(
+  input: {
+    preferredTabId: string | null | undefined;
+    closedSessionId: string;
+    layoutResult: CloseSessionWorkspaceLayoutResult;
+    remainingSessions: readonly TerminalSession[];
+  },
+): input is {
+  preferredTabId: string;
+  closedSessionId: string;
+  layoutResult: CloseSessionWorkspaceLayoutResult;
+  remainingSessions: readonly TerminalSession[];
+} {
+  const { preferredTabId, closedSessionId, layoutResult, remainingSessions } = input;
+  if (!preferredTabId || preferredTabId === closedSessionId) return false;
+  if (
+    preferredTabId === layoutResult.dissolvedWorkspaceId
+    || preferredTabId === layoutResult.removedWorkspaceId
+  ) {
+    return false;
+  }
+  if (preferredTabId === "vault" || preferredTabId === "sftp") return true;
+  if (layoutResult.workspaces.some((workspace) => workspace.id === preferredTabId)) return true;
+  return remainingSessions.some((session) => (
+    session.id === preferredTabId
+    && !session.workspaceId
+    && !session.hiddenFromTabs
+  ));
+}
+
+export function resolveActiveTabAfterCloseSession({
+  currentActiveTabId,
+  closedSessionId,
+  workspaceId,
+  layoutResult,
+  remainingSessions,
+  preferredTabId,
+}: {
+  currentActiveTabId: string | null;
+  closedSessionId: string;
+  workspaceId: string | undefined;
+  layoutResult: CloseSessionWorkspaceLayoutResult;
+  remainingSessions: readonly TerminalSession[];
+  preferredTabId?: string | null;
+}): string | null {
+  const fallbackWorkspace = layoutResult.workspaces[layoutResult.workspaces.length - 1];
+  const fallbackSolo = remainingSessions.filter((session) => !session.workspaceId && !session.hiddenFromTabs).slice(-1)[0];
+  const preferredInput = {
+    preferredTabId,
+    closedSessionId,
+    layoutResult,
+    remainingSessions,
+  };
+  const preferredFallback = isPreferredTabAvailableAfterClose(preferredInput)
+    ? preferredInput.preferredTabId
+    : undefined;
+  const fallback = layoutResult.lastRemainingSessionId
+    ?? preferredFallback
+    ?? fallbackWorkspace?.id
+    ?? fallbackSolo?.id
+    ?? "vault";
+
+  if (
+    currentActiveTabId === closedSessionId
+    || (layoutResult.dissolvedWorkspaceId && currentActiveTabId === layoutResult.dissolvedWorkspaceId)
+    || (layoutResult.removedWorkspaceId && currentActiveTabId === layoutResult.removedWorkspaceId)
+    || (workspaceId && currentActiveTabId === workspaceId && !layoutResult.workspaces.some((ws) => ws.id === workspaceId))
+  ) {
+    return fallback;
+  }
+
+  return null;
+}
+
+export function closeSessionsState({
+  sessions,
+  workspaces,
+  sessionIds,
+  currentActiveTabId,
+  preferredTabId,
+  tabOrder,
+}: {
+  sessions: readonly TerminalSession[];
+  workspaces: readonly Workspace[];
+  sessionIds: readonly string[];
+  currentActiveTabId: string | null;
+  preferredTabId?: string | null;
+  tabOrder: readonly string[];
+}): CloseSessionsStateResult {
+  let nextSessions = [...sessions];
+  let nextWorkspaces = [...workspaces];
+  let nextTabOrder = [...tabOrder];
+  let nextActiveTabId = currentActiveTabId;
+  let resolvedActiveTabId: string | undefined;
+
+  for (const sessionId of new Set(sessionIds)) {
+    const targetSession = nextSessions.find((session) => session.id === sessionId);
+    if (!targetSession) continue;
+
+    const workspaceId = targetSession.workspaceId;
+    const layoutResult = closeSessionWorkspaceLayoutState(
+      nextWorkspaces,
+      workspaceId,
+      sessionId,
+    );
+    nextWorkspaces = layoutResult.workspaces;
+    nextSessions = applyCloseSessionToSessions(nextSessions, sessionId, layoutResult);
+
+    if (layoutResult.dissolvedWorkspaceId && layoutResult.lastRemainingSessionId) {
+      nextTabOrder = replaceDissolvedWorkspaceTabOrder(
+        nextTabOrder,
+        layoutResult.dissolvedWorkspaceId,
+        [layoutResult.lastRemainingSessionId],
+      );
+    }
+
+    const activeTabAfterClose = resolveActiveTabAfterCloseSession({
+      currentActiveTabId: nextActiveTabId,
+      closedSessionId: sessionId,
+      workspaceId,
+      layoutResult,
+      remainingSessions: nextSessions,
+      preferredTabId,
+    });
+    if (activeTabAfterClose) {
+      nextActiveTabId = activeTabAfterClose;
+      resolvedActiveTabId = activeTabAfterClose;
+    }
+  }
+
+  return {
+    sessions: nextSessions,
+    workspaces: nextWorkspaces,
+    tabOrder: nextTabOrder,
+    activeTabId: resolvedActiveTabId,
   };
 }
 

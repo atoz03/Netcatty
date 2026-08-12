@@ -9,6 +9,11 @@ import type { Identity, SSHKey } from "../types.ts";
 import KeychainManager from "./KeychainManager.tsx";
 import { IdentityCard } from "./keychain/IdentityCard.tsx";
 import { KeyCard } from "./keychain/KeyCard.tsx";
+import {
+  shouldShowIdentitySection,
+  shouldShowKeySection,
+  shouldShowSearchNoResults,
+} from "./keychain/utils.ts";
 
 const longLabel =
   "sdakdjkasjakjskajskaijssdakdjkasjakjskajskaijssdakdjkasjakjskajskaijssdakdjkasjakjskajskaijs";
@@ -117,7 +122,7 @@ test("KeyCard list layout constrains long labels", () => {
   assert.match(markup, /block max-w-full truncate text-sm font-semibold/);
 });
 
-test("KeychainManager list layout constrains long key and identity rows", () => {
+test("KeychainManager shows keys and identities on the same page", () => {
   installNavigatorStub();
   installStorageStub("list");
 
@@ -145,6 +150,189 @@ test("KeychainManager list layout constrains long key and identity rows", () => 
   assert.doesNotMatch(markup, /flex-1 min-w-0 w-full overflow-y-auto overflow-x-hidden/);
   assert.match(markup, /flex min-w-0 w-full max-w-full flex-col gap-0/);
   assert.match(markup, /block min-w-0 w-full max-w-full/);
-  assert.match(markup, /Keys/);
-  assert.match(markup, /Identities/);
+  assert.match(markup, /data-section="keychain-identities"/);
+  assert.match(markup, /data-section="keychain-keys"/);
+  assert.doesNotMatch(markup, /data-section="keychain-empty"/);
+  assert.doesNotMatch(markup, />Identities<\/button>/);
+});
+
+test("KeychainManager shows keys without the identities section when no identities exist", () => {
+  installNavigatorStub();
+  installStorageStub();
+
+  const markup = renderWithI18n(
+    React.createElement(KeychainManager, {
+      keys: [keyItem],
+      identities: [],
+      onSave: () => {},
+      onUpdate: () => {},
+      onDelete: () => {},
+      onSaveIdentity: () => {},
+    }),
+  );
+
+  assert.match(markup, /data-section="keychain-keys"/);
+  assert.doesNotMatch(markup, /data-section="keychain-identities"/);
+  assert.doesNotMatch(markup, /data-section="keychain-empty"/);
+});
+
+test("KeychainManager shows the empty prompt only when keys and identities are absent", () => {
+  installNavigatorStub();
+  installStorageStub();
+
+  const markup = renderWithI18n(
+    React.createElement(KeychainManager, {
+      keys: [],
+      identities: [],
+      onSave: () => {},
+      onUpdate: () => {},
+      onDelete: () => {},
+      onSaveIdentity: () => {},
+    }),
+  );
+
+  assert.match(markup, /data-section="keychain-keys"/);
+  assert.match(markup, /data-section="keychain-empty"/);
+  assert.doesNotMatch(markup, /data-section="keychain-identities"/);
+});
+
+test("KeychainManager hides the empty key CTA when identities exist without keys", () => {
+  installNavigatorStub();
+  installStorageStub();
+
+  const markup = renderWithI18n(
+    React.createElement(KeychainManager, {
+      keys: [],
+      identities: [identity],
+      onSave: () => {},
+      onUpdate: () => {},
+      onDelete: () => {},
+      onSaveIdentity: () => {},
+    }),
+  );
+
+  assert.match(markup, /data-section="keychain-identities"/);
+  assert.doesNotMatch(markup, /data-section="keychain-keys"/);
+  assert.doesNotMatch(markup, /data-section="keychain-empty"/);
+});
+
+test("KeychainManager exposes new-key, import-certificate, and new-identity header actions", () => {
+  installNavigatorStub();
+  installStorageStub();
+
+  const markup = renderWithI18n(
+    React.createElement(KeychainManager, {
+      keys: [],
+      identities: [],
+      onSave: () => {},
+      onUpdate: () => {},
+      onDelete: () => {},
+      onSaveIdentity: () => {},
+    }),
+  );
+
+  // Header split "New Key" uses the same secondary chrome as sibling actions
+  assert.match(
+    markup,
+    /rounded-md shrink-0 bg-foreground\/5 text-foreground[\s\S]*?>New Key<\/button>/,
+  );
+  assert.match(markup, />Import Certificate<\/button>/);
+  assert.match(markup, />New Identity<\/button>/);
+  assert.doesNotMatch(markup, />KEY<\/button>/);
+  assert.doesNotMatch(markup, />CERTIFICATE<\/button>/);
+  assert.doesNotMatch(markup, />Identities<\/button>/);
+});
+
+test("keychain search reveals matching keys when identities do not match", () => {
+  assert.equal(shouldShowIdentitySection({
+    identityCount: 1,
+    filteredIdentityCount: 0,
+    filteredKeyCount: 1,
+    search: "matching-key",
+  }), false);
+});
+
+test("keychain search keeps identities for identity matches or no results", () => {
+  assert.equal(shouldShowIdentitySection({
+    identityCount: 1,
+    filteredIdentityCount: 1,
+    filteredKeyCount: 0,
+    search: "matching-identity",
+  }), true);
+  assert.equal(shouldShowIdentitySection({
+    identityCount: 1,
+    filteredIdentityCount: 0,
+    filteredKeyCount: 0,
+    search: "no-results",
+  }), true);
+});
+
+test("keychain search shows both sections when both kinds match", () => {
+  const state = {
+    identityCount: 1,
+    filteredIdentityCount: 1,
+    filteredKeyCount: 1,
+    search: "shared-label",
+  };
+
+  assert.equal(shouldShowIdentitySection(state), true);
+  assert.equal(shouldShowKeySection(state), true);
+});
+
+test("keychain browsing shows keys and identities together", () => {
+  assert.equal(shouldShowKeySection({
+    identityCount: 1,
+    filteredKeyCount: 1,
+    search: "",
+  }), true);
+  assert.equal(shouldShowIdentitySection({
+    identityCount: 1,
+    filteredIdentityCount: 1,
+    filteredKeyCount: 1,
+    search: "",
+  }), true);
+  assert.equal(shouldShowIdentitySection({
+    identityCount: 0,
+    filteredIdentityCount: 0,
+    filteredKeyCount: 1,
+    search: "",
+  }), false);
+});
+
+test("keychain browsing hides keys when only identities exist", () => {
+  assert.equal(shouldShowKeySection({
+    identityCount: 1,
+    filteredKeyCount: 0,
+    search: "",
+  }), false);
+});
+
+test("keychain search hides the keys section when only identities match", () => {
+  assert.equal(shouldShowKeySection({
+    identityCount: 1,
+    filteredKeyCount: 0,
+    search: "identity-only",
+  }), false);
+});
+
+test("keychain search keeps keys visible for empty key searches without identities", () => {
+  assert.equal(shouldShowKeySection({
+    identityCount: 0,
+    filteredKeyCount: 0,
+    search: "no-results",
+  }), true);
+});
+
+test("keychain search hides keys when identities cover the empty-search state", () => {
+  assert.equal(shouldShowKeySection({
+    identityCount: 1,
+    filteredKeyCount: 0,
+    search: "no-results",
+  }), false);
+});
+
+test("keychain distinguishes search misses from an empty vault", () => {
+  assert.equal(shouldShowSearchNoResults("missing", 0, 1), true);
+  assert.equal(shouldShowSearchNoResults("", 0, 1), false);
+  assert.equal(shouldShowSearchNoResults("missing", 0, 0), false);
 });

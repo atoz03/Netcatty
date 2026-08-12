@@ -17,8 +17,17 @@ export interface UserSkillSlashOption {
   description: string;
 }
 
+export type SystemSlashCommandSlug = 'stop' | 'compact';
+
+export interface SystemSlashCommand {
+  slug: SystemSlashCommandSlug;
+  name: string;
+  descriptionKey: string;
+}
+
 export type SlashCommandItem =
   | { kind: 'quickMessage'; message: AIQuickMessage }
+  | { kind: 'system'; command: SystemSlashCommand }
   | { kind: 'skill'; skill: UserSkillSlashOption };
 
 export const QUICK_MESSAGE_LIMITS = {
@@ -112,6 +121,22 @@ export function filterUserSkillsForSlash(
   });
 }
 
+export const SYSTEM_BUILTIN_SLASH_COMMANDS: SystemSlashCommand[] = [
+  { slug: 'compact', name: 'Compact context', descriptionKey: 'ai.chat.slashCompactDesc' },
+  { slug: 'stop', name: 'Stop', descriptionKey: 'ai.chat.slashStopDesc' },
+];
+
+export function filterSystemSlashCommands(
+  commands: SystemSlashCommand[],
+  query: string,
+): SystemSlashCommand[] {
+  const lowerQuery = query.trim().toLowerCase();
+  if (!lowerQuery) return commands;
+  return commands.filter((command) => (
+    command.slug.startsWith(lowerQuery) || command.name.toLowerCase().includes(lowerQuery)
+  ));
+}
+
 function slashQueryMatches(query: string, slug: string, name: string): boolean {
   const lowerQuery = query.trim().toLowerCase();
   if (!lowerQuery) return true;
@@ -122,10 +147,23 @@ export function buildSlashCommandItems(
   quickMessages: AIQuickMessage[],
   userSkills: UserSkillSlashOption[],
   query: string,
+  includeSystemCommands = false,
 ): SlashCommandItem[] {
-  const reservedSlugs = new Set(quickMessages.map((message) => message.slug));
-  const filteredMessages = filterQuickMessages(quickMessages, query);
+  const systemCommands = includeSystemCommands
+    ? filterSystemSlashCommands(SYSTEM_BUILTIN_SLASH_COMMANDS, query)
+    : [];
+  const systemSlugs = new Set<string>(SYSTEM_BUILTIN_SLASH_COMMANDS.map((command) => command.slug));
+  const reservedSlugs = new Set([
+    ...quickMessages.map((message) => message.slug),
+    ...(includeSystemCommands ? [...systemSlugs] : []),
+  ]);
+  const filteredMessages = filterQuickMessages(quickMessages, query)
+    .filter((message) => !systemSlugs.has(message.slug));
   return [
+    ...systemCommands.map((command) => ({
+      kind: 'system' as const,
+      command,
+    })),
     ...filteredMessages.map((message) => ({
       kind: 'quickMessage' as const,
       message,
@@ -140,26 +178,29 @@ export function buildSlashCommandItems(
 }
 
 export function getSlashCommandItemKey(item: SlashCommandItem): string {
-  return item.kind === 'quickMessage' ? `qm:${item.message.id}` : `sk:${item.skill.id}`;
+  if (item.kind === 'quickMessage') return `qm:${item.message.id}`;
+  if (item.kind === 'system') return `sys:${item.command.slug}`;
+  return `sk:${item.skill.id}`;
 }
 
 export function getSlashCommandItemId(item: SlashCommandItem): string {
-  return item.kind === 'quickMessage' ? item.message.id : item.skill.id;
+  if (item.kind === 'quickMessage') return item.message.id;
+  if (item.kind === 'system') return item.command.slug;
+  return item.skill.id;
 }
 
 export function createQuickMessageId(): string {
   return `qm_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** Built-in slash commands — not stored in user quick messages. */
-export const SYSTEM_BUILTIN_SLASH_COMMANDS = {
-  stop: {
-    slug: 'stop',
-    descriptionKey: 'ai.chat.slashStopDesc',
-  },
-} as const;
-
 export function isSystemStopSlashCommand(input: string): boolean {
   const trimmed = input.trim();
   return /^\/stop(?:\s|$)/i.test(trimmed) || trimmed.toLowerCase() === '/stop';
+}
+
+export function getSystemSlashCommand(input: string): SystemSlashCommandSlug | null {
+  const trimmed = input.trim().toLowerCase();
+  if (/^\/stop(?:\s|$)/.test(trimmed)) return 'stop';
+  if (trimmed === '/compact') return 'compact';
+  return null;
 }

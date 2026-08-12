@@ -1,4 +1,4 @@
-import { ChevronRight, Folder, FolderOpen, Server } from 'lucide-react';
+import { ChevronRight, Folder, FolderOpen, Plus, Server, Settings2 } from 'lucide-react';
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { useI18n } from '../../application/i18n/I18nProvider';
@@ -45,7 +45,12 @@ import { HostTreeGroupContextMenuContent, HostTreeHostContextMenuContent } from 
 import { HostTreeGroupInlineRenameInput } from '../host/HostTreeGroupInlineRenameInput';
 import { LazyMessageResponse } from '../ai-elements/LazyMessageResponse';
 import { DistroAvatar } from '../DistroAvatar';
-import { ContextMenu, ContextMenuTrigger } from '../ui/context-menu';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '../ui/context-menu';
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '../ui/hover-card';
 import { TREE_ROW_HEIGHT } from '../sftp/SftpPaneTreeNode';
 import { FixedSizeVirtualList, type FixedSizeVirtualListHandle } from '../ui/FixedSizeVirtualList';
@@ -99,6 +104,17 @@ type HostTreeDropTarget =
   | { kind: 'root' }
   | { kind: 'group'; path: string };
 
+export function resolveTerminalHostTreeDragCapabilities(input: {
+  kind: HostTreeFlatRow['kind'];
+  canReorder: boolean;
+  isInlineEditing: boolean;
+}): { draggable: boolean; canAcceptDrop: boolean } {
+  return {
+    draggable: !input.isInlineEditing && (input.kind === 'host' || input.canReorder),
+    canAcceptDrop: input.canReorder,
+  };
+}
+
 interface TerminalHostTreeSidebarProps {
   enabled?: boolean;
   surfaceVisible?: boolean;
@@ -108,6 +124,8 @@ interface TerminalHostTreeSidebarProps {
   resolvedPreviewTheme: TerminalTheme;
   activeHostId?: string | null;
   onConnect: (host: Host) => void;
+  onNewHost?: (defaultGroup?: string) => void;
+  onEditHost?: (host: Host) => void;
   onCreateLocalTerminal?: () => void;
 }
 
@@ -302,11 +320,13 @@ type HostTreeFlatRowProps = {
   activeHostId?: string | null;
   expandedPaths: Set<string>;
   searchActive: boolean;
-  canDrag: boolean;
+  canReorder: boolean;
   isDragOver: boolean;
   isInlineEditing: boolean;
   inlineEditInitialName?: string;
   onConnect: (host: Host) => void;
+  onNewHost?: (defaultGroup?: string) => void;
+  onEditHost?: (host: Host) => void;
   onTogglePath: (path: string) => void;
   onDragOverTarget: (target: HostTreeDropTarget) => void;
   onClearDragOverTarget: () => void;
@@ -322,11 +342,13 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
   activeHostId,
   expandedPaths,
   searchActive,
-  canDrag,
+  canReorder,
   isDragOver,
   isInlineEditing,
   inlineEditInitialName,
   onConnect,
+  onNewHost,
+  onEditHost,
   onTogglePath,
   onDragOverTarget,
   onClearDragOverTarget,
@@ -336,6 +358,13 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
   theme,
   menuActions,
 }) => {
+  const { t } = useI18n();
+  const dragCapabilities = resolveTerminalHostTreeDragCapabilities({
+    kind: row.kind,
+    canReorder,
+    isInlineEditing,
+  });
+
   if (row.kind === 'host') {
     const isActive = activeHostId === row.host.id;
     const hostDropParent = row.host.group || null;
@@ -360,14 +389,18 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
           paddingLeft: row.depth * 16 + 8,
           backgroundColor: isActive ? theme.rowActiveBg : (isDragOver ? theme.rowDropBg : undefined),
         }}
-        draggable={canDrag && !isInlineEditing}
+        // Host rows stay draggable under search/tag filters so focus-sidebar
+        // append can still receive host-id; in-tree reorder/drop stays disabled.
+        draggable={dragCapabilities.draggable}
         onDragStart={(event) => {
-          if (!canDrag || isInlineEditing) return;
+          if (!dragCapabilities.draggable) return;
           event.dataTransfer.setData(HOST_TREE_DRAG_HOST_ID, row.host.id);
-          event.dataTransfer.effectAllowed = 'move';
+          // copyMove: tree reorder uses move; focus-sidebar append uses copy.
+          // Filtered trees disable reorder, so allow copy-only for append.
+          event.dataTransfer.effectAllowed = canReorder ? 'copyMove' : 'copy';
         }}
         onDragOver={(event) => {
-          if (!canDrag) return;
+          if (!dragCapabilities.canAcceptDrop) return;
           event.preventDefault();
           event.stopPropagation();
           if (hasDragType(event.dataTransfer, HOST_TREE_DRAG_HOST_ID)) {
@@ -380,7 +413,7 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
         }}
         onDragLeave={onDragLeaveRow}
         onDrop={(event) => {
-          if (!canDrag) return;
+          if (!dragCapabilities.canAcceptDrop) return;
           event.preventDefault();
           event.stopPropagation();
           clearHostTreeDropIndicators(event.currentTarget.ownerDocument);
@@ -433,7 +466,7 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
       </div>
     );
 
-    if (!menuActions) return rowBody;
+    if (!menuActions && !onEditHost) return rowBody;
 
     return (
       <HoverCard openDelay={650} closeDelay={80}>
@@ -443,14 +476,27 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
               {rowBody}
             </HoverCardTrigger>
           </ContextMenuTrigger>
-          <HostTreeHostContextMenuContent
-            host={row.host}
-            onConnect={onConnect}
-            onRenameHost={menuActions.onRenameHost}
-            onDuplicateHost={menuActions.onDuplicateHost}
-            onCopyCredentials={menuActions.onCopyCredentials}
-            onDeleteHost={menuActions.onDeleteHost}
-          />
+          {menuActions ? (
+            <HostTreeHostContextMenuContent
+              host={row.host}
+              onConnect={onConnect}
+              onEditHost={onEditHost}
+              onRenameHost={menuActions.onRenameHost}
+              onDuplicateHost={menuActions.onDuplicateHost}
+              onCopyCredentials={menuActions.onCopyCredentials}
+              onCopyHostname={menuActions.onCopyHostname}
+              onDeleteHost={menuActions.onDeleteHost}
+            />
+          ) : (
+            <ContextMenuContent>
+              <ContextMenuItem onClick={() => onConnect(row.host)}>
+                <Server className="mr-2 h-4 w-4" /> {t('vault.hosts.connect')}
+              </ContextMenuItem>
+              <ContextMenuItem onClick={() => onEditHost?.(row.host)}>
+                <Settings2 className="mr-2 h-4 w-4" /> {t('terminal.layer.hostTree.editHost')}
+              </ContextMenuItem>
+            </ContextMenuContent>
+          )}
         </ContextMenu>
         {canShowHoverCard && <TerminalHostTreeHostHoverCard host={row.host} />}
       </HoverCard>
@@ -481,14 +527,14 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
         color: theme.termFg,
         backgroundColor: isDragOver ? theme.rowDropBg : undefined,
       }}
-      draggable={canDrag && !isInlineEditing}
+      draggable={dragCapabilities.draggable}
       onDragStart={(event) => {
-        if (!canDrag || isInlineEditing) return;
+        if (!dragCapabilities.draggable) return;
         event.dataTransfer.setData(HOST_TREE_DRAG_GROUP_PATH, node.path);
         event.dataTransfer.effectAllowed = 'move';
       }}
       onDragOver={(event) => {
-        if (!canDrag) return;
+        if (!dragCapabilities.canAcceptDrop) return;
         event.preventDefault();
         event.stopPropagation();
         const isDraggingGroup = hasDragType(event.dataTransfer, HOST_TREE_DRAG_GROUP_PATH);
@@ -503,7 +549,7 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
       }}
       onDragLeave={onDragLeaveRow}
       onDrop={(event) => {
-        if (!canDrag) return;
+        if (!dragCapabilities.canAcceptDrop) return;
         event.preventDefault();
         event.stopPropagation();
         clearHostTreeDropIndicators(event.currentTarget.ownerDocument);
@@ -559,28 +605,37 @@ const HostTreeFlatRowItem = memo<HostTreeFlatRowProps>(({
     </div>
   );
 
-  if (!menuActions) return rowBody;
+  if (!menuActions && !onNewHost) return rowBody;
 
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
         {rowBody}
       </ContextMenuTrigger>
-      <HostTreeGroupContextMenuContent
-        groupPath={node.path}
-        isManaged={isManaged}
-        onNewGroup={menuActions.onNewGroup}
-        onRenameGroup={menuActions.onRenameGroup}
-        onDeleteGroup={menuActions.onDeleteGroup}
-        onUnmanageGroup={menuActions.onUnmanageGroup}
-      />
+      {menuActions ? (
+        <HostTreeGroupContextMenuContent
+          groupPath={node.path}
+          isManaged={isManaged}
+          onNewHost={(groupPath) => onNewHost?.(groupPath)}
+          onNewGroup={menuActions.onNewGroup}
+          onRenameGroup={menuActions.onRenameGroup}
+          onDeleteGroup={menuActions.onDeleteGroup}
+          onUnmanageGroup={menuActions.onUnmanageGroup}
+        />
+      ) : (
+        <ContextMenuContent>
+          <ContextMenuItem onClick={() => onNewHost?.(node.path)}>
+            <Plus className="mr-2 h-4 w-4" /> {t('terminal.layer.hostTree.newHostInGroup')}
+          </ContextMenuItem>
+        </ContextMenuContent>
+      )}
     </ContextMenu>
   );
 }, (prev, next) => {
   if (prev.row !== next.row) return false;
   if (prev.expandedPaths !== next.expandedPaths) return false;
   if (prev.searchActive !== next.searchActive) return false;
-  if (prev.canDrag !== next.canDrag) return false;
+  if (prev.canReorder !== next.canReorder) return false;
   if (prev.isDragOver !== next.isDragOver) return false;
   if (prev.isInlineEditing !== next.isInlineEditing) return false;
   if (prev.inlineEditInitialName !== next.inlineEditInitialName) return false;
@@ -613,6 +668,8 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
   resolvedPreviewTheme,
   activeHostId,
   onConnect,
+  onNewHost,
+  onEditHost,
   onCreateLocalTerminal,
 }) => {
   const { t } = useI18n();
@@ -624,6 +681,8 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
   const [isResizing, setIsResizing] = useState(false);
   const [resizePreviewWidth, setResizePreviewWidth] = useState<number | null>(null);
   const [dragOverTarget, setDragOverTarget] = useState<HostTreeDropTarget | null>(null);
+  const [rootContextMenuOpen, setRootContextMenuOpen] = useState(false);
+  const rootContextMenuAllowedRef = useRef(false);
   const shellRef = useRef<HTMLDivElement>(null);
   const [sidebarWidth, setSidebarWidth, persistSidebarWidth] = useStoredNumber(
     STORAGE_KEY_TERMINAL_HOST_TREE_WIDTH,
@@ -700,7 +759,7 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
     });
   }, [expandedPaths, filteredTree, filteredUngrouped, treeExpandAll]);
 
-  const canDrag = Boolean(menuActions) && !searchActive && !tagsActive;
+  const canReorder = Boolean(menuActions) && !searchActive && !tagsActive;
 
   const handleNewRootGroup = useCallback(() => {
     if (!menuActions) return;
@@ -787,10 +846,10 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
   }, [clearDragOver]);
 
   const handleRootDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
-    if (!canDrag) return;
+    if (!canReorder) return;
     event.preventDefault();
     setDragOverTarget({ kind: 'root' });
-  }, [canDrag]);
+  }, [canReorder]);
 
   const handleRootDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
     const nextTarget = event.relatedTarget;
@@ -802,11 +861,11 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
   }, [clearDragOver]);
 
   const handleRootDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
-    if (!canDrag) return;
+    if (!canReorder) return;
     event.preventDefault();
     clearHostTreeDropIndicators(event.currentTarget.ownerDocument);
     handleDropToParent(null, event.dataTransfer);
-  }, [canDrag, handleDropToParent]);
+  }, [canReorder, handleDropToParent]);
 
   const handleListPointerDownCapture = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     if (!menuActions) return;
@@ -825,6 +884,17 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
     if (editingGroupPath) menuActions.cancelInlineGroupEdit();
     if (editingHostId) menuActions.cancelInlineHostEdit();
   }, [inlineEdit?.groupPath, inlineHostEdit?.hostId, menuActions]);
+
+  const handleRootContextMenuCapture = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target;
+    rootContextMenuAllowedRef.current = target instanceof Element
+      && !target.closest('[data-row-type]');
+  }, []);
+
+  const handleRootContextMenuOpenChange = useCallback((open: boolean) => {
+    setRootContextMenuOpen(open && rootContextMenuAllowedRef.current);
+    if (!open) rootContextMenuAllowedRef.current = false;
+  }, []);
 
   useEffect(() => {
     if (!inlineEdit?.shouldScrollIntoView || !inlineEdit.isNew) return;
@@ -857,7 +927,7 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
       activeHostId={activeHostId}
       expandedPaths={expandedPaths}
       searchActive={treeExpandAll}
-      canDrag={canDrag}
+      canReorder={canReorder}
       isDragOver={isRowDragOver(row)}
       isInlineEditing={
         (row.kind === 'group' && inlineEdit?.groupPath === row.node.path)
@@ -871,6 +941,8 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
             : undefined
       }
       onConnect={onConnect}
+      onNewHost={onNewHost}
+      onEditHost={onEditHost}
       onTogglePath={togglePath}
       onDragOverTarget={handleDragOverTarget}
       onClearDragOverTarget={clearDragOver}
@@ -882,7 +954,7 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
     />
   ), [
     activeHostId,
-    canDrag,
+    canReorder,
     clearDragOver,
     expandedPaths,
     inlineEdit,
@@ -894,6 +966,8 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
     isRowDragOver,
     menuActions,
     onConnect,
+    onNewHost,
+    onEditHost,
     treeExpandAll,
     theme,
     togglePath,
@@ -1078,6 +1152,8 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
           allTags={allTags}
           selectedTags={selectedTags}
           onSelectedTagsChange={setSelectedTags}
+          onNewHost={() => onNewHost?.()}
+          canNewHost={Boolean(onNewHost)}
           onNewRootGroup={handleNewRootGroup}
           canNewGroup={Boolean(menuActions)}
           onCreateLocalTerminal={handleCreateLocalTerminal}
@@ -1088,32 +1164,42 @@ const TerminalHostTreeSidebarInner: React.FC<TerminalHostTreeSidebarProps> = ({
           onCollapse={handleCollapse}
         />
 
-        <div
-          className="flex-1 min-h-0 py-1"
-          data-section="terminal-host-tree-sidebar-content"
-          style={dragOverTarget?.kind === 'root' ? { backgroundColor: theme.rowDropBg } : undefined}
-          onPointerDownCapture={handleListPointerDownCapture}
-          onDragOver={handleRootDragOver}
-          onDragLeave={handleRootDragLeave}
-          onDrop={handleRootDrop}
-        >
-          {flatRows.length === 0 ? (
-            <div className="px-3 py-8 text-center text-xs" style={{ color: theme.mutedFg }}>
-              <Server size={24} className="mx-auto mb-2 opacity-50" />
-              {t('terminal.layer.hostTree.empty')}
+        <ContextMenu open={rootContextMenuOpen} onOpenChange={handleRootContextMenuOpenChange}>
+          <ContextMenuTrigger asChild>
+            <div
+              className="flex-1 min-h-0 py-1"
+              data-section="terminal-host-tree-sidebar-content"
+              style={dragOverTarget?.kind === 'root' ? { backgroundColor: theme.rowDropBg } : undefined}
+              onContextMenuCapture={handleRootContextMenuCapture}
+              onPointerDownCapture={handleListPointerDownCapture}
+              onDragOver={handleRootDragOver}
+              onDragLeave={handleRootDragLeave}
+              onDrop={handleRootDrop}
+            >
+              {flatRows.length === 0 ? (
+                <div className="px-3 py-8 text-center text-xs" style={{ color: theme.mutedFg }}>
+                  <Server size={24} className="mx-auto mb-2 opacity-50" />
+                  {t('terminal.layer.hostTree.empty')}
+                </div>
+              ) : (
+                <FixedSizeVirtualList<HostTreeFlatRow>
+                  ref={listRef}
+                  items={flatRows}
+                  itemHeight={TREE_ROW_HEIGHT}
+                  className="[scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
+                  contentClassName="py-0"
+                  getItemKey={hostTreeFlatRowKey}
+                  renderItem={renderFlatRow}
+                />
+              )}
             </div>
-          ) : (
-            <FixedSizeVirtualList<HostTreeFlatRow>
-              ref={listRef}
-              items={flatRows}
-              itemHeight={TREE_ROW_HEIGHT}
-              className="[scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden"
-              contentClassName="py-0"
-              getItemKey={hostTreeFlatRowKey}
-              renderItem={renderFlatRow}
-            />
-          )}
-        </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent data-section="terminal-host-tree-root-context">
+            <ContextMenuItem onClick={() => onNewHost?.()}>
+              <Plus className="mr-2 h-4 w-4" /> {t('terminal.layer.hostTree.newHost')}
+            </ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
       </div>
     </div>
   );
@@ -1129,6 +1215,8 @@ export const TerminalHostTreeSidebar = memo(
     && prev.activeHostId === next.activeHostId
     && themeFingerprint(prev.resolvedPreviewTheme) === themeFingerprint(next.resolvedPreviewTheme)
     && prev.onConnect === next.onConnect
+    && prev.onNewHost === next.onNewHost
+    && prev.onEditHost === next.onEditHost
     && prev.onCreateLocalTerminal === next.onCreateLocalTerminal
   ),
 );

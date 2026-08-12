@@ -1,11 +1,51 @@
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 const test = require("node:test");
 
 const scriptBridge = require("./scriptBridge.cjs");
+const sessionLogStreamManager = require("./sessionLogStreamManager.cjs");
+const { getOrCreateBuffer } = require("../scripts/sessionOutputBuffer.cjs");
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+async function waitUntil(predicate, timeoutMs = 1000) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const value = predicate();
+    if (value) return value;
+    await delay(10);
+  }
+  throw new Error("Timed out waiting for condition");
+}
+
+test("closing a terminal releases its script output buffer", () => {
+  let closeListener = null;
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {},
+    terminalBridge: {},
+    terminalWorkerManager: {
+      addOutputTap() { return () => {}; },
+      onSessionClosed(listener) {
+        closeListener = listener;
+        return { dispose() {} };
+      },
+    },
+    getMainWindow: () => null,
+  });
+
+  scriptBridge.appendSessionOutput("closed-session", "stale output");
+  assert.equal(getOrCreateBuffer("closed-session").getText(), "stale output");
+  assert.equal(typeof closeListener, "function");
+
+  closeListener({ sessionId: "closed-session", reason: "closed" });
+  assert.equal(getOrCreateBuffer("closed-session").getText(), "");
+  scriptBridge.removeSessionBuffer("closed-session");
+});
 
 test("script run writes through terminal worker manager when enabled", async () => {
   const handlers = new Map();
@@ -50,11 +90,17 @@ test("script run writes through terminal worker manager when enabled", async () 
   });
 
   assert.deepEqual(terminalWrites, []);
-  assert.equal(workerSends.length, 1);
+  // sendLine emits body then CR as separate keyboard-like writes (#1960).
+  assert.equal(workerSends.length, 2);
   assert.equal(workerSends[0].channel, "netcatty:write");
   assert.deepEqual(workerSends[0].payload, {
     sessionId: "session-1",
-    data: "echo hi\r",
+    data: "echo hi",
+    automated: true,
+  });
+  assert.deepEqual(workerSends[1].payload, {
+    sessionId: "session-1",
+    data: "\r",
     automated: true,
   });
 });
@@ -156,6 +202,729 @@ test("same session script runs are serialized through the session mutex", async 
   assert.deepEqual(writeOrder, ["slow-run", "fast-run"]);
 });
 
+test("stopping a script releases the session queue so it can run again", async () => {
+  const handlers = new Map();
+  const sentRunUpdates = [];
+  const writes = [];
+  let dialogRequestId;
+
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {
+      app: {
+        getVersion: () => "test",
+        getPath: () => process.cwd(),
+      },
+    },
+    terminalBridge: {
+      writeToSession(_event, payload) {
+        writes.push(String(payload.data || ""));
+      },
+    },
+    terminalWorkerManager: null,
+    getMainWindow: () => ({
+      webContents: {
+        send(channel, payload) {
+          if (channel === "netcatty:script:runs-updated") {
+            sentRunUpdates.push(payload.runs);
+          }
+          if (channel === "netcatty:script:dialog-request") {
+            dialogRequestId = payload.requestId;
+          }
+          if (channel === "netcatty:script:screen-snapshot-request") {
+            setImmediate(() => {
+              handlers.get("netcatty:script:screen-snapshot-response")({}, {
+                requestId: payload.requestId,
+                snapshot: {
+                  rows: 24,
+                  cols: 80,
+                  currentRow: 0,
+                  lines: [],
+                },
+              });
+            });
+          }
+        },
+      },
+    }),
+  });
+  scriptBridge.registerHandlers({
+    handle(channel, handler) {
+      handlers.set(channel, handler);
+    },
+  });
+
+  const runHandler = handlers.get("netcatty:script:run");
+  const firstRunPromise = runHandler({}, {
+    scriptId: "stopped",
+    scriptLabel: "Stopped",
+    sessionId: "session-rerun",
+    content: `
+      const allowed = await nct.dialog.confirm('continue?');
+      if (allowed) {
+        await nct.screen.sendLine('old-run');
+      }
+    `,
+    permissionMode: "auto",
+  });
+
+  await waitUntil(() => dialogRequestId);
+  const firstRunId = await waitUntil(() => (
+    sentRunUpdates
+      .flat()
+      .find((run) => run.scriptId === "stopped" && run.status === "running")
+      ?.runId
+  ));
+
+  assert.deepEqual(await handlers.get("netcatty:script:stop")({}, { runId: firstRunId }), { ok: true });
+
+  await Promise.race([
+    runHandler({}, {
+      scriptId: "rerun",
+      scriptLabel: "Rerun",
+      sessionId: "session-rerun",
+      content: "await nct.screen.sendLine('second-run');",
+      permissionMode: "auto",
+    }),
+    delay(500).then(() => {
+      throw new Error("rerun stayed blocked behind stopped script");
+    }),
+  ]);
+  await firstRunPromise;
+
+  assert.ok(writes.some((data) => data.includes("second-run")));
+  assert.ok(!writes.some((data) => data.includes("old-run")));
+
+  assert.deepEqual(await handlers.get("netcatty:script:dialog-response")({}, {
+    requestId: dialogRequestId,
+    value: true,
+  }), { ok: false });
+  await delay(100);
+  assert.ok(!writes.some((data) => data.includes("old-run")));
+
+  const stoppedRun = sentRunUpdates.flat().find((run) => (
+    run.runId === firstRunId && run.status === "failed"
+  ));
+  assert.equal(stoppedRun.status, "failed");
+  assert.equal(stoppedRun.error, "Stopped by user");
+});
+
+test("reinitializing the script bridge drops an accepted old-run sendLine tail", async () => {
+  const handlers = new Map();
+  const oldWrites = [];
+  const replacementWrites = [];
+
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {
+      app: { getVersion: () => "test", getPath: () => process.cwd() },
+      webContents: { fromId: () => null },
+    },
+    terminalBridge: {
+      writeToSession(_event, payload) { oldWrites.push(payload.data); },
+    },
+    terminalWorkerManager: null,
+    getMainWindow: () => null,
+  });
+  scriptBridge.registerHandlers({
+    handle(channel, handler) { handlers.set(channel, handler); },
+  });
+
+  const oldRun = handlers.get("netcatty:script:run")({}, {
+    scriptId: "old-sendline-tail",
+    scriptLabel: "Old sendLine tail",
+    sessionId: "session-old-sendline-tail",
+    content: "await nct.screen.sendLine('old-body');",
+    permissionMode: "auto",
+  });
+  await waitUntil(() => oldWrites.includes("old-body"));
+
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {
+      app: { getVersion: () => "test", getPath: () => process.cwd() },
+      webContents: { fromId: () => null },
+    },
+    terminalBridge: {
+      writeToSession(_event, payload) { replacementWrites.push(payload.data); },
+    },
+    terminalWorkerManager: null,
+    getMainWindow: () => null,
+  });
+
+  await oldRun;
+  await delay(60);
+  assert.deepEqual(oldWrites, ["old-body"]);
+  assert.deepEqual(replacementWrites, []);
+});
+
+test("late startup snapshots from a stopped script do not seed the next run", async () => {
+  const handlers = new Map();
+  const writes = [];
+  const sentRunUpdates = [];
+  const snapshotRequestIds = [];
+
+  scriptBridge.removeSessionBuffer("session-late-snapshot");
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {
+      app: {
+        getVersion: () => "test",
+        getPath: () => process.cwd(),
+      },
+    },
+    terminalBridge: {
+      writeToSession(_event, payload) {
+        writes.push(String(payload.data || ""));
+      },
+    },
+    terminalWorkerManager: null,
+    getMainWindow: () => ({
+      webContents: {
+        send(channel, payload) {
+          if (channel === "netcatty:script:runs-updated") {
+            sentRunUpdates.push(payload.runs);
+          }
+          if (channel === "netcatty:script:dialog-request") {
+            setImmediate(() => {
+              handlers.get("netcatty:script:dialog-response")({}, {
+                requestId: payload.requestId,
+                value: "abort",
+              });
+            });
+          }
+          if (channel === "netcatty:script:screen-snapshot-request") {
+            snapshotRequestIds.push(payload.requestId);
+          }
+        },
+      },
+    }),
+  });
+  scriptBridge.registerHandlers({
+    handle(channel, handler) {
+      handlers.set(channel, handler);
+    },
+  });
+
+  const runHandler = handlers.get("netcatty:script:run");
+  const firstRunPromise = runHandler({}, {
+    scriptId: "stopped-before-snapshot",
+    scriptLabel: "Stopped before snapshot",
+    sessionId: "session-late-snapshot",
+    content: "await nct.screen.sendLine('old-run');",
+    permissionMode: "auto",
+  });
+
+  const firstSnapshotRequestId = await waitUntil(() => snapshotRequestIds[0]);
+  const firstRunId = await waitUntil(() => (
+    sentRunUpdates
+      .flat()
+      .find((run) => run.scriptId === "stopped-before-snapshot" && run.status === "running")
+      ?.runId
+  ));
+  assert.deepEqual(await handlers.get("netcatty:script:stop")({}, { runId: firstRunId }), { ok: true });
+  await firstRunPromise;
+
+  const secondRunPromise = runHandler({}, {
+    scriptId: "second-after-late-snapshot",
+    scriptLabel: "Second after late snapshot",
+    sessionId: "session-late-snapshot",
+    content: `
+      try {
+        await nct.screen.waitForText('OLD_READY', 200);
+        await nct.screen.sendLine('bad-write');
+      } catch {
+        await nct.screen.sendLine('good-write');
+      }
+    `,
+    permissionMode: "auto",
+  });
+
+  const secondSnapshotRequestId = await waitUntil(() => snapshotRequestIds[1]);
+  assert.deepEqual(await handlers.get("netcatty:script:screen-snapshot-response")({}, {
+    requestId: secondSnapshotRequestId,
+    snapshot: {
+      rows: 24,
+      cols: 80,
+      currentRow: 0,
+      lines: [],
+    },
+  }), { ok: true });
+
+  await delay(30);
+  assert.deepEqual(await handlers.get("netcatty:script:screen-snapshot-response")({}, {
+    requestId: firstSnapshotRequestId,
+    snapshot: {
+      rows: 24,
+      cols: 80,
+      currentRow: 0,
+      lines: ["OLD_READY"],
+    },
+  }), { ok: false });
+
+  await secondRunPromise;
+  assert.ok(writes.some((data) => data.includes("good-write")));
+  assert.ok(!writes.some((data) => data.includes("bad-write")));
+  assert.ok(!writes.some((data) => data.includes("old-run")));
+  scriptBridge.removeSessionBuffer("session-late-snapshot");
+});
+
+test("completed scripts clear unawaited dialog requests without rejecting them as stopped", async () => {
+  const handlers = new Map();
+  const sentRunUpdates = [];
+  const closedSessions = [];
+  let dialogRequestId;
+
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {
+      app: {
+        getVersion: () => "test",
+        getPath: () => process.cwd(),
+      },
+    },
+    terminalBridge: {
+      writeToSession() {},
+      closeSession(_event, payload) {
+        closedSessions.push(payload.sessionId);
+      },
+    },
+    terminalWorkerManager: null,
+    getMainWindow: () => ({
+      webContents: {
+        send(channel, payload) {
+          if (channel === "netcatty:script:runs-updated") {
+            sentRunUpdates.push(payload.runs);
+          }
+          if (channel === "netcatty:script:dialog-request") {
+            dialogRequestId = payload.requestId;
+          }
+          if (channel === "netcatty:script:screen-snapshot-request") {
+            setImmediate(() => {
+              handlers.get("netcatty:script:screen-snapshot-response")({}, {
+                requestId: payload.requestId,
+                snapshot: {
+                  rows: 24,
+                  cols: 80,
+                  currentRow: 0,
+                  lines: [],
+                },
+              });
+            });
+          }
+        },
+      },
+    }),
+  });
+  scriptBridge.registerHandlers({
+    handle(channel, handler) {
+      handlers.set(channel, handler);
+    },
+  });
+
+  await handlers.get("netcatty:script:run")({}, {
+    scriptId: "unawaited-dialog",
+    scriptLabel: "Unawaited dialog",
+    sessionId: "session-unawaited-dialog",
+    content: `
+      void nct.dialog.confirm('background prompt').then(() => nct.session.disconnect());
+      nct.log('done');
+    `,
+    permissionMode: "auto",
+  });
+
+  await delay(100);
+  assert.ok(dialogRequestId);
+  assert.deepEqual(closedSessions, []);
+  const finalRun = sentRunUpdates.at(-1).find((run) => run.scriptId === "unawaited-dialog");
+  assert.equal(finalRun.status, "completed");
+  assert.deepEqual(await handlers.get("netcatty:script:dialog-response")({}, {
+    requestId: dialogRequestId,
+    value: true,
+  }), { ok: false });
+});
+
+test("stopping scripts clears unawaited dialog requests without unhandled rejections", async () => {
+  const handlers = new Map();
+  const sentRunUpdates = [];
+  const unhandled = [];
+  let dialogRequestId;
+
+  const onUnhandledRejection = (reason) => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+  try {
+    scriptBridge.init({
+      sessions: new Map(),
+      electronModule: {
+        app: {
+          getVersion: () => "test",
+          getPath: () => process.cwd(),
+        },
+      },
+      terminalBridge: {
+        writeToSession() {},
+      },
+      terminalWorkerManager: null,
+      getMainWindow: () => ({
+        webContents: {
+          send(channel, payload) {
+            if (channel === "netcatty:script:runs-updated") {
+              sentRunUpdates.push(payload.runs);
+            }
+            if (channel === "netcatty:script:dialog-request") {
+              dialogRequestId = payload.requestId;
+            }
+            if (channel === "netcatty:script:screen-snapshot-request") {
+              setImmediate(() => {
+                handlers.get("netcatty:script:screen-snapshot-response")({}, {
+                  requestId: payload.requestId,
+                  snapshot: {
+                    rows: 24,
+                    cols: 80,
+                    currentRow: 0,
+                    lines: [],
+                  },
+                });
+              });
+            }
+          },
+        },
+      }),
+    });
+    scriptBridge.registerHandlers({
+      handle(channel, handler) {
+        handlers.set(channel, handler);
+      },
+    });
+
+    const runPromise = handlers.get("netcatty:script:run")({}, {
+      scriptId: "stop-unawaited-dialog",
+      scriptLabel: "Stop unawaited dialog",
+      sessionId: "session-stop-unawaited-dialog",
+      content: `
+        void nct.dialog.confirm('background prompt');
+        await nct.sleep(5000);
+      `,
+      permissionMode: "auto",
+    });
+
+    await waitUntil(() => dialogRequestId);
+    const runId = await waitUntil(() => (
+      sentRunUpdates
+        .flat()
+        .find((run) => run.scriptId === "stop-unawaited-dialog" && run.status === "running")
+        ?.runId
+    ));
+
+    assert.deepEqual(await handlers.get("netcatty:script:stop")({}, { runId }), { ok: true });
+    await runPromise;
+    await delay(100);
+
+    assert.equal(unhandled.length, 0);
+    assert.deepEqual(await handlers.get("netcatty:script:dialog-response")({}, {
+      requestId: dialogRequestId,
+      value: true,
+    }), { ok: false });
+  } finally {
+    process.off("unhandledRejection", onUnhandledRejection);
+  }
+});
+
+test("stopping scripts clears unawaited screen reads without unhandled rejections", async () => {
+  const handlers = new Map();
+  const sentRunUpdates = [];
+  const snapshotRequestIds = [];
+  const unhandled = [];
+
+  const onUnhandledRejection = (reason) => {
+    unhandled.push(reason);
+  };
+  process.on("unhandledRejection", onUnhandledRejection);
+  try {
+    scriptBridge.init({
+      sessions: new Map(),
+      electronModule: {
+        app: {
+          getVersion: () => "test",
+          getPath: () => process.cwd(),
+        },
+      },
+      terminalBridge: {
+        writeToSession() {},
+      },
+      terminalWorkerManager: null,
+      getMainWindow: () => ({
+        webContents: {
+          send(channel, payload) {
+            if (channel === "netcatty:script:runs-updated") {
+              sentRunUpdates.push(payload.runs);
+            }
+            if (channel === "netcatty:script:screen-snapshot-request") {
+              snapshotRequestIds.push(payload.requestId);
+              if (snapshotRequestIds.length === 1) {
+                setImmediate(() => {
+                  handlers.get("netcatty:script:screen-snapshot-response")({}, {
+                    requestId: payload.requestId,
+                    snapshot: {
+                      rows: 24,
+                      cols: 80,
+                      currentRow: 0,
+                      lines: [],
+                    },
+                  });
+                });
+              }
+            }
+          },
+        },
+      }),
+    });
+    scriptBridge.registerHandlers({
+      handle(channel, handler) {
+        handlers.set(channel, handler);
+      },
+    });
+
+    const runPromise = handlers.get("netcatty:script:run")({}, {
+      scriptId: "stop-unawaited-screen-read",
+      scriptLabel: "Stop unawaited screen read",
+      sessionId: "session-stop-unawaited-screen-read",
+      content: `
+        void nct.screen.getText();
+        await nct.sleep(5000);
+      `,
+      permissionMode: "auto",
+    });
+
+    await waitUntil(() => snapshotRequestIds[1]);
+    const runId = await waitUntil(() => (
+      sentRunUpdates
+        .flat()
+        .find((run) => run.scriptId === "stop-unawaited-screen-read" && run.status === "running")
+        ?.runId
+    ));
+
+    assert.deepEqual(await handlers.get("netcatty:script:stop")({}, { runId }), { ok: true });
+    await runPromise;
+    await delay(100);
+
+    assert.equal(unhandled.length, 0);
+    assert.deepEqual(await handlers.get("netcatty:script:screen-snapshot-response")({}, {
+      requestId: snapshotRequestIds[1],
+      snapshot: {
+        rows: 24,
+        cols: 80,
+        currentRow: 0,
+        lines: ["late"],
+      },
+    }), { ok: false });
+  } finally {
+    process.off("unhandledRejection", onUnhandledRejection);
+  }
+});
+
+test("stopping a script releases its session log so the next run can start one", async () => {
+  const handlers = new Map();
+  const sentRunUpdates = [];
+  const sessionId = "session-stop-log-cleanup";
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "netcatty-script-log-test-"));
+
+  try {
+    scriptBridge.init({
+      sessions: new Map([[sessionId, { hostname: "example.test" }]]),
+      electronModule: {
+        app: {
+          getVersion: () => "test",
+          getPath: () => logDir,
+        },
+      },
+      terminalBridge: {
+        writeToSession() {},
+      },
+      terminalWorkerManager: null,
+      getMainWindow: () => ({
+        webContents: {
+          send(channel, payload) {
+            if (channel === "netcatty:script:runs-updated") {
+              sentRunUpdates.push(payload.runs);
+            }
+            if (channel === "netcatty:script:screen-snapshot-request") {
+              setImmediate(() => {
+                handlers.get("netcatty:script:screen-snapshot-response")({}, {
+                  requestId: payload.requestId,
+                  snapshot: {
+                    rows: 24,
+                    cols: 80,
+                    currentRow: 0,
+                    lines: [],
+                  },
+                });
+              });
+            }
+          },
+        },
+      }),
+    });
+    scriptBridge.registerHandlers({
+      handle(channel, handler) {
+        handlers.set(channel, handler);
+      },
+    });
+
+    const runHandler = handlers.get("netcatty:script:run");
+    const firstLogPath = path.join(logDir, "first.log");
+    const firstRunPromise = runHandler({}, {
+      scriptId: "stopped-log-run",
+      scriptLabel: "Stopped log run",
+      sessionId,
+      content: `
+        await nct.session.startLog(${JSON.stringify(firstLogPath)});
+        try {
+          await nct.sleep(5000);
+        } finally {
+          await nct.session.stopLog();
+        }
+      `,
+      permissionMode: "auto",
+    });
+
+    await waitUntil(() => sessionLogStreamManager.hasStream(sessionId));
+    const firstRunId = await waitUntil(() => (
+      sentRunUpdates
+        .flat()
+        .find((run) => run.scriptId === "stopped-log-run" && run.status === "running")
+        ?.runId
+    ));
+
+    assert.deepEqual(await handlers.get("netcatty:script:stop")({}, { runId: firstRunId }), { ok: true });
+    await firstRunPromise;
+    await waitUntil(() => !sessionLogStreamManager.hasStream(sessionId));
+
+    const secondLogPath = path.join(logDir, "second.log");
+    await runHandler({}, {
+      scriptId: "next-log-run",
+      scriptLabel: "Next log run",
+      sessionId,
+      content: `
+        await nct.session.startLog(${JSON.stringify(secondLogPath)});
+        await nct.session.stopLog();
+      `,
+      permissionMode: "auto",
+    });
+
+    const secondRun = sentRunUpdates.at(-1).find((run) => run.scriptId === "next-log-run");
+    assert.equal(secondRun.status, "completed");
+    assert.equal(sessionLogStreamManager.hasStream(sessionId), false);
+  } finally {
+    await sessionLogStreamManager.cleanupAll();
+    fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
+test("late stopLog from a stopped script does not close the next run log", async () => {
+  const handlers = new Map();
+  const sentRunUpdates = [];
+  const sessionId = "session-stale-stop-log";
+  const logDir = fs.mkdtempSync(path.join(os.tmpdir(), "netcatty-script-stale-log-test-"));
+
+  try {
+    scriptBridge.init({
+      sessions: new Map([[sessionId, { hostname: "example.test" }]]),
+      electronModule: {
+        app: {
+          getVersion: () => "test",
+          getPath: () => logDir,
+        },
+      },
+      terminalBridge: {
+        writeToSession() {},
+      },
+      terminalWorkerManager: null,
+      getMainWindow: () => ({
+        webContents: {
+          send(channel, payload) {
+            if (channel === "netcatty:script:runs-updated") {
+              sentRunUpdates.push(payload.runs);
+            }
+            if (channel === "netcatty:script:screen-snapshot-request") {
+              setImmediate(() => {
+                handlers.get("netcatty:script:screen-snapshot-response")({}, {
+                  requestId: payload.requestId,
+                  snapshot: {
+                    rows: 24,
+                    cols: 80,
+                    currentRow: 0,
+                    lines: [],
+                  },
+                });
+              });
+            }
+          },
+        },
+      }),
+    });
+    scriptBridge.registerHandlers({
+      handle(channel, handler) {
+        handlers.set(channel, handler);
+      },
+    });
+
+    const runHandler = handlers.get("netcatty:script:run");
+    const firstRunPromise = runHandler({}, {
+      scriptId: "stale-stop-log-first",
+      scriptLabel: "Stale stopLog first",
+      sessionId,
+      content: `
+        await nct.session.startLog(${JSON.stringify(path.join(logDir, "first.log"))});
+        try {
+          await nct.sleep(5000);
+        } finally {
+          await nct.session.stopLog();
+        }
+      `,
+      permissionMode: "auto",
+    });
+
+    await waitUntil(() => sessionLogStreamManager.hasStream(sessionId));
+    const firstRunId = await waitUntil(() => (
+      sentRunUpdates
+        .flat()
+        .find((run) => run.scriptId === "stale-stop-log-first" && run.status === "running")
+        ?.runId
+    ));
+
+    assert.deepEqual(await handlers.get("netcatty:script:stop")({}, { runId: firstRunId }), { ok: true });
+    await firstRunPromise;
+    await waitUntil(() => !sessionLogStreamManager.hasStream(sessionId));
+
+    const secondRunPromise = runHandler({}, {
+      scriptId: "stale-stop-log-second",
+      scriptLabel: "Stale stopLog second",
+      sessionId,
+      content: `
+        await nct.session.startLog(${JSON.stringify(path.join(logDir, "second.log"))});
+        await nct.sleep(250);
+        await nct.session.stopLog();
+      `,
+      permissionMode: "auto",
+    });
+
+    await waitUntil(() => sessionLogStreamManager.hasStream(sessionId));
+    await delay(120);
+    assert.equal(sessionLogStreamManager.hasStream(sessionId), true);
+    await secondRunPromise;
+
+    const secondRun = sentRunUpdates.at(-1).find((run) => run.scriptId === "stale-stop-log-second");
+    assert.equal(secondRun.status, "completed");
+    assert.equal(sessionLogStreamManager.hasStream(sessionId), false);
+  } finally {
+    await sessionLogStreamManager.cleanupAll();
+    fs.rmSync(logDir, { recursive: true, force: true });
+  }
+});
+
 test("script run treats worker-managed sessions as connected", async () => {
   const handlers = new Map();
   const sentRunUpdates = [];
@@ -251,19 +1020,69 @@ test("script run uses renderer sessionMeta when main-process session map is empt
     scriptId: "renderer-meta",
     scriptLabel: "Renderer meta",
     sessionId: "session-renderer",
-    sessionMeta: { connected: true, hostname: "10.0.0.1", username: "root" },
+    sessionMeta: { connected: true, name: "Production", hostname: "10.0.0.1", username: "root" },
     content: `
       if (!nct.session.connected) {
         throw new Error("Session not connected");
       }
-      nct.log(\`\${nct.session.hostname}@\${nct.session.username}\`);
+      nct.log(\`\${nct.session.name}:\${nct.session.hostname}@\${nct.session.username}\`);
     `,
     permissionMode: "auto",
   });
 
   const finalRun = sentRunUpdates.at(-1).find((run) => run.scriptId === "renderer-meta");
   assert.equal(finalRun.status, "completed");
-  assert.match(finalRun.logs.map((entry) => entry.message).join("\n"), /10\.0\.0\.1@root/);
+  assert.match(finalRun.logs.map((entry) => entry.message).join("\n"), /Production:10\.0\.0\.1@root/);
+});
+
+test("script run uses the main-process session label when renderer metadata is absent", async () => {
+  const handlers = new Map();
+  const sentRunUpdates = [];
+
+  scriptBridge.init({
+    sessions: new Map([["session-local", {
+      status: "connected",
+      label: "Local Terminal",
+      hostname: "localhost",
+      username: "local",
+    }]]),
+    electronModule: {
+      app: {
+        getVersion: () => "test",
+        getPath: () => process.cwd(),
+      },
+    },
+    terminalBridge: {
+      writeToSession() {},
+    },
+    terminalWorkerManager: null,
+    getMainWindow: () => ({
+      webContents: {
+        send(channel, payload) {
+          if (channel === "netcatty:script:runs-updated") {
+            sentRunUpdates.push(payload.runs);
+          }
+        },
+      },
+    }),
+  });
+  scriptBridge.registerHandlers({
+    handle(channel, handler) {
+      handlers.set(channel, handler);
+    },
+  });
+
+  await handlers.get("netcatty:script:run")({}, {
+    scriptId: "local-session-name",
+    scriptLabel: "Local session name",
+    sessionId: "session-local",
+    content: "nct.log(nct.session.name);",
+    permissionMode: "auto",
+  });
+
+  const finalRun = sentRunUpdates.at(-1).find((run) => run.scriptId === "local-session-name");
+  assert.equal(finalRun.status, "completed");
+  assert.match(finalRun.logs.map((entry) => entry.message).join("\n"), /Local Terminal/);
 });
 
 test("script run sends form dialog requests and resolves object responses", async () => {
@@ -591,16 +1410,15 @@ test("script waitFor ignores keywords that have scrolled off the visible screen"
   scriptBridge.removeSessionBuffer(sessionId);
 });
 
-test("script waitFor does not seed buffer-fallback scrollback as visible screen", async () => {
+test("script waitFor seeds buffer-fallback so connection banners stay waitable (#1960)", async () => {
   const handlers = new Map();
   const sentRunUpdates = [];
   const sessionId = "session-buffer-fallback-scrollback";
 
   scriptBridge.removeSessionBuffer(sessionId);
-  // When the session's webContents is missing, requestScreenSnapshot falls back
-  // to the full script buffer. That must stay consumed so scrolled-off keywords
-  // do not rematch (#1821 / Codex review on #2035).
-  scriptBridge.appendSessionOutput(sessionId, "old deployment READY marker\nuser@host:~$ \n");
+  // Buffer-fallback must seed the live buffer so bastion menus already
+  // received stay waitable. Scrolled-off rematch is covered by viewport tests.
+  scriptBridge.appendSessionOutput(sessionId, "Welcome to SSHD\nSSH资源(5) :\n> \n");
   scriptBridge.init({
     sessions: new Map([
       [sessionId, { webContentsId: 999 }],
@@ -635,31 +1453,20 @@ test("script waitFor does not seed buffer-fallback scrollback as visible screen"
     },
   });
 
-  const runPromise = handlers.get("netcatty:script:run")({}, {
+  await handlers.get("netcatty:script:run")({}, {
     scriptId: "buffer-fallback",
     scriptLabel: "Buffer fallback",
     sessionId,
     content: `
-      const value = await nct.screen.waitFor('READY', 1000);
+      const value = await nct.screen.waitForRegex("SSH资源\\\\s*\\\\(\\\\d+\\\\)\\\\s*:", 1000);
       nct.log('matched ' + value);
     `,
     permissionMode: "auto",
   });
 
-  await delay(50);
-  const earlyRun = sentRunUpdates.at(-1)?.find((run) => run.scriptId === "buffer-fallback");
-  assert.notEqual(earlyRun?.status, "completed");
-  assert.doesNotMatch(
-    (earlyRun?.logs || []).map((entry) => entry.message).join("\n"),
-    /matched READY/,
-  );
-
-  scriptBridge.appendSessionOutput(sessionId, "fresh READY\n");
-  await runPromise;
-
   const finalRun = sentRunUpdates.at(-1).find((run) => run.scriptId === "buffer-fallback");
-  assert.equal(finalRun.status, "completed");
-  assert.match(finalRun.logs.map((entry) => entry.message).join("\n"), /matched READY/);
+  assert.equal(finalRun.status, "completed", finalRun.error || "expected completed");
+  assert.match(finalRun.logs.map((entry) => entry.message).join("\n"), /matched SSH资源\(5\) :/);
   scriptBridge.removeSessionBuffer(sessionId);
 });
 
@@ -1155,11 +1962,11 @@ test("script sendLine invalidates startup seed before later waits", async () => 
     permissionMode: "auto",
   });
 
-  await delay(40);
+  await waitUntil(() => writes.some((data) => String(data).includes("echo hi")));
   assert.ok(writes.some((data) => String(data).includes("echo hi")));
 
   // Startup seed must be gone: waits should not resolve on old READY / old prompt.
-  await delay(80);
+  await delay(20);
   const midRun = sentRunUpdates.at(-1).find((run) => run.scriptId === "send-invalidates-seed");
   assert.equal(midRun.status, "running");
 
@@ -1173,4 +1980,174 @@ test("script sendLine invalidates startup seed before later waits", async () => 
   assert.match(finalRun.logs.map((entry) => entry.message).join("\n"), /prompt 0/);
   assert.match(finalRun.logs.map((entry) => entry.message).join("\n"), /matched READY/);
   scriptBridge.removeSessionBuffer(sessionId);
+});
+
+test("script sendLine keeps prompts that arrive between body and CR waitable", async () => {
+  const handlers = new Map();
+  const sentRunUpdates = [];
+  const sessionId = "session-sendline-gap-prompt";
+  const writes = [];
+
+  scriptBridge.removeSessionBuffer(sessionId);
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {
+      app: {
+        getVersion: () => "test",
+        getPath: () => process.cwd(),
+      },
+      webContents: {
+        fromId: () => null,
+      },
+    },
+    terminalBridge: {
+      writeToSession(_event, payload) {
+        writes.push(payload.data);
+        if (payload.data === "3") {
+          setTimeout(() => {
+            scriptBridge.appendSessionOutput(sessionId, "\n资源'[Empty]'账户:");
+          }, 5);
+        }
+      },
+    },
+    terminalWorkerManager: null,
+    getMainWindow: () => ({
+      webContents: {
+        id: 1,
+        send(channel, payload) {
+          if (channel === "netcatty:script:runs-updated") {
+            sentRunUpdates.push(payload.runs);
+          }
+          if (channel === "netcatty:script:screen-snapshot-request") {
+            setImmediate(() => {
+              handlers.get("netcatty:script:screen-snapshot-response")({}, {
+                requestId: payload.requestId,
+                snapshot: {
+                  rows: 24,
+                  cols: 80,
+                  currentRow: 0,
+                  lines: ["SSH资源(5) :", "> "],
+                },
+              });
+            });
+          }
+          if (channel === "netcatty:script:dialog-request") {
+            setImmediate(() => {
+              handlers.get("netcatty:script:dialog-response")({}, {
+                requestId: payload.requestId,
+                value: "abort",
+              });
+            });
+          }
+        },
+      },
+    }),
+  });
+  scriptBridge.registerHandlers({
+    handle(channel, handler) {
+      handlers.set(channel, handler);
+    },
+  });
+
+  await handlers.get("netcatty:script:run")({}, {
+    scriptId: "sendline-gap",
+    scriptLabel: "SendLine gap prompt",
+    sessionId,
+    content: `
+      await nct.screen.waitForRegex("SSH资源\\\\s*\\\\(\\\\d+\\\\)\\\\s*:", 1000);
+      await nct.screen.sendLine("3");
+      await nct.screen.waitForText("资源'[Empty]'账户:", 1000);
+      await nct.screen.sendLine("zxadmin");
+      nct.log("account sent");
+    `,
+    permissionMode: "auto",
+  });
+
+  const finalRun = sentRunUpdates.at(-1).find((run) => run.scriptId === "sendline-gap");
+  assert.equal(finalRun.status, "completed", finalRun.error || "expected completed");
+  assert.deepEqual(writes.filter((w) => w === "3" || w === "\r" || w === "zxadmin"), [
+    "3",
+    "\r",
+    "zxadmin",
+    "\r",
+  ]);
+  assert.match(finalRun.logs.map((entry) => entry.message).join("\n"), /account sent/);
+  scriptBridge.removeSessionBuffer(sessionId);
+});
+
+test("resolveStartupSeedText prefers buffer when viewport paint lags bastion menu", () => {
+  const buffer =
+    "Welcome to SSHD\n\nuser login success\n\nSSH资源(5) :\n  [1] host\n";
+  const laggingViewport = "Welcome to SSHD\n\nuser login success\n";
+  const seed = scriptBridge.resolveStartupSeedText(laggingViewport, buffer);
+  assert.match(seed, /SSH资源\(5\)/);
+  assert.equal(scriptBridge.resolveStartupSeedText("", buffer), buffer);
+});
+
+test("resolveStartupSeedText prefers viewport when buffer only adds scrolled-off prefix", () => {
+  const viewport = "SSH资源(5) :\n  [1] host\n";
+  const buffer = `old deployment READY marker\nuser@host:~$ \n${viewport}`;
+  const seed = scriptBridge.resolveStartupSeedText(viewport, buffer);
+  assert.equal(seed, viewport);
+  assert.doesNotMatch(seed, /READY marker/);
+});
+
+test("script recording stops explicitly when the retained step limit is reached", async () => {
+  const handlers = new Map();
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {},
+    terminalBridge: {},
+    getMainWindow: () => null,
+  });
+  scriptBridge.registerHandlers({
+    handle(channel, handler) { handlers.set(channel, handler); },
+  });
+
+  const sessionId = "recording-step-budget";
+  await handlers.get("netcatty:script:recording:start")({}, { sessionId });
+  let result;
+  for (let index = 0; index < 10_000; index += 1) {
+    result = await handlers.get("netcatty:script:recording:append-step")({}, {
+      sessionId,
+      step: { type: "sleep", value: index },
+    });
+  }
+
+  assert.equal(result.stopped, true);
+  assert.match(result.error, /safety limit/i);
+  assert.equal(result.steps.length, 10_000);
+  assert.match(result.code, /sleep/);
+  assert.deepEqual(
+    await handlers.get("netcatty:script:recording:append-step")({}, {
+      sessionId,
+      step: { type: "sleep", value: 10_001 },
+    }),
+    { ok: false, error: "Recording not started" },
+  );
+});
+
+test("script recording rejects one step beyond the total byte budget without retaining it", async () => {
+  const handlers = new Map();
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {},
+    terminalBridge: {},
+    getMainWindow: () => null,
+  });
+  scriptBridge.registerHandlers({
+    handle(channel, handler) { handlers.set(channel, handler); },
+  });
+
+  const sessionId = "recording-byte-budget";
+  await handlers.get("netcatty:script:recording:start")({}, { sessionId });
+  const result = await handlers.get("netcatty:script:recording:append-step")({}, {
+    sessionId,
+    step: { type: "send", value: "x".repeat(2 * 1024 * 1024 + 1) },
+  });
+
+  assert.equal(result.stopped, true);
+  assert.match(result.error, /safety limit/i);
+  assert.deepEqual(result.steps, []);
+  assert.equal(result.code, "");
 });

@@ -108,6 +108,8 @@ function makeHarness(t) {
 
   return {
     bridge,
+    tmp,
+    sshPath,
     sessions,
     sent,
     spawns,
@@ -132,6 +134,74 @@ test("startMoshSession handshake path returns the same shape as the legacy path"
   const h = makeHarness(t);
   const result = await h.bridge.startMoshSession(h.event, h.options, { moshClientLookup: h.lookupOpts });
   assert.deepEqual(result, { sessionId: "mosh-test-session" });
+});
+
+test("Mosh PTYs explicitly enable bundled ConPTY clear support only on Windows", async (t) => {
+  const platformDescriptor = Object.getOwnPropertyDescriptor(process, "platform");
+
+  const startAndSwap = async (platform) => {
+    const h = makeHarness(t);
+    Object.defineProperty(process, "platform", { ...platformDescriptor, value: platform });
+
+    await h.bridge.startMoshSession(h.event, h.options, {
+      moshClientLookup: h.lookupOpts,
+      findExecutable: () => h.sshPath,
+    });
+    h.spawns[0].emitData(
+      "MOSH IP 203.0.113.8\r\nMOSH CONNECT 60002 ABCDEFGHIJKLMNOPQRSTUV==\r\n",
+    );
+    h.spawns[0].emitExit({ exitCode: 0, signal: 0 });
+    return h.spawns;
+  };
+
+  try {
+    const windowsSpawns = await startAndSwap("win32");
+    assert.equal(windowsSpawns.length, 2);
+    assert.equal(windowsSpawns[0].opts.useConptyDll, true);
+    assert.equal(windowsSpawns[1].opts.useConptyDll, true);
+
+    const linuxSpawns = await startAndSwap("linux");
+    assert.equal(linuxSpawns.length, 2);
+    assert.equal(linuxSpawns[0].opts.useConptyDll, false);
+    assert.equal(linuxSpawns[1].opts.useConptyDll, false);
+  } finally {
+    Object.defineProperty(process, "platform", platformDescriptor);
+  }
+});
+
+test("startMoshSession offers all locale settings to mosh-server without exporting them through SSH", async (t) => {
+  const h = makeHarness(t);
+  h.options.env = {
+    LANG: "C",
+    LANGUAGE: "zh_CN:zh",
+    LC_CTYPE: "ja_JP.UTF-8",
+    LC_ALL: "zh_CN.UTF-8",
+  };
+
+  await h.bridge.startMoshSession(h.event, h.options, { moshClientLookup: h.lookupOpts });
+
+  assert.equal(h.spawns[0].opts.env.LANG, undefined);
+  assert.equal(h.spawns[0].opts.env.LANGUAGE, undefined);
+  assert.equal(h.spawns[0].opts.env.LC_CTYPE, undefined);
+  assert.equal(h.spawns[0].opts.env.LC_ALL, undefined);
+  const remote = h.spawns[0].args.at(-1);
+  assert.ok(remote.indexOf("LANG=C") < remote.indexOf("LANGUAGE=zh_CN:zh"));
+  assert.ok(remote.indexOf("LANGUAGE=zh_CN:zh") < remote.indexOf("LC_CTYPE=ja_JP.UTF-8"));
+  assert.ok(remote.indexOf("LC_CTYPE=ja_JP.UTF-8") < remote.indexOf("LC_ALL=zh_CN.UTF-8"));
+  assert.equal((remote.match(/ -l /g) || []).length, 4);
+});
+
+test("startMoshSession keeps the original hostname as a UDP fallback", async (t) => {
+  const h = makeHarness(t);
+  await h.bridge.startMoshSession(h.event, h.options, { moshClientLookup: h.lookupOpts });
+
+  h.spawns[0].emitData(
+    "MOSH IP 203.0.113.8\r\nMOSH CONNECT 60002 ABCDEFGHIJKLMNOPQRSTUV==\r\n",
+  );
+  h.spawns[0].emitExit({ exitCode: 0, signal: 0 });
+
+  assert.equal(h.spawns[1].args[0], "203.0.113.8");
+  assert.equal(h.spawns[1].opts.env.MOSH_FALLBACK_HOST, "example.com");
 });
 
 test("startMoshSession uses bundled mosh-client even when PATH contains another client", async (t) => {
@@ -204,6 +274,29 @@ test("startMoshSession handshake path sends the existing exit event on failure",
   assert.ok(exit);
   assert.equal(exit.payload.sessionId, "mosh-test-session");
   assert.equal(exit.payload.reason, "error");
+  assert.match(
+    String(exit.payload.error || ""),
+    /no MOSH CONNECT/i,
+    "exit payload should name the handshake failure",
+  );
+  const dataChunks = h.sent
+    .filter((evt) => evt.channel === "netcatty:data" || evt.channel === "netcatty:session-data")
+    .map((evt) => String(evt.payload?.data ?? evt.payload ?? ""));
+  assert.ok(
+    dataChunks.some((chunk) => /Mosh handshake failed/i.test(chunk)),
+    "renderer should receive an explicit handshake-failure hint",
+  );
+  const handshakeHint = dataChunks.find((chunk) => /Mosh handshake failed/i.test(chunk));
+  assert.match(
+    handshakeHint,
+    /UDP client was not started/i,
+    "the hint should explain that UDP has not started yet",
+  );
+  assert.doesNotMatch(
+    handshakeHint,
+    /UDP ports.*reachable/i,
+    "an SSH bootstrap failure must not send users to UDP diagnostics",
+  );
 });
 
 test("startMoshSession writes the saved password when ssh prompts for one", async (t) => {
@@ -217,6 +310,72 @@ test("startMoshSession writes the saved password when ssh prompts for one", asyn
   h.spawns[0].emitData("(alice@example.com) Password:");
 
   assert.deepEqual(h.spawns[0].writes, ["saved-secret\r"]);
+});
+
+test("startMoshSession password-only mode disables public-key authentication", async (t) => {
+  const h = makeHarness(t);
+  await h.bridge.startMoshSession(
+    h.event,
+    { ...h.options, authMethod: "password", password: "saved-secret", useSshAgent: false },
+    { moshClientLookup: h.lookupOpts },
+  );
+
+  assert.ok(h.spawns[0].args.includes("PubkeyAuthentication=no"));
+  assert.ok(h.spawns[0].args.includes("PreferredAuthentications=password,keyboard-interactive"));
+});
+
+test("startMoshSession MFA password mode prefers keyboard-interactive", async (t) => {
+  const h = makeHarness(t);
+  await h.bridge.startMoshSession(
+    h.event,
+    {
+      ...h.options,
+      authMethod: "password",
+      password: "saved-secret",
+      requiresMfa: true,
+      useSshAgent: false,
+    },
+    { moshClientLookup: h.lookupOpts },
+  );
+
+  assert.ok(h.spawns[0].args.includes("PubkeyAuthentication=no"));
+  assert.ok(h.spawns[0].args.includes("PreferredAuthentications=keyboard-interactive,password"));
+});
+
+test("startMoshSession MFA auto mode keeps publickey first and prefers keyboard-interactive", async (t) => {
+  const h = makeHarness(t);
+  await h.bridge.startMoshSession(
+    h.event,
+    {
+      ...h.options,
+      authMethod: "auto",
+      password: "saved-secret",
+      requiresMfa: true,
+      identityFilePaths: [path.join(os.tmpdir(), "netcatty-mosh-mfa-id_ed25519")],
+      useSshAgent: false,
+    },
+    { moshClientLookup: h.lookupOpts },
+  );
+
+  assert.ok(h.spawns[0].args.includes("PreferredAuthentications=publickey,keyboard-interactive,password"));
+});
+
+test("startMoshSession key mode never probes unrelated default identities", async (t) => {
+  const h = makeHarness(t);
+  await h.bridge.startMoshSession(
+    h.event,
+    {
+      ...h.options,
+      authMethod: "key",
+      password: "fallback-secret",
+      useSshAgent: false,
+    },
+    { moshClientLookup: h.lookupOpts },
+  );
+
+  assert.ok(h.spawns[0].args.includes("IdentityFile=none"));
+  assert.ok(h.spawns[0].args.includes("IdentitiesOnly=yes"));
+  assert.equal(h.spawns[0].args.includes("PubkeyAuthentication=no"), false);
 });
 
 test("startMoshSession writes the saved password when ConPTY appends cursor controls to the prompt", async (t) => {
@@ -382,6 +541,121 @@ test("startMoshSession handshake path sends the existing exit event after mosh-c
   assert.equal(exit.payload.reason, "exited");
 });
 
+test("startMoshSession keeps MoshCatty on Netcatty's primary terminal screen", async (t) => {
+  const h = makeHarness(t);
+  await h.bridge.startMoshSession(h.event, h.options, { moshClientLookup: h.lookupOpts });
+
+  h.spawns[0].emitData("MOSH CONNECT 60002 ABCDEFGHIJKLMNOPQRSTUV==\r\n");
+  h.spawns[0].emitExit({ exitCode: 0, signal: 0 });
+
+  assert.equal(h.spawns.length, 2);
+  assert.equal(h.spawns[1].opts.env.MOSH_NO_TERM_INIT, "1");
+});
+
+test("startMoshSession restores terminal modes on exit without leaving the primary screen", async (t) => {
+  const h = makeHarness(t);
+  await h.bridge.startMoshSession(h.event, h.options, { moshClientLookup: h.lookupOpts });
+
+  h.spawns[0].emitData("MOSH CONNECT 60002 ABCDEFGHIJKLMNOPQRSTUV==\r\n");
+  h.spawns[0].emitExit({ exitCode: 0, signal: 0 });
+  h.spawns[1].emitData("\x1b[?25l\x1b[?1000h");
+  h.spawns[1].emitExit({ exitCode: 1, signal: 0 });
+
+  const terminalData = h.sent
+    .filter((evt) => evt.channel === "netcatty:data")
+    .map((evt) => evt.payload.data)
+    .join("");
+  const exitIndex = h.sent.findIndex((evt) => evt.channel === "netcatty:exit");
+  const cleanupIndex = h.sent.findIndex(
+    (evt) => evt.channel === "netcatty:data" && evt.payload.data.includes("\x1b[?25h"),
+  );
+
+  assert.match(terminalData, /\x1b\[\?25h/);
+  assert.match(terminalData, /\x1b\[\?1000l/);
+  assert.doesNotMatch(terminalData, /\x1b\[\?1049l/);
+  assert.ok(cleanupIndex >= 0 && cleanupIndex < exitIndex);
+});
+
+test("startMoshSession forwards terminal shortcut escape sequences after the client swap", async (t) => {
+  const h = makeHarness(t);
+  await h.bridge.startMoshSession(h.event, h.options, { moshClientLookup: h.lookupOpts });
+
+  h.spawns[0].emitData("MOSH CONNECT 60002 ABCDEFGHIJKLMNOPQRSTUV==\r\n");
+  h.spawns[0].emitExit({ exitCode: 0, signal: 0 });
+
+  const shortcuts = [
+    "\x1b[A",
+    "\x1b[B",
+    "\x1b[C",
+    "\x1b[D",
+    "\x1b[1;5A",
+    "\x1b[1;5B",
+    "\x1b[1;5C",
+    "\x1b[1;5D",
+    "\x1b.",
+  ];
+  for (const data of shortcuts) {
+    h.bridge.writeToSession(h.event, { sessionId: h.options.sessionId, data });
+  }
+
+  assert.deepEqual(h.spawns[1].writes, shortcuts);
+  assert.deepEqual(h.spawns[0].writes, []);
+});
+
+test("startMoshSession tags handshake output and emits ready after mosh-client swap", async (t) => {
+  const h = makeHarness(t);
+  await h.bridge.startMoshSession(h.event, h.options, { moshClientLookup: h.lookupOpts });
+
+  h.spawns[0].emitData("login banner\r\n");
+  // Pty output is coalesced and flushed on the next turn.
+  await new Promise((resolve) => setImmediate(resolve));
+  const handshakeData = h.sent.find((evt) =>
+    evt.channel === "netcatty:data" && evt.payload?.data?.includes("login banner"),
+  );
+  assert.ok(handshakeData, "expected handshake data on netcatty:data");
+  assert.equal(handshakeData.payload.meta?.moshHandshake, true);
+
+  assert.equal(
+    h.sent.some((evt) => evt.channel === "netcatty:mosh:ready"),
+    false,
+    "ready must not fire before the mosh-client swap",
+  );
+
+  h.spawns[0].emitData("MOSH CONNECT 60002 ABCDEFGHIJKLMNOPQRSTUV==\r\n");
+  h.spawns[0].emitExit({ exitCode: 0, signal: 0 });
+
+  const ready = h.sent.find((evt) => evt.channel === "netcatty:mosh:ready");
+  assert.ok(ready, "expected netcatty:mosh:ready after client swap");
+  assert.equal(ready.payload.sessionId, "mosh-test-session");
+  assert.equal(h.sessions.get("mosh-test-session")?.moshHandshakePhase, "mosh-client");
+});
+
+test("startMoshSession clears successful SSH bootstrap output before the Mosh screen", async (t) => {
+  const h = makeHarness(t);
+  await h.bridge.startMoshSession(h.event, h.options, { moshClientLookup: h.lookupOpts });
+
+  h.spawns[0].emitData(
+    "Welcome to Ubuntu\r\nmosh-server (mosh 1.4.0)\r\nLicense GPLv3+\r\n",
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  h.spawns[0].emitData("MOSH CONNECT 60002 ABCDEFGHIJKLMNOPQRSTUV==\r\n");
+  h.spawns[0].emitExit({ exitCode: 0, signal: 0 });
+  h.spawns[1].emitData(Buffer.from("root@example:~# "));
+  await new Promise((resolve) => h.sessions.get("mosh-test-session").flushPendingData(resolve));
+
+  const terminalData = h.sent
+    .filter((evt) => evt.channel === "netcatty:data")
+    .map((evt) => evt.payload.data)
+    .join("");
+  const bootstrapIndex = terminalData.indexOf("Welcome to Ubuntu");
+  const clearIndex = terminalData.indexOf("\x1b[2J\x1b[H");
+  const promptIndex = terminalData.indexOf("root@example:~# ");
+
+  assert.ok(bootstrapIndex >= 0, "the interactive SSH bootstrap should remain visible while connecting");
+  assert.ok(clearIndex > bootstrapIndex, "the successful handoff should clear bootstrap cells");
+  assert.ok(promptIndex > clearIndex, "the Mosh screen should render onto the cleared viewport");
+});
+
 test("startMoshSession stashes stats-companion auth after a successful handshake", async (t) => {
   const h = makeHarness(t);
   await h.bridge.startMoshSession(
@@ -389,8 +663,11 @@ test("startMoshSession stashes stats-companion auth after a successful handshake
     {
       ...h.options,
       port: 2200,
+      authMethod: "auto",
       password: "secret",
       keyId: "key-1",
+      identityFilePaths: ["~/.ssh/id_work"],
+      agentPublicKeys: ["ssh-ed25519 AAAASELECTED"],
       legacyAlgorithms: true,
       skipEcdsaHostKey: true,
       algorithmOverrides: { cipher: ["aes128-cbc"] },
@@ -411,7 +688,10 @@ test("startMoshSession stashes stats-companion auth after a successful handshake
   assert.equal(session.moshStatsAuth.hostname, "example.com");
   assert.equal(session.moshStatsAuth.port, 2200);
   assert.equal(session.moshStatsAuth.username, "alice");
+  assert.equal(session.moshStatsAuth.authMethod, "auto");
   assert.equal(session.moshStatsAuth.password, "secret");
+  assert.equal(session.moshStatsAuth.identityFilePaths[0], path.join(os.homedir(), ".ssh", "id_work"));
+  assert.deepEqual(session.moshStatsAuth.agentPublicKeys, ["ssh-ed25519 AAAASELECTED"]);
   assert.equal(session.moshStatsAuth.legacyAlgorithms, true);
   assert.equal(session.moshStatsAuth.skipEcdsaHostKey, true);
   assert.deepEqual(session.moshStatsAuth.algorithmOverrides, { cipher: ["aes128-cbc"] });

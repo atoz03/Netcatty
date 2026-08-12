@@ -75,6 +75,7 @@ export default defineConfig(() => {
               'vendor-xterm': [
                 '@xterm/xterm',
                 '@xterm/addon-fit',
+                '@xterm/addon-image',
                 '@xterm/addon-search',
                 '@xterm/addon-serialize',
                 '@xterm/addon-web-links',

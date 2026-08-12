@@ -2,9 +2,10 @@ import type { DragEvent, PointerEvent } from "react";
 import { Terminal as XTerm } from "@xterm/xterm";
 
 import type { TerminalContextReader } from "../../domain/terminalContextRead";
+import type { TerminalSessionExitEvent } from "../../application/state/resolveTerminalSessionExitIntent";
 import { resolveSessionTabTitle } from "../../domain/sessionTabTitle";
 import { logger } from "../../lib/logger";
-import { getPathForFile, type DropEntry } from "../../lib/sftpFileUtils";
+import { getDropEntryLocalPath, type DropEntry } from "../../lib/sftpFileUtils";
 import { normalizeLineEndings } from "../../lib/utils";
 import { resolveSnippetMultiLineRunMode } from "../../domain/snippetRunMode";
 import type {
@@ -19,6 +20,7 @@ import type {
   TerminalSettings,
   TerminalTheme,
 } from "../../types";
+import type { KittyKeyboardBroadcastInput } from "./runtime/kittyKeyboardBroadcast";
 
 export const MAX_CONNECTION_LOG_DATA_CHARS = 1_000_000;
 export const AUTO_RUN_SNIPPET_LINE_DELAY_MS = 250;
@@ -26,6 +28,8 @@ export const AUTO_RUN_SNIPPET_LINE_DELAY_MS = 250;
 export interface TerminalBroadcastInputOptions {
   noAutoRun?: boolean;
   lineDelayMs?: number;
+  kittyKeyboardInput?: KittyKeyboardBroadcastInput;
+  kittyKeyboardTargetSessionIds?: string[];
 }
 
 export { resolveSessionTabTitle };
@@ -40,9 +44,7 @@ export function extractRootPathsFromDropEntries(dropEntries: DropEntry[]): strin
   const seenPaths = new Set<string>();
 
   for (const entry of dropEntries) {
-    if (!entry.file) continue;
-
-    const fullPath = getPathForFile(entry.file);
+    const fullPath = getDropEntryLocalPath(entry);
     if (!fullPath) continue;
 
     const pathParts = entry.relativePath.split("/");
@@ -106,6 +108,8 @@ export interface TerminalProps {
   compactToolbar?: boolean;
   /** Line timestamps are unavailable in popup terminals that stream shell output without timestamp metadata. */
   lineTimestampsAvailable?: boolean;
+  /** Compact/popup path: delete snippets against the caller's vault hook. */
+  onDeleteSnippets?: (ids: ReadonlySet<string>) => void;
   chainHosts?: Host[];
   appearanceTheme?: TerminalTheme;
   knownHosts?: KnownHost[];
@@ -116,6 +120,12 @@ export interface TerminalProps {
   isResizing?: boolean;
   isFocusMode?: boolean;
   isFocused?: boolean;
+  /**
+   * Split-pane keyboard ownership for disconnected-dialog focus claims.
+   * `false` = visible unfocused split sibling (must not claim body/document focus).
+   * Omit outside split mode (solo / focus / popup).
+   */
+  isFocusedPane?: boolean;
   fontFamilyId: string;
   fontSize: number;
   terminalTheme: TerminalTheme;
@@ -124,7 +134,11 @@ export interface TerminalProps {
   customAccent?: string;
   terminalSettings?: TerminalSettings;
   sessionId: string;
+  workspaceId?: string;
   restoreState?: TerminalSession["restoreState"];
+  /** Secondary windows hydrate their own vault state outside the main snapshot store. */
+  vaultInitializedOverride?: boolean;
+  pendingInitialCwd?: string;
   shellType?: TerminalSession["shellType"];
   lastCwd?: string;
   restoreTerminalCwd?: boolean;
@@ -137,6 +151,16 @@ export interface TerminalProps {
   // source session whose authenticated connection should be reused for a new
   // shell channel — skipping a second MFA prompt (issue #1204).
   reuseConnectionFromSessionId?: string;
+  /**
+   * Attach to an already-running backend session (same PTY) instead of starting
+   * a new one. Used by the AI silent-session observe popup. Must not close the
+   * backend session on unmount.
+   */
+  attachExistingSession?: boolean;
+  /** Ephemeral grant required for attach-session IPC. */
+  attachAuthorization?: string;
+  /** Registers the async handoff that must finish before an attach popup closes. */
+  onAttachClosePreparationChange?: (prepare: (() => Promise<void>) | null) => void;
   serialConfig?: SerialConfig;
   hotkeyScheme?: "disabled" | "mac" | "pc";
   disableTerminalFontZoom?: boolean;
@@ -144,7 +168,7 @@ export interface TerminalProps {
   onHotkeyAction?: (action: string, event: KeyboardEvent) => void;
   onTerminalFontSizeChange?: (fontSize: number) => void;
   onStatusChange?: (sessionId: string, status: TerminalSession["status"]) => void;
-  onSessionExit?: (sessionId: string, evt: { exitCode?: number; signal?: number; error?: string; reason?: "exited" | "error" | "timeout" | "closed" }) => void;
+  onSessionExit?: (sessionId: string, evt: TerminalSessionExitEvent) => void;
   onTerminalDataCapture?: (sessionId: string, data: string) => void;
   onOsDetected?: (hostId: string, distro: string) => void;
   onCloseSession?: (sessionId: string) => void;
@@ -188,14 +212,18 @@ export interface TerminalProps {
     data: string,
     sourceSessionId: string,
     options?: TerminalBroadcastInputOptions,
-  ) => void;
+  ) => string[] | void;
   onSnippetExecutorChange?: (
     sessionId: string,
     executor: ((
       command: string,
       noAutoRun?: boolean,
-      options?: { broadcast?: boolean; multiLineRunMode?: Snippet["multiLineRunMode"] },
-    ) => void) | null,
+      options?: {
+        broadcast?: boolean;
+        multiLineRunMode?: Snippet["multiLineRunMode"];
+        focus?: boolean;
+      },
+    ) => boolean | Promise<boolean>) | null,
   ) => void;
   onBroadcastInterruptPriorityChange?: (
     sessionId: string,
@@ -205,9 +233,11 @@ export interface TerminalProps {
     sessionId: string,
     queueRewrite: ((rewrite: ProgrammaticCommandLogRewrite) => void) | null,
   ) => void;
-  sessionLog?: { enabled: boolean; directory: string; format: string; timestampsEnabled?: boolean };
+  sessionLog?: { enabled: boolean; directory: string; format: "txt" | "raw" | "html"; timestampsEnabled?: boolean };
   sshDebugLogEnabled?: boolean;
   sudoAutofillPassword?: string;
+  /** Host + keychain password identities for picker mode (#2156). */
+  sudoAutofillCandidates?: import("./runtime/terminalSudoAutofill").SudoPasswordAutofillCandidate[];
   showSelectionAIAction?: boolean;
   onAddSelectionToAI?: (sessionId: string, selection: string) => void;
   /** Override display name for the pane title bar (customName || hostLabel) */
@@ -252,6 +282,163 @@ export function shouldShowTerminalConnectionDialog({
     && !(!!hideConnectingDialogForConnectionReuse && status === "connecting")
     && !((isLocalConnection || isSerialConnection) && status === "connecting")
     && !(status === "disconnected" && isDisconnectedDialogDismissed);
+}
+
+/**
+ * Dialog-local Enter reconnect while the disconnected overlay owns focus.
+ * Leave native activation to focused buttons/links (Retry / Close / logs).
+ */
+export function shouldReconnectDisconnectedDialogOnEnterKey({
+  key,
+  enabled,
+  altKey,
+  ctrlKey,
+  metaKey,
+  shiftKey,
+  isComposing,
+  target,
+}: {
+  key: string;
+  enabled: boolean;
+  altKey?: boolean;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+  isComposing?: boolean;
+  target?: EventTarget | null;
+}): boolean {
+  if (!enabled || key !== "Enter") return false;
+  if (altKey || ctrlKey || metaKey || shiftKey || isComposing) return false;
+  if (typeof HTMLElement === "undefined" || !(target instanceof HTMLElement)) return true;
+  return !target.closest("button, a, input, textarea, select, [contenteditable='true'], [role='button'], [role='menuitem'], [role='textbox']");
+}
+
+const DIALOG_INTERACTIVE_FOCUS_SELECTOR =
+  "button, a, input, textarea, select, [contenteditable='true'], [role='button'], [role='menuitem'], [role='textbox']";
+
+/**
+ * Resolve the local terminal tree for focus claim/restore.
+ * Main panes expose `data-session-id`; popup terminals (TerminalPopupPage) do not,
+ * so walk up from the dialog until we find the sibling xterm textarea.
+ */
+export function resolveDisconnectedDialogTerminalRoot(
+  dialogNode: Element | null,
+  sessionRoot?: Element | null,
+): Element | null {
+  if (sessionRoot) return sessionRoot;
+  if (!dialogNode) return null;
+  let node: Element | null = dialogNode.parentElement;
+  while (node) {
+    if (node.querySelector("textarea.xterm-helper-textarea")) return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
+/**
+ * Only park focus on the disconnected overlay when it is safe:
+ * - focus is already lost (body / null) AND this pane may own keyboard focus, or
+ * - focus still belongs to this terminal/session tree.
+ * Never steal from another pane, side panel, or app chrome.
+ *
+ * `isFocusedPane === false` means an unfocused split sibling: document-level
+ * focus loss must not let that pane claim Enter-reconnect focus.
+ * Omit / true outside split contention (solo, focus mode, popup).
+ */
+export function shouldClaimDisconnectedDialogFocus({
+  activeElement,
+  dialogNode,
+  sessionRoot,
+  documentBody,
+  documentElement,
+  isFocusedPane,
+}: {
+  activeElement: Element | null;
+  dialogNode: HTMLElement;
+  sessionRoot: Element | null;
+  documentBody?: Element | null;
+  documentElement?: Element | null;
+  isFocusedPane?: boolean;
+}): boolean {
+  if (!activeElement || activeElement === documentBody || activeElement === documentElement) {
+    return isFocusedPane !== false;
+  }
+  if (typeof HTMLElement !== "undefined" && !(activeElement instanceof HTMLElement)) {
+    return isFocusedPane !== false;
+  }
+  const active = activeElement as HTMLElement;
+  if (dialogNode.contains(active)) {
+    // Already on the sink or a dialog control — do not yank off buttons.
+    if (active !== dialogNode && active.closest(DIALOG_INTERACTIVE_FOCUS_SELECTOR)) {
+      return false;
+    }
+    // Sink already focused.
+    return active !== dialogNode;
+  }
+  const terminalRoot = resolveDisconnectedDialogTerminalRoot(dialogNode, sessionRoot);
+  if (terminalRoot?.contains(active)) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Whether cleanup should hand focus back to xterm.
+ * Skip while the overlay node is still in the document — Enter-reconnect may
+ * have ended into connecting / auth / host-key without unmounting the dialog.
+ */
+export function shouldRestoreDisconnectedDialogTerminalFocus(
+  dialogNode: HTMLElement | null,
+): boolean {
+  if (!dialogNode) return false;
+  return !dialogNode.isConnected;
+}
+
+/**
+ * After the overlay unmounts, return focus to this session's xterm if we still own it.
+ *
+ * Body/html focus after unmount is treated as ownership only when this pane may
+ * own keyboard focus (`isFocusedPane !== false`). Unfocused split siblings must
+ * not redirect input after a background reconnect completes.
+ * If the dialog node still holds focus, restore regardless of the pane flag.
+ */
+export function restoreTerminalFocusFromDisconnectedDialog({
+  activeElement,
+  dialogNode,
+  sessionRoot,
+  documentBody,
+  documentElement,
+  isFocusedPane,
+}: {
+  activeElement: Element | null;
+  dialogNode: HTMLElement | null;
+  sessionRoot: Element | null;
+  documentBody?: Element | null;
+  documentElement?: Element | null;
+  isFocusedPane?: boolean;
+}): boolean {
+  if (!dialogNode) return false;
+  // When React removes the focused overlay, the browser parks focus on body/html
+  // before passive-effect cleanup runs — treat that as still owning focus only
+  // for the focused pane (or solo / popup where isFocusedPane is omitted).
+  const focusLostToDocument =
+    !activeElement
+    || activeElement === documentBody
+    || activeElement === documentElement;
+  if (focusLostToDocument) {
+    if (isFocusedPane === false) return false;
+  } else if (
+    activeElement !== dialogNode
+    && !dialogNode.contains(activeElement)
+  ) {
+    return false;
+  }
+  const terminalRoot = resolveDisconnectedDialogTerminalRoot(dialogNode, sessionRoot);
+  if (!terminalRoot) return false;
+  const textarea = terminalRoot.querySelector("textarea.xterm-helper-textarea");
+  if (!(textarea instanceof HTMLElement)) return false;
+  textarea.focus({ preventScroll: true });
+  return true;
 }
 
 export function shouldDelayAutoRunSnippetInput(

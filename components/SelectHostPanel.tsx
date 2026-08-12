@@ -12,6 +12,7 @@ interface SelectHostPanelProps {
   selectedHostIds?: string[];
   multiSelect?: boolean;
   onSelect: (host: Host) => void;
+  onSelectionChange?: (selectedHostIds: string[]) => void;
   onBack: () => void;
   onContinue?: () => void;
   onNewHost?: () => void;
@@ -24,6 +25,7 @@ interface SelectHostPanelProps {
   title?: string;
   subtitle?: string;
   className?: string;
+  width?: string;
   layout?: AsidePanelLayout;
   resizable?: boolean;
   persistWidthStorageKey?: string;
@@ -36,6 +38,7 @@ const SelectHostPanel: React.FC<SelectHostPanelProps> = ({
   selectedHostIds = [],
   multiSelect = false,
   onSelect,
+  onSelectionChange,
   onBack,
   onContinue,
   onNewHost,
@@ -48,6 +51,7 @@ const SelectHostPanel: React.FC<SelectHostPanelProps> = ({
   title,
   subtitle,
   className,
+  width,
   layout = "overlay",
   resizable = false,
   persistWidthStorageKey,
@@ -77,6 +81,7 @@ const SelectHostPanel: React.FC<SelectHostPanelProps> = ({
       showBackButton={true}
       onBack={onBack}
       className={cn(layout === "overlay" && "z-40", newHostPanelOpen && "overflow-visible", className)}
+      width={width}
       layout={layout}
       resizable={resizable}
       persistWidthStorageKey={persistWidthStorageKey}
@@ -88,6 +93,7 @@ const SelectHostPanel: React.FC<SelectHostPanelProps> = ({
         selectedHostIds={selectedHostIds}
         multiSelect={multiSelect}
         onSelect={onSelect}
+        onSelectionChange={onSelectionChange}
         onConfirm={handleConfirm}
         onNewHost={onNewHost}
         availableKeys={availableKeys}

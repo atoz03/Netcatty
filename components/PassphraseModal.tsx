@@ -21,6 +21,8 @@ export interface PassphraseRequest {
   keyPath: string;
   keyName: string;
   hostname?: string;
+  sessionId?: string;
+  bootEpoch?: number;
 }
 
 /** Opt-in only: do not default to remembering key passphrases (#2024). */

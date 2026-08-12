@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { buildCattyStreamTimeouts } from './streamTimeouts';
-import { CATTY_APPROVAL_TIMEOUT_MS } from '../shared/approvalConstants';
+import { CATTY_APPROVAL_HARD_DEADLINE_MS } from '../shared/approvalConstants';
 
 describe('buildCattyStreamTimeouts', () => {
   it('keeps stream budgets from undercutting the configured command timeout', () => {
@@ -16,9 +16,9 @@ describe('buildCattyStreamTimeouts', () => {
     assert.ok(timeouts.totalMs > oneDayMs);
   });
 
-  it('includes confirm-mode approval time in long command stream budgets', () => {
+  it('includes confirm-mode hard approval deadline in long command stream budgets', () => {
     const commandTimeoutMs = 60 * 1000;
-    const expectedMinimum = commandTimeoutMs + CATTY_APPROVAL_TIMEOUT_MS + (90 * 1000);
+    const expectedMinimum = commandTimeoutMs + CATTY_APPROVAL_HARD_DEADLINE_MS + (90 * 1000);
     const timeouts = buildCattyStreamTimeouts({
       permissionMode: 'confirm',
       commandTimeoutMs,
@@ -32,7 +32,7 @@ describe('buildCattyStreamTimeouts', () => {
 
   it('scales the total stream budget for multi-step long command turns', () => {
     const commandTimeoutMs = 10 * 60 * 1000;
-    const singleStepBudgetMs = commandTimeoutMs + CATTY_APPROVAL_TIMEOUT_MS + (90 * 1000);
+    const singleStepBudgetMs = commandTimeoutMs + CATTY_APPROVAL_HARD_DEADLINE_MS + (90 * 1000);
     const timeouts = buildCattyStreamTimeouts({
       permissionMode: 'confirm',
       commandTimeoutMs,

@@ -1,6 +1,6 @@
 import { tool } from 'ai';
 import { z } from 'zod';
-import type { NetcattyBridge } from '../cattyAgent/executor';
+import type { ExecutorContext, NetcattyBridge } from '../cattyAgent/executor';
 import type { TerminalContextReadRange } from '../../../domain/terminalContextRead';
 import type { AIPermissionMode } from '../types';
 import type { WebSearchConfig } from '../types';
@@ -17,9 +17,17 @@ import {
 import { reserveSessionSlot } from '../shared/sessionExecutionQueue';
 import { fitTerminalExecuteResultForModel } from './terminalCompression';
 import { fitLargeToolResultForModel } from './toolResultFitting';
-import type { ToolOutputStore } from './toolOutputStore';
+import { redactSecretsForModel } from './modelSecretRedaction';
 import {
+  globalTerminalMonitorGuard,
+  isStreamingMonitorCommand,
+} from './terminalMonitorGuard';
+import type { ToolOutputStore } from './toolOutputStore';
+import { TOOL_OUTPUT_READ_MAX_CHARS } from './toolOutputStore';
+import {
+  buildTerminalWriteFingerprint,
   hashScopeKey,
+  hashToolResult,
   previewToolResult,
   type ToolResultDedup,
 } from './toolResultDedup';
@@ -128,17 +136,61 @@ function fitCapabilityResultForModel(
   spec: CattyToolSpec,
   chatSessionId?: string,
   toolOutputStore?: ToolOutputStore,
+  args?: Record<string, unknown>,
+  toolResultDedup?: ToolResultDedup,
 ): unknown {
   if (spec.capabilityId === 'harness.tool_output.read') {
     return result;
   }
+
+  const resultRecord = result && typeof result === 'object'
+    ? result as Record<string, unknown>
+    : undefined;
+  const jobId = typeof args?.jobId === 'string'
+    ? args.jobId
+    : typeof resultRecord?.jobId === 'string' ? resultRecord.jobId : undefined;
+  const terminalSessionId = typeof args?.sessionId === 'string'
+    ? args.sessionId
+    : typeof resultRecord?.sessionId === 'string'
+      ? resultRecord.sessionId
+      : jobId ? toolResultDedup?.terminalSessionForJob(jobId) : undefined;
 
   return fitLargeToolResultForModel({
     result,
     capabilityId: spec.capabilityId,
     chatSessionId,
     toolOutputStore,
+    terminalSessionId,
+    normalizeStrings: spec.capabilityId.startsWith('terminal.')
+      || spec.capabilityId === 'harness.terminal.read_context',
   });
+}
+
+export function applyMonitorStopResult(
+  poll: Record<string, unknown>,
+  stopResult: unknown,
+  suppressedCount: number,
+): Record<string, unknown> {
+  const stopFailed = Boolean(
+    stopResult && typeof stopResult === 'object'
+    && (
+      (stopResult as { ok?: boolean }).ok === false
+      || (
+        typeof (stopResult as { error?: unknown }).error === 'string'
+        && (stopResult as { error: string }).error.trim().length > 0
+      )
+    ),
+  );
+  return stopFailed
+    ? {
+        ...poll,
+        output: `[automatic monitor stop failed after sustained overload; ${suppressedCount} batches were suppressed. The job may still be running; poll/stop it explicitly and narrow the command before continuing.]`,
+      }
+    : {
+        ...poll,
+        status: 'stopping',
+        output: `[monitor stop requested after sustained overload; ${suppressedCount} batches were suppressed. Narrow the command with grep/awk before restarting it.]`,
+      };
 }
 
 interface LocalExecutionContext {
@@ -156,19 +208,38 @@ async function executeLocalCattyCapability(ctx: LocalExecutionContext): Promise<
 
   switch (spec.capabilityId) {
     case 'harness.tool_output.read': {
-      const { handleId, mode, maxChars } = args as {
+      const { handleId, mode, maxChars, offset, query } = args as {
         handleId: string;
-        mode?: 'head' | 'tail' | 'full';
+        mode?: 'head' | 'tail' | 'full' | 'range' | 'search';
         maxChars?: number;
+        offset?: number;
+        query?: string;
       };
       if (!toolOutputStore || !chatSessionId) {
         return { error: 'Tool output store is unavailable.' };
       }
-      const content = toolOutputStore.read({ handleId, mode, maxChars }, chatSessionId);
-      if (content == null) {
+      const requestedChars = Math.min(
+        TOOL_OUTPUT_READ_MAX_CHARS,
+        typeof maxChars === 'number' && Number.isFinite(maxChars)
+          ? Math.max(1, Math.floor(maxChars))
+          : TOOL_OUTPUT_READ_MAX_CHARS,
+      );
+      const grantedChars = toolResultDedup
+        ? toolResultDedup.takeBudget('tool-output-read', requestedChars, TOOL_OUTPUT_READ_MAX_CHARS * 2)
+        : requestedChars;
+      if (grantedChars <= 0) {
+        return {
+          error: `This turn has reached its ${TOOL_OUTPUT_READ_MAX_CHARS * 2}-character saved-output read budget. Continue in the next turn or narrow the search.`,
+        };
+      }
+      const result = await toolOutputStore.readChunkAsync(
+        { handleId, mode, maxChars: grantedChars, offset, query },
+        chatSessionId,
+      );
+      if (result == null) {
         return { error: `Handle "${handleId}" was not found for this chat session.` };
       }
-      return { handleId, mode: mode ?? 'head', content };
+      return { ...result, content: redactSecretsForModel(result.content) };
     }
     case 'harness.workspace.get_info': {
       const scopeCtx = resolveContext();
@@ -250,12 +321,27 @@ async function executeLocalCattyCapability(ctx: LocalExecutionContext): Promise<
         };
       }
 
-      return scopeCtx.readTerminalContext({
+      const result = await scopeCtx.readTerminalContext({
         sessionId,
         range: typeof args.range === 'string' ? args.range as TerminalContextReadRange : undefined,
         startLine: typeof args.startLine === 'number' ? args.startLine : undefined,
         maxLines: typeof args.maxLines === 'number' ? args.maxLines : undefined,
       });
+      if (result.ok === false) return result;
+      const normalizedResult = result;
+      const fingerprint = toolResultDedup?.fingerprintFor(
+        spec.toolName,
+        hashScopeKey([
+          sessionId,
+          String(normalizedResult.startLine),
+          String(normalizedResult.endLine),
+          normalizedResult.range,
+          hashToolResult(normalizedResult.content),
+        ]),
+      );
+      return fingerprint
+        ? applyToolDedup(spec.toolName, fingerprint, normalizedResult, toolResultDedup)
+        : normalizedResult;
     }
     case 'harness.web.search': {
       const { query, maxResults } = args as { query: string; maxResults?: number };
@@ -319,6 +405,7 @@ function createCatalogTool(spec: CattyToolSpec) {
       const slot = queueKey ? reserveSessionSlot(queueKey) : null;
 
       try {
+        const result = await (async () => {
         if (abortSignal?.aborted) {
           return { error: 'Tool call cancelled before it could start.' };
         }
@@ -327,6 +414,21 @@ function createCatalogTool(spec: CattyToolSpec) {
 
         if (spec.capabilityId === 'terminal.execute') {
           const { sessionId: sid, command } = args as { sessionId: string; command: string };
+          const writeFingerprint = buildTerminalWriteFingerprint(
+            'terminal_execute',
+            deps.chatSessionId,
+            { sessionId: sid, command },
+          );
+          const replay = writeFingerprint
+            ? toolResultDedup?.replayCompletedWrite(writeFingerprint)
+            : undefined;
+          if (replay !== undefined) {
+            return {
+              ...(typeof replay === 'object' && replay !== null ? replay : { result: replay }),
+              replayedCompletedResult: true,
+              note: 'The command already executed before request compaction; its recorded result was replayed and the command was not executed again.',
+            };
+          }
           const cancelOnAbort = () => {
             if (deps.chatSessionId) {
               void deps.bridge.aiCattyCancelExec?.(deps.chatSessionId);
@@ -335,8 +437,30 @@ function createCatalogTool(spec: CattyToolSpec) {
           abortSignal?.addEventListener('abort', cancelOnAbort, { once: true });
           try {
             const result = await executeTerminalExecute(deps, { sessionId: sid, command });
-            if (result.ok === false) return unwrap(result);
-            return fitTerminalExecuteResultForModel({
+            if (result.ok === false) {
+              if (!result.data) return unwrap(result);
+              const fittedFailure = {
+                error: fitLargeToolResultForModel({
+                  result: result.error,
+                  capabilityId: 'terminal.execute.error',
+                  chatSessionId: deps.chatSessionId,
+                  toolOutputStore,
+                  terminalSessionId: sid,
+                  normalizeStrings: true,
+                }),
+                ...fitTerminalExecuteResultForModel({
+                  ...result.data,
+                  command,
+                  sessionId: sid,
+                }, {
+                  chatSessionId: deps.chatSessionId,
+                  toolOutputStore,
+                }),
+              };
+              if (writeFingerprint) toolResultDedup?.rememberCompletedWrite(writeFingerprint, fittedFailure);
+              return fittedFailure;
+            }
+            const fitted = fitTerminalExecuteResultForModel({
               ...result.data,
               command,
               sessionId: sid,
@@ -344,6 +468,8 @@ function createCatalogTool(spec: CattyToolSpec) {
               chatSessionId: deps.chatSessionId,
               toolOutputStore,
             });
+            if (writeFingerprint) toolResultDedup?.rememberCompletedWrite(writeFingerprint, fitted);
+            return fitted;
           } finally {
             abortSignal?.removeEventListener('abort', cancelOnAbort);
           }
@@ -358,19 +484,130 @@ function createCatalogTool(spec: CattyToolSpec) {
             toolResultDedup,
             chatSessionId: deps.chatSessionId,
           });
-          return fitCapabilityResultForModel(result, spec, deps.chatSessionId, toolOutputStore);
+          return fitCapabilityResultForModel(
+            result,
+            spec,
+            deps.chatSessionId,
+            toolOutputStore,
+            args as Record<string, unknown>,
+            toolResultDedup,
+          );
         }
 
         if (!spec.rpcMethod) {
           return { error: `Capability "${spec.capabilityId}" has no RPC binding.` };
         }
 
-        const raw = await invokeCapabilityRpc(
+        const terminalStartFingerprint = spec.capabilityId === 'terminal.start'
+          ? buildTerminalWriteFingerprint(
+              'terminal_start',
+              deps.chatSessionId,
+              args as { sessionId?: unknown; command?: unknown },
+            )
+          : undefined;
+        const terminalStartReplay = terminalStartFingerprint
+          ? toolResultDedup?.replayCompletedWrite(terminalStartFingerprint)
+          : undefined;
+        if (terminalStartReplay !== undefined) {
+          return {
+            ...(typeof terminalStartReplay === 'object' && terminalStartReplay !== null
+              ? terminalStartReplay
+              : { result: terminalStartReplay }),
+            replayedCompletedResult: true,
+            note: 'The background command already started before request compaction; its recorded job was replayed and no second job was created.',
+          };
+        }
+
+        let raw = await invokeCapabilityRpc(
           deps.bridge,
           spec.rpcMethod,
           args as Record<string, unknown>,
           deps.chatSessionId,
         );
+        if (
+          spec.capabilityId === 'terminal.start'
+          && raw && typeof raw === 'object'
+          && typeof (raw as { jobId?: unknown }).jobId === 'string'
+          && typeof (args as { sessionId?: unknown }).sessionId === 'string'
+        ) {
+          toolResultDedup?.rememberTerminalJobSession(
+            (raw as { jobId: string }).jobId,
+            (args as { sessionId: string }).sessionId,
+          );
+        }
+
+        if (
+          spec.capabilityId === 'terminal.poll'
+          && raw
+          && typeof raw === 'object'
+          && (raw as { ok?: boolean }).ok !== false
+        ) {
+          let poll = raw as Record<string, unknown>;
+          const monitorKey = `${deps.chatSessionId ?? 'global'}:${String(poll.jobId ?? args.jobId ?? '')}`;
+          if (
+            isStreamingMonitorCommand(poll.command)
+            && typeof poll.output === 'string'
+            && poll.output.trim().length > 0
+          ) {
+            const guarded = globalTerminalMonitorGuard.process(monitorKey, poll.output);
+            if (guarded.action === 'stop') {
+              const stopResult = await invokeCapabilityRpc(
+                deps.bridge,
+                'netcatty/jobStop',
+                { jobId: poll.jobId ?? args.jobId },
+                deps.chatSessionId,
+              );
+              poll = applyMonitorStopResult(poll, stopResult, guarded.suppressedCount);
+            } else if (guarded.action === 'suppress') {
+              poll = {
+                ...poll,
+                output: `[monitor batch suppressed by rate limit; suppressed=${guarded.suppressedCount}]`,
+              };
+            } else {
+              let output = guarded.content;
+              if (guarded.sourceTruncated && toolOutputStore && deps.chatSessionId) {
+                const jobId = String(poll.jobId ?? args.jobId ?? '');
+                const handle = toolOutputStore.store({
+                  chatSessionId: deps.chatSessionId,
+                  capabilityId: 'terminal.poll.monitor-batch',
+                  content: poll.output,
+                  sessionId: jobId ? toolResultDedup?.terminalSessionForJob(jobId) : undefined,
+                });
+                output += [
+                  '',
+                  `[monitor batch archived before shortening: rawChars=${poll.output.length} handleId=${handle.id}]`,
+                  'Use tool_output_read with this handleId to search/read omitted details; the terminal nextOffset already advances past the raw batch.',
+                  'This saved output is available only until the app closes. Read this handle before closing the app.',
+                ].join('\n');
+              }
+              poll = { ...poll, output };
+            }
+          }
+          if (poll.status !== 'running' && poll.status !== 'stopping') {
+            globalTerminalMonitorGuard.clear(monitorKey);
+          }
+          raw = poll;
+          const fingerprint = toolResultDedup?.fingerprintFor(
+            spec.toolName,
+            hashScopeKey([
+              String(poll.jobId ?? args.jobId ?? ''),
+              String(poll.outputBaseOffset ?? ''),
+              String(poll.nextOffset ?? ''),
+              String(poll.status ?? ''),
+              hashToolResult(poll.output ?? ''),
+            ]),
+          );
+          if (fingerprint) {
+            return fitCapabilityResultForModel(
+              applyToolDedup(spec.toolName, fingerprint, poll, toolResultDedup),
+              spec,
+              deps.chatSessionId,
+              toolOutputStore,
+              args as Record<string, unknown>,
+              toolResultDedup,
+            );
+          }
+        }
 
         if (spec.toolName === 'get_environment' || spec.capabilityId === 'session.environment') {
           const ctx = typeof deps.context === 'function' ? deps.context() : deps.context;
@@ -384,6 +621,8 @@ function createCatalogTool(spec: CattyToolSpec) {
               spec,
               deps.chatSessionId,
               toolOutputStore,
+              args as Record<string, unknown>,
+              toolResultDedup,
             );
           }
         }
@@ -400,6 +639,8 @@ function createCatalogTool(spec: CattyToolSpec) {
               spec,
               deps.chatSessionId,
               toolOutputStore,
+              args as Record<string, unknown>,
+              toolResultDedup,
             );
           }
 
@@ -425,13 +666,35 @@ function createCatalogTool(spec: CattyToolSpec) {
                 preview: handle.preview,
                 totalChars: handle.totalChars,
                 handleId: handle.id,
-                note: 'Full file content stored. Use tool_output_read with this handleId to read more.',
+                note: 'Full file content is available only until the app closes. Use tool_output_read now.',
               };
             }
           }
         }
 
-        return fitCapabilityResultForModel(raw, spec, deps.chatSessionId, toolOutputStore);
+        const fittedRaw = fitCapabilityResultForModel(
+          raw,
+          spec,
+          deps.chatSessionId,
+          toolOutputStore,
+          args as Record<string, unknown>,
+          toolResultDedup,
+        );
+        if (
+          terminalStartFingerprint
+          && raw && typeof raw === 'object'
+          && (raw as { ok?: boolean }).ok !== false
+          && typeof (raw as { jobId?: unknown }).jobId === 'string'
+        ) {
+          toolResultDedup?.rememberCompletedWrite(terminalStartFingerprint, fittedRaw);
+        }
+        return fittedRaw;
+        })();
+        if (toolOutputStore && deps.chatSessionId) {
+          await toolOutputStore.flush(deps.chatSessionId);
+          return toolOutputStore.resolveRestartPersistenceNotices(result, deps.chatSessionId);
+        }
+        return result;
       } finally {
         slot?.release();
       }
@@ -456,8 +719,8 @@ export function buildCattyToolContext(input: {
     commandBlocklist: input.commandBlocklist,
     webSearchConfig: input.webSearchConfig,
     getExecutorContext: typeof input.context === 'function'
-      ? input.context
-      : () => input.context,
+      ? input.context as () => ExecutorContext
+      : () => input.context as ExecutorContext,
     toolOutputStore: input.toolOutputStore,
     toolResultDedup: input.toolResultDedup,
   };

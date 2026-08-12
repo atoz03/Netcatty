@@ -1,14 +1,43 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import type React from 'react';
-import type { Host, HostProtocol } from '../../types';
+import type { Host, HostProtocol, TerminalSession } from '../../types';
 import type { PassphraseRequest } from '../../components/PassphraseModal';
-import { getEffectiveHostDistro } from '../../domain/host';
+import type { TerminalPopupPayload } from '../../domain/systemManager/types';
+import { getEffectiveHostDistro, classifyDistroId, shouldProbeSessionCwd } from '../../domain/host';
 import { sanitizeHostIconFields } from '../../domain/hostIcon';
+import { resolveEffectiveTerminalProtocol } from '../../domain/terminalProtocol';
 import { getTerminalPassthroughActions } from '../state/useGlobalHotkeys';
+import { tabShortcutDigitFromEvent } from '../../domain/models/keyBindings';
 import { buildNumberShortcutTabTargets } from './tabShortcutTargets';
+import { captureInheritedCwd } from '../state/inheritedCwd';
 
 type AppContextGetter = () => Record<string, any>;
 const TERMINAL_PASSTHROUGH_ACTIONS = getTerminalPassthroughActions();
+
+async function deliverKeyboardInteractiveResponse(
+  ctx: Record<string, any>,
+  requestId: string,
+  responses: string[],
+  cancelled: boolean,
+) {
+  const { netcattyBridge, t, toast } = ctx;
+  const bridge = netcattyBridge.get();
+  if (!bridge?.respondKeyboardInteractive) {
+    toast.error(t('common.unknownError'), t('common.error'));
+    return false;
+  }
+  try {
+    const result = await bridge.respondKeyboardInteractive(requestId, responses, cancelled);
+    if (!result?.success) {
+      toast.error(result?.error || t('common.unknownError'), t('common.error'));
+      return false;
+    }
+    return true;
+  } catch (err) {
+    toast.error(err instanceof Error ? err.message : t('common.unknownError'), t('common.error'));
+    return false;
+  }
+}
 
 export const getLogHostVisualSnapshot = (host: Host) => {
   const icon = sanitizeHostIconFields(host);
@@ -23,21 +52,84 @@ export const getLogHostVisualSnapshot = (host: Host) => {
   };
 };
 
-export function handleTrayJumpToSessionImpl(getCtx: AppContextGetter, sessionId: string) {
-  const { sessions, setActiveTabId, setWorkspaceFocusedSession } = getCtx();
-{
-    const session = sessions.find((item) => item.id === sessionId);
-    if (session?.workspaceId) {
-      setActiveTabId(session.workspaceId);
-      setWorkspaceFocusedSession(session.workspaceId, sessionId);
+/**
+ * AI silent sessions stay out of the tab bar. Opening them via tray should
+ * attach a terminal-popup window to the same live PTY (same sessionId) instead
+ * of activating them as a main-window tab (tab-less terminal surface) or
+ * spawning a new shell via connection reuse.
+ */
+export function buildAiSilentSessionPopupPayload(session: TerminalSession): TerminalPopupPayload {
+  const { hiddenFromTabs: _hiddenFromTabs, ...sourceSession } = session;
+  return {
+    title: session.hostLabel || 'Terminal',
+    parentSessionId: session.id,
+    startupCommand: '',
+    attachSessionId: session.id,
+    sourceSession: {
+      ...sourceSession,
+    },
+  };
+}
+
+export async function handleTrayJumpToSessionImpl(getCtx: AppContextGetter, sessionId: string) {
+  const {
+    sessions,
+    setActiveTabId,
+    setWorkspaceFocusedSession,
+    netcattyBridge,
+    toast,
+    t,
+  } = getCtx();
+  const session = sessions.find((item: TerminalSession) => item.id === sessionId);
+  if (!session) return;
+
+  if (session.hiddenFromTabs) {
+    // Leave the main surface if this silent session was already activated
+    // (legacy jump path left a terminal with no tab chrome).
+    const getActiveTabId = getCtx().getActiveTabId as (() => string) | undefined;
+    if (!getActiveTabId || getActiveTabId() === sessionId) {
+      setActiveTabId('vault');
+    }
+
+    const bridge = netcattyBridge?.get?.();
+    if (!bridge?.openTerminalPopup) {
+      toast?.error?.(t?.('tabs.copyTabToNewWindowFailed') ?? 'Failed to open tab in a new window');
       return;
     }
-    setActiveTabId(sessionId);
+    try {
+      const result = await bridge.openTerminalPopup(buildAiSilentSessionPopupPayload(session));
+      if (!result?.success) {
+        toast?.error?.(
+          result?.error
+            || t?.('tabs.copyTabToNewWindowFailed')
+            || 'Failed to open tab in a new window',
+        );
+      }
+    } catch (err) {
+      toast?.error?.(
+        err instanceof Error
+          ? err.message
+          : (t?.('tabs.copyTabToNewWindowFailed') ?? 'Failed to open tab in a new window'),
+      );
+    }
+    return;
   }
+
+  // Visible sessions still live in the main window; bring it forward now that
+  // the tray jump IPC no longer auto-focuses main (silent AI sessions open a
+  // popup instead and must not steal main-window focus).
+  void netcattyBridge?.get?.()?.openMainWindow?.();
+
+  if (session.workspaceId) {
+    setActiveTabId(session.workspaceId);
+    setWorkspaceFocusedSession(session.workspaceId, sessionId);
+    return;
+  }
+  setActiveTabId(sessionId);
 }
 
 export function handleTrayTogglePortForwardImpl(getCtx: AppContextGetter, ruleId: string, start: boolean) {
-  const { hosts, identities, keys, knownHosts, portForwardingRules, resolveEffectiveHost, startTunnel, stopTunnel, t, terminalSettings, toast } = getCtx();
+  const { hasRuntimeTunnel, hosts, identities, keys, knownHosts, portForwardingRules, resolveEffectiveHost, startTunnel, stopTunnel, t, terminalSettings, toast } = getCtx();
 {
     const rule = portForwardingRules.find((item) => item.id === ruleId);
     if (!rule) return;
@@ -48,14 +140,18 @@ export function handleTrayTogglePortForwardImpl(getCtx: AppContextGetter, ruleId
     }
 
     if (start) {
-      const effectiveHost = resolveEffectiveHost(host);
-      void startTunnel(rule, effectiveHost, hosts.map(resolveEffectiveHost), keys, identities, (status, error) => {
-        if (status === "error" && error) toast.error(error);
-      }, rule.autoStart, terminalSettings, knownHosts);
+      if (!hasRuntimeTunnel(ruleId)) {
+        const effectiveHost = resolveEffectiveHost(host);
+        void startTunnel(rule, effectiveHost, hosts.map(resolveEffectiveHost), keys, identities, (status, error) => {
+          if (status === "error" && error) toast.error(error);
+        }, rule.autoStart, terminalSettings, knownHosts);
+      }
       return;
     }
 
-    void stopTunnel(ruleId);
+    void stopTunnel(ruleId).then((result) => {
+      if (!result.success && result.error) toast.error(result.error);
+    });
   }
 }
 
@@ -90,7 +186,7 @@ export function handleTrayPanelConnectImpl(getCtx: AppContextGetter, hostId: str
       return sessionId;
     }
 
-    const protocol = effectiveHost.etEnabled ? 'et' : effectiveHost.moshEnabled ? 'mosh' : (effectiveHost.protocol || 'ssh');
+    const protocol = resolveEffectiveTerminalProtocol(effectiveHost);
     const resolvedAuth = resolveHostAuth({ host: effectiveHost, keys, identities });
     const sessionId = connectToHost(effectiveHost);
     addConnectionLog({
@@ -99,7 +195,7 @@ export function handleTrayPanelConnectImpl(getCtx: AppContextGetter, hostId: str
       hostLabel: host.label,
       hostname: host.hostname,
       username: resolvedAuth.username || 'root',
-      protocol: protocol as 'ssh' | 'telnet' | 'local' | 'mosh' | 'et',
+      protocol,
       ...getLogHostVisualSnapshot(effectiveHost),
       startTime: Date.now(),
       localUsername: username,
@@ -227,42 +323,68 @@ export function handleEscapeKeyDownImpl(getCtx: AppContextGetter, e: KeyboardEve
   }
 }
 
-export function handleKeyboardInteractiveSubmitImpl(getCtx: AppContextGetter, requestId: string, responses: string[], savePassword?: string) {
-  const { hosts, keyboardInteractiveQueue, netcattyBridge, sessions, setKeyboardInteractiveQueue, updateHosts } = getCtx();
+export async function handleKeyboardInteractiveSubmitImpl(
+  getCtx: AppContextGetter,
+  requestId: string,
+  responses: string[],
+  savePassword?: string,
+) {
+  const ctx = getCtx();
+  const {
+    hosts,
+    hostsRef,
+    keyboardInteractiveQueue,
+    sessions,
+    setKeyboardInteractiveQueue,
+    updateHosts,
+  } = ctx;
 {
-    const bridge = netcattyBridge.get();
-    if (bridge?.respondKeyboardInteractive) {
-      void bridge.respondKeyboardInteractive(requestId, responses, false);
-    }
-    // Save password to host if requested
-    if (savePassword) {
-      const request = keyboardInteractiveQueue.find(r => r.requestId === requestId);
-      if (request?.sessionId) {
-        const session = sessions.find(s => s.id === request.sessionId);
-        // Only save when the prompting hostname matches the session's host,
-        // to avoid overwriting the destination host's password with a jump host's password
-        if (session?.hostId && (!request.hostname || request.hostname === session.hostname)) {
-          const host = hosts.find(h => h.id === session.hostId);
-          if (host) {
-            updateHosts(hosts.map(h => h.id === host.id ? { ...h, password: savePassword, savePassword: true } : h));
-          }
-        }
-      }
+    if (!await deliverKeyboardInteractiveResponse(ctx, requestId, responses, false)) return false;
+    const request = keyboardInteractiveQueue.find(r => r.requestId === requestId);
+    const session = request?.sessionId
+      ? sessions.find(s => s.id === request.sessionId)
+      : undefined;
+    const explicitHostId = typeof request?.hostId === "string" ? request.hostId : undefined;
+    const canUseExplicitHost = !!explicitHostId;
+    // Only mutate the destination host when the prompting hostname matches —
+    // jump-host challenges without an explicit hostId must not rewrite the target host.
+    const canUpdateDestinationHost = !!(
+      session?.hostId
+      && (!request?.hostname || request.hostname === session.hostname)
+    );
+    const hostIdToUpdate = canUseExplicitHost
+      ? explicitHostId
+      : canUpdateDestinationHost
+        ? session.hostId
+        : undefined;
+    const latestHosts = hostsRef?.current ?? hosts;
+    const host = hostIdToUpdate
+      ? latestHosts.find((h: Host) => h.id === hostIdToUpdate)
+      : undefined;
+    // Save password to host if requested - never for second-factor / EDR prompts
+    // (allowSavePassword === false) so a secondary secret cannot overwrite the
+    // host login password (#2150 / Codex review on #2151).
+    if (savePassword && host && request?.allowSavePassword !== false) {
+      updateHosts(latestHosts.map((h: Host) => h.id === host.id ? {
+        ...h,
+        password: savePassword,
+        savePassword: true,
+      } : h));
     }
     // Remove from queue by requestId
     setKeyboardInteractiveQueue(prev => prev.filter(r => r.requestId !== requestId));
+    return true;
   }
 }
 
-export function handleKeyboardInteractiveCancelImpl(getCtx: AppContextGetter, requestId: string) {
-  const { netcattyBridge, setKeyboardInteractiveQueue } = getCtx();
+export async function handleKeyboardInteractiveCancelImpl(getCtx: AppContextGetter, requestId: string) {
+  const ctx = getCtx();
+  const { setKeyboardInteractiveQueue } = ctx;
 {
-    const bridge = netcattyBridge.get();
-    if (bridge?.respondKeyboardInteractive) {
-      void bridge.respondKeyboardInteractive(requestId, [], true);
-    }
+    if (!await deliverKeyboardInteractiveResponse(ctx, requestId, [], true)) return false;
     // Remove from queue by requestId
     setKeyboardInteractiveQueue(prev => prev.filter(r => r.requestId !== requestId));
+    return true;
   }
 }
 
@@ -340,24 +462,100 @@ export function createLocalTerminalWithCurrentShellImpl(getCtx: AppContextGetter
   }
 }
 
-export function splitSessionWithCurrentShellImpl(getCtx: AppContextGetter, sessionId: string, direction: 'horizontal' | 'vertical') {
-  const { classifyLocalShellType, discoveredShells, resolveShellSetting, splitSession, terminalSettings } = getCtx();
-{
-    const resolved = resolveShellSetting(terminalSettings.localShell, discoveredShells);
-    return splitSession(sessionId, direction, {
-      localShellType: classifyLocalShellType(resolved?.command || terminalSettings.localShell, navigator.userAgent),
-    });
+async function captureCtxInheritedCwd(getCtx: AppContextGetter, sessionId: string): Promise<string | undefined> {
+  const { sessions, netcattyBridge, hostById, terminalHosts, getSessionRestoreCwd } = getCtx();
+  const source = sessions?.find((s: { id: string }) => s.id === sessionId);
+  if (!source) return undefined;
+
+  // Freshest cwd: the live OSC 7 value tracked in terminal state (the only
+  // source that reflects `cd`s in a running local terminal — lastCwd is a
+  // startup snapshot). Falls through to the SSH probe / lastCwd when absent.
+  const liveCwd: string | undefined = getSessionRestoreCwd?.(sessionId);
+
+  const bridge = netcattyBridge?.get?.();
+  // hostById is a Map of SAVED hosts; ephemeral terminal hosts only appear in
+  // terminalHosts. Classify the DETECTED distro (host.distro), not the
+  // effective/override value, so a cosmetic Linux icon can't re-enable the
+  // probe on a network device (matches the terminal cwd-probe gate).
+  const host = hostById?.get?.(source.hostId)
+    ?? terminalHosts?.find?.((h: { id: string }) => h.id === source.hostId);
+  const isNetworkDevice = !!host
+    && (host.deviceType === 'network' || classifyDistroId(host.distro) === 'network-device');
+
+  // Only probe when the app's own cwd-probe gate would: never for network
+  // devices (the extra exec channel can close a Huawei VRP-style session), and
+  // for not-yet-classified hosts consult the SSH banner (issue #1043).
+  let allowSshProbe = false;
+  const isConnectedSsh = (source.protocol === "ssh" || source.protocol === undefined)
+    && source.status === "connected";
+  if (!liveCwd && isConnectedSsh && !isNetworkDevice) {
+    try {
+      const info = await bridge?.getSessionRemoteInfo?.(sessionId);
+      allowSshProbe = shouldProbeSessionCwd({ isNetworkDevice: false, remoteSshVersion: info?.remoteSshVersion });
+    } catch {
+      allowSshProbe = false;
+    }
   }
+
+  const probe = async (
+    id: string,
+    options?: {
+      allowHomeFallback?: boolean;
+      allowLoginShellFallback?: boolean;
+      timeoutMs?: number;
+    },
+  ) =>
+    (await bridge?.getSessionPwd?.(id, options)) ?? { success: false };
+  return captureInheritedCwd(source, probe, { liveCwd, allowSshProbe });
 }
 
-export function copySessionWithCurrentShellImpl(getCtx: AppContextGetter, sessionId: string) {
+export async function splitSessionWithCurrentShellImpl(getCtx: AppContextGetter, sessionId: string, direction: 'horizontal' | 'vertical') {
+  const { classifyLocalShellType, discoveredShells, resolveShellSetting, splitSession, terminalSettings } = getCtx();
+  const resolved = resolveShellSetting(terminalSettings.localShell, discoveredShells);
+  const inheritedCwd = await captureCtxInheritedCwd(getCtx, sessionId);
+  const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+  return splitSession(sessionId, direction, {
+    localShellType: classifyLocalShellType(resolved?.command || terminalSettings.localShell, userAgent),
+    inheritedCwd,
+  });
+}
+
+export async function copySessionWithCurrentShellImpl(getCtx: AppContextGetter, sessionId: string) {
   const { classifyLocalShellType, copySession, discoveredShells, resolveShellSetting, terminalSettings } = getCtx();
-{
-    const resolved = resolveShellSetting(terminalSettings.localShell, discoveredShells);
-    return copySession(sessionId, {
-      localShellType: classifyLocalShellType(resolved?.command || terminalSettings.localShell, navigator.userAgent),
-    });
+  const resolved = resolveShellSetting(terminalSettings.localShell, discoveredShells);
+  const inheritedCwd = await captureCtxInheritedCwd(getCtx, sessionId);
+  const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+  return copySession(sessionId, {
+    localShellType: classifyLocalShellType(resolved?.command || terminalSettings.localShell, userAgent),
+    inheritedCwd,
+  });
+}
+
+export async function copyWorkspaceWithCurrentShellImpl(getCtx: AppContextGetter, workspaceId: string) {
+  const { classifyLocalShellType, collectSessionIds, copyWorkspace, discoveredShells, resolveShellSetting, terminalSettings, workspaces } = getCtx();
+  const workspace = workspaces.find((w: { id: string }) => w.id === workspaceId);
+  if (!workspace) return;
+
+  const sessionIds: string[] = collectSessionIds(workspace.root);
+  // Resolve each pane's cwd in parallel — SSH panes may await the /proc probe.
+  const entries = await Promise.all(
+    sessionIds.map(async (id): Promise<readonly [string, string | undefined]> =>
+      [id, await captureCtxInheritedCwd(getCtx, id)] as const),
+  );
+  const perPaneCwd: Record<string, string | undefined> = Object.fromEntries(entries);
+
+  // Cwd capture is async, so do not invoke the state action with a workspace
+  // that was closed or changed while its panes were being inspected.
+  if (getCtx().workspaces.find((candidate: { id: string }) => candidate.id === workspaceId) !== workspace) {
+    return;
   }
+
+  const resolved = resolveShellSetting(terminalSettings.localShell, discoveredShells);
+  const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+  return copyWorkspace(workspaceId, {
+    localShellType: classifyLocalShellType(resolved?.command || terminalSettings.localShell, userAgent),
+    perPaneCwd,
+  });
 }
 
 export function openManagedTerminalWithCurrentShellImpl(
@@ -453,10 +651,10 @@ export async function confirmIfBusyLocalTerminalImpl(getCtx: AppContextGetter, s
 }
 
 export async function closeTabsBatchImpl(getCtx: AppContextGetter, targetIds: string[]) {
-  const { closeLogView, closeSession, closeTabsInFlightRef, closeWorkspace, confirmIfBusyLocalTerminal, logViews, sessions, workspaces } = getCtx();
+  const { closeLogView, closeSessions, closeTabsInFlightRef, closeWorkspace, confirmIfBusyLocalTerminal, logViews, sessions, workspaces } = getCtx();
 {
-      if (targetIds.length === 0) return;
-      if (closeTabsInFlightRef.current) return;
+      if (targetIds.length === 0) return true;
+      if (closeTabsInFlightRef.current) return false;
 
       // Expand workspace ids into their constituent session ids so the busy
       // probe sees every local shell that's about to be killed.
@@ -475,16 +673,21 @@ export async function closeTabsBatchImpl(getCtx: AppContextGetter, targetIds: st
       closeTabsInFlightRef.current = true;
       try {
         const ok = await confirmIfBusyLocalTerminal(sessionIdsToProbe);
-        if (!ok) return;
+        if (!ok) return false;
+        const standaloneSessionIds = targetIds.filter((tabId) => (
+          sessions.some((session) => session.id === tabId)
+        ));
+        if (standaloneSessionIds.length > 0) {
+          closeSessions(standaloneSessionIds);
+        }
         for (const tabId of targetIds) {
           if (workspaces.find((w) => w.id === tabId)) {
             closeWorkspace(tabId);
-          } else if (sessions.find((s) => s.id === tabId)) {
-            closeSession(tabId);
           } else if (logViews.find((lv) => lv.id === tabId)) {
             closeLogView(tabId);
           }
         }
+        return true;
       } finally {
         closeTabsInFlightRef.current = false;
       }
@@ -492,7 +695,7 @@ export async function closeTabsBatchImpl(getCtx: AppContextGetter, targetIds: st
 }
 
 export function executeHotkeyActionImpl(getCtx: AppContextGetter, action: string, e: KeyboardEvent) {
-  const { IS_DEV, MOVE_FOCUS_DEBOUNCE_MS, activeTabStore, addConnectionLogRef, closeSession, closeTabInFlightRef, closeWorkspace, collectSessionIds, confirmIfBusyLocalTerminal, createLocalTerminalWithCurrentShell, editorTabs, fromEditorTabId, handleOpenSettingsRef, handleRequestCloseEditorTabRef, isEditorTabId, isQuickSwitcherOpen, lastMoveFocusTimeRef, moveFocusInWorkspace, orderedTabs, resolveCloseIntent, resolveSnippetsShortcutIntent, sessions, setActiveTabId, setAddToWorkspaceDialog, setIsQuickSwitcherOpen, setNavigateToSection, settings, splitSessionWithCurrentShell, systemInfoRef, toEditorTabId, toggleBroadcast, toggleScriptsSidePanelRef, toggleSidePanelRef, toggleWorkspaceViewMode, workspaces } = getCtx();
+  const { IS_DEV, MOVE_FOCUS_DEBOUNCE_MS, activeTabStore, addConnectionLogRef, closePluginViewTab, closeSession, closeTabInFlightRef, closeWorkspace, collectSessionIds, confirmIfBusyLocalTerminal, createLocalTerminalWithCurrentShell, editorTabs, fromEditorTabId, handleOpenSettingsRef, handleRequestCloseEditorTabRef, isEditorTabId, isPluginViewTabId, isQuickSwitcherOpen, lastMoveFocusTimeRef, moveFocusInWorkspace, orderedTabs, resolveCloseIntent, resolveSnippetsShortcutIntent, sessions, setActiveTabId, setAddToWorkspaceDialog, setIsQuickSwitcherOpen, setNavigateToSection, settings, splitSessionWithCurrentShell, systemInfoRef, toEditorTabId, toggleBroadcast, toggleScriptsSidePanelRef, toggleSidePanelRef, toggleWorkspaceViewMode, workspaces } = getCtx();
 {
     const shortcutTabs = buildNumberShortcutTabTargets({
       showSftpTab: settings.showSftpTab ?? true,
@@ -502,12 +705,10 @@ export function executeHotkeyActionImpl(getCtx: AppContextGetter, action: string
     });
     switch (action) {
       case 'switchToTab': {
-        // Get the number key pressed (1-9)
-        const num = parseInt(e.key, 10);
-        if (num >= 1 && num <= 9) {
-          if (num <= shortcutTabs.length) {
-            setActiveTabId(shortcutTabs[num - 1]);
-          }
+        // Prefer physical Digit code so Shift+[1...9] works when e.key is "!" etc.
+        const num = tabShortcutDigitFromEvent(e);
+        if (num !== null && num <= shortcutTabs.length) {
+          setActiveTabId(shortcutTabs[num - 1]);
         }
         break;
       }
@@ -537,6 +738,11 @@ export function executeHotkeyActionImpl(getCtx: AppContextGetter, action: string
         const currentId = activeTabStore.getActiveTabId();
         if (!currentId || currentId === 'vault' || currentId === 'sftp') break;
         if (closeTabInFlightRef.current) break;
+
+        if (isPluginViewTabId?.(currentId)) {
+          closePluginViewTab?.(currentId);
+          break;
+        }
 
         // Editor tabs route through their own dirty-confirm close flow.
         if (isEditorTabId(currentId)) {
@@ -805,7 +1011,7 @@ export function handleCreateLocalTerminalImpl(
   }
 }
 
-export function handleConnectToHostImpl(getCtx: AppContextGetter, host: Host) {
+export function handleConnectToHostImpl(getCtx: AppContextGetter, host: Host, hidden = false) {
   const { addConnectionLog, connectToHost, identities, keys, resolveEffectiveHost, resolveHostAuth, systemInfoRef } = getCtx();
 {
     const { username, hostname: localHost } = systemInfoRef.current;
@@ -815,7 +1021,7 @@ export function handleConnectToHostImpl(getCtx: AppContextGetter, host: Host) {
     // Handle serial hosts separately
     if (effectiveHost.protocol === 'serial') {
       const portName = host.hostname.split('/').pop() || host.hostname;
-      const sessionId = connectToHost(effectiveHost);
+      const sessionId = connectToHost(effectiveHost, { hidden });
       addConnectionLog({
         sessionId,
         hostId: host.id,
@@ -832,16 +1038,16 @@ export function handleConnectToHostImpl(getCtx: AppContextGetter, host: Host) {
       return sessionId;
     }
 
-    const protocol = effectiveHost.etEnabled ? 'et' : effectiveHost.moshEnabled ? 'mosh' : (effectiveHost.protocol || 'ssh');
+    const protocol = resolveEffectiveTerminalProtocol(effectiveHost);
     const resolvedAuth = resolveHostAuth({ host: effectiveHost, keys, identities });
-    const sessionId = connectToHost(effectiveHost);
+    const sessionId = connectToHost(effectiveHost, { hidden });
     addConnectionLog({
       sessionId,
       hostId: host.id,
       hostLabel: host.label,
       hostname: host.hostname,
       username: resolvedAuth.username || 'root',
-      protocol: protocol as 'ssh' | 'telnet' | 'local' | 'mosh' | 'et',
+      protocol,
       ...getLogHostVisualSnapshot(effectiveHost),
       startTime: Date.now(),
       localUsername: username,
@@ -922,29 +1128,6 @@ export function handleProtocolSelectImpl(getCtx: AppContextGetter, protocol: Hos
       handleConnectToHost(hostWithProtocol);
       setProtocolSelectHost(null);
     }
-  }
-}
-
-export function handleToggleThemeImpl(getCtx: AppContextGetter) {
-  const { openSettingsWindow, resolvedTheme, setTheme, t, theme, toast } = getCtx();
-{
-    if (theme === 'system') {
-      toast.info(
-        t('topTabs.toggleTheme.systemExitMessage'),
-        {
-          title: t('topTabs.toggleTheme.systemExitTitle'),
-          actionLabel: t('topTabs.toggleTheme.openSettings'),
-          onClick: () => {
-            void (async () => {
-              const opened = await openSettingsWindow();
-              if (!opened) toast.error(t('toast.settingsUnavailable'), t('common.settings'));
-            })();
-          },
-        }
-      );
-      return;
-    }
-    setTheme(resolvedTheme === 'dark' ? 'light' : 'dark');
   }
 }
 

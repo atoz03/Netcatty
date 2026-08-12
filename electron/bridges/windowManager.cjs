@@ -32,6 +32,8 @@ const THEME_COLORS = {
 let mainWindow = null;
 const mainWindows = new Set();
 const appContentWindows = new Set();
+const dirtyEditorWindows = new Set();
+let appContentWindowClosedHandler = null;
 let lastFocusedMainWindow = null;
 let settingsWindow = null;
 let currentTheme = "light";
@@ -41,6 +43,7 @@ let cachedNativeTheme = null;
 
 let handlersRegistered = false; // Prevent duplicate IPC handler registration
 let menuDeps = null;
+let pluginApplicationMenuProvider = null;
 let electronApp = null; // Reference to Electron app for userData path
 let isQuitting = false;
 // Set right before electron-updater's quitAndInstall() drives app.quit() for a
@@ -88,6 +91,17 @@ function debugLog(...args) {
 
 function setIsQuitting(nextValue) {
   isQuitting = Boolean(nextValue);
+}
+
+function setAppContentWindowClosedHandler(handler) {
+  if (handler != null && typeof handler !== "function") {
+    throw new TypeError("App content window close handler must be a function");
+  }
+  appContentWindowClosedHandler = handler ?? null;
+}
+
+function notifyAppContentWindowClosed(win) {
+  appContentWindowClosedHandler?.(win);
 }
 
 function shouldCloseWindowFromInput(input) {
@@ -248,9 +262,10 @@ function getWindowBoundsState(win, overrideBounds) {
 }
 
 const MENU_LABELS = {
-  en: { edit: "Edit", view: "View", window: "Window", reload: "Reload", closeWindow: "Close Window" },
-  "zh-CN": { edit: "编辑", view: "视图", window: "窗口", reload: "重新加载", closeWindow: "关闭窗口" },
-  "zh-TW": { edit: "編輯", view: "檢視", window: "視窗", reload: "重新載入", closeWindow: "關閉視窗" },
+  en: { edit: "Edit", view: "View", plugins: "Plugins", window: "Window", reload: "Reload", closeWindow: "Close Window" },
+  ru: { edit: "Правка", view: "Вид", plugins: "Плагины", window: "Окно", reload: "Перезагрузить", closeWindow: "Закрыть окно" },
+  "zh-CN": { edit: "编辑", view: "视图", plugins: "插件", window: "窗口", reload: "重新加载", closeWindow: "关闭窗口" },
+  "zh-TW": { edit: "編輯", view: "檢視", plugins: "外掛程式", window: "視窗", reload: "重新載入", closeWindow: "關閉視窗" },
 };
 
 function tMenu(language, key) {
@@ -266,7 +281,19 @@ function tMenu(language, key) {
 function rebuildApplicationMenu() {
   if (!menuDeps?.Menu || !menuDeps?.app) return;
   const menu = buildAppMenu(menuDeps.Menu, menuDeps.app, menuDeps.isMac, currentLanguage);
-  menuDeps.Menu.setApplicationMenu(menu);
+  menuDeps.Menu.setApplicationMenu?.(menu);
+}
+
+function setPluginApplicationMenuProvider(provider) {
+  if (provider != null && typeof provider !== "function") {
+    throw new TypeError("Plugin application menu provider must be a function");
+  }
+  pluginApplicationMenuProvider = provider ?? null;
+  rebuildApplicationMenu();
+}
+
+function getCurrentLanguage() {
+  return currentLanguage;
 }
 
 function getWindowForIpcEvent(event) {
@@ -294,7 +321,11 @@ function pruneAppContentWindows() {
   for (const win of Array.from(appContentWindows)) {
     if (!win || win.isDestroyed?.()) {
       appContentWindows.delete(win);
+      dirtyEditorWindows.delete(win);
     }
+  }
+  for (const win of Array.from(dirtyEditorWindows)) {
+    if (!appContentWindows.has(win)) dirtyEditorWindows.delete(win);
   }
 }
 
@@ -308,25 +339,32 @@ function getAppContentWindowList() {
   return Array.from(appContentWindows).filter((win) => isWindowUsable(win));
 }
 
+function getDirtyEditorWindowList() {
+  pruneAppContentWindows();
+  return Array.from(dirtyEditorWindows).filter((win) => isWindowUsable(win));
+}
+
 function rememberMainWindow(win) {
   if (!win || win.isDestroyed?.()) return;
   lastFocusedMainWindow = win;
   mainWindow = win;
 }
 
-function registerAppContentWindow(win) {
+function registerAppContentWindow(win, options = {}) {
   if (!win || win.isDestroyed?.()) return;
   appContentWindows.add(win);
+  if (options.queryDirtyEditors === true) dirtyEditorWindows.add(win);
 }
 
 function unregisterAppContentWindow(win) {
   if (!win) return;
   appContentWindows.delete(win);
+  dirtyEditorWindows.delete(win);
 }
 
 function registerMainWindow(win) {
   if (!win || win.isDestroyed?.()) return;
-  registerAppContentWindow(win);
+  registerAppContentWindow(win, { queryDirtyEditors: true });
   mainWindows.add(win);
   rememberMainWindow(win);
   try {
@@ -849,7 +887,10 @@ function resolveLiveAppIcon(fallback = null) {
 /**
  * Create the main application window
  */
-const { createMainWindowApi } = require("./windowManager/mainWindow.cjs");
+const {
+  createMainWindowApi,
+  setTerminalKeyboardFocusForWindow,
+} = require("./windowManager/mainWindow.cjs");
 const mainWindowApi = createMainWindowApi({
   get mainWindow() { return mainWindow; },
   set mainWindow(value) { mainWindow = value; },
@@ -898,6 +939,8 @@ const mainWindowApi = createMainWindowApi({
   unregisterMainWindow,
   registerAppContentWindow,
   unregisterAppContentWindow,
+  notifyAppContentWindowClosed,
+  setAppContentWindowClosedHandler,
   getMainWindowCount,
   applyWindowOpacityToWindow,
   resolveLiveAppIcon,
@@ -972,6 +1015,9 @@ const terminalPopupWindowApi = createTerminalPopupWindowApi({
   sendWhenRendererReady,
   showAndFocusWindow,
   resolveSettingsWindowBounds,
+  registerAppContentWindow,
+  unregisterAppContentWindow,
+  notifyAppContentWindowClosed,
 });
 const { openTerminalPopupWindow, closeTerminalPopupWindow } = terminalPopupWindowApi;
 
@@ -1043,6 +1089,11 @@ function registerWindowHandlers(ipcMain, nativeTheme) {
     return restoreWindowInputFocus(win);
   });
 
+  ipcMain.on("netcatty:window:set-terminal-keyboard-focus", (event, payload) => {
+    const win = getWindowForIpcEvent(event);
+    setTerminalKeyboardFocusForWindow(win, payload?.focused === true);
+  });
+
   ipcMain.handle("netcatty:window:setTitle", (event, title) => {
     const win = getWindowForIpcEvent(event);
     if (!win || win.isDestroyed()) return false;
@@ -1058,6 +1109,7 @@ function registerWindowHandlers(ipcMain, nativeTheme) {
   ipcMain.handle("netcatty:setTheme", (_event, theme) => {
     currentTheme = theme;
     nativeTheme.themeSource = theme;
+    rebuildApplicationMenu();
     const effectiveTheme = theme === "system"
       ? (nativeTheme?.shouldUseDarkColors ? "dark" : "light")
       : theme;
@@ -1136,6 +1188,22 @@ function registerWindowHandlers(ipcMain, nativeTheme) {
   // Broadcast settings changed to all windows (for cross-window sync)
   ipcMain.on("netcatty:settings:changed", (event, payload) => {
     const senderId = event?.sender?.id;
+    // Apply SSH transport idle park TTL in the main process (shared shell/SFTP/
+    // transfer/port-forward connections). Renderer owns persistence; main owns
+    // the registry timers.
+    try {
+      if (typeof payload?.value === "number" && Number.isFinite(payload.value) && payload.value >= 0) {
+        const {
+          setDefaultTransportIdleTtlMs,
+          STORAGE_KEY_SSH_TRANSPORT_IDLE_TTL_MS,
+        } = require("./sshConnectionPool.cjs");
+        if (payload?.key === STORAGE_KEY_SSH_TRANSPORT_IDLE_TTL_MS) {
+          setDefaultTransportIdleTtlMs(payload.value);
+        }
+      }
+    } catch {
+      // ignore — pool may be unavailable in tests
+    }
     // Notify all windows except the sender
     // Check both isDestroyed() and webContents.isDestroyed() to handle HMR refresh
     try {
@@ -1218,6 +1286,37 @@ function buildAppMenu(Menu, app, isMac, language = currentLanguage) {
         { role: "togglefullscreen" },
       ],
     },
+    ...(() => {
+      let items = [];
+      try { items = pluginApplicationMenuProvider?.() ?? []; } catch {}
+      if (!Array.isArray(items) || items.length === 0) return [];
+      const sortedItems = [...items].sort((left, right) => (
+        String(left.group ?? "").localeCompare(String(right.group ?? ""))
+        || Number(left.order ?? 0) - Number(right.order ?? 0)
+        || String(left.id ?? "").localeCompare(String(right.id ?? ""))
+      ));
+      const submenu = [];
+      let previousGroup = null;
+      for (const item of sortedItems) {
+        const group = String(item.group ?? "");
+        if (previousGroup != null && group !== previousGroup) submenu.push({ type: "separator" });
+        previousGroup = group;
+        submenu.push({
+          id: item.id,
+          label: item.label,
+          enabled: item.enabled !== false,
+          type: item.checked == null ? "normal" : "checkbox",
+          checked: item.checked === true,
+          accelerator: item.accelerator,
+          icon: item.icon,
+          click: item.click,
+        });
+      }
+      return [{
+        label: tMenu(language, "plugins"),
+        submenu,
+      }];
+    })(),
     {
       label: tMenu(language, "window"),
       submenu: [
@@ -1308,15 +1407,19 @@ module.exports = {
   closeTerminalPopupWindow,
   prewarmSettingsWindow,
   buildAppMenu,
+  getCurrentLanguage,
+  setPluginApplicationMenuProvider,
   getMainWindow,
   getMainWindows: getMainWindowList,
   getAppContentWindows: getAppContentWindowList,
+  getDirtyEditorWindows: getDirtyEditorWindowList,
   getMainWindowCount,
   isMainWindow,
   registerMainWindow,
   unregisterMainWindow,
   registerAppContentWindow,
   unregisterAppContentWindow,
+  setAppContentWindowClosedHandler,
   getSettingsWindow,
   isWindowUsable,
   registerWindowHandlers,

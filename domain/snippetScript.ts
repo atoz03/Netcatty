@@ -46,7 +46,7 @@ async function main() {
   const tag = \`nc-it-\${Date.now().toString(36)}\`;
   nct.log('=== Netcatty Integration Test START ===');
   nct.log(\`tag=\${tag}  nct.version=\${nct.version}\`);
-  nct.log(\`session: host=\${nct.session.hostname} user=\${nct.session.username} connected=\${nct.session.connected}\`);
+  nct.log(\`session: name=\${nct.session.name} host=\${nct.session.hostname} user=\${nct.session.username} connected=\${nct.session.connected}\`);
 
   if (!nct.session.connected) {
     throw new Error('Session not connected');
@@ -160,6 +160,7 @@ export const DEFAULT_SCRIPT_TEMPLATE = `// Netcatty automation script - async JS
 // nct.screen.waitForAny([patterns], ms?) wait until any pattern matches
 // nct.screen.sendLine(cmd)                type command + Enter; send(text) raw keys only
 // nct.screen.getText(start?, end?) | clear()
+// nct.session.connected | name | hostname | username (read-only metadata)
 // nct.session.sleep(ms) | startLog(path) | stopLog() | disconnect()
 // nct.dialog.confirm(msg)->bool | prompt(msg, def?)->string | alert(msg)
 // nct.dialog.form({ fields })->object; fields: select/radio/checkbox/textarea/number, optional visibleWhen

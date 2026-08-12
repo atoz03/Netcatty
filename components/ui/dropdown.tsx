@@ -140,6 +140,7 @@ const DropdownContent: React.FC<DropdownContentProps> = ({
   const [position, setPosition] = useState<{
     top: number;
     left: number;
+    maxHeight?: number;
   } | null>(null);
 
   // Calculate position function
@@ -156,48 +157,75 @@ const DropdownContent: React.FC<DropdownContentProps> = ({
     const triggerRect = triggerRef.current.getBoundingClientRect();
     const contentEl = contentRef.current;
 
-    let top: number;
-    let left: number;
+    const contentHeight = contentEl?.offsetHeight ?? 0;
+    const contentWidth = contentEl?.offsetWidth ?? 0;
+    const viewportMargin = 8;
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const spaceBelow = Math.max(
+      0,
+      viewportHeight - triggerRect.bottom - sideOffset - viewportMargin,
+    );
+    const spaceAbove = Math.max(
+      0,
+      triggerRect.top - sideOffset - viewportMargin,
+    );
 
-    // Use trigger's bottom for vertical positioning (not parent's)
+    // Prefer requested side when it fits; otherwise pick the side with more room.
+    // Never bounce oversized menus off-screen by flipping twice.
+    let placeBelow: boolean;
     if (side === "bottom") {
+      if (contentHeight <= spaceBelow || spaceBelow >= spaceAbove) {
+        placeBelow = true;
+      } else {
+        placeBelow = false;
+      }
+    } else if (contentHeight <= spaceAbove || spaceAbove > spaceBelow) {
+      placeBelow = false;
+    } else {
+      placeBelow = true;
+    }
+
+    const available = placeBelow ? spaceBelow : spaceAbove;
+    const maxHeight =
+      contentHeight > available && available > 0
+        ? available
+        : undefined;
+    const effectiveHeight = maxHeight ?? contentHeight;
+
+    let top: number;
+    if (placeBelow) {
       top = triggerRect.bottom + sideOffset;
     } else {
-      top = triggerRect.top - sideOffset;
+      top = triggerRect.top - effectiveHeight - sideOffset;
+      if (top < viewportMargin) {
+        top = viewportMargin;
+      }
     }
 
     // Use anchor element (parent or trigger) for horizontal positioning
+    let left: number;
     if (align === "start") {
       left = rect.left;
     } else if (align === "end") {
-      left = rect.right;
-      if (contentEl) {
-        left = rect.right - contentEl.offsetWidth;
-      }
+      left = contentEl ? rect.right - contentWidth : rect.right;
     } else {
       left = rect.left + rect.width / 2;
       if (contentEl) {
-        left -= contentEl.offsetWidth / 2;
+        left -= contentWidth / 2;
       }
     }
 
-    // Keep within viewport
     if (contentEl) {
-      const viewportWidth = window.innerWidth;
-      const viewportHeight = window.innerHeight;
-
-      if (left + contentEl.offsetWidth > viewportWidth - 8) {
-        left = viewportWidth - contentEl.offsetWidth - 8;
+      if (left + contentWidth > viewportWidth - viewportMargin) {
+        left = viewportWidth - contentWidth - viewportMargin;
       }
-      if (left < 8) {
-        left = 8;
-      }
-      if (top + contentEl.offsetHeight > viewportHeight - 8) {
-        top = rect.top - contentEl.offsetHeight - sideOffset;
+      if (left < viewportMargin) {
+        left = viewportMargin;
       }
     }
 
-    return { top, left };
+    return { top, left, maxHeight };
   }, [align, sideOffset, side, alignToParent, triggerRef]);
 
   // Calculate position synchronously after DOM updates
@@ -268,6 +296,8 @@ const DropdownContent: React.FC<DropdownContentProps> = ({
       style={{
         top: position?.top ?? -9999,
         left: position?.left ?? -9999,
+        maxHeight: position?.maxHeight,
+        overflowY: position?.maxHeight ? "auto" : undefined,
         visibility: position ? "visible" : "hidden",
       }}
     >

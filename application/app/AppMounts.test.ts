@@ -53,10 +53,12 @@ test('vault activation suppresses inherited text color transitions', () => {
 });
 
 test('vault surface carries app theme vars while terminal chrome is active', () => {
+  const appThemeStyleSource = readFileSync(new URL('./useAppThemeStyle.ts', import.meta.url), 'utf8');
   assert.match(appMountsSource, /appThemeStyle\?: React\.CSSProperties/);
   assert.match(appMountsSource, /style=\{\{ \.\.\.appThemeStyle, \.\.\.containerStyle \}\}/);
-  assert.match(appViewSource, /buildAppThemeCssVars\(tokens, accentMode, customAccent\)/);
-  assert.match(appViewSource, /<VaultViewContainer appThemeStyle=\{appThemeStyle\}>/);
+  assert.match(appThemeStyleSource, /buildAppThemeCssVars\(tokens, accentMode, customAccent\)/);
+  assert.match(appThemeStyleSource, /useAppearanceChromeStore/);
+  assert.match(appViewSource, /VaultThemedSurface|useAppThemeStyle|appThemeStyle/);
 });
 
 test('active tab chrome keeps removed theme side effects unmounted', () => {
@@ -64,4 +66,13 @@ test('active tab chrome keeps removed theme side effects unmounted', () => {
   const removedThemeStoreSetter = ['set', 'Im', 'mersive', 'Active'].join('');
   assert.equal(activeTabChromeSource.includes(removedThemeHook), false);
   assert.equal(activeTabChromeSource.includes(removedThemeStoreSetter), false);
+});
+
+test('terminal layer force-mounts immediately when a hidden MCP session exists', () => {
+  // A silent session never becomes activeTabId, so without this it would wait
+  // for the up-to-5s idle-callback fallback before TerminalPanesHost renders
+  // TerminalPane and starts the PTY — racing an immediate terminal_execute.
+  assert.match(appMountsSource, /hasHiddenSession = props\.sessions\.some\(\(session\) => session\.hiddenFromTabs\)/);
+  assert.match(appMountsSource, /useState\(isVisible \|\| hasHiddenSession\)/);
+  assert.match(appMountsSource, /if \(isVisible \|\| hasHiddenSession\) setShouldMount\(true\)/);
 });

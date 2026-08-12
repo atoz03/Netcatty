@@ -9,6 +9,7 @@ interface ResolveWindowCommandCloseIntentInput {
   sessionIds: string[];
   workspaceIds: string[];
   logViewIds: string[];
+  pluginViewTabIds?: string[];
 }
 
 export function resolveWindowCommandCloseIntent({
@@ -17,12 +18,13 @@ export function resolveWindowCommandCloseIntent({
   sessionIds,
   workspaceIds,
   logViewIds,
+  pluginViewTabIds = [],
 }: ResolveWindowCommandCloseIntentInput): WindowCommandCloseIntent {
   if (!activeTabId) {
     return { kind: 'closeWindow' };
   }
 
-  if (editorTabIds.includes(activeTabId)) {
+  if (editorTabIds.includes(activeTabId) || pluginViewTabIds.includes(activeTabId)) {
     return { kind: 'closeTab' };
   }
 

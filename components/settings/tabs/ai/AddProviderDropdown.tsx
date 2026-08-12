@@ -44,7 +44,7 @@ export const AddProviderDropdown: React.FC<{
                   onAdd(pid);
                   setIsOpen(false);
                 }}
-                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm hover:bg-accent transition-colors text-left"
+                className="w-full flex items-center gap-2.5 px-3 py-2 text-sm hover:bg-accent hover:text-accent-foreground transition-colors text-left"
               >
                 <ProviderIconBadge providerId={pid} size="sm" />
                 {PROVIDER_PRESETS[pid].name}

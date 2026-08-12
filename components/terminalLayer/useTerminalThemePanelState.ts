@@ -1,5 +1,6 @@
 import { startTransition, useCallback, useEffect, useMemo } from 'react';
 
+import { useAppearanceChromeStore } from '../../application/state/appearanceChromeStore';
 import type { ResolvedAppearance, TerminalAppearanceHostScope } from '../../domain/terminalAppearanceRuntime';
 import {
   clearHostFontFamilyOverride,
@@ -24,12 +25,10 @@ import type { SidePanelTab } from './TerminalLayerSupport';
 const navigatorPlatform = typeof navigator !== 'undefined' ? navigator.platform : '';
 
 interface UseTerminalThemePanelStateOptions {
-  accentMode: 'theme' | 'custom';
   activeSession: TerminalSession | undefined;
   activeSidePanelTab: SidePanelTab | null;
   activeWorkspace: Workspace | undefined;
   clearIntent: () => void;
-  customAccent: string;
   followAppTerminalTheme: boolean;
   focusedSessionId: string | undefined;
   fontSize: number;
@@ -116,10 +115,23 @@ export function useTerminalThemePanelState({
     isEphemeral: isFocusedHostEphemeral,
   }), [focusedHost, isFocusedHostEphemeral]);
 
-  const focusedAppearance = useMemo(
-    () => resolveFocusedAppearance(focusedHostScope),
-    [resolveFocusedAppearance, focusedHostScope],
-  );
+  // Subscribe to accent store so compose-bar / manual chrome recompute when
+  // color-picker changes, even though resolveFocusedAppearance identity is
+  // intentionally stable across accent drag (and TerminalLayer memo ignores
+  // accent props).
+  const appearanceChrome = useAppearanceChromeStore();
+  const focusedAppearance = useMemo(() => {
+    // resolveFocusedAppearance reads accent from the chrome store; pin these
+    // deps so compose-bar chrome updates while focusedHostScope stays stable.
+    void appearanceChrome.accentMode;
+    void appearanceChrome.customAccent;
+    return resolveFocusedAppearance(focusedHostScope);
+  }, [
+    appearanceChrome.accentMode,
+    appearanceChrome.customAccent,
+    focusedHostScope,
+    resolveFocusedAppearance,
+  ]);
 
   const previewTargetSessionId = activeWorkspace?.focusedSessionId ?? activeSession?.id ?? null;
 

@@ -203,6 +203,219 @@ test("applyGroupDefaults still inherits telnet credentials when host fields are 
   assert.equal(resolveTelnetPassword(result), "group-telnet-password");
 });
 
+test("applyGroupDefaults inherits a reusable Telnet identity from the group", () => {
+  const result = applyGroupDefaults(
+    host({ telnetIdentityId: undefined }),
+    { telnetIdentityId: "group-telnet-identity" },
+  );
+
+  assert.equal(result.telnetIdentityId, "group-telnet-identity");
+});
+
+test("applyGroupDefaults preserves an explicitly cleared Telnet identity", () => {
+  const result = applyGroupDefaults(
+    host({ telnetIdentityId: "" }),
+    { telnetIdentityId: "group-telnet-identity" },
+  );
+
+  assert.equal(result.telnetIdentityId, "");
+});
+
+test("resolveGroupDefaults lets child manual SSH credentials replace a parent identity", () => {
+  const resolved = resolveGroupDefaults("prod/manual", [
+    { path: "prod", identityId: "parent-identity", username: "parent-user" },
+    { path: "prod/manual", username: "child-user", password: "child-password" },
+  ]);
+
+  assert.equal(resolved.identityId, undefined);
+  assert.equal(resolved.username, "child-user");
+  assert.equal(resolved.password, "child-password");
+});
+
+test("resolveGroupDefaults lets child manual Telnet credentials replace a parent identity", () => {
+  const resolved = resolveGroupDefaults("prod/manual", [
+    { path: "prod", telnetIdentityId: "parent-identity" },
+    { path: "prod/manual", telnetUsername: "child-user", telnetPassword: "child-password" },
+  ]);
+
+  assert.equal(resolved.telnetIdentityId, undefined);
+  assert.equal(resolved.telnetUsername, "child-user");
+  assert.equal(resolved.telnetPassword, "child-password");
+});
+
+test("resolveGroupDefaults clears a parent key identity bundle for a child password opt-out", () => {
+  const resolved = resolveGroupDefaults("prod/manual", [
+    {
+      path: "prod",
+      identityId: "parent-identity",
+      username: "parent-user",
+      authMethod: "key",
+      identityFileId: "parent-key",
+    },
+    {
+      path: "prod/manual",
+      identityId: "",
+      username: "child-user",
+      password: "child-password",
+      authMethod: "password",
+    },
+  ]);
+
+  assert.equal(resolved.identityId, "");
+  assert.equal(resolved.username, "child-user");
+  assert.equal(resolved.password, "child-password");
+  assert.equal(resolved.authMethod, "password");
+  assert.equal(resolved.identityFileId, undefined);
+});
+
+test("resolveGroupDefaults clears parent identity credentials for an empty child marker", () => {
+  const resolved = resolveGroupDefaults("prod/manual", [
+    {
+      path: "prod",
+      identityId: "parent-identity",
+      username: "parent-user",
+      authMethod: "key",
+      telnetIdentityId: "parent-telnet-identity",
+      telnetUsername: "parent-telnet-user",
+    },
+    {
+      path: "prod/manual",
+      identityId: "",
+      telnetIdentityId: "",
+    },
+  ]);
+
+  assert.equal(resolved.identityId, "");
+  assert.equal(resolved.username, undefined);
+  assert.equal(resolved.authMethod, undefined);
+  assert.equal(resolved.telnetIdentityId, "");
+  assert.equal(resolved.telnetUsername, undefined);
+});
+
+test("applyGroupDefaults keeps host manual SSH credentials instead of a group identity", () => {
+  const result = applyGroupDefaults(
+    host({ username: "host-user", password: "host-password" }),
+    {
+      identityId: "group-identity",
+      username: "group-user",
+      password: "group-password",
+      savePassword: false,
+      authMethod: "key",
+      identityFileId: "group-key",
+      identityFilePaths: ["~/.ssh/group-key"],
+    },
+  );
+
+  assert.equal(result.identityId, undefined);
+  assert.equal(result.username, "host-user");
+  assert.equal(result.password, "host-password");
+  assert.equal(result.savePassword, undefined);
+  assert.equal(result.authMethod, undefined);
+  assert.equal(result.identityFileId, undefined);
+  assert.equal(result.identityFilePaths, undefined);
+});
+
+test("applyGroupDefaults lets a host password inherit a manual group username", () => {
+  const result = applyGroupDefaults(
+    host({ username: "", password: "host-password" }),
+    { username: "group-user" },
+  );
+
+  assert.equal(result.identityId, undefined);
+  assert.equal(result.username, "group-user");
+  assert.equal(result.password, "host-password");
+});
+
+test("applyGroupDefaults lets an empty host identity inherit manual group credentials", () => {
+  const result = applyGroupDefaults(
+    host({ identityId: "", username: "", authMethod: undefined }),
+    {
+      username: "group-user",
+      password: "group-password",
+      authMethod: "password",
+    },
+  );
+
+  assert.equal(result.identityId, "");
+  assert.equal(result.username, "group-user");
+  assert.equal(result.password, "group-password");
+  assert.equal(result.authMethod, "password");
+});
+
+test("applyGroupDefaults does not bypass a host no-save choice with a group identity", () => {
+  const result = applyGroupDefaults(
+    host({ username: "", password: undefined, savePassword: false }),
+    {
+      identityId: "group-identity",
+      username: "group-user",
+      password: "group-password",
+      authMethod: "password",
+    },
+  );
+
+  assert.equal(result.identityId, undefined);
+  assert.equal(result.username, "");
+  assert.equal(result.password, undefined);
+  assert.equal(result.savePassword, false);
+  assert.equal(result.authMethod, undefined);
+});
+
+test("applyGroupDefaults does not inherit a group password after a host clears it", () => {
+  const result = applyGroupDefaults(
+    host({ username: "", password: undefined, savePassword: false }),
+    {
+      username: "group-user",
+      password: "group-password",
+      authMethod: "password",
+    },
+  );
+
+  assert.equal(result.password, undefined);
+  assert.equal(result.savePassword, false);
+  assert.equal(result.authMethod, "password");
+});
+
+test("applyGroupDefaults keeps host manual Telnet credentials instead of a group identity", () => {
+  const result = applyGroupDefaults(
+    host({ telnetUsername: "host-user", telnetPassword: "host-password" }),
+    { telnetIdentityId: "group-identity" },
+  );
+
+  assert.equal(result.telnetIdentityId, undefined);
+  assert.equal(result.telnetUsername, "host-user");
+  assert.equal(result.telnetPassword, "host-password");
+});
+
+test("applyGroupDefaults preserves imported primary Telnet credentials", () => {
+  const result = applyGroupDefaults(
+    host({
+      protocol: "telnet",
+      username: "operator",
+      password: "host-password",
+      telnetIdentityId: undefined,
+    }),
+    { telnetIdentityId: "group-telnet-identity" },
+  );
+
+  assert.equal(result.telnetIdentityId, undefined);
+  assert.equal(resolveTelnetUsername(result), "operator");
+  assert.equal(resolveTelnetPassword(result), "host-password");
+});
+
+test("applyGroupDefaults lets a default primary Telnet host inherit a group identity", () => {
+  const result = applyGroupDefaults(
+    host({
+      protocol: "telnet",
+      username: "root",
+      password: undefined,
+      telnetIdentityId: undefined,
+    }),
+    { telnetIdentityId: "group-telnet-identity" },
+  );
+
+  assert.equal(result.telnetIdentityId, "group-telnet-identity");
+});
+
 test("applyGroupDefaults preserves explicit empty identityId instead of inheriting group identity", () => {
   const result = applyGroupDefaults(
     host({ identityId: "" }),
@@ -212,13 +425,53 @@ test("applyGroupDefaults preserves explicit empty identityId instead of inheriti
   assert.equal(result.identityId, "");
 });
 
-test("applyGroupDefaults inherits group identityId when host identityId is unset", () => {
+test("applyGroupDefaults inherits group identityId when host only has default SSH fields", () => {
   const result = applyGroupDefaults(
-    host({ identityId: undefined }),
+    host({ identityId: undefined, authMethod: "password" }),
     { identityId: "group-identity" },
   );
 
   assert.equal(result.identityId, "group-identity");
+  assert.equal(result.username, "root");
+});
+
+test("applyGroupDefaults keeps explicit host auth modes instead of inheriting a group identity", () => {
+  for (const authMethod of ["auto", "password"] as const) {
+    const result = applyGroupDefaults(
+      host({ authMethod, authPolicyVersion: 1 }),
+      { identityId: "group-identity" },
+    );
+
+    assert.equal(result.authMethod, authMethod);
+    assert.equal(result.identityId, undefined);
+  }
+});
+
+test("applyGroupDefaults preserves a custom username instead of inheriting a group identity", () => {
+  const result = applyGroupDefaults(
+    host({ identityId: undefined, username: "ubuntu", authMethod: "password" }),
+    {
+      identityId: "group-identity",
+      username: "group-user",
+      password: "group-password",
+      authMethod: "password",
+    },
+  );
+
+  assert.equal(result.identityId, undefined);
+  assert.equal(result.username, "ubuntu");
+  assert.equal(result.password, undefined);
+  assert.equal(result.authMethod, "password");
+});
+
+test("applyGroupDefaults treats an explicit empty identity as a host opt-out", () => {
+  const result = applyGroupDefaults(
+    host({ identityId: "", username: "host-user", authMethod: "password" }),
+    { identityId: "group-identity", username: "group-user" },
+  );
+
+  assert.equal(result.identityId, "");
+  assert.equal(result.username, "host-user");
 });
 
 test("applyGroupDefaults continues to inherit empty ssh username from the group", () => {
@@ -258,6 +511,46 @@ test("sanitizeGroupConfig keeps a still-valid fontFamily untouched", () => {
   const after = sanitizeGroupConfig(before);
   assert.equal(after.fontFamily, "jetbrains-mono");
   assert.equal(after.fontFamilyOverride, true);
+});
+
+test("sanitizeGroupConfig preserves legacy group passwords as password-only", () => {
+  const after = sanitizeGroupConfig({
+    path: "team",
+    password: "group-secret",
+  });
+
+  assert.equal(after.authMethod, "password");
+});
+
+test("sanitizeGroupConfig preserves an explicit automatic password fallback", () => {
+  const after = sanitizeGroupConfig({
+    path: "team",
+    authMethod: "auto",
+    password: "group-secret",
+  });
+
+  assert.equal(after.authMethod, "auto");
+});
+
+test("sanitizeGroupConfig does not replace a selected identity with password-only", () => {
+  const after = sanitizeGroupConfig({
+    path: "team",
+    identityId: "identity-1",
+    password: "stale-secret",
+  });
+
+  assert.equal(after.authMethod, undefined);
+});
+
+test("sanitizeGroupConfig treats an empty inherited identity marker as cleared", () => {
+  const after = sanitizeGroupConfig({
+    path: "team/child",
+    identityId: "",
+    password: "child-secret",
+  });
+
+  assert.equal(after.identityId, "");
+  assert.equal(after.authMethod, "password");
 });
 
 test("applyGroupDefaults inherits skipEcdsaHostKey from the group when host has no value", () => {

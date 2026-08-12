@@ -7,7 +7,7 @@ type ClipboardImageFile = {
   size?: number;
 };
 
-type RemoteClipboardImageBridge = Pick<
+export type RemoteClipboardImageBridge = Pick<
   NetcattyBridge,
   "readClipboardImage" | "openSftpForSession" | "startStreamTransfer"
 > & Pick<Partial<NetcattyBridge>, "closeSftp" | "deleteTempFile">;
@@ -20,10 +20,11 @@ type HandleRemoteClipboardImagePasteOptions = {
   bridge?: RemoteClipboardImageBridge;
   createTransferId?: () => string;
   getRemoteCwd: () => Promise<string | null | undefined>;
+  isSensitiveInput?: () => boolean;
   scrollToBottomAfterProgrammaticInput?: (data: string) => void;
   sessionId: string | null | undefined;
   terminalBackend: {
-    writeToSession: (sessionId: string, data: string, options?: { automated?: boolean }) => void;
+    writeToSession: (sessionId: string, data: string, options?: { automated?: boolean; sensitive?: boolean }) => void;
   };
   term?: TerminalLike | null;
 };
@@ -82,6 +83,7 @@ export async function handleRemoteClipboardImageUpload({
   bridge,
   createTransferId = defaultTransferId,
   getRemoteCwd,
+  isSensitiveInput,
   scrollToBottomAfterProgrammaticInput,
   sessionId,
   terminalBackend,
@@ -92,7 +94,14 @@ export async function handleRemoteClipboardImageUpload({
     return { ok: false, reason: "unsupported" };
   }
 
-  const image: ClipboardImageFile | null = await bridge.readClipboardImage();
+  let image: ClipboardImageFile | null;
+  try {
+    image = await bridge.readClipboardImage();
+  } catch {
+    // A clipboard read failure is indistinguishable from an empty clipboard —
+    // treat it as "no image" so callers can fall back to a normal paste.
+    return { ok: false, reason: "no-image" };
+  }
   if (!image?.path || !image.name) return { ok: false, reason: "no-image" };
 
   let sftpId: string | undefined;
@@ -115,7 +124,9 @@ export async function handleRemoteClipboardImageUpload({
     if (!transferResult || transferResult.error) return { ok: false, reason: "upload-failed" };
 
     const pastedPath = quoteRemotePathForShell(targetPath);
-    terminalBackend.writeToSession(sessionId, pastedPath);
+    terminalBackend.writeToSession(sessionId, pastedPath, {
+      sensitive: isSensitiveInput?.() === true,
+    });
     scrollToBottomAfterProgrammaticInput?.(pastedPath);
     term?.focus?.();
     return { ok: true, remotePath: targetPath, pastedPath };

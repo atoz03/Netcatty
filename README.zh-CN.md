@@ -128,6 +128,7 @@
 ### 🖥️ 终端工作区
 - **分屏** —— 水平/垂直分割，多任务并行
 - **多会话管理** —— 多连接并排处理
+- **内联图片** —— 直接渲染远端程序输出的 Kitty 图形、SIXEL 与 iTerm 内联图片
 
 ### 📁 SFTP + 内置编辑器
 - **文件工作流** —— 拖拽上传/下载更直观
@@ -204,6 +205,17 @@ Netcatty 会自动识别并在主机列表中展示对应的系统图标：
 | **Linux** | x64 / arm64 |
 
 或在 [GitHub Releases](https://github.com/binaricat/Netcatty/releases) 浏览所有版本。
+
+### 代码签名与隐私
+
+Netcatty 正在申请 SignPath Foundation 开源项目计划。申请通过后，适用的
+Windows 发布文件将使用 **Free code signing provided by SignPath.io, certificate by SignPath Foundation**。
+详情见[代码签名政策](CODE_SIGNING_POLICY.md)和[隐私政策](PRIVACY.md)。申请和接入完成前，
+Windows 发布文件可能仍未签名。
+
+> **Windows 便携数据：** 退出 Netcatty，在 `Netcatty.exe`（zip 版）或便携版启动文件旁创建名为 `data` 的文件夹。下次启动后，Netcatty 会把数据保存在这里。已保存的密码和私钥仍受创建它们的 Windows 用户保护；将该文件夹移到其他电脑或 Windows 用户后，需要重新输入这些敏感信息。
+
+> **在 Windows 中用 Netcatty 打开文件夹：** 安装版会在资源管理器的文件夹右键菜单和文件夹空白处右键菜单中加入 **Open in Netcatty**。点击后会直接在该目录打开本地终端；Windows 11 需要先选择 **显示更多选项**。可在 **设置 → 系统 → Windows 资源管理器** 中随时关闭或重新开启。ZIP 版和便携版默认不会添加此菜单。
 
 > **macOS 用户注意：** 当前发布版本应已完成代码签名和公证。如果 Gatekeeper 仍然提示风险，请确认您下载的是 GitHub Releases 中的最新官方构建。
 
@@ -307,11 +319,11 @@ npm run pack:linux   # Linux (AppImage + DEB + RPM)
 <a name="star-历史"></a>
 # Star 历史
 
-<a href="https://star-history.com/#binaricat/Netcatty&Date">
+<a href="https://www.star-history.com/#binaricat/Netcatty&Date">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=binaricat/Netcatty&type=Date&theme=dark" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=binaricat/Netcatty&type=Date" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=binaricat/Netcatty&type=Date" />
+   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/star-history/star-history-dark.svg" />
+   <source media="(prefers-color-scheme: light)" srcset="docs/assets/star-history/star-history-light.svg" />
+   <img alt="Star History Chart" src="docs/assets/star-history/star-history-light.svg" />
  </picture>
 </a>
 

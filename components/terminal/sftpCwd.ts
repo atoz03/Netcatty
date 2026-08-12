@@ -5,6 +5,11 @@ type SessionPwdResult = {
 
 type SessionPwdOptions = {
   allowHomeFallback?: boolean;
+  /**
+   * When true, fall back to the same-uid login shell cwd after su/sudo.
+   * When omitted, follows allowHomeFallback (backend default).
+   */
+  allowLoginShellFallback?: boolean;
 };
 
 type ResolvePreferredTerminalCwdOptions = {
@@ -13,6 +18,8 @@ type ResolvePreferredTerminalCwdOptions = {
   getSessionPwd: (sessionId: string, options?: SessionPwdOptions) => Promise<SessionPwdResult>;
   /** When true, always probe the backend instead of trusting renderer cwd. */
   preferFreshBackend?: boolean;
+  /** When false, a failed backend probe must not return a cached renderer cwd. */
+  allowRendererFallback?: boolean;
 };
 
 const normalizeCwd = (cwd?: string | null): string | null => {
@@ -46,20 +53,26 @@ export const resolvePreferredTerminalCwd = async ({
   sessionId,
   getSessionPwd,
   preferFreshBackend = false,
+  allowRendererFallback = true,
 }: ResolvePreferredTerminalCwdOptions): Promise<string | null> => {
   const knownCwd = normalizeCwd(rendererCwd);
   if (!preferFreshBackend && knownCwd) return knownCwd;
-  if (!sessionId) return null;
+  if (!sessionId) return allowRendererFallback ? knownCwd : null;
 
   try {
     const result = await getSessionPwd(
       sessionId,
-      preferFreshBackend ? { allowHomeFallback: false } : undefined,
+      // Disable ~ guessing so we do not open SFTP on a fabricated home path,
+      // but keep login-shell fallback after su/sudo so drag-drop still
+      // resolves a writable cwd (#2886).
+      preferFreshBackend
+        ? { allowHomeFallback: false, allowLoginShellFallback: true }
+        : undefined,
     );
     const backendCwd = result.success ? normalizeCwd(result.cwd) : null;
-    return backendCwd ?? knownCwd;
+    return backendCwd ?? (allowRendererFallback ? knownCwd : null);
   } catch {
-    return knownCwd;
+    return allowRendererFallback ? knownCwd : null;
   }
 };
 

@@ -5,6 +5,11 @@ const RETRY_MAX_MESSAGE_TEXT_CHARS = 8_000;
 const TRUNCATION_MARKER = "\n\n[... output truncated for request size ...]\n\n";
 const HEAD_CHARS = 800;
 const TAIL_CHARS = 4_000;
+const MAX_VERBOSE_LINE_CHARS = 2_000;
+// Terminal streams contain control bytes by design; these patterns remove them before model use.
+// eslint-disable-next-line no-control-regex
+const ANSI_ESCAPE_PATTERN = /[\u001b\u009b][[\]()#;?]*(?:(?:(?:[a-zA-Z\d]*(?:;[-a-zA-Z\d/#&.:=?%@~_]+)*)?\u0007)|(?:(?:\d{1,4}(?:[;:]\d{0,4})*)?[\dA-PR-TZcf-nq-uy=><~]))/g;
+const LARGE_BASE64_PATTERN = /(?:[A-Za-z0-9+/]{4}){125,}(?:==|=)?/g;
 
 export interface CompressMessagesForRequestTooLargeRetryResult {
   messages: ModelMessage[];
@@ -18,10 +23,15 @@ export interface CompressMessagesForRequestTooLargeRetryResult {
 export function compressVerboseText(value: string): string {
   if (!value) return value;
 
-  let compressed = value.replace(/\r\n/g, "\n");
+  let compressed = value.replace(ANSI_ESCAPE_PATTERN, "");
+  compressed = compressed.replace(/\r\n/g, "\n");
+  compressed = collapseCarriageReturnFrames(compressed);
+  // eslint-disable-next-line no-control-regex
+  compressed = compressed.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+  compressed = compressed.replace(LARGE_BASE64_PATTERN, match => `[base64-like payload omitted: ${match.length} chars]`);
   compressed = compressed.replace(/\n{4,}/g, "\n\n\n");
 
-  const lines = compressed.split("\n");
+  const lines = compressed.split("\n").map(shortenVerboseLine);
   const deduped: string[] = [];
   let repeatCount = 0;
   for (const line of lines) {
@@ -36,6 +46,30 @@ export function compressVerboseText(value: string): string {
   }
 
   return deduped.join("\n");
+}
+
+function collapseCarriageReturnFrames(value: string): string {
+  if (!value.includes("\r")) return value;
+  const output: string[] = [];
+  let current = "";
+  for (const char of value) {
+    if (char === "\r") {
+      current = "";
+    } else if (char === "\n") {
+      output.push(current);
+      current = "";
+    } else {
+      current += char;
+    }
+  }
+  output.push(current);
+  return output.join("\n");
+}
+
+function shortenVerboseLine(line: string): string {
+  if (line.length <= MAX_VERBOSE_LINE_CHARS) return line;
+  const edge = Math.floor((MAX_VERBOSE_LINE_CHARS - 80) / 2);
+  return `${line.slice(0, edge)}[... long line shortened: ${line.length} chars ...]${line.slice(-edge)}`;
 }
 
 export function truncateTextWithHeadAndTail(
@@ -91,7 +125,7 @@ export function compressMessagesForRequestTooLargeRetry(
 function compressModelMessageForRequestRetry(message: ModelMessage): ModelMessage {
   if (typeof message.content === "string") {
     const content = compressAndTruncateText(message.content, RETRY_MAX_MESSAGE_TEXT_CHARS);
-    return content === message.content ? message : { ...message, content };
+    return content === message.content ? message : ({ ...message, content } as ModelMessage);
   }
 
   if (!Array.isArray(message.content)) return message;
@@ -103,7 +137,7 @@ function compressModelMessageForRequestRetry(message: ModelMessage): ModelMessag
     return compressed;
   });
 
-  return didAdjust ? { ...message, content } : message;
+  return didAdjust ? ({ ...message, content } as ModelMessage) : message;
 }
 
 function compressContentPartForRequestRetry(part: unknown): unknown {

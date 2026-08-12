@@ -667,7 +667,9 @@ export function useUpdateCheck(options?: { autoUpdateEnabled?: boolean; enabled?
     hasCheckedOnStartupRef.current = true;
     debugLog('Starting delayed update check for version:', updateState.currentVersion);
 
+    let checkArmed = true;
     startupCheckTimeoutRef.current = setTimeout(async () => {
+      checkArmed = false;
       // Re-check the toggle at fire time — the user may have toggled it
       // after the timer was scheduled.
       const stillEnabled = localStorageAdapter.readString(STORAGE_KEY_AUTO_UPDATE_ENABLED);
@@ -711,6 +713,12 @@ export function useUpdateCheck(options?: { autoUpdateEnabled?: boolean; enabled?
     return () => {
       if (startupCheckTimeoutRef.current) {
         clearTimeout(startupCheckTimeoutRef.current);
+        startupCheckTimeoutRef.current = null;
+      }
+      // A remount clears the timer before it fires — allow the next effect to
+      // schedule again instead of permanently skipping the check.
+      if (checkArmed) {
+        hasCheckedOnStartupRef.current = false;
       }
     };
   }, [enabled, updateState.currentVersion, autoUpdateEnabled, performCheck]);

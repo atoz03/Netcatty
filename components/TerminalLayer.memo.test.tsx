@@ -206,3 +206,83 @@ test("TerminalLayer re-renders when a note open request changes", () => {
     false,
   );
 });
+
+test("TerminalLayer ignores shellHistory prop churn (reads shellHistoryStore instead)", () => {
+  assert.equal(
+    terminalLayerAreEqual(
+      baseProps as never,
+      { ...baseProps, shellHistory: [{ id: "1", command: "ls", hostId: "h", hostLabel: "h", sessionId: "s", timestamp: 1 }] } as never,
+    ),
+    true,
+  );
+});
+
+test("TerminalLayer ignores notes prop churn (reads notesStore instead)", () => {
+  assert.equal(
+    terminalLayerAreEqual(
+      baseProps as never,
+      {
+        ...baseProps,
+        notes: [{ id: "n1", title: "One", content: "body", tags: [], createdAt: 1, updatedAt: 1, order: 1000 }],
+        noteGroups: ["Ops"],
+        updateNotes: () => {},
+        updateNoteGroups: () => {},
+      } as never,
+    ),
+    true,
+  );
+});
+
+test("TerminalLayer ignores customAccent prop churn (reads appearanceChromeStore instead)", () => {
+  assert.equal(
+    terminalLayerAreEqual(
+      baseProps as never,
+      { ...baseProps, accentMode: "custom", customAccent: "#ff00aa" } as never,
+    ),
+    true,
+  );
+});
+
+test("TerminalLayer ignores sessions dynamicTitle-only updates", () => {
+  const sessionsA = [{
+    id: "s1",
+    hostId: "h1",
+    hostLabel: "host",
+    username: "root",
+    hostname: "example.test",
+    status: "connected",
+    dynamicTitle: "old",
+  }];
+  const sessionsB = [{
+    ...sessionsA[0],
+    dynamicTitle: "new",
+    codingCliProviderId: "claude",
+  }];
+  assert.equal(
+    terminalLayerAreEqual(
+      { ...baseProps, sessions: sessionsA } as never,
+      { ...baseProps, sessions: sessionsB } as never,
+    ),
+    true,
+  );
+});
+
+test("TerminalLayer re-renders when portForwardingRules change", () => {
+  assert.equal(
+    terminalLayerAreEqual(
+      baseProps as never,
+      { ...baseProps, portForwardingRules: [{ id: "pf-1" }] } as never,
+    ),
+    false,
+  );
+});
+
+test("TerminalLayer re-renders when terminalFontFamilyId changes", () => {
+  assert.equal(
+    terminalLayerAreEqual(
+      { ...baseProps, terminalFontFamilyId: "jetbrain-mono" } as never,
+      { ...baseProps, terminalFontFamilyId: "sf-mono" } as never,
+    ),
+    false,
+  );
+});

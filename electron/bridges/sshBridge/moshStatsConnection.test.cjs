@@ -56,6 +56,7 @@ function makeApi(overrides = {}) {
     NetcattyAgent: overrides.NetcattyAgent || class {},
     buildAlgorithms: overrides.buildAlgorithms || (() => ({ algos: true })),
     getSshAgentSocket: overrides.getSshAgentSocket || (() => null),
+    prepareSystemSshAgentForAuth: overrides.prepareSystemSshAgentForAuth,
     readFileNoFollow: overrides.readFileNoFollow || (async () => null),
     expandIdentityFilePath: overrides.expandIdentityFilePath || ((p) => p),
     isAutoFillablePasswordChallenge:
@@ -245,6 +246,78 @@ test("reads identity files non-interactively when no inline key is present", asy
   assert.deepEqual(reads, ["~/.ssh/id_ed25519"]);
   const client = FakeSSHClient.instances[0];
   assert.equal(client.connectOpts.privateKey, "FILEKEY");
+});
+
+test("tries every discovered identity file for automatic stats auth", async () => {
+  const { api, sessions } = makeApi({
+    readFileNoFollow: async (p) => p.endsWith("id_first") ? "FIRSTKEY" : "SECONDKEY",
+    getSshAgentSocket: () => "/tmp/agent.sock",
+  });
+  const session = {
+    moshStatsAuth: {
+      hostname: "h",
+      username: "u",
+      identityFilePaths: ["~/.ssh/id_first", "~/.ssh/id_second"],
+    },
+  };
+  sessions.set("sid", session);
+
+  api.ensureMoshStatsConnection(session, "sid");
+  await tick();
+  await tick();
+
+  const handler = FakeSSHClient.instances[0].connectOpts.authHandler;
+  const nextMethod = () => {
+    let method;
+    handler(null, false, (value) => { method = value; });
+    return method;
+  };
+
+  assert.equal(nextMethod(), "none");
+  assert.equal(nextMethod(), "agent");
+  assert.deepEqual(nextMethod(), {
+    type: "publickey",
+    username: "u",
+    key: "FIRSTKEY",
+    passphrase: undefined,
+  });
+  assert.deepEqual(nextMethod(), {
+    type: "publickey",
+    username: "u",
+    key: "SECONDKEY",
+    passphrase: undefined,
+  });
+});
+
+test("automatic stats auth keeps local-key fallback with an explicit agent", async () => {
+  const { api, sessions } = makeApi({
+    readFileNoFollow: async (p) => p.endsWith("id_first") ? "FIRSTKEY" : "SECONDKEY",
+    prepareSystemSshAgentForAuth: async () => "/tmp/selected-agent.sock",
+  });
+  const session = {
+    moshStatsAuth: {
+      hostname: "h",
+      username: "u",
+      authMethod: "auto",
+      useSshAgent: true,
+      identityFilePaths: ["~/.ssh/id_first", "~/.ssh/id_second"],
+    },
+  };
+  sessions.set("sid", session);
+
+  api.ensureMoshStatsConnection(session, "sid");
+  await tick();
+  await tick();
+
+  const connectOpts = FakeSSHClient.instances[0].connectOpts;
+  assert.equal(connectOpts.agent, "/tmp/selected-agent.sock");
+  const offered = drainAuthHandler(connectOpts.authHandler);
+  assert.equal(offered[0], "none");
+  assert.equal(offered[1], "agent");
+  assert.deepEqual(offered.slice(2), [
+    { type: "publickey", username: "u", key: "FIRSTKEY", passphrase: undefined },
+    { type: "publickey", username: "u", key: "SECONDKEY", passphrase: undefined },
+  ]);
 });
 
 test("falls back to ssh-agent when a socket is available and no inline creds", async () => {

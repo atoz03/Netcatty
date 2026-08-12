@@ -1,6 +1,7 @@
 import React from 'react';
 
 import type { useI18n } from '../../application/i18n/I18nProvider';
+import type { Host, TerminalSession } from '../../types';
 import { ContextMenuContent, ContextMenuItem } from '../ui/context-menu';
 
 type TranslateFn = ReturnType<typeof useI18n>['t'];
@@ -11,7 +12,12 @@ interface SessionTabContextMenuContentProps {
   onCopySession?: (sessionId: string) => void;
   onCopySessionToNewWindow?: (sessionId: string) => void;
   onDetachSession?: (sessionId: string) => void;
+  onReconnectSession: (sessionId: string) => void;
+  sessionStatus: TerminalSession['status'];
   onRenameSession: (sessionId: string) => void;
+  /** Vault host for this session; omit edit when missing (e.g. local shell). */
+  editHost?: Host;
+  onEditHost?: (host: Host) => void;
   renderBulkCloseItems?: (anchorId: string) => React.ReactNode;
   t: TranslateFn;
 }
@@ -22,15 +28,30 @@ export function SessionTabContextMenuContent({
   onCopySession,
   onCopySessionToNewWindow,
   onDetachSession,
+  onReconnectSession,
+  sessionStatus,
   onRenameSession,
+  editHost,
+  onEditHost,
   renderBulkCloseItems,
   t,
 }: SessionTabContextMenuContentProps) {
   return (
     <ContextMenuContent>
+      <ContextMenuItem
+        disabled={isSessionReconnectDisabled(sessionStatus)}
+        onClick={() => onReconnectSession(sessionId)}
+      >
+        {t('terminal.menu.reconnect')}
+      </ContextMenuItem>
       <ContextMenuItem onClick={() => onRenameSession(sessionId)}>
         {t('common.rename')}
       </ContextMenuItem>
+      {editHost && onEditHost && (
+        <ContextMenuItem onClick={() => onEditHost(editHost)}>
+          {t('terminal.layer.hostTree.editHost')}
+        </ContextMenuItem>
+      )}
       {onCopySession && (
         <ContextMenuItem onClick={() => onCopySession(sessionId)}>
           {t('tabs.copyTab')}
@@ -53,3 +74,7 @@ export function SessionTabContextMenuContent({
     </ContextMenuContent>
   );
 }
+
+export const isSessionReconnectDisabled = (status: TerminalSession['status']): boolean => (
+  status === 'connecting'
+);

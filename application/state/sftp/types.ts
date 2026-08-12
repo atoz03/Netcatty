@@ -1,4 +1,4 @@
-import { KnownHost, SftpConnection, SftpFileEntry, SftpFilenameEncoding } from "../../../domain/models";
+import { Host, KnownHost, SftpConnection, SftpFileEntry, SftpFilenameEncoding } from "../../../domain/models";
 
 export interface SftpPane {
   id: string;
@@ -75,11 +75,23 @@ export interface FileWatchErrorEvent {
 }
 
 export interface SftpStateOptions {
+  transferOwnerId?: string;
+  canPrepareTransferAdoption?: boolean;
+  /**
+   * When false the side panel is retained-but-hidden (closed during transfer).
+   * Progress must not force React state paints for the hidden tree.
+   */
+  surfaceVisible?: boolean;
   onFileWatchSynced?: (event: FileWatchSyncedEvent) => void;
   onFileWatchError?: (event: FileWatchErrorEvent) => void;
   useCompressedUpload?: boolean;
   defaultShowHiddenFiles?: boolean;
   autoConnectLocalOnMount?: boolean;
+  /**
+   * When false, park (soft-close) browse SFTP channels so transfer-pool
+   * sessions stay independent. Defaults to true (interactive).
+   */
+  interactive?: boolean;
   /**
    * Global SSH keepalive settings, forwarded through to per-SFTP-connection
    * keepalive resolution so a host that has opted into its own override
@@ -88,4 +100,20 @@ export interface SftpStateOptions {
   terminalSettings?: { verifyHostKeys: boolean; keepaliveInterval: number; keepaliveCountMax: number };
   knownHosts?: KnownHost[];
   onAddKnownHost?: (knownHost: KnownHost) => void;
+  /**
+   * Resolve a live terminal session id for a vault host so transfer-pool opens
+   * can reuse that SSH transport (openSftpForSession) instead of a cold connect.
+   * When `host` is provided, only return a session whose live endpoint matches.
+   */
+  resolveTransferSourceSessionId?: (hostId: string, host?: Host) => string | undefined;
+  /**
+   * Resolve a live terminal session id for restoring parked browse sessions.
+   * This keeps side-panel tab switches on the already-authenticated SSH transport.
+   */
+  resolveBrowseSourceSessionId?: (hostId: string, host?: Host) => string | undefined;
+  /**
+   * @deprecated Transfer channels no longer park independently. SSH keep-alive
+   * is controlled by sshTransportIdleTtlMs in settings.
+   */
+  transferPoolIdleTtlMs?: number;
 }

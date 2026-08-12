@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import type { Host } from '../../types';
 
+const sidebarSource = readFileSync(new URL('./TerminalHostTreeSidebar.tsx', import.meta.url), 'utf8');
+
 const storage = new Map<string, string>();
 Object.defineProperty(globalThis, 'localStorage', {
   configurable: true,
@@ -20,6 +22,7 @@ const {
   getTerminalHostTreeInitialLayoutWidth,
   getTerminalHostTreeLayoutTargetWidth,
   getTerminalHostTreeMeasuredLayoutWidth,
+  resolveTerminalHostTreeDragCapabilities,
   getTerminalHostTreeSidebarPanelStyle,
   getTerminalHostTreeSidebarShellStyle,
   isTerminalHostTreeSidebarVisible,
@@ -100,6 +103,19 @@ test('host tree sidebar memo tracks surface visibility and theme changes', () =>
   assert.match(source, /themeFingerprint\(prev\.resolvedPreviewTheme\) === themeFingerprint\(next\.resolvedPreviewTheme\)/);
 });
 
+test('host tree sidebar wires app-level host creation and editing actions', () => {
+  assert.match(sidebarSource, /onNewHost\?: \(defaultGroup\?: string\) => void/);
+  assert.match(sidebarSource, /onEditHost\?: \(host: Host\) => void/);
+  assert.match(sidebarSource, /onEditHost=\{onEditHost\}/);
+  assert.match(sidebarSource, /onNewHost=\{\(groupPath\) => onNewHost\?\.\(groupPath\)\}/);
+});
+
+test('host tree sidebar exposes new host only from unused root space', () => {
+  assert.match(sidebarSource, /data-section="terminal-host-tree-root-context"/);
+  assert.match(sidebarSource, /closest\('\[data-row-type\]'\)/);
+  assert.match(sidebarSource, /<ContextMenuItem onClick=\{\(\) => onNewHost\?\.\(\)\}>/);
+});
+
 test('host tree sidebar clips the panel instead of fading it out while closing', () => {
   const theme = {
     termBg: '#000000',
@@ -171,6 +187,25 @@ test('host tree host inline rename rejects empty names without changing hosts', 
   assert.equal(result.hosts, hosts);
 });
 
+test('filtered host rows can drag outward without enabling filtered tree reorder', () => {
+  assert.deepEqual(resolveTerminalHostTreeDragCapabilities({
+    kind: 'host',
+    canReorder: false,
+    isInlineEditing: false,
+  }), {
+    draggable: true,
+    canAcceptDrop: false,
+  });
+  assert.deepEqual(resolveTerminalHostTreeDragCapabilities({
+    kind: 'group',
+    canReorder: false,
+    isInlineEditing: false,
+  }), {
+    draggable: false,
+    canAcceptDrop: false,
+  });
+});
+
 test('host tree hover card is hidden while the same host is inline editing', () => {
   assert.equal(shouldShowTerminalHostHoverCard('host-1', null), true);
   assert.equal(shouldShowTerminalHostHoverCard('host-1', 'host-2'), true);
@@ -201,4 +236,18 @@ test('host tree row icons, labels, and protocol badges share centered line boxes
   assert.match(source, /flex h-5 w-4 shrink-0 items-center/);
   assert.match(source, /flex h-5 shrink-0 items-center">\s*\{isExpanded/);
   assert.match(source, /flex min-w-0 flex-1 items-center truncate leading-5">\{node\.name\}/);
+});
+
+test('filtered host rows can still start host-id drag for focus-sidebar append', () => {
+  const source = readFileSync(new URL('./TerminalHostTreeSidebar.tsx', import.meta.url), 'utf8');
+  const hostRowStart = source.indexOf('data-row-type="host"');
+  const groupRowStart = source.indexOf('data-row-type="group"');
+  assert.ok(hostRowStart >= 0 && groupRowStart > hostRowStart);
+  const hostRowBlock = source.slice(hostRowStart, groupRowStart);
+
+  assert.match(hostRowBlock, /draggable=\{dragCapabilities\.draggable\}/);
+  assert.match(hostRowBlock, /effectAllowed = canReorder \? 'copyMove' : 'copy'/);
+  assert.match(hostRowBlock, /if \(!dragCapabilities\.draggable\) return;/);
+  assert.match(source, /const canReorder = Boolean\(menuActions\) && !searchActive && !tagsActive;/);
+  assert.match(source, /canAcceptDrop: input\.canReorder/);
 });

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { forEachNonEmptyRegexMatch } from "./keywordHighlightRegex.ts";
+import { forEachNonEmptyRe2Match, forEachNonEmptyRegexMatch } from "./keywordHighlightRegex.ts";
 
 test("forEachNonEmptyRegexMatch returns normal consuming matches", () => {
   const regex = /\bfoo\b/gi;
@@ -35,4 +35,16 @@ test("forEachNonEmptyRegexMatch resets reused regex state before scanning", () =
   });
 
   assert.deepEqual(indices, [0, 2, 5]);
+});
+
+test("forEachNonEmptyRe2Match returns global case-insensitive UTF-16 ranges", () => {
+  const ranges: Array<[number, number]> = [];
+  forEachNonEmptyRe2Match("foo+", "x😀FOO yfoo", (start, length) => {
+    ranges.push([start, length]);
+  });
+  assert.deepEqual(ranges, [[3, 3], [8, 3]]);
+});
+
+test("forEachNonEmptyRe2Match rejects expressions outside RE2", () => {
+  assert.throws(() => forEachNonEmptyRe2Match("(a)\\1", "aa", () => {}));
 });

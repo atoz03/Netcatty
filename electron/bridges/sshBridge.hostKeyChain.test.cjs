@@ -27,6 +27,10 @@ function loadBridgeWithMockedSsh2(t) {
 
     connect(opts) {
       this.connectOpts = opts;
+      if (MockSSHClient.connectionErrorsByHost.has(opts.host)) {
+        setImmediate(() => this.emit("error", MockSSHClient.connectionErrorsByHost.get(opts.host)));
+        return;
+      }
       if (MockSSHClient.timeoutHosts.has(opts.host)) {
         setImmediate(() => this.emit("timeout"));
         return;
@@ -35,6 +39,10 @@ function loadBridgeWithMockedSsh2(t) {
       setImmediate(() => {
         const accept = () => {
           this.emit("connect");
+          if (MockSSHClient.closeBeforeReadyHosts.has(opts.host)) {
+            this.emit("close");
+            return;
+          }
           this.emit("handshake");
           this.emit("ready");
         };
@@ -76,6 +84,8 @@ function loadBridgeWithMockedSsh2(t) {
   MockSSHClient.hostKeysByHost = new Map();
   MockSSHClient.timeoutHosts = new Set();
   MockSSHClient.stalledForwardTargets = new Set();
+  MockSSHClient.connectionErrorsByHost = new Map();
+  MockSSHClient.closeBeforeReadyHosts = new Set();
   MockSSHClient.defaultHostKey = makeRawPublicKey("ssh-ed25519", "default untrusted key");
 
   Module._load = function patchedLoad(request, parent, isMain) {
@@ -111,7 +121,7 @@ function makeSender({ rejectHostKeyPrompts = false } = {}) {
       if (rejectHostKeyPrompts && channel === "netcatty:host-key:verify") {
         const { handleResponse } = require("./hostKeyVerifier.cjs");
         queueMicrotask(() => {
-          handleResponse(null, {
+          handleResponse({ sender: { id: this.id } }, {
             requestId: payload.requestId,
             accept: false,
           });
@@ -150,7 +160,10 @@ test("jump-host chain connections verify hop host keys against known hosts", asy
       port: 22,
       username: "alice",
       password: "secret",
+      requiresMfa: true,
       label: "Bastion",
+      sshTcpConnectTimeoutMs: 45_000,
+      sshAuthReadyTimeoutMs: 300_000,
     }],
     "target.example.com",
     22,
@@ -159,10 +172,18 @@ test("jump-host chain connections verify hop host keys against known hosts", asy
 
   assert.equal(MockSSHClient.instances.length, 1);
   const connectOpts = MockSSHClient.instances[0].connectOpts;
-  assert.equal(connectOpts.timeout, 20_000);
-  assert.equal(connectOpts.readyTimeout, 120_000);
+  assert.equal(connectOpts.timeout, 45_000);
+  assert.equal(connectOpts.readyTimeout, 0);
   assert.equal(typeof connectOpts.hostVerifier, "function");
   assert.equal(MockSSHClient.instances[0].hostVerifierCalls, 1);
+  const offered = [];
+  connectOpts.authHandler(null, null, (method) => offered.push(method));
+  connectOpts.authHandler(
+    ["password", "keyboard-interactive"],
+    false,
+    (method) => offered.push(method && typeof method === "object" ? method.type : method),
+  );
+  assert.deepEqual(offered, ["none", "keyboard-interactive"]);
   assert.ok(sender.sent.some((message) => (
     message.channel === "netcatty:chain:progress"
     && message.payload.sessionId === "session-1"
@@ -203,6 +224,70 @@ test("jump-host chain destroys timed-out hop connections", async (t) => {
   assert.equal(MockSSHClient.instances.length, 1);
   assert.equal(MockSSHClient.instances[0].connectOpts.timeout, 20_000);
   assert.equal(MockSSHClient.instances[0].ended, true);
+});
+
+test("jump-host chain rejects when a hop closes during authentication", async (t) => {
+  const { bridge, MockSSHClient } = loadBridgeWithMockedSsh2(t);
+  const sender = makeSender();
+  MockSSHClient.hostKeysByHost.set(
+    "closing-bastion.example.com",
+    makeRawPublicKey("ssh-ed25519", "closing bastion key"),
+  );
+  MockSSHClient.closeBeforeReadyHosts.add("closing-bastion.example.com");
+
+  await assert.rejects(
+    bridge.connectThroughChain(
+      { sender },
+      { knownHosts: [], verifyHostKeys: false, _defaultKeys: [] },
+      [{
+        hostname: "closing-bastion.example.com",
+        port: 22,
+        username: "alice",
+        password: "secret",
+        label: "Closing Bastion",
+      }],
+      "target.example.com",
+      22,
+      "session-close",
+    ),
+    /Connection to Closing Bastion closed before authentication completed/,
+  );
+
+  const errors = sender.sent.filter((message) => (
+    message.channel === "netcatty:chain:progress"
+    && message.payload.status === "error"
+  ));
+  assert.equal(errors.length, 1);
+});
+
+test("jump-host chain does not classify host-name auth substrings as auth failures", async (t) => {
+  const { bridge, MockSSHClient } = loadBridgeWithMockedSsh2(t);
+  const sender = makeSender();
+  const err = new Error("Connection reset by auth-bastion.example.com");
+  err.level = "client-socket";
+  MockSSHClient.connectionErrorsByHost.set("auth-bastion.example.com", err);
+
+  await assert.rejects(
+    bridge.connectThroughChain(
+      { sender },
+      { knownHosts: [], _defaultKeys: [] },
+      [{
+        hostname: "auth-bastion.example.com",
+        port: 22,
+        username: "alice",
+        password: "secret",
+        label: "Auth Bastion",
+      }],
+      "target.example.com",
+      22,
+      "session-1",
+    ),
+    (error) => {
+      assert.equal(error.isJumpHostAuthError, undefined);
+      assert.equal(error.message, "Connection reset by auth-bastion.example.com");
+      return true;
+    },
+  );
 });
 
 test("jump-host chain times out stalled forwarding to the next target", async (t) => {

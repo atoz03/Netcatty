@@ -164,7 +164,7 @@ test("reconnect preparation cancels an in-flight disconnected hibernate", () => 
   const claimIndex = reconnectBody.indexOf(
     "reconnectPreparationTokenRef.current = retryToken",
   );
-  const cleanupIndex = reconnectBody.indexOf("await cleanupSession()");
+  const cleanupIndex = reconnectBody.indexOf("await cleanupSession({ retainOwnership: true })");
   const startNewSessionIndex = reconnectBody.indexOf("const startNewSession = () =>");
 
   assert.ok(claimIndex >= 0 && claimIndex < cleanupIndex);

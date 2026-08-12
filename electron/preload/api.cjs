@@ -538,6 +538,7 @@ function createPreloadApi(ctx) {
     const payload = {
       sessionId,
       ...(Number.isFinite(options?.bootEpoch) ? { bootEpoch: Number(options.bootEpoch) } : {}),
+      ...(options?.retainOwnership === true ? { retainOwnership: true } : {}),
     };
     const epochScoped = Number.isFinite(options?.bootEpoch);
     // Unscoped closes keep the historical sync listener teardown so reconnect
@@ -820,10 +821,11 @@ function createPreloadApi(ctx) {
       const result = await ipcRenderer.invoke("netcatty:sftp:open", options);
       return result.sftpId;
     },
-  openSftpForSession: async (sessionId, expectedEndpoint) => {
+  openSftpForSession: async (sessionId, options) => {
     const result = await ipcRenderer.invoke("netcatty:sftp:openForSession", {
+      ...(options || {}),
       sessionId,
-      expectedEndpoint,
+      expectedEndpoint: options,
     });
     return result.sftpId;
   },
@@ -1728,6 +1730,9 @@ function createPreloadApi(ctx) {
   // MCP Server session metadata
   aiMcpUpdateSessions: async (sessions, chatSessionId) => {
     return ipcRenderer.invoke("netcatty:ai:mcp:update-sessions", { sessions, chatSessionId });
+  },
+  aiMcpUpdateLiveSessions: async (sessions) => {
+    return ipcRenderer.invoke("netcatty:ai:mcp:update-live-sessions", { sessions });
   },
   aiMcpMergeSessions: async (sessions, chatSessionId) => {
     return ipcRenderer.invoke("netcatty:ai:mcp:merge-sessions", { sessions, chatSessionId });

@@ -3,6 +3,24 @@ import type { MutableRefObject } from "react";
 import { isSessionError } from "./errors";
 import type { SftpPane } from "./types";
 
+export interface SftpSessionProbeBridge {
+  realpathSftp?: (sftpId: string, path: string) => Promise<string>;
+}
+
+/**
+ * Probe the SFTP protocol itself instead of using remote home discovery.
+ * Restricted/chroot servers can deny SSH exec or expose '/' as their virtual
+ * root while the SFTP session remains fully usable.
+ */
+export async function probeSftpSession(
+  bridge: SftpSessionProbeBridge | null | undefined,
+  sftpId: string,
+): Promise<boolean> {
+  if (!bridge?.realpathSftp) return true;
+  await bridge.realpathSftp(sftpId, ".");
+  return true;
+}
+
 export interface EnsureRemoteSftpSessionParams {
   side: "left" | "right";
   getActivePane: (side: "left" | "right") => SftpPane | null;

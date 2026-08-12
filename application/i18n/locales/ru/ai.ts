@@ -34,6 +34,7 @@ export const ruAiMessages: Messages = {
   'ai.providers.apiKey.placeholder': 'Введите API-ключ',
   'ai.providers.apiKey.decrypting': 'Расшифровка...',
   'ai.providers.baseUrl': 'Базовый URL',
+  'ai.providers.baseUrl.anthropicHelp': 'Anthropic-совместимый: хост с /v1 или без (например https://gateway.example или https://gateway.example/v1). Проверка и чат используют /v1/models и /v1/messages.',
   'ai.providers.skipTLSVerify': 'Пропустить проверку TLS-сертификата (для самоподписанных сертификатов)',
   'ai.providers.defaultModel': 'Модель по умолчанию',
   'ai.providers.defaultModel.placeholder': 'например, gpt-4o, claude-sonnet-4-20250514',

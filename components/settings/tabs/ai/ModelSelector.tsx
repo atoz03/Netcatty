@@ -3,6 +3,7 @@ import { Check, ChevronDown, RefreshCw } from "lucide-react";
 import type { AIProviderId, ProviderStyle } from "../../../../infrastructure/ai/types";
 import { resolveProviderStyle } from "../../../../infrastructure/ai/types";
 import { buildModelDiscoveryHeaders, resolveModelsDiscoveryEndpoint } from "../../../../infrastructure/ai/modelDiscoveryHeaders";
+import { buildProviderProbeUrl } from "../../../../infrastructure/ai/providerConnectionProbe";
 import { useI18n } from "../../../../application/i18n/I18nProvider";
 import { Button } from "../../../ui/button";
 import { Tooltip, TooltipContent, TooltipTrigger } from "../../../ui/tooltip";
@@ -150,7 +151,7 @@ export const ModelSelector: React.FC<{
       if (bridge.aiAllowlistAddHost && baseURL) {
         await bridge.aiAllowlistAddHost(baseURL);
       }
-      const url = `${baseURL.replace(/\/+$/, "")}${effectiveModelsEndpoint}`;
+      const url = buildProviderProbeUrl(baseURL, effectiveModelsEndpoint);
       const headers = buildModelDiscoveryHeaders(resolvedStyle, apiKey);
       const result = await bridge.aiFetch(url, "GET", headers, undefined, undefined, undefined, undefined, skipTLSVerify);
       if (!result.ok) {

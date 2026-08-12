@@ -510,6 +510,9 @@ export const ProviderConfigForm: React.FC<{
           placeholder={preset?.defaultBaseURL || "https://"}
           className="w-full h-8 rounded-md border border-input bg-background px-3 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
         />
+        {resolvedStyle === "anthropic" ? (
+          <p className="text-[11px] text-muted-foreground/70">{t('ai.providers.baseUrl.anthropicHelp')}</p>
+        ) : null}
       </div>
 
       {/* Default Model */}

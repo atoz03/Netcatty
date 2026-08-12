@@ -169,15 +169,20 @@ test("dispatchCapabilityRpc preserves the host-open scope generation across the 
       assert.equal(chatSessionId, "chat-1");
       return 7;
     },
-    onHostOpened: (chatSessionId, sessionId, generation) => {
-      registrations.push({ chatSessionId, sessionId, generation });
+    onHostOpened: (chatSessionId, sessionId, generation, result) => {
+      registrations.push({ chatSessionId, sessionId, generation, result });
     },
     invokeVaultAgent: async () => ({ ok: true, sessionId: "session-1" }),
   });
 
   await dispatch("public/vault/hosts/open", { chatSessionId: "chat-1", hostId: "host-1" });
 
-  assert.deepEqual(registrations, [{ chatSessionId: "chat-1", sessionId: "session-1", generation: 7 }]);
+  assert.deepEqual(registrations, [{
+    chatSessionId: "chat-1",
+    sessionId: "session-1",
+    generation: 7,
+    result: { ok: true, sessionId: "session-1" },
+  }]);
 });
 
 test("dispatchCapabilityRpc routes vault hosts create to vault service", async () => {

@@ -53,6 +53,7 @@ export const zhTWAiMessages: Messages = {
   'ai.providers.apiKey.placeholder': '輸入 API Key',
   'ai.providers.apiKey.decrypting': '解密中...',
   'ai.providers.baseUrl': 'Base URL',
+  'ai.providers.baseUrl.anthropicHelp': 'Anthropic 相容：可填不帶或帶 /v1 的主機（例如 https://gateway.example 或 https://gateway.example/v1）。偵測與聊天都會請求 /v1/models、/v1/messages。',
   'ai.providers.skipTLSVerify': '跳過 TLS 憑證驗證（用於自我簽署憑證）',
   'ai.providers.defaultModel': '預設模型',
   'ai.providers.defaultModel.placeholder': '例如 gpt-4o, claude-sonnet-4-20250514',

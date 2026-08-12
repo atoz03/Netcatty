@@ -33,6 +33,36 @@ export function shouldSkipSftpSidePanelAutoConnect(
   return isRemoteSftpTabHealthy(activeTab, hasBackendSession);
 }
 
+export function isPendingSameEndpointSshSession(
+  session: {
+    hostId?: string | null;
+    status?: string;
+    hostname?: string | null;
+    port?: number | null;
+    username?: string | null;
+    protocol?: string | null;
+    moshEnabled?: boolean;
+    etEnabled?: boolean;
+  },
+  host: {
+    id: string;
+    hostname: string;
+    port?: number | null;
+    username: string;
+  },
+): boolean {
+  return Boolean(
+    session.hostId === host.id
+    && session.status === "connecting"
+    && session.hostname === host.hostname
+    && (session.port ?? 22) === (host.port ?? 22)
+    && session.username === host.username
+    && (session.protocol === "ssh" || session.protocol === undefined)
+    && !session.moshEnabled
+    && !session.etEnabled,
+  );
+}
+
 /** Whether a stored endpoint key still belongs to the live connection's host. */
 export function connectionKeyMatchesHost(
   connectionKey: string | null | undefined,

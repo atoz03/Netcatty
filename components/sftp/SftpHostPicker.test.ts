@@ -50,7 +50,7 @@ test("sftp host picker uses single-line quick switcher row layout", () => {
   assert.doesNotMatch(source, /text-xs text-muted-foreground truncate/);
 });
 
-test("sftp host picker omits sourceSessionId for sudo connected hosts", () => {
+test("sftp host picker passes sourceSessionId for sudo connected hosts", () => {
   assert.match(source, /sftpSourceSessionIdForHost/);
   assert.match(
     source,
@@ -59,11 +59,6 @@ test("sftp host picker omits sourceSessionId for sudo connected hosts", () => {
   assert.match(
     source,
     /onSelectHost\(\s*item\.entry\.host,\s*sourceSessionId \? \{ sourceSessionId \} : undefined,\s*\)/,
-  );
-  // Must not always pass sessionId as a reuse hint (sudo would hide the spinner).
-  assert.doesNotMatch(
-    source,
-    /onSelectHost\(item\.entry\.host, \{ sourceSessionId: item\.entry\.sessionId \}\)/,
   );
 });
 

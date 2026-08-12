@@ -4,6 +4,7 @@
  */
 
 const pendingBootAborts = new Map();
+const latestBootEpochs = new Map();
 
 function normalizeBootEpoch(bootEpoch) {
   if (!Number.isFinite(bootEpoch)) return undefined;
@@ -29,9 +30,13 @@ function registerPendingBootAbort(sessionId, bootEpoch) {
     try { existing.controller.abort(); } catch { /* ignore */ }
   }
   const controller = new AbortController();
+  const normalized = normalizeBootEpoch(bootEpoch);
+  if (normalized !== undefined) {
+    latestBootEpochs.set(sessionId, Math.max(latestBootEpochs.get(sessionId) ?? normalized, normalized));
+  }
   pendingBootAborts.set(sessionId, {
     controller,
-    bootEpoch: normalizeBootEpoch(bootEpoch),
+    bootEpoch: normalized,
   });
   return controller;
 }
@@ -57,6 +62,34 @@ function abortPendingBoot(sessionId, bootEpoch) {
     pendingBootAborts.delete(sessionId);
   }
   return true;
+}
+
+function hasPendingBootAfter(sessionId, bootEpoch) {
+  if (!sessionId) return false;
+  const pending = pendingBootAborts.get(sessionId);
+  const requested = normalizeBootEpoch(bootEpoch);
+  return Boolean(
+    pending
+    && requested !== undefined
+    && pending.bootEpoch !== undefined
+    && pending.bootEpoch > requested
+  );
+}
+
+function hasNewerBootEpoch(sessionId, bootEpoch) {
+  if (!sessionId) return false;
+  const requested = normalizeBootEpoch(bootEpoch);
+  const latest = latestBootEpochs.get(sessionId);
+  return requested !== undefined && latest !== undefined && latest > requested;
+}
+
+function forgetBootEpoch(sessionId, bootEpoch) {
+  if (!sessionId) return;
+  const requested = normalizeBootEpoch(bootEpoch);
+  const latest = latestBootEpochs.get(sessionId);
+  if (requested === undefined || latest === undefined || latest <= requested) {
+    latestBootEpochs.delete(sessionId);
+  }
 }
 
 function clearPendingBootAbort(sessionId, controller) {
@@ -161,6 +194,7 @@ function claimSessionSlot(sessions, sessionId, session, bootEpoch) {
   }
   if (normalized !== undefined) {
     session.bootEpoch = normalized;
+    latestBootEpochs.set(sessionId, Math.max(latestBootEpochs.get(sessionId) ?? normalized, normalized));
   }
   let displaced;
   // When a newer boot replaces an older registry entry, mark and return the
@@ -197,6 +231,9 @@ module.exports = {
   claimSessionSlot,
   clearPendingBootAbort,
   disposeDisplacedSessionResources,
+  forgetBootEpoch,
+  hasPendingBootAfter,
+  hasNewerBootEpoch,
   normalizeBootEpoch,
   registerPendingBootAbort,
   sessionMatchesBootEpoch,

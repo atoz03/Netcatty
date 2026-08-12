@@ -958,6 +958,16 @@ test("connection endpoint can record negotiated agent forwarding instead of the 
   assert.equal(normalizeEndpoint(endpoint).agentForwarding, false);
 });
 
+test("channel reuse can borrow a normal SSH transport for sudo SFTP", () => {
+  const base = { hostname: "sudo.example", username: "root", port: 22 };
+  const normalShell = buildConnectionReuseEndpoint(base, { sftpSudo: false });
+  const sudoSftp = buildConnectionReuseEndpoint(base, { sftpSudo: true });
+
+  assert.notEqual(buildEndpointKey(normalShell), buildEndpointKey(sudoSftp));
+  assert.equal(endpointAllowsReuse(sudoSftp, normalShell, "channel"), true);
+  assert.equal(endpointAllowsReuse(sudoSftp, normalShell, "shell"), false);
+});
+
 test("endpointAllowsReuse: shell exact vs channel asymmetric for agentForwarding", () => {
   const base = { hostname: "a.example", username: "root", port: 22 };
   // Channel (default): request needs ForwardAgent, existing never enabled it -> reject.

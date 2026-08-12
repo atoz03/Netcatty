@@ -13,3 +13,10 @@ test("hidden selected theme uses the normal theme item row", () => {
   assert.match(source, /hiddenSelectedTheme && \(\s*<ThemeItem/);
   assert.doesNotMatch(source, /terminal\.hiddenTheme\.title[\s\S]*terminal\.hiddenTheme\.desc/);
 });
+
+test("theme side panel tabs are vertically centered in the header", () => {
+  assert.match(
+    source,
+    /TERMINAL_SIDE_PANEL_INNER_HEADER_CLASS, 'flex items-center px-1\.5 gap-0\.5 border-b'/,
+  );
+});

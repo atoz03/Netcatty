@@ -70,6 +70,54 @@ test("resolveProviderEndpoint keeps an explicit openrouter baseURL untouched", (
   assert.equal(result.baseURL, "https://proxy.example/v1");
 });
 
+test("resolveProviderEndpoint normalizes Anthropic-compat Base URL for @ai-sdk/anthropic", () => {
+  // Claude Code style (bare host) must gain /v1 so chat hits …/v1/messages.
+  assert.equal(
+    resolveProviderEndpoint(
+      makeConfig({ style: "anthropic", baseURL: "https://gateway.example/" }),
+      "anthropic",
+      "sk-test",
+    ).baseURL,
+    "https://gateway.example/v1",
+  );
+  // AI SDK style already includes /v1 — leave it alone.
+  assert.equal(
+    resolveProviderEndpoint(
+      makeConfig({ style: "anthropic", baseURL: "https://gateway.example/v1" }),
+      "anthropic",
+      "sk-test",
+    ).baseURL,
+    "https://gateway.example/v1",
+  );
+  // Official Anthropic preset default (no /v1) also needs the suffix.
+  assert.equal(
+    resolveProviderEndpoint(
+      makeConfig({ providerId: "anthropic", baseURL: "https://api.anthropic.com" }),
+      "anthropic",
+      "sk-test",
+    ).baseURL,
+    "https://api.anthropic.com/v1",
+  );
+  // Custom complete SDK prefix without /v1 must not gain /v1
+  // (proxy serves …/anthropic/messages, not …/anthropic/v1/messages).
+  assert.equal(
+    resolveProviderEndpoint(
+      makeConfig({ style: "anthropic", baseURL: "https://proxy.example/anthropic" }),
+      "anthropic",
+      "sk-test",
+    ).baseURL,
+    "https://proxy.example/anthropic",
+  );
+  // OpenAI-compat style must not rewrite the path.
+  assert.equal(
+    resolveProviderEndpoint(
+      makeConfig({ style: "openai", baseURL: "https://api.deepseek.com" }),
+      "openai",
+      "sk-test",
+    ).baseURL,
+    "https://api.deepseek.com",
+  );
+});
 test("resolveProviderEndpoint applies the ollama URL fallback for every style override", () => {
   for (const style of ["openai", "anthropic", "google"] as const) {
     const result = resolveProviderEndpoint(

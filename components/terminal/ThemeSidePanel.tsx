@@ -311,7 +311,7 @@ const ThemeSidePanelInner: React.FC<ThemeSidePanelProps> = ({
       >
         {/* Tab Bar */}
         <div
-          className={cn(TERMINAL_SIDE_PANEL_INNER_HEADER_CLASS, 'flex px-1.5 gap-0.5 border-b')}
+          className={cn(TERMINAL_SIDE_PANEL_INNER_HEADER_CLASS, 'flex items-center px-1.5 gap-0.5 border-b')}
           style={{ borderColor: 'var(--terminal-panel-border)' }}
         >
           <button

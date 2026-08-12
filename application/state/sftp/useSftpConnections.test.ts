@@ -3,8 +3,12 @@
 
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
+  buildSftpConnectInFlightKey,
+  buildSftpHomeDirCandidates,
+  runSftpConnectOnceByKey,
   createSftpConnectionId,
   createPinnedReconnectSideResolver,
   openSftpConnectionOnce,
@@ -15,10 +19,60 @@ import {
   resolvePinnedReconnectSide,
 } from "./useSftpConnections.ts";
 
+test("home dir candidates prefer user home then root", () => {
+  assert.deepEqual(buildSftpHomeDirCandidates("deploy"), ["/home/deploy", "/root"]);
+  assert.deepEqual(buildSftpHomeDirCandidates("root"), ["/root"]);
+  assert.deepEqual(buildSftpHomeDirCandidates(undefined), ["/root"]);
+  assert.deepEqual(buildSftpHomeDirCandidates(null), ["/root"]);
+});
+
 test("connection ids stay unique even when connects start in the same millisecond", () => {
   const ids = ["uuid-a", "uuid-b"];
   assert.equal(createSftpConnectionId("left", () => ids.shift()!), "left-uuid-a");
   assert.equal(createSftpConnectionId("left", () => ids.shift()!), "left-uuid-b");
+});
+
+test("runSftpConnectOnceByKey shares an in-flight connect for the same tab and endpoint", async () => {
+  const inFlight = new Map<string, Promise<void>>();
+  let runs = 0;
+  let releaseFirst: (() => void) | undefined;
+
+  const first = runSftpConnectOnceByKey(inFlight, "left:tab-1:host-key:ssh-session-1:/home", async () => {
+    runs += 1;
+    await new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+  });
+  const second = runSftpConnectOnceByKey(inFlight, "left:tab-1:host-key:ssh-session-1:/home", async () => {
+    runs += 1;
+  });
+
+  assert.equal(runs, 1);
+  releaseFirst?.();
+  await Promise.all([first, second]);
+  assert.equal(runs, 1);
+  assert.equal(inFlight.size, 0);
+});
+
+test("buildSftpConnectInFlightKey uses the allocated tab id for forced new tabs", () => {
+  const first = buildSftpConnectInFlightKey({
+    side: "left",
+    tabId: "new-tab-a",
+    targetConnectionKey: "host-key",
+    sourceSessionId: "ssh-session-1",
+    initialPath: "/home",
+    forceNewTab: true,
+  });
+  const second = buildSftpConnectInFlightKey({
+    side: "left",
+    tabId: "new-tab-b",
+    targetConnectionKey: "host-key",
+    sourceSessionId: "ssh-session-1",
+    initialPath: "/home",
+    forceNewTab: true,
+  });
+
+  assert.notEqual(first, second);
 });
 
 const openOptions = {
@@ -71,6 +125,43 @@ test("openSftpWithSessionPreference falls back to normal SFTP when session reuse
 
   assert.equal(sftpId, "fresh-sftp");
   assert.deepEqual(calls, ["openForSession:ssh-session-1", "openSftp:sftp-request-1"]);
+});
+
+test("openSftpWithSessionPreference tries session reuse for sudo SFTP before fresh auth", async () => {
+  const calls: string[] = [];
+  let passedOptions: NetcattySSHOptions | undefined;
+  const sftpId = await openSftpWithSessionPreference({
+    bridge: {
+      openSftpForSession: async (sessionId: string, options?: NetcattySSHOptions) => {
+        calls.push(`openForSession:${sessionId}`);
+        passedOptions = options;
+        return "sudo-session-backed-sftp";
+      },
+      openSftp: async () => {
+        calls.push("openSftp");
+        return "fresh-sftp";
+      },
+    },
+    sourceSessionId: "ssh-session-1",
+    openOptions: {
+      ...openOptions,
+      sudo: true,
+      password: "sudo-pass",
+    },
+  });
+
+  assert.equal(sftpId, "sudo-session-backed-sftp");
+  assert.deepEqual(calls, ["openForSession:ssh-session-1"]);
+  assert.equal(passedOptions?.sudo, true);
+  assert.equal(passedOptions?.password, "sudo-pass");
+});
+
+test("remote browse connect does not discard sourceSessionId for sudo hosts", () => {
+  const source = readFileSync(new URL("./useSftpConnections.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(
+    source,
+    /host\.sftpSudo\s*\?\s*undefined\s*:\s*options\?\.sourceSessionId/,
+  );
 });
 
 test("openSftpWithSessionPreference opens normal SFTP without a source session", async () => {

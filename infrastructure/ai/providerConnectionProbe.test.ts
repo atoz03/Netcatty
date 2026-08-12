@@ -27,6 +27,23 @@ test("buildProviderProbeUrl joins base URL and endpoint without duplicate slashe
   );
 });
 
+test("buildProviderProbeUrl avoids double /v1 for AI SDK style Anthropic bases", () => {
+  // Reporter case: Base URL already includes /v1 (chat works) but probe used to
+  // request GET …/v1/v1/models.
+  assert.equal(
+    buildProviderProbeUrl("https://gateway.example/v1", "/v1/models"),
+    "https://gateway.example/v1/models",
+  );
+  assert.equal(
+    buildProviderProbeUrl("https://gateway.example/v1/", "/v1/models"),
+    "https://gateway.example/v1/models",
+  );
+  assert.equal(
+    buildProviderProbeUrl("https://gateway.example/", "/v1/models"),
+    "https://gateway.example/v1/models",
+  );
+});
+
 test("validateProviderProbeInputs requires base URL and API key except for ollama", () => {
   assert.deepEqual(
     validateProviderProbeInputs({ baseURL: "", apiKey: "sk", providerId: "openai" }),
@@ -168,4 +185,26 @@ test("probeProviderConnection returns typed failures before fetch", async () => 
     }),
     { ok: false, reason: "unavailable" },
   );
+});
+
+test("probeProviderConnection does not double /v1 for Anthropic AI SDK style bases", async () => {
+  const calls: string[] = [];
+  const run = await probeProviderConnection({
+    bridge: {
+      aiFetch: async (url) => {
+        calls.push(url);
+        return {
+          ok: true,
+          status: 200,
+          data: JSON.stringify({ data: [{ id: "claude-sonnet" }] }),
+        };
+      },
+    },
+    baseURL: "https://gateway.example/v1",
+    apiKey: "sk-test",
+    providerId: "custom",
+    style: "anthropic",
+  });
+  assert.deepEqual(calls, ["https://gateway.example/v1/models"]);
+  assert.equal(run.ok, true);
 });

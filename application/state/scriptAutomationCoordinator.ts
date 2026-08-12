@@ -83,6 +83,8 @@ export function getActiveScriptRunForSession(sessionId: string): ScriptRun | und
 }
 
 export async function runAutomationScript(params: {
+  runId?: string;
+  returnWhenQueued?: boolean;
   snippet: Snippet;
   sessionId: string;
   sessionIds?: string[];
@@ -104,6 +106,8 @@ export async function runAutomationScript(params: {
     throw new Error('Script bridge unavailable');
   }
   return bridge.scriptRun({
+    runId: params.runId,
+    returnWhenQueued: params.returnWhenQueued,
     scriptId: params.snippet.id,
     scriptLabel: params.snippet.label,
     content: params.snippet.command,
@@ -176,6 +180,7 @@ export async function runConnectScriptsSequential(params: {
   scripts: Snippet[];
   sessionId: string;
   signal?: AbortSignal;
+  onCancelableRunChange?: (stopCurrentRun: (() => Promise<void>) | null) => void;
   onScriptStart?: (snippet: Snippet) => void;
   onScriptComplete?: (snippet: Snippet) => void;
   sessionMeta?: {
@@ -185,18 +190,63 @@ export async function runConnectScriptsSequential(params: {
     username?: string;
   };
 }): Promise<void> {
-  for (const snippet of params.scripts) {
+  const throwIfAborted = () => {
     if (params.signal?.aborted) {
-      throw new Error('Aborted');
+      throw new DOMException('Connect script run cancelled', 'AbortError');
     }
+  };
+
+  for (const snippet of params.scripts) {
+    throwIfAborted();
+    const runId = crypto.randomUUID();
+    let stopPromise: Promise<void> | undefined;
+    let stopped = false;
     params.onScriptStart?.(snippet);
-    const { runId } = await runAutomationScript({
+    const queueAccepted = runAutomationScript({
+      runId,
+      returnWhenQueued: true,
       snippet,
       sessionId: params.sessionId,
       sessionMeta: params.sessionMeta,
     });
-    await waitForScriptRun(runId, { signal: params.signal });
-    params.onScriptComplete?.(snippet);
+    const stopThisRun = () => {
+      if (stopPromise) return stopPromise;
+      const attempt = queueAccepted.then(async () => {
+        const result = await stopScriptRun(runId);
+        if (!result.ok) {
+          throw new Error(`Connect script run could not be stopped: ${runId}`);
+        }
+        stopped = true;
+      });
+      stopPromise = attempt;
+      void attempt.catch(() => {
+        if (stopPromise === attempt) stopPromise = undefined;
+      });
+      return attempt;
+    };
+    params.onCancelableRunChange?.(stopThisRun);
+    const onAbort = () => {
+      void stopThisRun().catch(() => {});
+    };
+    params.signal?.addEventListener('abort', onAbort, { once: true });
+
+    try {
+      await queueAccepted;
+      throwIfAborted();
+      await waitForScriptRun(runId, { signal: params.signal });
+      params.onScriptComplete?.(snippet);
+    } catch (err) {
+      if (params.signal?.aborted) {
+        await stopThisRun();
+        throw new DOMException('Connect script run cancelled', 'AbortError');
+      }
+      throw err;
+    } finally {
+      params.signal?.removeEventListener('abort', onAbort);
+      if (!params.signal?.aborted || stopped) {
+        params.onCancelableRunChange?.(null);
+      }
+    }
   }
 }
 

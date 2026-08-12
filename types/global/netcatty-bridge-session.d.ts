@@ -363,7 +363,7 @@ declare global {
     respondTerminalOutputDrain?(requestId: string): void;
     notifyTerminalSessionDisplayReady?(sessionId: string): void;
     ackSessionFlow(sessionId: string, bytes: number): void;
-    closeSession(sessionId: string, options?: { bootEpoch?: number }): void | Promise<void>;
+    closeSession(sessionId: string, options?: { bootEpoch?: number; retainOwnership?: boolean }): void | Promise<void>;
     /** Move a live session's output port to this renderer (same PTY). */
     rebindTerminalSessionOutput?(sessionId: string, authorization: string): Promise<{
       success: boolean;

@@ -53,6 +53,7 @@ export const zhCNAiMessages: Messages = {
   'ai.providers.apiKey.placeholder': '输入 API Key',
   'ai.providers.apiKey.decrypting': '解密中...',
   'ai.providers.baseUrl': 'Base URL',
+  'ai.providers.baseUrl.anthropicHelp': 'Anthropic 兼容：可填不带或带 /v1 的主机（例如 https://gateway.example 或 https://gateway.example/v1）。检测与聊天都会请求 /v1/models、/v1/messages。',
   'ai.providers.skipTLSVerify': '跳过 TLS 证书验证（用于自签名证书）',
   'ai.providers.defaultModel': '默认模型',
   'ai.providers.defaultModel.placeholder': '例如 gpt-4o, claude-sonnet-4-20250514',

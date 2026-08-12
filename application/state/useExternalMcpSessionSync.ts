@@ -17,6 +17,49 @@ type UseExternalMcpSessionSyncOptions = {
   portForwardingRules: PortForwardingRule[];
 };
 
+export function createLatestPayloadSync<T>(
+  send: (payload: T) => Promise<unknown>,
+) {
+  let desired: { serialized: string; payload: T } | null = null;
+  let acknowledged = '';
+  let inFlight: Promise<void> | null = null;
+  let cancelled = false;
+
+  const pump = async () => {
+    while (!cancelled && desired && desired.serialized !== acknowledged) {
+      const target = desired;
+      try {
+        const result = await send(target.payload);
+        if (cancelled) break;
+        if (result && typeof result === 'object' && 'ok' in result && (result as { ok?: boolean }).ok === false) {
+          if (desired === target) break;
+          continue;
+        }
+        acknowledged = target.serialized;
+      } catch {
+        if (desired === target) break;
+      }
+    }
+  };
+
+  return {
+    push(payload: T, serialized = JSON.stringify(payload)): Promise<void> {
+      if (cancelled) return Promise.resolve();
+      desired = { payload, serialized };
+      if (!inFlight) {
+        inFlight = pump().finally(() => {
+          inFlight = null;
+        });
+      }
+      return inFlight;
+    },
+    cancel(): void {
+      cancelled = true;
+      desired = null;
+    },
+  };
+}
+
 function isMainAppWindow(): boolean {
   if (typeof window === 'undefined') return false;
   const hash = window.location.hash || '';
@@ -43,7 +86,6 @@ export function useExternalMcpSessionSync({
     void enabledTick;
     return readExternalMcpStoredEnabled();
   }, [enabledTick]);
-  const syncGenerationRef = useRef(0);
 
   useEffect(() => {
     const bump = () => setEnabledTick((value) => value + 1);
@@ -77,34 +119,41 @@ export function useExternalMcpSessionSync({
     });
   }, [sessions, sessionHostsMap, hosts, portForwardingRules]);
 
-  const lastSentSerializedRef = useRef('');
+  const liveSyncRef = useRef<ReturnType<typeof createLatestPayloadSync<typeof payload>> | null>(null);
+  const externalSyncRef = useRef<ReturnType<typeof createLatestPayloadSync<typeof payload>> | null>(null);
+
+  useEffect(() => {
+    if (!isMainAppWindow()) return;
+    const bridge = netcattyBridge.get();
+    if (!bridge?.aiMcpUpdateLiveSessions) return;
+    const serialized = JSON.stringify(payload);
+    liveSyncRef.current ??= createLatestPayloadSync((nextPayload) => (
+      Promise.resolve(bridge.aiMcpUpdateLiveSessions?.(nextPayload))
+    ));
+    void liveSyncRef.current.push(payload, serialized);
+  }, [payload]);
 
   useEffect(() => {
     if (!isMainAppWindow()) return;
     if (!enabled) {
-      syncGenerationRef.current += 1;
-      lastSentSerializedRef.current = '';
+      // Recreate the synchronizer after re-enabling because disabling can
+      // clear the main-process scope even when the renderer payload is equal.
+      externalSyncRef.current?.cancel();
+      externalSyncRef.current = null;
       return;
     }
     const bridge = netcattyBridge.get();
     if (!bridge?.aiMcpUpdateSessions) return;
 
     const serialized = JSON.stringify(payload);
-    if (serialized === lastSentSerializedRef.current) return;
-
-    const generation = ++syncGenerationRef.current;
     const timeoutId = window.setTimeout(() => {
-      void Promise.resolve(bridge.aiMcpUpdateSessions?.(payload, EXTERNAL_MCP_CHAT_SESSION_ID))
-        .then((result) => {
-          if (generation !== syncGenerationRef.current) return;
-          if (result && typeof result === 'object' && 'ok' in result && (result as { ok?: boolean }).ok === false) {
-            return;
-          }
-          lastSentSerializedRef.current = serialized;
-        })
-        .catch(() => {
-          // Leave the ref unset so the next effect can retry.
-        });
+      externalSyncRef.current ??= createLatestPayloadSync((nextPayload) => (
+        Promise.resolve(bridge.aiMcpUpdateSessions?.(
+          nextPayload,
+          EXTERNAL_MCP_CHAT_SESSION_ID,
+        ))
+      ));
+      void externalSyncRef.current.push(payload, serialized);
     }, 250);
 
     return () => {

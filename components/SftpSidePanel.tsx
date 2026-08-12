@@ -86,6 +86,7 @@ import { scheduleDeferredTerminalFocus } from "./systemManager/tmuxActionFocus";
 import {
   connectionKeyMatchesHost,
   findReusableSftpSidePanelTab,
+  isPendingSameEndpointSshSession,
   shouldAcceptPendingSftpUpload,
   shouldResetSftpSidePanelSourceSession,
   shouldSkipSftpSidePanelAutoConnect,
@@ -560,6 +561,12 @@ const SftpSidePanelInner: React.FC<SftpSidePanelProps> = ({
       activeHost.username,
       activeHost.sftpFileProtocol,
     );
+    const pendingSameEndpointSession = sessions.find((session) => (
+      isPendingSameEndpointSshSession(session, activeHost)
+    ));
+    if (!activeSessionId && pendingSameEndpointSession) {
+      return;
+    }
     const sessionChanged = shouldResetSftpSidePanelSourceSession(
       lastSourceSessionIdRef.current,
       activeSessionId,
@@ -737,7 +744,7 @@ const SftpSidePanelInner: React.FC<SftpSidePanelProps> = ({
         tabConnectionKeyMapRef.current.set(tabId, connectionKey);
       },
     });
-  }, [activeHost, activeSessionId, initialLocation, interactiveWorkActive]);
+  }, [activeHost, activeSessionId, initialLocation, interactiveWorkActive, sessions]);
 
   useEffect(() => {
     if (!activeHost || !isVisible) return;

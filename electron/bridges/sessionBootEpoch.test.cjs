@@ -21,17 +21,26 @@ test("pending boot abort cancels older generations but not newer ones", () => {
   const {
     abortPendingBoot,
     clearPendingBootAbort,
+    forgetBootEpoch,
+    hasNewerBootEpoch,
     registerPendingBootAbort,
+    hasPendingBootAfter,
   } = require("./sessionBootEpoch.cjs");
   const older = registerPendingBootAbort("s-pending", 2);
   const newer = registerPendingBootAbort("s-pending", 4);
   assert.equal(older.signal.aborted, true);
   assert.equal(newer.signal.aborted, false);
   assert.equal(abortPendingBoot("s-pending", 3), false);
+  assert.equal(hasPendingBootAfter("s-pending", 3), true);
+  assert.equal(hasNewerBootEpoch("s-pending", 3), true);
   assert.equal(newer.signal.aborted, false);
   assert.equal(abortPendingBoot("s-pending", 4), true);
+  assert.equal(hasPendingBootAfter("s-pending", 3), false);
+  assert.equal(hasNewerBootEpoch("s-pending", 3), true);
   assert.equal(newer.signal.aborted, true);
   clearPendingBootAbort("s-pending", newer);
+  forgetBootEpoch("s-pending", 4);
+  assert.equal(hasNewerBootEpoch("s-pending", 3), false);
 });
 
 test("claimSessionSlot replaces an older boot epoch and marks it superseded", () => {

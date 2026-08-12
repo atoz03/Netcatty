@@ -226,8 +226,15 @@ import {
 import type { CreateXTermRuntimeContext } from "./terminal/runtime/createXTermRuntime";
 import { TerminalView } from "./terminal/TerminalView";
 import {
+  cancelConnectAutomationBatch,
+  createConnectAutomationBatch,
+  trackConnectAutomationStop,
+  type ConnectAutomationBatch,
+} from "./terminal/connectAutomationBatch";
+import {
   getInitialTerminalStatus,
   resolveTerminalVaultInitialized,
+  shouldResetConnectAutomationOnReconnect,
   shouldSuppressHostStartupCommandOnReconnect,
   shouldStartTerminalBackend,
 } from "./terminal/restoredSessionGate";
@@ -369,6 +376,7 @@ const TerminalComponent: React.FC<TerminalProps> = ({
   const connectScriptsConsumedRef = useRef(false);
   const connectScriptsCompletedIdsRef = useRef(new Set<string>());
   const connectScriptsInFlightRef = useRef(false);
+  const connectScriptsBatchRef = useRef<ConnectAutomationBatch | null>(null);
   const pendingScriptRunIdRef = useRef<string | null>(null);
   const pendingScriptHandledRef = useRef<Snippet | null>(null);
   const pendingScriptRef = useRef(pendingScript);
@@ -1609,7 +1617,7 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     terminalCwdTracker,
   ]);
 
-  const cleanupSession = async () => {
+  const cleanupSession = async (options?: { retainOwnership?: boolean }) => {
     const closingSessionId = sessionRef.current;
     xtermRuntimeRef.current?.flushKittyKeyboardReleases();
     sessionRef.current = null;
@@ -1637,7 +1645,10 @@ const TerminalComponent: React.FC<TerminalProps> = ({
       // Still notify main so in-flight SSH passphrase prompts for this UI
       // sessionId are aborted even before a backend session was attached.
       try {
-        await terminalBackend.closeSession(sessionId, { bootEpoch: resolveCloseBootEpoch() });
+        await terminalBackend.closeSession(sessionId, {
+          bootEpoch: resolveCloseBootEpoch(),
+          ...(options?.retainOwnership === true ? { retainOwnership: true } : {}),
+        });
       } catch (err) {
         logger.warn("Failed to cancel pending session boot on disconnect", err);
       }
@@ -1746,7 +1757,10 @@ const TerminalComponent: React.FC<TerminalProps> = ({
         clearTerminalSessionFlowAck(closingSessionId);
       }
       try {
-        await terminalBackend.closeSession(closingSessionId, { bootEpoch: resolveCloseBootEpoch() });
+        await terminalBackend.closeSession(closingSessionId, {
+          bootEpoch: resolveCloseBootEpoch(),
+          ...(options?.retainOwnership === true ? { retainOwnership: true } : {}),
+        });
       } catch (err) {
         logger.warn("Failed to close SSH session", err);
       }
@@ -2517,9 +2531,19 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     if (!shouldEvaluateConnect && !hasPendingWork) return;
     if (connectScriptsInFlightRef.current) return;
 
+    const batch = createConnectAutomationBatch();
+    connectScriptsBatchRef.current = batch;
+    connectScriptsInFlightRef.current = true;
+    const batchStillActive = () => (
+      !batch.controller.signal.aborted && connectScriptsBatchRef.current === batch
+    );
+
     // Defer until xterm has rendered login output and the main-process output tap
     // has populated SessionOutputBuffer (avoids waitForPrompt racing an empty buffer).
+    let timerFired = false;
     const timer = window.setTimeout(() => {
+      timerFired = true;
+      if (!batchStillActive()) return;
       const runPending = Boolean(pendingOne);
       const connectQueueNow = connectScriptsConsumedRef.current
         ? []
@@ -2548,6 +2572,10 @@ const TerminalComponent: React.FC<TerminalProps> = ({
         })) {
           connectScriptsConsumedRef.current = true;
         }
+        if (connectScriptsBatchRef.current === batch) {
+          connectScriptsBatchRef.current = null;
+          connectScriptsInFlightRef.current = false;
+        }
         return;
       }
 
@@ -2556,11 +2584,13 @@ const TerminalComponent: React.FC<TerminalProps> = ({
         connectQueueNow.map((item) => item.id).filter((id): id is string => Boolean(id)),
       );
 
-      connectScriptsInFlightRef.current = true;
-
       void runConnectScriptsSequential({
         scripts: scriptsToRun,
         sessionId,
+        signal: batch.controller.signal,
+        onCancelableRunChange: (stopCurrentRun) => (
+          trackConnectAutomationStop(batch, stopCurrentRun)
+        ),
         sessionMeta: {
           connected: true,
           name: scriptSessionName,
@@ -2568,6 +2598,7 @@ const TerminalComponent: React.FC<TerminalProps> = ({
           username: host.username,
         },
         onScriptComplete: (snippet) => {
+          if (!batchStillActive()) return;
           if (snippet.id && connectIdsInBatch.has(snippet.id)) {
             connectScriptsCompletedIdsRef.current.add(snippet.id);
           }
@@ -2581,6 +2612,7 @@ const TerminalComponent: React.FC<TerminalProps> = ({
         },
       })
         .then(() => {
+          if (!batchStillActive()) return;
           const resolvedAfterRun = resolveConnectScriptsForHost(host, snippets);
           const doneAfterRun = resolvedAfterRun.length === 0
             || resolvedAfterRun.every(
@@ -2591,6 +2623,7 @@ const TerminalComponent: React.FC<TerminalProps> = ({
           }
         })
         .catch(async (err) => {
+          if (!batchStillActive()) return;
           const message = err instanceof Error ? err.message : String(err);
           toast.error(message.includes('Observer mode') ? t('scripts.observer.blocked') : message);
           connectScriptsConsumedRef.current = true;
@@ -2606,6 +2639,10 @@ const TerminalComponent: React.FC<TerminalProps> = ({
             await runConnectScriptsSequential({
               scripts: [pendingScriptToMark],
               sessionId,
+              signal: batch.controller.signal,
+              onCancelableRunChange: (stopCurrentRun) => (
+                trackConnectAutomationStop(batch, stopCurrentRun)
+              ),
               sessionMeta: {
                 connected: true,
                 name: scriptSessionName,
@@ -2613,6 +2650,7 @@ const TerminalComponent: React.FC<TerminalProps> = ({
                 username: host.username,
               },
               onScriptComplete: (snippet) => {
+                if (!batchStillActive()) return;
                 if (snippet.id) {
                   pendingScriptRunIdRef.current = snippet.id;
                 } else {
@@ -2621,16 +2659,32 @@ const TerminalComponent: React.FC<TerminalProps> = ({
               },
             });
           } catch (pendingErr) {
+            if (!batchStillActive()) return;
             const pendingMessage = pendingErr instanceof Error ? pendingErr.message : String(pendingErr);
             toast.error(pendingMessage.includes('Observer mode') ? t('scripts.observer.blocked') : pendingMessage);
           }
         })
         .finally(() => {
-          connectScriptsInFlightRef.current = false;
+          if (
+            !batch.controller.signal.aborted
+            && connectScriptsBatchRef.current === batch
+          ) {
+            connectScriptsBatchRef.current = null;
+            connectScriptsInFlightRef.current = false;
+          }
         });
     }, 400);
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      if (!timerFired && connectScriptsBatchRef.current === batch) {
+        batch.controller.abort();
+        connectScriptsBatchRef.current = null;
+        connectScriptsInFlightRef.current = false;
+      } else if (statusRef.current !== "connected") {
+        void cancelConnectAutomationBatch(batch).catch(() => {});
+      }
+    };
   }, [effectiveTerminalProtocol, host, isPendingScriptAlreadyHandled, moshShellReady, pendingScript, pendingScriptId, scriptSessionName, sessionId, snippets, status, t]);
 
   useEffect(() => {
@@ -3255,7 +3309,7 @@ const TerminalComponent: React.FC<TerminalProps> = ({
     setPendingHostKeyRequestId(null);
     setError(null);
     setProgressLogs((prev) => [...prev, "Disconnected by user."]);
-    void cleanupSession();
+    void cleanupSession({ retainOwnership: true });
     updateStatus("disconnected");
     setChainProgress(null);
     setIsDisconnectedDialogDismissed(false);
@@ -3358,20 +3412,8 @@ const TerminalComponent: React.FC<TerminalProps> = ({
       return;
     }
     if (!termRef.current) return;
-    if (mode === "manual") {
-      clearAutoReconnect();
-      prepareRestoredReconnect();
-      // A clone's first connection can fail (auth/host-key/transport) before the
-      // inherited `cd` is consumed. prepareRestoredReconnect() just cleared the
-      // intent for non-restored sessions, so re-arm it here; the callback no-ops
-      // once the cwd was consumed or when there is no pending inherited cwd.
-      prepareInitialCwdIntent();
-    } else {
-      restoreCwdIntentRef.current = null;
-      suppressHostStartupCommandRef.current = shouldSuppressHostStartupCommandOnReconnect("automatic");
-    }
-    // Claim the retry before awaiting close. A close/cancel/unmount during the
-    // awaited backend cleanup invalidates this token and stops the continuation.
+    // Claim the retry before awaiting either script cancellation or backend
+    // cleanup. A second reconnect/cancel invalidates this continuation.
     const retryToken = Symbol("retry");
     retryTokenRef.current = retryToken;
     reconnectPreparationTokenRef.current = retryToken;
@@ -3382,8 +3424,61 @@ const TerminalComponent: React.FC<TerminalProps> = ({
       }
     };
 
+    const connectAutomationBatch = connectScriptsBatchRef.current;
+    if (connectAutomationBatch) {
+      try {
+        await cancelConnectAutomationBatch(connectAutomationBatch);
+      } catch (error) {
+        finishReconnectPreparation();
+        const message = error instanceof Error ? error.message : String(error);
+        toast.error(message);
+        if (mode === "auto" && retryTokenStillCurrent()) {
+          // Return to disconnected so the existing auto-reconnect loop can
+          // schedule another attempt, including another exact stop request.
+          updateStatus("disconnected");
+        }
+        return;
+      }
+      if (!retryTokenStillCurrent()) {
+        finishReconnectPreparation();
+        return;
+      }
+      if (connectScriptsBatchRef.current === connectAutomationBatch) {
+        connectScriptsBatchRef.current = null;
+        connectScriptsInFlightRef.current = false;
+      }
+    }
+
+    if (mode === "manual") {
+      clearAutoReconnect();
+      // Manual reconnect skips the disconnected status transition that normally
+      // clears these refs, so onConnect scripts would otherwise stay consumed.
+      if (shouldResetConnectAutomationOnReconnect(
+        restoreState === "restored-disconnected" ? "restored" : "manual",
+      )) {
+        // The prior batch is now stopped, so its callbacks cannot mutate these
+        // newly allocated guards for the fresh manual connection.
+        connectScriptsConsumedRef.current = false;
+        connectScriptsCompletedIdsRef.current = new Set();
+        connectScriptsInFlightRef.current = false;
+      }
+      prepareRestoredReconnect();
+      // A clone's first connection can fail (auth/host-key/transport) before the
+      // inherited `cd` is consumed. prepareRestoredReconnect() just cleared the
+      // intent for non-restored sessions, so re-arm it here; the callback no-ops
+      // once the cwd was consumed or when there is no pending inherited cwd.
+      prepareInitialCwdIntent();
+    } else {
+      // An automatic reconnect replaces the transport but remains the same user
+      // session. Stop old automation above, then preserve the existing policy of
+      // not starting onConnect scripts again on the replacement transport.
+      connectScriptsConsumedRef.current = true;
+      restoreCwdIntentRef.current = null;
+      suppressHostStartupCommandRef.current = shouldSuppressHostStartupCommandOnReconnect("automatic");
+    }
+
     try {
-      await cleanupSession();
+      await cleanupSession({ retainOwnership: true });
     } catch (error) {
       finishReconnectPreparation();
       throw error;

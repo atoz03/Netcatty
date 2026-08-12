@@ -30,6 +30,92 @@ test("renderer terminal input reports activity for the matching session", () => 
   ]);
 });
 
+test("direct-mode close reports ownership cleanup after the backend already exited", () => {
+  const activity = [];
+  terminalBridge.init({
+    sessions: new Map(),
+    electronModule: {},
+    reportOpenedSessionActivity: (event) => activity.push(event),
+  });
+
+  const result = terminalBridge.closeSession({ sender: {} }, {
+    sessionId: "already-exited",
+    bootEpoch: 3,
+  });
+
+  assert.deepEqual(result, { closed: false, reason: "missing" });
+  assert.deepEqual(activity, [{ sessionId: "already-exited", phase: "closed" }]);
+});
+
+test("direct-mode disconnect close keeps host_open ownership for reconnect", () => {
+  const activity = [];
+  const sessions = new Map([
+    ["session-keep", {
+      proc: { kill() {} },
+      webContentsId: 1,
+    }],
+  ]);
+  terminalBridge.init({
+    sessions,
+    electronModule: { webContents: { fromId: () => ({ isDestroyed: () => true, send() {} }) } },
+    reportOpenedSessionActivity: (event) => activity.push(event),
+  });
+
+  const result = terminalBridge.closeSession({ sender: {} }, {
+    sessionId: "session-keep",
+    retainOwnership: true,
+  });
+
+  assert.deepEqual(result, { closed: true });
+  assert.equal(sessions.has("session-keep"), false);
+  assert.deepEqual(activity, []);
+});
+
+test("direct-mode disconnect close of an already-exited session keeps ownership", () => {
+  const activity = [];
+  terminalBridge.init({
+    sessions: new Map(),
+    electronModule: {},
+    reportOpenedSessionActivity: (event) => activity.push(event),
+  });
+
+  const result = terminalBridge.closeSession({ sender: {} }, {
+    sessionId: "already-exited",
+    bootEpoch: 3,
+    retainOwnership: true,
+  });
+
+  assert.deepEqual(result, { closed: false, reason: "missing" });
+  assert.deepEqual(activity, []);
+});
+
+test("stale direct-mode close cannot clean up a newer same-id boot", () => {
+  const activity = [];
+  const { claimSessionSlot } = require("./sessionBootEpoch.cjs");
+  const lifecycle = new Map();
+  claimSessionSlot(lifecycle, "reconnected", {}, 4);
+  lifecycle.delete("reconnected");
+  terminalBridge.init({
+    sessions: new Map(),
+    electronModule: {},
+    reportOpenedSessionActivity: (event) => activity.push(event),
+  });
+
+  const stale = terminalBridge.closeSession({ sender: {} }, {
+    sessionId: "reconnected",
+    bootEpoch: 3,
+  });
+  assert.deepEqual(stale, { skipped: true, reason: "boot-epoch-mismatch" });
+  assert.deepEqual(activity, []);
+
+  const current = terminalBridge.closeSession({ sender: {} }, {
+    sessionId: "reconnected",
+    bootEpoch: 4,
+  });
+  assert.deepEqual(current, { closed: false, reason: "missing" });
+  assert.deepEqual(activity, [{ sessionId: "reconnected", phase: "closed" }]);
+});
+
 test("only a submitted non-sensitive user command arms cwd recovery", () => {
   const stream = { write() { return true; } };
   const session = { stream, webContentsId: 1, blockUntargetedCwdProbe: true };

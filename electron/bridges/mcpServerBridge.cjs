@@ -94,8 +94,14 @@ function disconnectExternalMcpClients() {
 // Per-scope metadata: chatSessionId → { sessionIds: string[], metadata: Map<sessionId, meta> }
 // Each chat session only sees the hosts registered for its scope.
 const scopedMetadata = new Map();
+let liveSessionMetadata = new Map();
+let sessionMetadataRevision = 0;
+let terminalSessionCloseRevision = 0;
+const closedTerminalSessionRevisions = new Map();
+const MAX_CLOSED_TERMINAL_SESSION_REVISIONS = 2048;
 const scopedAttachments = new Map(); // chatSessionId -> Map<filePath, attachment>
 const { createSessionOwnershipRegistry } = require("./mcpServerBridge/sessionOwnership.cjs");
+const { retainOwnedSessions, mergeRetentionMeta } = require("./mcpServerBridge/retainOwnedSessions.cjs");
 const {
   createSessionIdleManager,
   normalizeSessionIdleTimeoutMinutes,
@@ -368,6 +374,8 @@ const {
   releaseSessionExecution,
 } = backgroundJobApi;
 
+let disposeWorkerSessionClosed = null;
+
 function init(deps) {
   sessions = deps.sessions;
   terminalWorkerManager = deps.terminalWorkerManager || null;
@@ -377,6 +385,23 @@ function init(deps) {
   debugLog("init", { hasSessions: Boolean(sessions), hasElectron: Boolean(electronModule) });
   if (deps.commandBlocklist) {
     commandBlocklist = deps.commandBlocklist;
+  }
+  try { disposeWorkerSessionClosed?.dispose?.(); } catch { /* ignore */ }
+  disposeWorkerSessionClosed = null;
+  // Only explicit UI/tab closes drop host_open ownership. Shell "exited"
+  // events (including missing/nonzero exitCode) and recoverable exits
+  // (error / worker-exit / superseded / quiet transport "closed") keep
+  // ownership so a disconnected tab can reconnect with the same session id.
+  // Auto-close clean exits still forget ownership when the renderer closes
+  // the tab and the worker emits explicit:true.
+  if (typeof terminalWorkerManager?.onSessionClosed === "function") {
+    disposeWorkerSessionClosed = terminalWorkerManager.onSessionClosed((event) => {
+      const sessionId = event?.sessionId;
+      if (!sessionId) return;
+      if (event?.explicit === true) {
+        forgetClosedTerminalSession(sessionId);
+      }
+    });
   }
 }
 
@@ -441,6 +466,7 @@ function shutdownHost({ preserveScopedMetadata = false } = {}) {
   if (!preserveScopedMetadata) {
     scopedMetadata.clear();
     scopedAttachments.clear();
+    liveSessionMetadata.clear();
   }
   for (const [, job] of backgroundJobs) {
     try {
@@ -598,12 +624,50 @@ function syncLiveSessionsToExternalScope(chatSessionId = EXTERNAL_MCP_CHAT_SESSI
   return { ok: true, count: sessionList.length, chatSessionId };
 }
 
-function findSessionMetaAcrossScopes(sessionId) {
-  for (const scoped of scopedMetadata.values()) {
+function findSessionMetaAcrossScopes(sessionId, excludeChatSessionId = null) {
+  let latest = liveSessionMetadata.get(sessionId) || null;
+  let latestRevision = Number.isSafeInteger(latest?._revision) ? latest._revision : -1;
+  for (const [scopeId, scoped] of scopedMetadata.entries()) {
+    if (excludeChatSessionId && scopeId === excludeChatSessionId) continue;
     const meta = scoped?.metadata?.get?.(sessionId);
-    if (meta) return meta;
+    if (!meta) continue;
+    const revision = Number.isSafeInteger(meta._revision) ? meta._revision : 0;
+    if (revision > latestRevision) {
+      latest = meta;
+      latestRevision = revision;
+    }
   }
-  return null;
+  return latest;
+}
+
+/**
+ * App-owned live session snapshot. Unlike the External MCP scope, this is
+ * always refreshed by the main renderer and is never exposed as a scope of
+ * its own. It only supplies current state for session ids a chat already owns.
+ */
+function updateLiveSessionMetadata(sessionList) {
+  const incoming = Array.isArray(sessionList) ? sessionList : [];
+  const updateRevision = ++sessionMetadataRevision;
+  const next = new Map();
+  for (const entry of incoming) {
+    if (!entry || typeof entry !== "object" || !entry.sessionId) continue;
+    next.set(entry.sessionId, {
+      hostname: entry.hostname || "",
+      label: entry.label || "",
+      os: entry.os || "",
+      username: entry.username || "",
+      protocol: entry.protocol || "",
+      shellType: entry.shellType || "",
+      deviceType: entry.deviceType || "",
+      connected: entry.connected !== false,
+      hostId: entry.hostId || "",
+      hostChain: Array.isArray(entry.hostChain) ? entry.hostChain : [],
+      activePortForwards: Array.isArray(entry.activePortForwards) ? entry.activePortForwards : [],
+      _revision: updateRevision,
+    });
+  }
+  liveSessionMetadata = next;
+  return { ok: true, count: next.size };
 }
 
 function seedExternalScopeFromOtherScopes(chatSessionId) {
@@ -612,7 +676,10 @@ function seedExternalScopeFromOtherScopes(chatSessionId) {
     if (scopeId === chatSessionId || !scoped?.metadata) continue;
     for (const [sessionId, meta] of scoped.metadata.entries()) {
       if (!sessionId || !meta) continue;
-      if (!byId.has(sessionId)) {
+      const existing = byId.get(sessionId);
+      const existingRevision = Number.isSafeInteger(existing?._revision) ? existing._revision : 0;
+      const revision = Number.isSafeInteger(meta._revision) ? meta._revision : 0;
+      if (!existing || revision > existingRevision) {
         byId.set(sessionId, { sessionId, ...meta });
       }
     }
@@ -680,14 +747,34 @@ function beginChatExecution(chatSessionId, sessionId, command) {
  * @param {string} [chatSessionId] - AI chat session ID for per-scope isolation
  */
 function updateSessionMetadata(sessionList, chatSessionId) {
+  const incoming = Array.isArray(sessionList) ? sessionList : [];
+  const updateRevision = ++sessionMetadataRevision;
+  // Authoritative empty replace: clear retention ownership for this scope so a
+  // later non-empty sync cannot resurrect sessions via cross-scope fallback.
+  if (chatSessionId && incoming.length === 0) {
+    openedSessionOwnership.releaseScopeOwnership(chatSessionId);
+  }
+  // host_open merges the new session into this chat scope, but the AI side
+  // panel later pushes a full replace of only the currently focused tab —
+  // which would drop mid-turn opened sessions. Retain ownership-tracked ids.
+  const effectiveList = chatSessionId
+    ? retainOwnedSessions({
+      incomingSessions: incoming,
+      ownedSessionIds: openedSessionOwnership.listOwned(chatSessionId),
+      previousById: scopedMetadata.get(chatSessionId)?.metadata || null,
+      // Skip the current scope so a stale connected:false snapshot cannot
+      // shadow a fresher copy from External MCP / another chat tab.
+      findFallbackMeta: (sessionId) => findSessionMetaAcrossScopes(sessionId, chatSessionId),
+    })
+    : incoming;
   debugLog("updateSessionMetadata", {
     chatSessionId,
-    count: Array.isArray(sessionList) ? sessionList.length : 0,
-    sessionIds: Array.isArray(sessionList) ? sessionList.map(s => s.sessionId) : [],
+    count: effectiveList.length,
+    sessionIds: effectiveList.map(s => s.sessionId),
   });
-  const ids = sessionList.map(s => s.sessionId);
+  const ids = effectiveList.map(s => s.sessionId);
   const metaMap = new Map();
-  for (const s of sessionList) {
+  for (const s of effectiveList) {
     metaMap.set(s.sessionId, {
       hostname: s.hostname || "",
       label: s.label || "",
@@ -700,6 +787,7 @@ function updateSessionMetadata(sessionList, chatSessionId) {
       hostId: s.hostId || "",
       hostChain: Array.isArray(s.hostChain) ? s.hostChain : [],
       activePortForwards: Array.isArray(s.activePortForwards) ? s.activePortForwards : [],
+      _revision: Number.isSafeInteger(s._revision) ? s._revision : updateRevision,
     });
   }
 
@@ -919,11 +1007,92 @@ function resolveScopedSessionIds(chatSessionId, explicitScopedIds = null) {
 /**
  * Look up metadata for a sessionId, scoped to a specific chat session.
  * Falls back to session object properties if no scoped metadata is found.
+ * When this scope still has a stale connected:false snapshot (common after
+ * host_open + tab switch), refresh connected from a fresher cross-scope copy.
+ * Owned host_open sessions also refresh while still connected so another
+ * scope's empty activePortForwards reaches getContext without a later sidebar
+ * replace.
  */
 function getSessionMeta(sessionId, chatSessionId) {
   if (!chatSessionId) return null;
   const scoped = scopedMetadata.get(chatSessionId);
-  return scoped?.metadata?.get(sessionId) || null;
+  const meta = scoped?.metadata?.get(sessionId) || null;
+  if (!meta) return null;
+  const owned = openedSessionOwnership.validate(chatSessionId, sessionId).ok;
+  // Live non-owned snapshots stay local. Owned sessions (and stale
+  // connected:false copies) consult other scopes.
+  if (!owned && meta.connected !== false) return toPublicSessionMeta(meta);
+  const fresher = findSessionMetaAcrossScopes(sessionId, chatSessionId);
+  if (!fresher) return toPublicSessionMeta(meta);
+  if (!owned && fresher.connected === false) return toPublicSessionMeta(meta);
+  const refreshed = mergeRetentionMeta(meta, fresher);
+  if (!refreshed) return toPublicSessionMeta(meta);
+  scoped.metadata.set(sessionId, refreshed);
+  return toPublicSessionMeta(refreshed);
+}
+
+function toPublicSessionMeta(meta) {
+  if (!meta || typeof meta !== "object") return meta;
+  const { _revision, ...publicMeta } = meta;
+  return publicMeta;
+}
+
+function buildOpenedSessionMeta(result, sessionId) {
+  const host = result?.host && typeof result.host === "object" ? result.host : {};
+  return {
+    sessionId,
+    hostname: host.hostname || "",
+    label: host.label || host.hostname || sessionId,
+    os: host.os || "",
+    username: host.username || "",
+    protocol: result?.protocol || host.protocol || "",
+    shellType: "",
+    deviceType: host.deviceType || "",
+    connected: result?.status === "connected",
+    hostId: result?.hostId || host.id || "",
+    hostChain: [],
+    activePortForwards: [],
+  };
+}
+
+function ensureOpenedSessionMetadata(chatSessionId, sessionId, result) {
+  if (!chatSessionId || !sessionId) return;
+  if (scopedMetadata.get(chatSessionId)?.metadata?.has(sessionId)) return;
+  const latest = findSessionMetaAcrossScopes(sessionId, chatSessionId);
+  mergeSessionMetadata([
+    latest ? { sessionId, ...latest } : buildOpenedSessionMeta(result, sessionId),
+  ], chatSessionId);
+}
+
+/**
+ * Drop host_open ownership and scoped metadata after a terminal session is
+ * actually closed (explicit UI tab close or agent session_close).
+ */
+function forgetClosedTerminalSession(sessionId) {
+  if (!sessionId) return;
+  terminalSessionCloseRevision += 1;
+  closedTerminalSessionRevisions.delete(sessionId);
+  closedTerminalSessionRevisions.set(sessionId, terminalSessionCloseRevision);
+  while (closedTerminalSessionRevisions.size > MAX_CLOSED_TERMINAL_SESSION_REVISIONS) {
+    closedTerminalSessionRevisions.delete(closedTerminalSessionRevisions.keys().next().value);
+  }
+  sessionIdleManager.forgetSession(sessionId);
+  openedSessionOwnership.forgetSession(sessionId);
+  liveSessionMetadata.delete(sessionId);
+  for (const scoped of scopedMetadata.values()) {
+    scoped.sessionIds = scoped.sessionIds.filter((id) => id !== sessionId);
+    scoped.metadata.delete(sessionId);
+  }
+}
+
+function forgetUnownedTerminalSessionMetadata(sessionId) {
+  if (!sessionId) return;
+  openedSessionOwnership.forgetSession(sessionId);
+  liveSessionMetadata.delete(sessionId);
+  for (const scoped of scopedMetadata.values()) {
+    scoped.sessionIds = scoped.sessionIds.filter((id) => id !== sessionId);
+    scoped.metadata.delete(sessionId);
+  }
 }
 
 /**
@@ -1192,6 +1361,10 @@ const sessionIdleManager = createSessionIdleManager({
 function reportOpenedSessionActivity(event = {}) {
   const sessionId = event?.sessionId;
   if (!sessionId) return false;
+  if (event.phase === "closed") {
+    forgetClosedTerminalSession(sessionId);
+    return true;
+  }
   if (event.phase === "begin") {
     return sessionIdleManager.beginActivity(null, sessionId);
   }
@@ -1231,20 +1404,14 @@ sessionService = createSessionService({
     endTerminalSessionClose(params.sessionId);
     if (outcome.closed) return;
     if (outcome.notFound) {
-      sessionIdleManager.forgetSession(params.sessionId);
-      openedSessionOwnership.forgetSession(params.sessionId);
+      forgetClosedTerminalSession(params.sessionId);
       return;
     }
     sessionIdleManager.resume(params.sessionId);
   },
   onClosed: async (sessionId) => {
     await settleBackgroundJobsForTerminalSession(sessionId);
-    sessionIdleManager.forgetSession(sessionId);
-    openedSessionOwnership.forgetSession(sessionId);
-    for (const scoped of scopedMetadata.values()) {
-      scoped.sessionIds = scoped.sessionIds.filter((id) => id !== sessionId);
-      scoped.metadata.delete(sessionId);
-    }
+    forgetClosedTerminalSession(sessionId);
   },
 });
 
@@ -1267,9 +1434,40 @@ const dispatchCapabilityRpc = createCapabilityRpcDispatcher({
   USER_DENIED_MESSAGE,
   listPortForwards: () => listActivePortForwards(),
   sessionService,
-  captureHostOpenScope: (chatSessionId) => openedSessionOwnership.captureGeneration(chatSessionId),
-  onHostOpened: (chatSessionId, sessionId, generation) => {
-    openedSessionOwnership.register(chatSessionId, sessionId, generation);
+  captureHostOpenScope: (chatSessionId) => ({
+    ownershipGeneration: openedSessionOwnership.captureGeneration(chatSessionId),
+    closeRevision: terminalSessionCloseRevision,
+  }),
+  onHostOpened: async (chatSessionId, sessionId, generation, result) => {
+    // The renderer creates the tab before replying to host_open. If the user
+    // explicitly closes it while that reply is still in flight, the eventual
+    // result must not revive ownership or scope metadata for the closed tab.
+    if ((closedTerminalSessionRevisions.get(sessionId) || 0) > generation?.closeRevision) return;
+    if (!openedSessionOwnership.register(
+      chatSessionId,
+      sessionId,
+      generation?.ownershipGeneration ?? generation,
+    )) {
+      // The chat may have been deleted while the renderer was creating the
+      // terminal. The generation revoke correctly rejects ownership, but the
+      // newly created backend session must also be reclaimed or it becomes an
+      // unowned session that no agent can close.
+      // host_open mints a fresh tab/session id. A reconnect with that id is the
+      // same logical tab and must also be reclaimed after its initiating chat
+      // was deleted; unrelated sessions do not reuse the minted id.
+      sessionIdleManager.track(chatSessionId, sessionId);
+      await sessionService.closeTracked({ chatSessionId, sessionId });
+      // A failed close stays idle-tracked so the normal bounded retry can try
+      // again. Remove only scope/live metadata here so a deleted chat cannot be
+      // recreated by the renderer's late merge.
+      forgetUnownedTerminalSessionMetadata(sessionId);
+      return;
+    }
+    closedTerminalSessionRevisions.delete(sessionId);
+    // A full empty scope replace can land after the renderer's best-effort
+    // host_open merge but before this async operation completes. Once the open
+    // succeeds, restore the returned session atomically with its ownership.
+    ensureOpenedSessionMetadata(chatSessionId, sessionId, result);
     sessionIdleManager.track(chatSessionId, sessionId);
   },
 });
@@ -1992,6 +2190,8 @@ const configAndCleanupApi = createConfigAndCleanupApi({
 const { resolveMcpServerRuntimeCommand, buildMcpServerConfig, cleanupScopedMetadata } = configAndCleanupApi;
 
 function cleanup() {
+  try { disposeWorkerSessionClosed?.dispose?.(); } catch { /* ignore */ }
+  disposeWorkerSessionClosed = null;
   shutdownHost();
 }
 
@@ -2013,6 +2213,7 @@ module.exports = {
   applyChatSessionCancelled,
   checkCommandSafety,
   updateSessionMetadata,
+  updateLiveSessionMetadata,
   mergeSessionMetadata,
   updateAttachmentMetadata,
   handleListAttachments,
@@ -2029,6 +2230,7 @@ module.exports = {
   hasActiveWorkerJobForTerminalSession,
   cancelSftpOpsForSession,
   getSessionMeta,
+  forgetClosedTerminalSession,
   cleanupScopedMetadata,
   cleanup,
   shutdownHost,

@@ -607,6 +607,25 @@ function sameEndpoint(a, b) {
     && left.keepaliveCountMax === right.keepaliveCountMax;
 }
 
+function sameTransportEndpoint(a, b) {
+  const left = normalizeEndpoint(a);
+  const right = normalizeEndpoint(b);
+  if (!left || !right) return false;
+  // SFTP sudo changes the channel/subsystem setup, not the authenticated SSH
+  // transport. Channel borrowers (SFTP/port forwarding) may reuse the terminal
+  // connection and apply sudo when opening their own channel.
+  if (left.hostId && right.hostId && left.hostId !== right.hostId) return false;
+  return left.hostname === right.hostname
+    && left.port === right.port
+    && left.username === right.username
+    && left.protocol === right.protocol
+    && left.jumpFingerprint === right.jumpFingerprint
+    && left.proxyFingerprint === right.proxyFingerprint
+    && left.authFingerprint === right.authFingerprint
+    && left.keepaliveIntervalMs === right.keepaliveIntervalMs
+    && left.keepaliveCountMax === right.keepaliveCountMax;
+}
+
 /**
  * True when a requested open can reuse an existing transport/session endpoint.
  *
@@ -619,7 +638,11 @@ function sameEndpoint(a, b) {
  *     transport; cannot use a nofwd transport when the request needs ForwardAgent.
  */
 function endpointAllowsReuse(requested, existing, kind = "channel") {
-  if (!sameEndpoint(requested, existing)) return false;
+  if (kind === "shell") {
+    if (!sameEndpoint(requested, existing)) return false;
+  } else if (!sameTransportEndpoint(requested, existing)) {
+    return false;
+  }
   const req = normalizeEndpoint(requested);
   const have = normalizeEndpoint(existing);
   if (!req || !have) return false;

@@ -202,6 +202,90 @@ test("same session script runs are serialized through the session mutex", async 
   assert.deepEqual(writeOrder, ["slow-run", "fast-run"]);
 });
 
+test("a caller can cancel its queued script by run id without stopping the active script", async () => {
+  const handlers = new Map();
+  const writes = [];
+  let activeDialogRequestId;
+
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {
+      app: { getVersion: () => "test", getPath: () => process.cwd() },
+    },
+    terminalBridge: {
+      writeToSession(_event, payload) {
+        writes.push(String(payload.data || ""));
+      },
+    },
+    terminalWorkerManager: null,
+    getMainWindow: () => ({
+      webContents: {
+        send(channel, payload) {
+          if (channel === "netcatty:script:dialog-request") {
+            activeDialogRequestId = payload.requestId;
+          }
+          if (channel === "netcatty:script:screen-snapshot-request") {
+            setImmediate(() => {
+              handlers.get("netcatty:script:screen-snapshot-response")({}, {
+                requestId: payload.requestId,
+                snapshot: { rows: 24, cols: 80, currentRow: 0, lines: [] },
+              });
+            });
+          }
+        },
+      },
+    }),
+  });
+  scriptBridge.registerHandlers({
+    handle(channel, handler) {
+      handlers.set(channel, handler);
+    },
+  });
+
+  const runHandler = handlers.get("netcatty:script:run");
+  const activeRun = runHandler({}, {
+    runId: "unrelated-active-run",
+    scriptId: "manual",
+    sessionId: "session-queued-cancel",
+    content: `
+      await nct.dialog.confirm('hold queue');
+      await nct.screen.sendLine('active-finished');
+    `,
+    permissionMode: "auto",
+  });
+  await waitUntil(() => activeDialogRequestId);
+
+  const queued = await runHandler({}, {
+    runId: "queued-connect-run",
+    returnWhenQueued: true,
+    scriptId: "connect",
+    sessionId: "session-queued-cancel",
+    content: "await nct.screen.sendLine('queued-ran');",
+    permissionMode: "auto",
+  });
+  assert.deepEqual(queued, {
+    runId: "queued-connect-run",
+    runIds: ["queued-connect-run"],
+  });
+  assert.deepEqual(
+    await handlers.get("netcatty:script:stop")({}, { runId: "queued-connect-run" }),
+    { ok: true },
+  );
+
+  assert.deepEqual(
+    await handlers.get("netcatty:script:dialog-response")({}, {
+      requestId: activeDialogRequestId,
+      value: true,
+    }),
+    { ok: true },
+  );
+  await activeRun;
+  await delay(30);
+
+  assert.ok(writes.some((data) => data.includes("active-finished")));
+  assert.ok(!writes.some((data) => data.includes("queued-ran")));
+});
+
 test("stopping a script releases the session queue so it can run again", async () => {
   const handlers = new Map();
   const sentRunUpdates = [];
@@ -356,6 +440,172 @@ test("reinitializing the script bridge drops an accepted old-run sendLine tail",
   await delay(60);
   assert.deepEqual(oldWrites, ["old-body"]);
   assert.deepEqual(replacementWrites, []);
+});
+
+test("reinitializing the script bridge invalidates accepted queued runs", async () => {
+  const handlers = new Map();
+  const oldWrites = [];
+  const replacementWrites = [];
+  let activeDialogRequestId;
+
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {
+      app: { getVersion: () => "test", getPath: () => process.cwd() },
+    },
+    terminalBridge: {
+      writeToSession(_event, payload) { oldWrites.push(String(payload.data || "")); },
+    },
+    terminalWorkerManager: null,
+    getMainWindow: () => ({
+      webContents: {
+        send(channel, payload) {
+          if (channel === "netcatty:script:dialog-request") {
+            activeDialogRequestId = payload.requestId;
+          }
+          if (channel === "netcatty:script:screen-snapshot-request") {
+            setImmediate(() => {
+              handlers.get("netcatty:script:screen-snapshot-response")({}, {
+                requestId: payload.requestId,
+                snapshot: { rows: 24, cols: 80, currentRow: 0, lines: [] },
+              });
+            });
+          }
+        },
+      },
+    }),
+  });
+  scriptBridge.registerHandlers({
+    handle(channel, handler) { handlers.set(channel, handler); },
+  });
+
+  const runHandler = handlers.get("netcatty:script:run");
+  const activeRun = runHandler({}, {
+    runId: "active-before-reinit",
+    scriptId: "active-before-reinit",
+    sessionId: "session-reinit-queue",
+    content: "await nct.dialog.confirm('hold queue');",
+    permissionMode: "auto",
+  });
+  await waitUntil(() => activeDialogRequestId);
+  await runHandler({}, {
+    runId: "queued-before-reinit",
+    returnWhenQueued: true,
+    scriptId: "queued-before-reinit",
+    sessionId: "session-reinit-queue",
+    content: "await nct.screen.sendLine('stale-queued-write');",
+    permissionMode: "auto",
+  });
+
+  scriptBridge.init({
+    sessions: new Map(),
+    electronModule: {
+      app: { getVersion: () => "test", getPath: () => process.cwd() },
+    },
+    terminalBridge: {
+      writeToSession(_event, payload) { replacementWrites.push(String(payload.data || "")); },
+    },
+    terminalWorkerManager: null,
+    getMainWindow: () => null,
+  });
+
+  await activeRun;
+  await delay(60);
+  assert.deepEqual(oldWrites, []);
+  assert.deepEqual(replacementWrites, []);
+});
+
+test("an old queued run cannot unregister a reused run id after reinitialization", async () => {
+  const handlers = new Map();
+  const writes = [];
+  let oldDialogRequestId;
+  let replacementDialogRequestId;
+
+  const makeMainWindow = (setDialogRequestId) => () => ({
+    webContents: {
+      send(channel, payload) {
+        if (channel === "netcatty:script:dialog-request") {
+          setDialogRequestId(payload.requestId);
+        }
+        if (channel === "netcatty:script:screen-snapshot-request") {
+          setImmediate(() => {
+            handlers.get("netcatty:script:screen-snapshot-response")({}, {
+              requestId: payload.requestId,
+              snapshot: { rows: 24, cols: 80, currentRow: 0, lines: [] },
+            });
+          });
+        }
+      },
+    },
+  });
+  const baseDeps = {
+    sessions: new Map(),
+    electronModule: {
+      app: { getVersion: () => "test", getPath: () => process.cwd() },
+    },
+    terminalBridge: {
+      writeToSession(_event, payload) { writes.push(String(payload.data || "")); },
+    },
+    terminalWorkerManager: null,
+  };
+
+  scriptBridge.init({
+    ...baseDeps,
+    getMainWindow: makeMainWindow((id) => { oldDialogRequestId = id; }),
+  });
+  scriptBridge.registerHandlers({
+    handle(channel, handler) { handlers.set(channel, handler); },
+  });
+
+  const runHandler = handlers.get("netcatty:script:run");
+  const oldActive = runHandler({}, {
+    runId: "old-active-for-reuse",
+    sessionId: "session-reinit-reuse",
+    content: "await nct.dialog.confirm('hold old queue');",
+    permissionMode: "auto",
+  });
+  await waitUntil(() => oldDialogRequestId);
+  await runHandler({}, {
+    runId: "reused-queued-id",
+    returnWhenQueued: true,
+    sessionId: "session-reinit-reuse",
+    content: "await nct.screen.sendLine('stale-reused-write');",
+    permissionMode: "auto",
+  });
+
+  scriptBridge.init({
+    ...baseDeps,
+    getMainWindow: makeMainWindow((id) => { replacementDialogRequestId = id; }),
+  });
+  const replacementActive = runHandler({}, {
+    runId: "replacement-active-for-reuse",
+    sessionId: "session-reinit-reuse",
+    content: "await nct.dialog.confirm('hold replacement queue');",
+    permissionMode: "auto",
+  });
+  await runHandler({}, {
+    runId: "reused-queued-id",
+    returnWhenQueued: true,
+    sessionId: "session-reinit-reuse",
+    content: "await nct.screen.sendLine('replacement-reused-write');",
+    permissionMode: "auto",
+  });
+
+  await oldActive;
+  await waitUntil(() => replacementDialogRequestId);
+  assert.deepEqual(
+    await handlers.get("netcatty:script:stop")({}, { runId: "reused-queued-id" }),
+    { ok: true },
+  );
+  await handlers.get("netcatty:script:dialog-response")({}, {
+    requestId: replacementDialogRequestId,
+    value: true,
+  });
+  await replacementActive;
+  await delay(60);
+
+  assert.ok(!writes.some((data) => data.includes("stale-reused-write")));
+  assert.ok(!writes.some((data) => data.includes("replacement-reused-write")));
 });
 
 test("late startup snapshots from a stopped script do not seed the next run", async () => {

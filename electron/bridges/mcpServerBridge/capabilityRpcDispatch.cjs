@@ -166,7 +166,7 @@ function createCapabilityRpcDispatcher(deps) {
       : null;
     const result = await handler(params);
     if (capability.id === "vault.host.open" && result?.ok !== false && result?.sessionId) {
-      deps.onHostOpened?.(params?.chatSessionId, result.sessionId, hostOpenGeneration);
+      await deps.onHostOpened?.(params?.chatSessionId, result.sessionId, hostOpenGeneration, result);
     }
     return result;
   };

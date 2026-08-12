@@ -97,6 +97,13 @@ export async function releaseSftpConnectionMetadata(params: {
   params.onRemoteSessionClosed?.(sftpId);
 }
 
+/** Hardcoded home-path candidates when SSH exec / listable realpath fail. */
+export function buildSftpHomeDirCandidates(username?: string | null): string[] {
+  if (username === "root") return ["/root"];
+  if (username) return [`/home/${username}`, "/root"];
+  return ["/root"];
+}
+
 export function createSftpConnectionId(
   side: "left" | "right",
   randomUUID: () => string = () => crypto.randomUUID(),
@@ -176,6 +183,41 @@ export function createPinnedReconnectSideResolver(
   };
 }
 
+export function runSftpConnectOnceByKey(
+  inFlight: Map<string, Promise<void>>,
+  key: string,
+  run: () => Promise<void>,
+): Promise<void> {
+  const existing = inFlight.get(key);
+  if (existing) return existing;
+
+  const promise = run().finally(() => {
+    if (inFlight.get(key) === promise) {
+      inFlight.delete(key);
+    }
+  });
+  inFlight.set(key, promise);
+  return promise;
+}
+
+export function buildSftpConnectInFlightKey(params: {
+  side: "left" | "right";
+  tabId: string;
+  targetConnectionKey: string;
+  sourceSessionId?: string;
+  initialPath?: string;
+  forceNewTab?: boolean;
+}): string {
+  return [
+    params.side,
+    params.tabId,
+    params.targetConnectionKey,
+    params.sourceSessionId ?? "",
+    params.initialPath ?? "",
+    params.forceNewTab ? "force-new-tab" : "",
+  ].join("\u0000");
+}
+
 interface UseSftpConnectionsResult {
   connect: (side: "left" | "right", host: Host | "local", options?: SftpConnectOptions) => Promise<void>;
   disconnect: (side: "left" | "right") => Promise<void>;
@@ -249,6 +291,7 @@ export const useSftpConnections = ({
   const [hostKeyVerification, setHostKeyVerification] = useState<SftpHostKeyVerificationState | null>(null);
   const hostKeyVerificationRef = useRef<(SftpHostKeyVerificationState & { requestId: string; sessionId: string }) | null>(null);
   const activeHostKeySessionsRef = useRef<Map<string, { side: "left" | "right"; tabId: string }>>(new Map());
+  const connectInFlightRef = useRef<Map<string, Promise<void>>>(new Map());
 
   const setPendingHostKeyVerification = useCallback((
     next: (SftpHostKeyVerificationState & { requestId: string; sessionId: string }) | null,
@@ -426,21 +469,31 @@ export const useSftpConnections = ({
       // immediately, avoiding race conditions with deferred effects.
       options?.onTabCreated?.(activeTabId);
 
-      const connectionId = createSftpConnectionId(side);
+      const connectInFlightKey = buildSftpConnectInFlightKey({
+        side,
+        tabId: activeTabId,
+        targetConnectionKey,
+        sourceSessionId: host === "local" ? undefined : options?.sourceSessionId,
+        initialPath: effectiveInitialPath,
+        forceNewTab: options?.forceNewTab,
+      });
 
-      navSeqRef.current[side] += 1;
-      const connectRequestId = navSeqRef.current[side];
-      const getTargetPane = () => {
-        const targetSide = resolveTargetSide();
-        const tabs = targetSide === "left" ? leftTabsRef.current.tabs : rightTabsRef.current.tabs;
-        return tabs.find((tab) => tab.id === activeTabId) ?? null;
-      };
-      const isTargetConnectionCurrent = () => {
-        const pane = getTargetPane();
-        if (!pane) return false;
-        if (pane.connection?.id === connectionId) return true;
-        return !pane.connection && navSeqRef.current[side] === connectRequestId;
-      };
+      return runSftpConnectOnceByKey(connectInFlightRef.current, connectInFlightKey, async () => {
+        const connectionId = createSftpConnectionId(side);
+
+        navSeqRef.current[side] += 1;
+        const connectRequestId = navSeqRef.current[side];
+        const getTargetPane = () => {
+          const targetSide = resolveTargetSide();
+          const tabs = targetSide === "left" ? leftTabsRef.current.tabs : rightTabsRef.current.tabs;
+          return tabs.find((tab) => tab.id === activeTabId) ?? null;
+        };
+        const isTargetConnectionCurrent = () => {
+          const pane = getTargetPane();
+          if (!pane) return false;
+          if (pane.connection?.id === connectionId) return true;
+          return !pane.connection && navSeqRef.current[side] === connectRequestId;
+        };
       const isTargetConnectionAtPath = (path: string) => {
         const connection = getTargetPane()?.connection;
         if (!connection) return navSeqRef.current[side] === connectRequestId;
@@ -573,9 +626,7 @@ export const useSftpConnections = ({
           sharedHostCache?.path,
         );
 
-        // Sudo never reuses a terminal shell; normalize before UI state so
-        // reusedConnection (spinner/overlay) matches the actual open path.
-        const sourceSessionId = host.sftpSudo ? undefined : options?.sourceSessionId;
+        const sourceSessionId = options?.sourceSessionId;
 
         const connection: SftpConnection = {
           id: connectionId,
@@ -698,15 +749,7 @@ export const useSftpConnections = ({
             }
 
             if (!detected) {
-              const candidates: string[] = [];
-              if (credentials.username === "root") {
-                candidates.push("/root");
-              } else if (credentials.username) {
-                candidates.push(`/home/${credentials.username}`);
-                candidates.push("/root");
-              } else {
-                candidates.push("/root");
-              }
+              const candidates = buildSftpHomeDirCandidates(credentials.username);
               const statSftp = bridge?.statSftp;
               if (statSftp) {
                 for (const candidate of candidates) {
@@ -784,6 +827,23 @@ export const useSftpConnections = ({
                 // root also failed
               }
             }
+            // Last resort: home candidates. Covers provisional "/" from realpath
+            // when discovery treated root as home and listing it failed, so
+            // /home/<user> or /root can still recover the session.
+            if (!fallbackSucceeded) {
+              for (const candidate of buildSftpHomeDirCandidates(credentials.username)) {
+                if (candidate === startPath) continue;
+                try {
+                  files = await listRemoteFiles(sftpId, candidate, filenameEncoding);
+                  startPath = candidate;
+                  homeDir = candidate;
+                  fallbackSucceeded = true;
+                  break;
+                } catch {
+                  // Ignore missing/permission errors
+                }
+              }
+            }
             if (!fallbackSucceeded) {
               throw new Error("Cannot list any remote directory");
             }
@@ -855,6 +915,7 @@ export const useSftpConnections = ({
           unsubSftpProgress?.();
         }
       }
+      });
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [

@@ -39,10 +39,15 @@ const pendingScreenSnapshots = new Map();
 const scriptLogTokens = new Map();
 /** @type {Map<string, Promise<void>>} */
 const sessionRunChains = new Map();
+/** @type {Map<string, number>} */
+const queuedRunGenerations = new Map();
+/** @type {Map<string, number>} */
+const cancelledQueuedRunGenerations = new Map();
 /** @type {Map<string, { abort: (reason?: Error) => void }>} */
 const runAbortControls = new Map();
 /** @type {Map<string, { connected?: boolean, name?: string, hostname?: string, username?: string }>} */
 const rendererSessionMetaById = new Map();
+let scriptRuntimeGeneration = 0;
 let disposeTerminalDataTap = null;
 let disposeWorkerOutputTap = null;
 let disposeWorkerSessionClosed = null;
@@ -78,6 +83,9 @@ function enqueueSessionRun(sessionId, task) {
 }
 
 function init(deps) {
+  scriptRuntimeGeneration += 1;
+  queuedRunGenerations.clear();
+  cancelledQueuedRunGenerations.clear();
   for (const [runId, control] of runAbortControls.entries()) {
     const run = runs.get(runId);
     if (run && !run.endedAt) {
@@ -593,6 +601,8 @@ async function runScriptOnSession({
 
 async function handleScriptRun(_event, payload = {}) {
   const {
+    runId: requestedRunId,
+    returnWhenQueued = false,
     scriptId,
     scriptLabel,
     content,
@@ -612,21 +622,50 @@ async function handleScriptRun(_event, payload = {}) {
   if (!content || !String(content).trim()) {
     throw new Error("Script content is empty");
   }
+  if (requestedRunId !== undefined && targets.length !== 1) {
+    throw new Error("A caller-provided runId requires exactly one target session");
+  }
+  if (returnWhenQueued && targets.length !== 1) {
+    throw new Error("returnWhenQueued requires exactly one target session");
+  }
 
   const runIds = [];
   const queueRun = (sid) => {
-    const runId = randomUUID();
+    const generation = scriptRuntimeGeneration;
+    const runId = requestedRunId === undefined ? randomUUID() : String(requestedRunId).trim();
+    if (!runId || runId.length > 128) {
+      throw new Error("Invalid script run id");
+    }
+    if (runs.has(runId) || queuedRunGenerations.has(runId)) {
+      throw new Error(`Script run id already exists: ${runId}`);
+    }
     runIds.push(runId);
-    return enqueueSessionRun(sid, () => runScriptOnSession({
-      runId,
-      scriptId,
-      scriptLabel,
-      sessionId: sid,
-      content,
-      permissionMode,
-      sessionMeta: payload.sessionMeta,
-    }));
+    queuedRunGenerations.set(runId, generation);
+    return enqueueSessionRun(sid, () => {
+      if (queuedRunGenerations.get(runId) === generation) {
+        queuedRunGenerations.delete(runId);
+      }
+      if (generation !== scriptRuntimeGeneration) return undefined;
+      if (cancelledQueuedRunGenerations.get(runId) === generation) {
+        cancelledQueuedRunGenerations.delete(runId);
+        return undefined;
+      }
+      return runScriptOnSession({
+        runId,
+        scriptId,
+        scriptLabel,
+        sessionId: sid,
+        content,
+        permissionMode,
+        sessionMeta: payload.sessionMeta,
+      });
+    });
   };
+
+  if (returnWhenQueued) {
+    void queueRun(targets[0]).catch(() => {});
+    return { runIds, runId: runIds[0] };
+  }
 
   if (mode === "sequential") {
     for (const sid of targets) {
@@ -641,7 +680,12 @@ async function handleScriptRun(_event, payload = {}) {
 
 function handleScriptStop(_event, payload = {}) {
   const run = runs.get(payload.runId);
-  if (!run) return { ok: false };
+  if (!run) {
+    const generation = queuedRunGenerations.get(payload.runId);
+    if (generation === undefined) return { ok: false };
+    cancelledQueuedRunGenerations.set(payload.runId, generation);
+    return { ok: true };
+  }
   run.aborted = true;
   run.paused = false;
   run.status = "failed";

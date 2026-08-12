@@ -53,6 +53,7 @@ export const enAiMessages: Messages = {
   'ai.providers.apiKey.placeholder': 'Enter API key',
   'ai.providers.apiKey.decrypting': 'Decrypting...',
   'ai.providers.baseUrl': 'Base URL',
+  'ai.providers.baseUrl.anthropicHelp': 'Anthropic-compatible: host with or without /v1 (for example https://gateway.example or https://gateway.example/v1). Detection and chat both use /v1/models and /v1/messages.',
   'ai.providers.skipTLSVerify': 'Skip TLS certificate verification (for self-signed certs)',
   'ai.providers.defaultModel': 'Default Model',
   'ai.providers.defaultModel.placeholder': 'e.g. gpt-4o, claude-sonnet-4-20250514',

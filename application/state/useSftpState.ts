@@ -30,7 +30,7 @@ import { buildSftpHostCredentials } from "./sftp/useSftpHostCredentials";
 import { useSftpFileWatch } from "./sftp/useSftpFileWatch";
 import { useSftpSessionCleanup } from "./sftp/useSftpSessionCleanup";
 import { useSftpSessionErrors } from "./sftp/useSftpSessionErrors";
-import { ensureRemoteSftpSession } from "./sftp/ensureRemoteSftpSession";
+import { ensureRemoteSftpSession, probeSftpSession } from "./sftp/ensureRemoteSftpSession";
 import { openTransferSftpSession } from "./sftp/dedicatedTransferResume";
 import {
   createTransferPoolKeyCache,
@@ -316,9 +316,7 @@ export const useSftpState = (
       // Prefer borrowing the live (or parked) terminal SSH transport so MFA is
       // not repeated. Transport leases keep the shared conn alive after the
       // terminal tab closes until the transfer SFTP lease is returned.
-      const sourceSessionId = !host.sftpSudo
-        ? resolveTransferSourceSessionId?.(host.id, host)
-        : undefined;
+      const sourceSessionId = resolveTransferSourceSessionId?.(host.id, host);
       if (sourceSessionId) {
         try {
           logger.info(
@@ -608,16 +606,7 @@ export const useSftpState = (
         forceReconnect: ensureOptions?.forceReconnect,
         releaseConnection,
         tabId,
-        probeSession: async (sftpId) => {
-          // Lightweight liveness check; any session-error from the bridge
-          // triggers a reconnect in ensureRemoteSftpSession.
-          if (!bridge?.getSftpHomeDir) return true;
-          const result = await bridge.getSftpHomeDir(sftpId);
-          if (result && result.success === false) {
-            throw new Error(result.error || "SFTP session not found");
-          }
-          return true;
-        },
+        probeSession: (sftpId) => probeSftpSession(bridge, sftpId),
       });
     },
     resolveConnectedHost: (tabId) => connectedHostByTabIdRef.current.get(tabId) ?? null,
@@ -704,6 +693,12 @@ export const useSftpState = (
         const pane = getActivePane(side);
         if (!pane?.connection || pane.connection.isLocal) continue;
         if (sftpSessionsRef.current.has(pane.connection.id)) continue;
+        const connectedHost = connectedHostByTabIdRef.current.get(pane.id) ?? null;
+        const vaultHost = hosts.find((host) => host.id === pane.connection?.hostId) ?? null;
+        const targetHost = connectedHost && connectedHost !== "local" ? connectedHost : vaultHost;
+        const resolvedSourceSessionId = targetHost
+          ? resolveBrowseSourceSessionId?.(targetHost.id, targetHost)
+          : undefined;
         try {
           await ensureRemoteSftpSession({
             side,
@@ -713,16 +708,10 @@ export const useSftpState = (
             connect,
             resolveConnectedHost: (id) => connectedHostByTabIdRef.current.get(id) ?? null,
             resolveHostById: (hostId) => hosts.find((host) => host.id === hostId) ?? null,
-            resolveSourceSessionId: resolveBrowseSourceSessionId,
-            probeSession: async (sftpId) => {
-              const bridge = netcattyBridge.get();
-              if (!bridge?.getSftpHomeDir) return true;
-              const result = await bridge.getSftpHomeDir(sftpId);
-              if (result && result.success === false) {
-                throw new Error(result.error || "SFTP session not found");
-              }
-              return true;
-            },
+            resolveSourceSessionId: resolvedSourceSessionId
+              ? () => resolvedSourceSessionId
+              : resolveBrowseSourceSessionId,
+            probeSession: (sftpId) => probeSftpSession(netcattyBridge.get(), sftpId),
             releaseConnection,
           });
           logger.info(`[SFTP] Restored browse session on ${side}`);

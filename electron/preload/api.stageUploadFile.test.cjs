@@ -191,3 +191,31 @@ test("listLocalTree keeps the entries listener until the tree-end marker arrives
   assert.equal(batches[0][0].relativePath, "project/nested/deep.txt");
   assert.equal(removed, true);
 });
+
+test("openSftpForSession keeps the SSH source session id when options include an SFTP session id", async () => {
+  const invoked = [];
+  const api = createPreloadApi({
+    webUtils: {},
+    ipcRenderer: {
+      on() {},
+      removeListener() {},
+      async invoke(channel, payload) {
+        invoked.push({ channel, payload });
+        return { sftpId: "opened-sftp" };
+      },
+    },
+  });
+
+  const sftpId = await api.openSftpForSession("ssh-session-1", {
+    sessionId: "sftp-left-browse-session",
+    hostname: "192.168.9.138",
+    port: 22,
+    username: "zlhrs",
+  });
+
+  assert.equal(sftpId, "opened-sftp");
+  assert.equal(invoked.length, 1);
+  assert.equal(invoked[0].channel, "netcatty:sftp:openForSession");
+  assert.equal(invoked[0].payload.sessionId, "ssh-session-1");
+  assert.equal(invoked[0].payload.expectedEndpoint.sessionId, "sftp-left-browse-session");
+});

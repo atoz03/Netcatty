@@ -4,6 +4,7 @@ import type { SftpPane } from "../../application/state/sftp/types";
 import {
   connectionKeyMatchesHost,
   findReusableSftpSidePanelTab,
+  isPendingSameEndpointSshSession,
   isRemoteSftpTabHealthy,
   shouldAcceptPendingSftpUpload,
   shouldResetSftpSidePanelSourceSession,
@@ -73,6 +74,35 @@ test("shouldSkipSftpSidePanelAutoConnect rejects when the active tab has no endp
   const tab = remoteConnectedTab();
   assert.equal(
     shouldSkipSftpSidePanelAutoConnect("host-a-key", "host-a-key", tab, true, null),
+    false,
+  );
+});
+
+test("isPendingSameEndpointSshSession only waits for actively connecting SSH sessions", () => {
+  const host = {
+    id: "host-1",
+    hostname: "server.example",
+    port: 22,
+    username: "root",
+  };
+  const baseSession = {
+    hostId: "host-1",
+    hostname: "server.example",
+    port: 22,
+    username: "root",
+    protocol: "ssh",
+  };
+
+  assert.equal(
+    isPendingSameEndpointSshSession({ ...baseSession, status: "connecting" }, host),
+    true,
+  );
+  assert.equal(
+    isPendingSameEndpointSshSession({ ...baseSession, status: "disconnected" }, host),
+    false,
+  );
+  assert.equal(
+    isPendingSameEndpointSshSession({ ...baseSession, status: "connected" }, host),
     false,
   );
 });

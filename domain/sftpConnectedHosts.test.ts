@@ -117,23 +117,23 @@ test("listSftpConnectedHosts includes hosts with SFTP sudo for picker display", 
   assert.equal(result.length, 1);
   assert.equal(result[0]?.sessionId, "s-sudo");
   assert.equal(result[0]?.host.sftpSudo, true);
-  // Transfer/open must still refuse shell reuse for sudo.
+  // Sudo SFTP still opens a new subsystem/channel, but it should borrow the
+  // already-authenticated SSH transport before falling back to fresh auth.
   assert.equal(
     resolveSftpTransferSourceSessionId(sessions, hostsById, "a", result[0]?.host),
-    undefined,
+    "s-sudo",
   );
-  // Picker/connect must not pass sessionId as a reuse hint for sudo hosts.
-  assert.equal(sftpSourceSessionIdForHost(result[0]?.host, result[0]?.sessionId), undefined);
+  assert.equal(sftpSourceSessionIdForHost(result[0]?.host, result[0]?.sessionId), "s-sudo");
 });
 
-test("sftpSourceSessionIdForHost keeps non-sudo reuse and drops sudo", () => {
+test("sftpSourceSessionIdForHost keeps sudo and non-sudo reuse hints", () => {
   assert.equal(
     sftpSourceSessionIdForHost(host({ id: "a", label: "Alpha" }), "s1"),
     "s1",
   );
   assert.equal(
     sftpSourceSessionIdForHost(host({ id: "a", label: "Alpha", sftpSudo: true }), "s1"),
-    undefined,
+    "s1",
   );
   assert.equal(sftpSourceSessionIdForHost(undefined, "s1"), "s1");
   assert.equal(sftpSourceSessionIdForHost(host({ id: "a", label: "Alpha" }), undefined), undefined);
@@ -311,6 +311,34 @@ test("resolveSftpTransferSourceSessionId matches among multi-tab same hostId end
   );
   // Without endpoint preference, last reusable session for hostId wins.
   assert.equal(resolveSftpTransferSourceSessionId(sessions, hostsById, "h1"), "s-new");
+});
+
+test("resolveSftpTransferSourceSessionId ignores SFTP browse connection ids", () => {
+  const vault = host({ id: "h1", label: "Prod", hostname: "prod.example.test", username: "alice", port: 22 });
+  const hostsById = new Map([["h1", vault]]);
+  const sessions = [
+    session({
+      id: "terminal-ssh-1",
+      hostId: "h1",
+      status: "connected",
+      hostname: "prod.example.test",
+      username: "alice",
+      port: 22,
+    }),
+    session({
+      id: "sftp-left-accidental-browse-id",
+      hostId: "h1",
+      status: "connected",
+      hostname: "prod.example.test",
+      username: "alice",
+      port: 22,
+    }),
+  ];
+
+  assert.equal(
+    resolveSftpTransferSourceSessionId(sessions, hostsById, "h1", vault),
+    "terminal-ssh-1",
+  );
 });
 
 test("sftpPickerSessionsEqual ignores title-only changes", () => {

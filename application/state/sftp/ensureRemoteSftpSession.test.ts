@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Host } from "../../../domain/models";
-import { ensureRemoteSftpSession } from "./ensureRemoteSftpSession";
+import { ensureRemoteSftpSession, probeSftpSession } from "./ensureRemoteSftpSession";
 import type { SftpPane } from "./types";
 
 const host = {
@@ -36,6 +36,24 @@ const remotePane = (connectionId: string): SftpPane => ({
 } as unknown as SftpPane);
 
 const noopReleaseConnection = async () => {};
+
+test("SFTP session probe accepts a virtual root directory", async () => {
+  const calls: Array<[string, string]> = [];
+  const ok = await probeSftpSession({
+    realpathSftp: async (sftpId, remotePath) => {
+      calls.push([sftpId, remotePath]);
+      return "/";
+    },
+  }, "sftp-jumpserver");
+
+  assert.equal(ok, true);
+  assert.deepEqual(calls, [["sftp-jumpserver", "."]]);
+});
+
+test("SFTP session probe does not require home discovery", async () => {
+  const ok = await probeSftpSession(undefined, "sftp-live");
+  assert.equal(ok, true);
+});
 
 test("returns an existing mapped SFTP session without reconnecting", async () => {
   let connectCalls = 0;

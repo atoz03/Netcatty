@@ -26,6 +26,7 @@ export type SftpPickerSessionFields = Pick<
  * Connecting sessions and Mosh/ET transports have no reusable ssh2 shell conn.
  */
 const isReusableSftpSourceSession = (session: SftpPickerSessionFields): boolean => {
+  if (session.id.startsWith("sftp-")) return false;
   if (session.status !== "connected") return false;
   if (session.moshEnabled || session.etEnabled) return false;
   const protocol = session.protocol;
@@ -99,8 +100,8 @@ export const sftpPickerSessionsEqual = (
  * One entry per hostId — keeps the most recently listed SSH terminal session.
  *
  * Includes hosts with sftpSudo: they still belong under "Connected" when a
- * terminal is open, but connect paths must not reuse the shell (see
- * resolveSftpTransferSourceSessionId and useSftpConnections sudo guards).
+ * terminal is open, and SFTP can borrow the already-authenticated SSH transport
+ * before silently falling back to a fresh connection.
  */
 export const listSftpConnectedHosts = (
   sessions: ReadonlyArray<SftpPickerSessionFields>,
@@ -131,15 +132,14 @@ export const listSftpConnectedHosts = (
 };
 
 /**
- * Drop terminal-session reuse when the host requires a dedicated sudo SFTP
- * channel. Used by the picker and browse connect path so UI state
- * (`reusedConnection`) and the actual open agree.
+ * Return the live terminal session id that SFTP should try before fresh auth.
+ * The main process validates that the hinted session really matches the target.
  */
 export const sftpSourceSessionIdForHost = (
   host: Pick<Host, "sftpSudo"> | null | undefined,
   sourceSessionId: string | undefined,
 ): string | undefined => {
-  if (!sourceSessionId || host?.sftpSudo) return undefined;
+  if (!sourceSessionId) return undefined;
   return sourceSessionId;
 };
 
@@ -160,7 +160,6 @@ export const resolveSftpTransferSourceSessionId = (
   hostId: string,
   host?: Pick<Host, "hostname" | "username" | "port" | "sftpSudo" | "protocol">,
 ): string | undefined => {
-  if (host?.sftpSudo) return undefined;
   let lastMatch: string | undefined;
   for (const session of sessions) {
     if (session.hostId !== hostId) continue;
@@ -168,7 +167,6 @@ export const resolveSftpTransferSourceSessionId = (
     const vaultHost = hostsById.get(session.hostId);
     if (!vaultHost) continue;
     if (vaultHost.protocol === "serial" || isPluginHostProtocol(vaultHost.protocol)) continue;
-    if (vaultHost.sftpSudo) continue;
     const liveHost = hostForLiveSession(vaultHost, session);
     if (host && !sftpHostEndpointsEqual(liveHost, host)) continue;
     lastMatch = session.id;

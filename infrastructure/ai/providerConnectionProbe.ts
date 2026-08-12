@@ -51,7 +51,14 @@ export function resolveProviderProbeEndpoint(
 }
 
 export function buildProviderProbeUrl(baseURL: string, endpoint: string): string {
-  return `${baseURL.replace(/\/+$/, "")}${endpoint.startsWith("/") ? endpoint : `/${endpoint}`}`;
+  const base = baseURL.replace(/\/+$/, "");
+  let path = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+  // Anthropic-compat: AI SDK style bases already end in /v1; discovery uses
+  // /v1/models for Claude Code style bare hosts. Drop the duplicate /v1.
+  if (/\/v1$/i.test(base) && /^\/v1(\/|$)/i.test(path)) {
+    path = path.replace(/^\/v1/i, "") || "/";
+  }
+  return `${base}${path.startsWith("/") ? path : `/${path}`}`;
 }
 
 export function validateProviderProbeInputs(input: {

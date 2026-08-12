@@ -14,7 +14,13 @@ const {
 
 function loadSftpBridgeWithProxySocket(proxySocket, overrides = {}) {
   const bridgePath = require.resolve("./sftpBridge.cjs");
+  const openConnectionPath = require.resolve("./sftpBridge/openConnection.cjs");
   delete require.cache[bridgePath];
+  // Reload openConnection when we need to wrap createOpenConnectionApi so the
+  // bridge picks up a patched connectSudoSftp (session-backed sudo tests).
+  if (overrides.connectSudoSftp) {
+    delete require.cache[openConnectionPath];
+  }
 
   const originalLoad = Module._load;
   Module._load = function patchedLoad(request, parent, isMain) {
@@ -30,6 +36,25 @@ function loadSftpBridgeWithProxySocket(proxySocket, overrides = {}) {
         Client: overrides.SSHClient,
       };
     }
+    if (
+      overrides.connectSudoSftp
+      && (request === "./sftpBridge/openConnection.cjs"
+        || request === openConnectionPath
+        || (typeof request === "string" && request.endsWith("/sftpBridge/openConnection.cjs")))
+    ) {
+      const mod = originalLoad.call(this, request, parent, isMain);
+      const originalCreate = mod.createOpenConnectionApi;
+      return {
+        ...mod,
+        createOpenConnectionApi(ctx) {
+          const api = originalCreate(ctx);
+          return {
+            ...api,
+            connectSudoSftp: overrides.connectSudoSftp,
+          };
+        },
+      };
+    }
     return originalLoad.call(this, request, parent, isMain);
   };
 
@@ -38,6 +63,20 @@ function loadSftpBridgeWithProxySocket(proxySocket, overrides = {}) {
   } finally {
     Module._load = originalLoad;
   }
+}
+
+function createFakeSftpChannel() {
+  return {
+    ended: false,
+    readdir: () => {},
+    stat: () => {},
+    mkdir: () => {},
+    unlink: () => {},
+    end() {
+      this.ended = true;
+    },
+    on() {},
+  };
 }
 
 class FailingSshClient extends EventEmitter {
@@ -268,5 +307,165 @@ test("openSftpForSession honors session.sftpFileProtocol when payload omits file
   assert.equal(opened.fileProtocol, "sftp");
   assert.equal(sftpCalls, 1);
   assert.equal(sftpClients.get(opened.sftpId)?.__netcattyFileProtocol, "sftp");
+  await bridge.closeSftp(null, { sftpId: opened.sftpId });
+});
+
+test("openSftpForSession rejects sudo with forced SCP before opening a channel", async () => {
+  let sudoCalls = 0;
+  let sftpCalls = 0;
+  const bridge = loadSftpBridgeWithProxySocket(null, {
+    connectSudoSftp: async () => {
+      sudoCalls += 1;
+      throw new Error("connectSudoSftp should not run for scp+sudo");
+    },
+  });
+  const sftpClients = new Map();
+  const conn = {
+    sftp(cb) {
+      sftpCalls += 1;
+      cb(null, createFakeSftpChannel());
+    },
+    end() {},
+  };
+  const session = {
+    conn,
+    stream: {},
+    sftpFileProtocol: "scp",
+  };
+  bridge.init({
+    sftpClients,
+    sessions: new Map([["session-sudo-scp", session]]),
+    electronModule: {},
+  });
+
+  await assert.rejects(
+    () => bridge.openSftpForSession(null, {
+      sessionId: "session-sudo-scp",
+      sudo: true,
+      fileProtocol: "scp",
+      password: "secret",
+    }),
+    /Sudo Mode is not supported with File Protocol set to SCP/i,
+  );
+  assert.equal(sudoCalls, 0);
+  assert.equal(sftpCalls, 0);
+  assert.equal(sftpClients.size, 0);
+});
+
+test("openSftpForSession falls back to standard SFTP when sudo sftp-server exits 127", async () => {
+  let sudoCalls = 0;
+  let sftpCalls = 0;
+  const bridge = loadSftpBridgeWithProxySocket(null, {
+    connectSudoSftp: async () => {
+      sudoCalls += 1;
+      throw new Error("SFTP sudo failed with exit code 127. sftp-server not found");
+    },
+  });
+  const sftpClients = new Map();
+  const fakeSftp = createFakeSftpChannel();
+  const conn = {
+    sftp(cb) {
+      sftpCalls += 1;
+      cb(null, fakeSftp);
+    },
+    end() {},
+  };
+  const session = { conn, stream: {} };
+  bridge.init({
+    sftpClients,
+    sessions: new Map([["session-sudo-127", session]]),
+    electronModule: {},
+  });
+
+  const opened = await bridge.openSftpForSession(null, {
+    sessionId: "session-sudo-127",
+    sudo: true,
+    password: "secret",
+  });
+
+  assert.equal(opened.ok, true);
+  assert.equal(opened.fileProtocol, "sftp");
+  assert.equal(opened.sourceSessionId, "session-sudo-127");
+  assert.equal(sudoCalls, 1);
+  assert.equal(sftpCalls, 1);
+  const client = sftpClients.get(opened.sftpId);
+  assert.equal(client?.__netcattyFileProtocol, "sftp");
+  assert.equal(client?.__netcattySudoMode, false);
+  assert.equal(client?.sftp, fakeSftp);
+  await bridge.closeSftp(null, { sftpId: opened.sftpId });
+});
+
+test("openSftpForSession does not fall back to standard SFTP on non-127 sudo errors", async () => {
+  let sftpCalls = 0;
+  const bridge = loadSftpBridgeWithProxySocket(null, {
+    connectSudoSftp: async () => {
+      throw new Error("SFTP sudo failed with exit code 1. The password may be incorrect");
+    },
+  });
+  const sftpClients = new Map();
+  const conn = {
+    sftp(cb) {
+      sftpCalls += 1;
+      cb(null, createFakeSftpChannel());
+    },
+    end() {},
+  };
+  const session = { conn, stream: {} };
+  bridge.init({
+    sftpClients,
+    sessions: new Map([["session-sudo-auth", session]]),
+    electronModule: {},
+  });
+
+  await assert.rejects(
+    () => bridge.openSftpForSession(null, {
+      sessionId: "session-sudo-auth",
+      sudo: true,
+      password: "wrong",
+    }),
+    /exit code 1/i,
+  );
+  assert.equal(sftpCalls, 0);
+  assert.equal(sftpClients.size, 0);
+});
+
+test("openSftpForSession keeps sudo mode when connectSudoSftp succeeds", async () => {
+  const sudoWrapper = createFakeSftpChannel();
+  let closeBound = false;
+  sudoWrapper.on = (event, cb) => {
+    if (event === "close") closeBound = true;
+    return sudoWrapper;
+  };
+  const bridge = loadSftpBridgeWithProxySocket(null, {
+    connectSudoSftp: async () => sudoWrapper,
+  });
+  const sftpClients = new Map();
+  let sftpCalls = 0;
+  const conn = {
+    sftp(cb) {
+      sftpCalls += 1;
+      cb(null, createFakeSftpChannel());
+    },
+    end() {},
+  };
+  const session = { conn, stream: {} };
+  bridge.init({
+    sftpClients,
+    sessions: new Map([["session-sudo-ok", session]]),
+    electronModule: {},
+  });
+
+  const opened = await bridge.openSftpForSession(null, {
+    sessionId: "session-sudo-ok",
+    sudo: true,
+    password: "secret",
+  });
+
+  assert.equal(opened.ok, true);
+  assert.equal(sftpCalls, 0);
+  const client = sftpClients.get(opened.sftpId);
+  assert.equal(client?.__netcattySudoMode, true);
+  assert.equal(client?.sftp, sudoWrapper);
+  assert.equal(closeBound, true);
   await bridge.closeSftp(null, { sftpId: opened.sftpId });
 });

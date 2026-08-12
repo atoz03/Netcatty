@@ -117,6 +117,10 @@ export interface ScriptDialogRequest {
 }
 
 export interface ScriptRunParams {
+  /** Optional caller-generated id so a queued run can be cancelled before it starts. */
+  runId?: string;
+  /** Return after the run enters the backend queue instead of waiting for completion. */
+  returnWhenQueued?: boolean;
   scriptId?: string;
   scriptLabel?: string;
   content: string;

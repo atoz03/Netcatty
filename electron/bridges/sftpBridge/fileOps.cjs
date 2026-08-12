@@ -932,8 +932,14 @@ function createFileOpsApi(ctx) {
         }
       }
     
-      // Method 2: SFTP realpath('.') — skip if result is '/' for non-root users
-      // because some SFTP servers start in '/' rather than the user's home
+      // Method 2: SFTP realpath('.'). A virtual/chroot SFTP server (including
+      // bastion products such as JumpServer) can legitimately expose '/' as
+      // the authenticated user's root even when SSH exec channels are denied.
+      //
+      // Accept non-root absolute paths immediately. Accept '/' only when it is
+      // actually listable so we do not suppress renderer candidate probing
+      // (/home/<user>, /root) on servers that merely start cwd at '/' without
+      // granting readdir on the real filesystem root.
       try {
         const sftp = await requireSftpChannel(client, {
           signal,
@@ -942,8 +948,32 @@ function createFileOpsApi(ctx) {
         throwIfAborted(signal);
         const absPath = await realpathAsync(sftp, ".");
         throwIfAborted(signal);
-        if (absPath && absPath !== "/") {
+        if (absPath && absPath.startsWith("/") && absPath !== "/") {
           return { success: true, homeDir: absPath };
+        }
+        if (absPath === "/") {
+          try {
+            if (typeof readdirAsync === "function") {
+              await readdirAsync(sftp, "/");
+            } else if (sftp && typeof sftp.readdir === "function") {
+              await new Promise((resolve, reject) => {
+                sftp.readdir("/", (err, items) => {
+                  if (err) reject(err);
+                  else resolve(items || []);
+                });
+              });
+            } else {
+              // No list probe available — keep virtual-root acceptance from #2934.
+              return { success: true, homeDir: "/" };
+            }
+            throwIfAborted(signal);
+            return { success: true, homeDir: "/" };
+          } catch (listErr) {
+            if (signal?.aborted) {
+              throw listErr;
+            }
+            // Non-listable root: fall through so candidate probing can run.
+          }
         }
       } catch (err) {
         if (signal?.aborted) {

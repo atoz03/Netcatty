@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 import {
   getInitialTerminalStatus,
   resolveTerminalVaultInitialized,
+  shouldResetConnectAutomationOnReconnect,
   shouldSuppressHostStartupCommandOnReconnect,
   shouldStartTerminalBackend,
 } from "./restoredSessionGate.ts";
@@ -62,6 +63,88 @@ test("host startup command policy distinguishes restored and automatic reconnect
   assert.equal(shouldSuppressHostStartupCommandOnReconnect("automatic"), true);
 });
 
+test("connect automation reset policy distinguishes manual and automatic reconnects", () => {
+  assert.equal(shouldResetConnectAutomationOnReconnect("manual"), true);
+  assert.equal(shouldResetConnectAutomationOnReconnect("restored"), true);
+  assert.equal(shouldResetConnectAutomationOnReconnect("automatic"), false);
+});
+
+test("manual reconnect resets connect automation before opening a new session", () => {
+  const source = readFileSync(new URL("../Terminal.tsx", import.meta.url), "utf8");
+  const reconnectIndex = source.indexOf("const startReconnect = ");
+  const cancelBatchIndex = source.indexOf(
+    "await cancelConnectAutomationBatch(connectAutomationBatch)",
+    reconnectIndex,
+  );
+  const manualBranchIndex = source.indexOf('if (mode === "manual")', reconnectIndex);
+  const stopFailureRetryIndex = source.indexOf(
+    'if (mode === "auto" && retryTokenStillCurrent())',
+    cancelBatchIndex,
+  );
+  const stopFailureDisconnectedIndex = source.indexOf(
+    'updateStatus("disconnected")',
+    stopFailureRetryIndex,
+  );
+  const resetConsumedIndex = source.indexOf(
+    "connectScriptsConsumedRef.current = false",
+    manualBranchIndex,
+  );
+  const resetCompletedIndex = source.indexOf(
+    "connectScriptsCompletedIdsRef.current = new Set()",
+    manualBranchIndex,
+  );
+  const resetInFlightIndex = source.indexOf(
+    "connectScriptsInFlightRef.current = false",
+    manualBranchIndex,
+  );
+  const connectingIndex = source.indexOf('updateStatus("connecting")', manualBranchIndex);
+  const autoElseIndex = source.indexOf("} else {", manualBranchIndex);
+  const autoSuppressIndex = source.indexOf(
+    'shouldSuppressHostStartupCommandOnReconnect("automatic")',
+    autoElseIndex,
+  );
+
+  assert.notEqual(reconnectIndex, -1);
+  assert.notEqual(cancelBatchIndex, -1);
+  assert.notEqual(manualBranchIndex, -1);
+  assert.notEqual(stopFailureRetryIndex, -1);
+  assert.notEqual(stopFailureDisconnectedIndex, -1);
+  assert.notEqual(resetConsumedIndex, -1);
+  assert.notEqual(resetCompletedIndex, -1);
+  assert.notEqual(resetInFlightIndex, -1);
+  assert.notEqual(connectingIndex, -1);
+  assert.notEqual(autoElseIndex, -1);
+  assert.notEqual(autoSuppressIndex, -1);
+  assert.ok(
+    cancelBatchIndex < manualBranchIndex
+      && cancelBatchIndex < resetConsumedIndex
+      && cancelBatchIndex < resetCompletedIndex
+      && cancelBatchIndex < resetInFlightIndex,
+    "every reconnect must await onConnect cancellation before manual guards are cleared",
+  );
+  assert.ok(
+    stopFailureRetryIndex < stopFailureDisconnectedIndex
+      && stopFailureDisconnectedIndex < manualBranchIndex,
+    "automatic reconnect must return to disconnected when stopping the old batch fails",
+  );
+  assert.ok(
+    resetConsumedIndex < connectingIndex && resetCompletedIndex < connectingIndex,
+    "manual reconnect must clear connect-automation consumption before status becomes connecting",
+  );
+  assert.ok(
+    autoElseIndex < autoSuppressIndex && autoSuppressIndex < connectingIndex,
+    "automatic reconnect must keep the existing connect-automation consumption decision",
+  );
+  assert.ok(
+    !source.slice(autoElseIndex, connectingIndex).includes("connectScriptsConsumedRef.current = false"),
+    "automatic reconnect must not reset connect-automation refs",
+  );
+  assert.match(
+    source.slice(autoElseIndex, connectingIndex),
+    /connectScriptsConsumedRef\.current = true/,
+    "automatic reconnect must stop the old batch without queuing it again",
+  );
+});
 test("restored disconnected sessions still create a terminal runtime before backend startup", () => {
   const source = readFileSync(new URL("./useTerminalEffects.ts", import.meta.url), "utf8");
   const runtimeIndex = source.indexOf("const runtime = createXTermRuntime");

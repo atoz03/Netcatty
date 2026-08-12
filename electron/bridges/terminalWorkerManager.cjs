@@ -1125,11 +1125,25 @@ function createTerminalWorkerManager(options = {}) {
     }
   }
 
-  function notifySessionClosed(sessionId, reason) {
+  function notifySessionClosed(sessionId, reason, options = {}) {
     if (!sessionId) return;
+    const explicit = options?.explicit === true;
+    const event = explicit
+      ? { sessionId, reason, explicit: true }
+      : { sessionId, reason };
     for (const listener of [...sessionClosedListeners]) {
-      try { listener(Object.freeze({ sessionId, reason })); } catch {}
+      try { listener(Object.freeze(event)); } catch {}
     }
+  }
+
+  function notifyRendererSessionClosed(sessionId, payload) {
+    // Disconnect / reconnect keep the tab and session id, so they must not
+    // look like an explicit tab close to host_open ownership.
+    if (payload?.retainOwnership === true) {
+      notifySessionClosed(sessionId, "closed");
+      return;
+    }
+    notifySessionClosed(sessionId, "closed", { explicit: true });
   }
 
   function drainOutputSession(sessionId, requestId) {
@@ -1473,7 +1487,9 @@ function createTerminalWorkerManager(options = {}) {
         clearAttachHome(sessionId);
         terminalOutputChannel?.closeSession?.(sessionId);
         suppressedPendingOutputSessions.add(sessionId);
-        notifySessionClosed(sessionId, message.payload?.reason || "superseded");
+        // Always label superseded exits as such — payload reason may be
+        // "closed"/"error" and must not be mistaken for an authoritative end.
+        notifySessionClosed(sessionId, "superseded");
         const targets = new Set([displayWebContentsId, homeWebContentsId]);
         if (onRendererEvent) {
           for (const webContentsId of targets) {
@@ -1502,7 +1518,7 @@ function createTerminalWorkerManager(options = {}) {
         finishPendingSessionStart(originEntry);
         pending.delete(message.originRequestId);
         originEntry.reject(new Error("Terminal session was superseded by a newer start request"));
-        notifySessionClosed(sessionId, message.payload?.reason);
+        notifySessionClosed(sessionId, "superseded");
         return;
       }
       const displayWebContentsId =
@@ -1752,6 +1768,11 @@ function createTerminalWorkerManager(options = {}) {
       && payload?.sessionId
       && closedSessions.has(payload.sessionId)
       && !pendingSessionStartSequences.has(payload.sessionId)) {
+      // Worker already tombstoned the session (clean exit / crash). A later
+      // renderer close still has to notify host listeners as explicit so
+      // auto-close can drop host_open ownership, unless this is a disconnect
+      // that keeps the tab for reconnect.
+      notifyRendererSessionClosed(payload.sessionId, payload);
       return Promise.resolve(undefined);
     }
     const requestId = randomUUID();
@@ -1813,7 +1834,9 @@ function createTerminalWorkerManager(options = {}) {
       finishPendingSessionStart(entry);
       entry?.reject(error);
     }
-    if (notifyClosedAfterPost) notifySessionClosed(payload.sessionId, "closed");
+    if (notifyClosedAfterPost) {
+      notifyRendererSessionClosed(payload.sessionId, payload);
+    }
     return promise;
   }
 
@@ -1900,6 +1923,7 @@ function createTerminalWorkerManager(options = {}) {
       && closedSessions.has(payload.sessionId)
       && !pendingSessionStartSequences.has(payload.sessionId)) {
       closeOutputSession(payload.sessionId);
+      notifyRendererSessionClosed(payload.sessionId, payload);
       return;
     }
     if (channel === "netcatty:close" && payload?.sessionId) {
@@ -1921,7 +1945,9 @@ function createTerminalWorkerManager(options = {}) {
         retireWorkerAfterIpcFailure(worker, error);
         postError = error;
       }
-      if (shouldNotifyClosed) notifySessionClosed(payload.sessionId, "closed");
+      if (shouldNotifyClosed) {
+        notifyRendererSessionClosed(payload.sessionId, payload);
+      }
       if (postError) throw postError;
       return;
     }

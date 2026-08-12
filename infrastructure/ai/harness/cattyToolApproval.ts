@@ -14,6 +14,22 @@ type CattyToolPolicySpec = {
   };
 };
 
+/**
+ * The callable half of the SDK's approval union.
+ *
+ * `ToolApprovalConfiguration` is `generic function | per-tool record`. This
+ * factory always returns the function, so callers (and tests) should not have
+ * to re-narrow it before invoking.
+ */
+export type CattyToolApproval = Extract<
+  ToolApprovalConfiguration<
+    Record<string, never>,
+    import('./cattyRuntimeContext').CattyRuntimeContext
+  >,
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (...args: any[]) => any
+>;
+
 const policyByToolName = new Map<string, CattyToolPolicySpec>(
   (cattyToolSpecs as CattyToolPolicySpec[]).map((spec) => [spec.toolName, spec]),
 );
@@ -32,7 +48,7 @@ export function buildCattyToolApproval(input: {
   permissionMode: AIPermissionMode;
   chatSessionId?: string;
   requestApproval?: typeof defaultRequestApproval;
-}): ToolApprovalConfiguration<Record<string, never>, import('./cattyRuntimeContext').CattyRuntimeContext> {
+}): CattyToolApproval {
   const { permissionMode, chatSessionId, requestApproval = defaultRequestApproval } = input;
 
   return async ({ toolCall }) => {

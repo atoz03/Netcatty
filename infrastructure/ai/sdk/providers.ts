@@ -313,7 +313,9 @@ function normalizeOpenAIChatToolCall(
   toolCallId: string,
   rememberedName?: string,
 ): Record<string, unknown> {
-  const normalized = { ...toolCall, id: toolCallId };
+  // Annotated: spreading a Record into an object literal drops the index
+  // signature, leaving just `{ id: string }`.
+  const normalized: Record<string, unknown> = { ...toolCall, id: toolCallId };
   if (
     normalized.type === '' ||
     normalized.type == null ||

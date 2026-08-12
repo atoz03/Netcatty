@@ -118,6 +118,9 @@ export class KeywordHighlighter implements IDisposable {
   private pendingTerminalRefreshRange: DirtyLineSegment | null = null;
   private lastBufferSnapshot: BufferSnapshot | null = null;
   private recentWriteBurst = 0;
+  /** Bumped per parsed write; only a write can move what a decoration sits on. */
+  private writeSeq = 0;
+  private validatedWriteSeq = -1;
   private lastWriteAt = 0;
   private lastBurstDecayAt = 0;
   private lastUserInputAt = 0;
@@ -171,6 +174,7 @@ export class KeywordHighlighter implements IDisposable {
       // When new data is written, refresh on the next frame so highlights land
       // with the freshly rendered content instead of trailing behind it.
       this.term.onWriteParsed(() => {
+        this.writeSeq += 1;
         if (this.enterInputPending) {
           this.scheduleEnterInputIdleClear();
         }
@@ -770,6 +774,14 @@ export class KeywordHighlighter implements IDisposable {
     let writeContinuationPending = false;
     try {
       this.syncLineDecorationIndex();
+      // Once per write, whatever reason ends up driving the refresh. A write can
+      // be absorbed by a scroll or a full pass (both outrank it) and those paths
+      // skip the rows they have already indexed, so tying the check to the write
+      // reason alone would let a rewritten row keep its old colour.
+      if (this.writeSeq !== this.validatedWriteSeq) {
+        this.validatedWriteSeq = this.writeSeq;
+        this.markStaleDecorationsDirty(viewportStart, viewportEnd);
+      }
       const previousRange = this.lastRenderRange;
 
       if (reason === "write") {
@@ -792,6 +804,17 @@ export class KeywordHighlighter implements IDisposable {
         }
         if (rangeEnd > previousRange.end) {
           this.processLineRange(Math.max(rangeStart, previousRange.end + 1), rangeEnd, cursorAbsoluteY);
+        }
+        // The overlap was indexed on an earlier pass, so it is skipped above.
+        // Rows flagged since then still have to be rescanned, or a full refresh
+        // would preserve exactly the highlights it was asked to re-derive.
+        const overlapStart = Math.max(rangeStart, previousRange.start);
+        const overlapEnd = Math.min(rangeEnd, previousRange.end);
+        if (
+          overlapStart <= overlapEnd
+          && (this.dirtyAllInRenderRange || this.dirtySegments.length > 0)
+        ) {
+          this.processDirtyLinesInRange(overlapStart, overlapEnd, cursorAbsoluteY, "write");
         }
       } else {
         this.processLineRange(rangeStart, rangeEnd, cursorAbsoluteY);
@@ -1193,38 +1216,63 @@ export class KeywordHighlighter implements IDisposable {
   }
 
   /**
-   * Mark decorated rows whose text no longer matches what produced their
-   * decorations.
+   * Mark visible decorated rows whose text no longer matches what produced
+   * their decorations, and re-anchor the line index when markers have drifted.
    *
-   * Write-driven invalidation is otherwise inferred from cursor movement plus a
-   * nine-point viewport probe. A program that rewrites a row in place away from
-   * the cursor — scroll regions, `\r` overwrites, status redraws — slips past
-   * both, leaving the decoration anchored to a marker whose content has since
-   * changed, so the rule's colour lands on unrelated characters. Only decorated
-   * rows can show a stale highlight and keyword matches are sparse, so
-   * re-hashing the ones on screen is cheap insurance.
+   * Decorations ride on xterm markers, and a marker only follows its content
+   * for some of the ways a buffer can move:
+   *   - `onTrim` shifts every marker, so plain scrollback is fine;
+   *   - `CSI L` / `CSI M` shift only the markers at or below the edit, so the
+   *     rest of the map keeps its old lines and `markerLineOffset` — which is
+   *     derived from a single anchor entry — stops describing the others;
+   *   - a scroll region moves rows with `CircularList.shiftElements`, which
+   *     fires no event at all, so the content slides out from under markers
+   *     that do not move a row.
+   * Cursor-position and viewport-probe heuristics cannot see any of that, so a
+   * decoration ends up painting the rule colour over unrelated characters.
    *
-   * Deliberately scoped to the visible rows rather than the overscan band: only
-   * what is on screen can show the wrong colour, and widening it would make
-   * every keystroke echo pay for rows nobody is looking at.
+   * Walking the decoration map (rather than the rows) keeps this correct when
+   * the index has drifted: `marker.line` is the authoritative position, while
+   * a row lookup through a stale offset silently misses the very entries that
+   * went wrong. Drift also has to force a rebuild — otherwise the rescan below
+   * cannot resolve the state it just flagged and would leave it in place.
+   *
+   * Cost is one number comparison per retained decoration plus a re-hash of the
+   * decorated rows that are on screen; keyword matches are sparse, so that is
+   * normally a handful of rows. The caller runs this once per parsed write, so
+   * scrolling over already-highlighted scrollback still pays nothing.
    */
-  private markChangedDecoratedLinesDirty(rangeStart: number, rangeEnd: number): void {
-    if (this.dirtyAllInRenderRange || this.lineDecorations.size === 0) return;
+  private markStaleDecorationsDirty(viewportStart: number, viewportEnd: number): void {
+    if (this.lineDecorations.size === 0) return;
     const buffer = this.term?.buffer?.active;
     if (!buffer) return;
 
-    // Walk the rows, not the decoration map: retention keeps up to a thousand
-    // off-screen entries, and the index is already keyed by line.
-    this.syncLineDecorationIndex();
-    for (let lineY = Math.max(0, rangeStart); lineY <= rangeEnd; lineY += 1) {
-      const state = this.lineDecorations.get(this.toIndexedLine(lineY));
-      if (!state || state.marker.isDisposed || state.marker.line !== lineY) continue;
+    const staleLines: number[] = [];
+    let indexDrifted = false;
+    for (const state of this.lineDecorations.values()) {
+      if (state.marker.isDisposed) {
+        indexDrifted = true;
+        continue;
+      }
+      const lineY = state.marker.line;
+      if (lineY !== state.indexedLine + this.markerLineOffset) {
+        indexDrifted = true;
+      }
+      if (lineY < viewportStart || lineY > viewportEnd) continue;
       const lineText = buffer.getLine(lineY)?.translateToString(true) ?? "";
       if (this.hashDecorationText(lineText) === state.textHash) continue;
-      this.addDirtyRange(lineY, lineY);
+      staleLines.push(lineY);
+    }
+
+    if (indexDrifted) {
+      this.lineDecorationIndexNeedsRebuild = true;
+      this.syncLineDecorationIndex();
+    }
+    for (const lineY of staleLines) {
       // addDirtyRange escalates to "everything" once the segment budget blows;
       // there is nothing left to narrow down after that.
       if (this.dirtyAllInRenderRange) return;
+      this.addDirtyRange(lineY, lineY);
     }
   }
 
@@ -1409,11 +1457,6 @@ export class KeywordHighlighter implements IDisposable {
         this.addDirtyRange(snapshot.viewportY - padding, prev.viewportY - 1 + padding);
       }
     }
-
-    this.markChangedDecoratedLinesDirty(
-      snapshot.viewportY,
-      snapshot.viewportY + rows - 1,
-    );
   }
 
   private decayWriteBurst(now: number) {

@@ -2504,3 +2504,129 @@ test("in-place rewrite of a decorated line retires its stale highlight", async (
     raf.restore();
   }
 });
+
+const IP_RULE = {
+  id: "ip",
+  label: "IP",
+  patterns: ["\\b\\d{1,3}(?:\\.\\d{1,3}){3}\\b"],
+  color: "#EC4899",
+  enabled: true,
+};
+
+test("a refresh notices a rewritten row without help from the dirty set", async () => {
+  const raf = installAnimationFrameQueue();
+  try {
+    const rows = 24;
+    const harness = createFakeTerminal("plain", { lineCount: 60, rows });
+    const { term, handlers } = harness;
+    harness.setLineText(5, "connect 192.168.1.1 ok");
+
+    const highlighter = new KeywordHighlighter(term as never);
+    highlighter.setRules([IP_RULE], true);
+    raf.flush();
+    assert.equal(harness.getActiveDecorationCount(), 1);
+
+    harness.setLineText(5, "connect the gateway ok");
+    handlers.writeParsed?.();
+
+    // The dirty set is not a reliable carrier: a scroll refresh clamps a
+    // whole-viewport mark down to its own overlap, the per-refresh time budget
+    // defers the rest, and the Enter guard skips marking entirely while a scan
+    // is already in flight. Losing it must not cost the row its rescan.
+    const internals = highlighter as unknown as {
+      dirtySegments: unknown[];
+      dirtyLineCount: number;
+      dirtyAllInRenderRange: boolean;
+    };
+    internals.dirtySegments = [];
+    internals.dirtyLineCount = 0;
+    internals.dirtyAllInRenderRange = false;
+
+    await new Promise((resolve) => { setTimeout(resolve, 220); });
+    raf.flush();
+
+    assert.equal(harness.getActiveDecorationCount(), 0);
+    highlighter.dispose();
+    resetTerminalOutputPressure(term as never);
+  } finally {
+    raf.restore();
+  }
+});
+
+test("full refresh rescans flagged rows inside the range it already indexed", async () => {
+  const raf = installAnimationFrameQueue();
+  try {
+    const rows = 24;
+    const harness = createFakeTerminal("plain", { lineCount: 60, rows });
+    const { term, handlers } = harness;
+    harness.setLineText(5, "connect 192.168.1.1 ok");
+
+    const highlighter = new KeywordHighlighter(term as never);
+    highlighter.setRules([IP_RULE], true);
+    raf.flush();
+    assert.equal(harness.getActiveDecorationCount(), 1);
+
+    harness.setLineText(5, "connect the gateway ok");
+    handlers.writeParsed?.();
+
+    // A full pass only walks the edges once an earlier pass covered the middle.
+    // Writes get absorbed into it because "full" outranks "write", so the
+    // overlap still has to honour the rows flagged since that earlier pass.
+    const internals = highlighter as unknown as {
+      lastRenderRange: { start: number; end: number } | null;
+      pendingRefreshReason: string;
+    };
+    internals.lastRenderRange = { start: 0, end: 71 };
+    internals.pendingRefreshReason = "full";
+    await new Promise((resolve) => { setTimeout(resolve, 220); });
+    raf.flush();
+
+    assert.equal(harness.getActiveDecorationCount(), 0);
+    highlighter.dispose();
+    resetTerminalOutputPressure(term as never);
+  } finally {
+    raf.restore();
+  }
+});
+
+test("stale highlights are found through a drifted marker index", async () => {
+  const raf = installAnimationFrameQueue();
+  try {
+    const rows = 24;
+    const harness = createFakeTerminal("plain", { lineCount: 60, rows });
+    const { term, handlers } = harness;
+    harness.setLineText(5, "connect 192.168.1.1 ok");
+    harness.setLineText(16, "peer 10.0.0.7 ok");
+
+    const highlighter = new KeywordHighlighter(term as never);
+    highlighter.setRules([IP_RULE], true);
+    raf.flush();
+    assert.equal(harness.getActiveDecorationCount(), 2);
+
+    // `CSI M` between two decorated rows shifts only the marker below the edit,
+    // so the single-anchor offset still describes row 5 and no longer describes
+    // the other one: row 15 holds its content but it stays indexed under 16.
+    const internals = highlighter as unknown as {
+      lineDecorations: Map<number, { marker: { line: number }; indexedLine: number }>;
+    };
+    const drifted = internals.lineDecorations.get(16);
+    assert.ok(drifted);
+    drifted.marker.line = 15;
+    harness.setLineText(15, "peer 10.0.0.7 ok");
+    harness.setLineText(16, "plain 16");
+
+    // Neither row is on the nine-point probe grid and both are away from the
+    // cursor, so a row-keyed lookup through the stale offset is the only thing
+    // standing between the repaint below and a highlight on unrelated text.
+    harness.setLineText(15, "peer went away");
+    handlers.writeParsed?.();
+    await new Promise((resolve) => { setTimeout(resolve, 220); });
+    raf.flush();
+
+    assert.equal(harness.getActiveDecorationCount(), 1);
+    highlighter.dispose();
+    resetTerminalOutputPressure(term as never);
+  } finally {
+    raf.restore();
+  }
+});

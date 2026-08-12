@@ -21,6 +21,7 @@ export {
   getVaultCsvTemplate,
   resolveVaultCsvHostKeyPath,
 } from "./vaultImport/csvExport";
+import { isFailedResult } from '../lib/resultNarrowing';
 
 interface ParsedJumpHost {
   hostname: string;
@@ -313,7 +314,7 @@ const createHost = (input: {
   notes?: string;
 }): Host => {
   const built = buildVaultHostFromDraft(input);
-  if (!built.ok) {
+  if (isFailedResult(built)) {
     throw new Error(built.error);
   }
   return built.host;

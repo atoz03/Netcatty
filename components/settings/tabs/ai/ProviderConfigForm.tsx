@@ -18,6 +18,7 @@ import type { ProviderFormState } from "./types";
 import { ModelSelector } from "./ModelSelector";
 import { mergeModelContextWindow } from "./modelMetadata";
 import { ProviderIconBadge } from "./ProviderIconBadge";
+import { isFailedResult } from '../../../../lib/resultNarrowing';
 
 const ICON_PIXEL_SIZE = 64;
 const ICON_WEBP_QUALITY = 0.85;
@@ -226,7 +227,7 @@ export const ProviderConfigForm: React.FC<{
       apiKey: form.apiKey,
       providerId: provider.providerId,
     });
-    if (!inputCheck.ok) {
+    if (isFailedResult(inputCheck)) {
       probeRequestIdRef.current += 1;
       setIsTesting(false);
       setProbeResult({
@@ -254,7 +255,7 @@ export const ProviderConfigForm: React.FC<{
         skipTLSVerify: form.skipTLSVerify,
       });
       if (probeRequestIdRef.current !== requestId) return;
-      if (!run.ok) {
+      if (isFailedResult(run)) {
         setProbeResult({
           health: "error",
           message: t(

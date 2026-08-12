@@ -7,6 +7,7 @@ import {
 } from './hostConnectScripts.ts';
 import { isScriptSnippet } from './snippetScript.ts';
 import { getNextVaultOrder } from './vaultOrder.ts';
+import { isErrorResult } from '../lib/resultNarrowing.ts';
 
 export type SnippetAgentListItem = ReturnType<typeof serializeSnippetForAgentList>;
 export type SnippetAgentDetail = ReturnType<typeof serializeSnippetForAgentGet>;
@@ -172,40 +173,40 @@ export function buildSnippetFromAgentDraft(
   if (!command.trim()) return { ok: false, error: 'command is required.' };
 
   const kindResult = parseKind(draft.kind, options.forceKind ?? 'snippet');
-  if (typeof kindResult === 'object' && 'error' in kindResult) {
+  if (isErrorResult(kindResult)) {
     return { ok: false, error: kindResult.error };
   }
   const kind = options.forceKind ?? kindResult;
 
   const triggerResult = parseTrigger(draft.trigger);
-  if (triggerResult && typeof triggerResult === 'object' && 'error' in triggerResult) {
+  if (isErrorResult(triggerResult)) {
     return { ok: false, error: triggerResult.error };
   }
   const trigger = triggerResult ?? (kind === 'script' ? 'manual' : undefined);
 
   const languageResult = parseLanguage(draft.language);
-  if (languageResult && typeof languageResult === 'object' && 'error' in languageResult) {
+  if (isErrorResult(languageResult)) {
     return { ok: false, error: languageResult.error };
   }
 
   const tags = parseTags(draft.tags);
-  if (tags && 'error' in tags) return { ok: false, error: tags.error };
+  if (isErrorResult(tags)) return { ok: false, error: tags.error };
 
   const targetsAllHosts = parseOptionalBoolean(draft.targetsAllHosts);
   let targets: string[] | undefined;
   if (!targetsAllHosts) {
     const targetsResult = parseTargets(draft.targets);
-    if (targetsResult && 'error' in targetsResult) return { ok: false, error: targetsResult.error };
+    if (isErrorResult(targetsResult)) return { ok: false, error: targetsResult.error };
     targets = targetsResult && targetsResult.length > 0 ? targetsResult : undefined;
   }
 
   const triggerPatternRaw = typeof draft.triggerPattern === 'string' ? draft.triggerPattern : undefined;
   const triggerPattern = validateTriggerPattern(trigger, triggerPatternRaw);
-  if (triggerPattern && typeof triggerPattern === 'object' && 'error' in triggerPattern) {
+  if (isErrorResult(triggerPattern)) {
     return { ok: false, error: triggerPattern.error };
   }
   const multiLineRunMode = parseMultiLineRunMode(draft.multiLineRunMode);
-  if (multiLineRunMode && typeof multiLineRunMode === 'object' && 'error' in multiLineRunMode) {
+  if (isErrorResult(multiLineRunMode)) {
     return { ok: false, error: multiLineRunMode.error };
   }
 
@@ -253,7 +254,7 @@ export function applySnippetAgentPatch(
     kind = options.forceKind;
   } else if (patch.kind !== undefined) {
     const kindResult = parseKind(patch.kind, kind);
-    if (typeof kindResult === 'object' && 'error' in kindResult) {
+    if (isErrorResult(kindResult)) {
       return { ok: false, error: kindResult.error };
     }
     kind = kindResult;
@@ -262,7 +263,7 @@ export function applySnippetAgentPatch(
   let trigger = existing.trigger;
   if (patch.trigger !== undefined) {
     const triggerResult = parseTrigger(patch.trigger);
-    if (triggerResult && typeof triggerResult === 'object' && 'error' in triggerResult) {
+    if (isErrorResult(triggerResult)) {
       return { ok: false, error: triggerResult.error };
     }
     trigger = triggerResult;
@@ -271,14 +272,14 @@ export function applySnippetAgentPatch(
   let language = existing.language;
   if (patch.language !== undefined) {
     const languageResult = parseLanguage(patch.language);
-    if (languageResult && typeof languageResult === 'object' && 'error' in languageResult) {
+    if (isErrorResult(languageResult)) {
       return { ok: false, error: languageResult.error };
     }
     language = languageResult;
   }
 
   const tags = patch.tags !== undefined ? parseTags(patch.tags) : existing.tags;
-  if (tags && 'error' in tags) return { ok: false, error: tags.error };
+  if (isErrorResult(tags)) return { ok: false, error: tags.error };
 
   const prevTargetIds = existing.targets ? [...existing.targets] : undefined;
 
@@ -295,7 +296,7 @@ export function applySnippetAgentPatch(
       targets = undefined;
     } else {
       const targetsResult = parseTargets(patch.targets ?? existing.targets ?? []);
-      if (targetsResult && 'error' in targetsResult) return { ok: false, error: targetsResult.error };
+      if (isErrorResult(targetsResult)) return { ok: false, error: targetsResult.error };
       targets = targetsResult && targetsResult.length > 0 ? targetsResult : undefined;
     }
   }
@@ -304,13 +305,13 @@ export function applySnippetAgentPatch(
     ? (typeof patch.triggerPattern === 'string' ? patch.triggerPattern : '')
     : existing.triggerPattern;
   const triggerPattern = validateTriggerPattern(trigger, triggerPatternRaw);
-  if (triggerPattern && typeof triggerPattern === 'object' && 'error' in triggerPattern) {
+  if (isErrorResult(triggerPattern)) {
     return { ok: false, error: triggerPattern.error };
   }
   const multiLineRunMode = patch.multiLineRunMode !== undefined
     ? parseMultiLineRunMode(patch.multiLineRunMode)
     : existing.multiLineRunMode;
-  if (multiLineRunMode && typeof multiLineRunMode === 'object' && 'error' in multiLineRunMode) {
+  if (isErrorResult(multiLineRunMode)) {
     return { ok: false, error: multiLineRunMode.error };
   }
 

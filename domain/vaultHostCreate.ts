@@ -4,6 +4,7 @@ import {
   findIntroducedVaultJumpGraphIssue,
   findVaultGroupConfigJumpReference,
 } from './vaultJumpGraph';
+import { isFailedResult } from '../lib/resultNarrowing';
 
 const DEFAULT_SSH_PORT = 22;
 const DEFAULT_TELNET_PORT = 23;
@@ -267,7 +268,7 @@ export function buildVaultHostFromDraft(
     return { ok: false, error: 'keyPath is required when passphrase is provided.' };
   }
   const tags = parseTags(draft.tags);
-  if (!tags.ok) return tags;
+  if (isFailedResult(tags)) return tags;
   if (draft.group !== undefined && draft.group !== null && typeof draft.group !== 'string') {
     return { ok: false, error: 'group must be a string.' };
   }
@@ -717,7 +718,7 @@ export function applyVaultHostUpdate(
   }
   if (tags.provided) {
     const nextTags = parseTags(tags.value);
-    if (!nextTags.ok) return nextTags;
+    if (isFailedResult(nextTags)) return nextTags;
     updated.tags = nextTags.tags;
   }
   if (notes.provided) {
@@ -866,7 +867,7 @@ export function buildVaultHostsFromDrafts(
 
   drafts.forEach((draft, index) => {
     const built = buildVaultHostFromDraft(draft);
-    if (!built.ok) {
+    if (isFailedResult(built)) {
       issues.push({ index, error: built.error });
       return;
     }

@@ -58,6 +58,7 @@ import {
   validatePortForwardingHost,
 } from '../../domain/portForwardingAgentOps';
 import { deleteGroup, upsertGroup } from '../../domain/vaultGroupAgentOps';
+import { isErrorResult, isFailedResult } from '../../lib/resultNarrowing';
 
 const SENSITIVE_HOST_KEYS = new Set([
   'password',
@@ -381,7 +382,7 @@ async function executeSnippetOrScriptRun(
   }
 
   const applied = applySnippetVariables(snippet.command, variableValues);
-  if (!applied.ok) {
+  if (isFailedResult(applied)) {
     return { ok: false, error: `Missing snippet variable "${applied.missing.join('", "')}".` };
   }
   const command = applied.command;
@@ -557,7 +558,7 @@ export async function handleVaultAgentOp(
         return { ok: false, error: 'Session close is not available in this window.' };
       }
       const closed = deps.closeSession(sessionId);
-      if (!closed.ok) return closed;
+      if (isFailedResult(closed)) return closed;
       return { ok: true, sessionId, status: 'closed' };
     }
     case 'host.get': {
@@ -590,7 +591,7 @@ export async function handleVaultAgentOp(
       const isExternalMcpCall = chatSessionId === EXTERNAL_MCP_CHAT_SESSION_ID;
       const effectiveHost = deps.resolveEffectiveHost(host);
       const opened = deps.openHost(effectiveHost, isExternalMcpCall);
-      if (!opened.ok) {
+      if (isFailedResult(opened)) {
         return { ok: false, error: opened.error };
       }
 
@@ -615,7 +616,7 @@ export async function handleVaultAgentOp(
     }
     case 'hosts.create': {
       const parsedDrafts = parseVaultHostDraftsInput(params.hosts);
-      if (!parsedDrafts.ok) return { ok: false, error: parsedDrafts.error };
+      if (isFailedResult(parsedDrafts)) return { ok: false, error: parsedDrafts.error };
 
       const dryRun = parseOptionalBoolean(params.dryRun) ?? false;
       const skipDuplicates = parseOptionalBoolean(params.skipDuplicates) ?? true;
@@ -725,7 +726,7 @@ export async function handleVaultAgentOp(
             proxyProfiles: deps.proxyProfiles,
           },
         );
-        if (!updated.ok) return updated;
+        if (isFailedResult(updated)) return updated;
         updatedHost = updated.updatedHost;
         updatedHosts = updated.hosts;
         updatedCustomGroups = updated.customGroups;
@@ -766,7 +767,7 @@ export async function handleVaultAgentOp(
         deps.resolveEffectiveHost,
         deps.getGroupConfigs(),
       );
-      if (!deleted.ok) return deleted;
+      if (isFailedResult(deleted)) return deleted;
 
       deps.updateHosts(deleted.hosts);
       return {
@@ -923,9 +924,9 @@ export async function handleVaultAgentOp(
       if (!title) return { ok: false, error: 'title is required.' };
       const content = typeof params.content === 'string' ? params.content : '';
       const linkedHostIds = parseOptionalStringArray(params.linkedHostIds, 'linkedHostIds');
-      if (linkedHostIds && 'error' in linkedHostIds) return { ok: false, error: linkedHostIds.error };
+      if (isErrorResult(linkedHostIds)) return { ok: false, error: linkedHostIds.error };
       const tags = parseOptionalStringArray(params.tags, 'tags');
-      if (tags && 'error' in tags) return { ok: false, error: tags.error };
+      if (isErrorResult(tags)) return { ok: false, error: tags.error };
       const note = sanitizeVaultNote({
         title,
         content,
@@ -943,9 +944,9 @@ export async function handleVaultAgentOp(
       const existing = deps.getNotes().find((entry) => entry.id === noteId);
       if (!existing) return { ok: false, error: `Vault note "${noteId}" was not found.` };
       const linkedHostIds = parseOptionalStringArray(params.linkedHostIds, 'linkedHostIds');
-      if (linkedHostIds && 'error' in linkedHostIds) return { ok: false, error: linkedHostIds.error };
+      if (isErrorResult(linkedHostIds)) return { ok: false, error: linkedHostIds.error };
       const tags = parseOptionalStringArray(params.tags, 'tags');
-      if (tags && 'error' in tags) return { ok: false, error: tags.error };
+      if (isErrorResult(tags)) return { ok: false, error: tags.error };
       const note = sanitizeVaultNote({
         ...existing,
         title: params.title !== undefined ? sanitizeNoteTitle(params.title) : existing.title,
@@ -1018,7 +1019,7 @@ export async function handleVaultAgentOp(
         create: op === 'group.create',
         newPath: params.newPath,
       });
-      if (!result.ok) return result;
+      if (isFailedResult(result)) return result;
       deps.updateCustomGroups(result.state.groups);
       deps.updateGroupConfigs(result.state.configs);
       deps.updateHosts(result.state.hosts);
@@ -1034,7 +1035,7 @@ export async function handleVaultAgentOp(
         groups: deps.getCustomGroups(), configs: deps.getGroupConfigs(), hosts: deps.getHosts(),
         managedSources: deps.getManagedSources(),
       }, params.path, deleteHosts ?? false);
-      if (!result.ok) return result;
+      if (isFailedResult(result)) return result;
       deps.updateCustomGroups(result.state.groups);
       deps.updateGroupConfigs(result.state.configs);
       deps.updateHosts(result.state.hosts);
@@ -1054,7 +1055,7 @@ export async function handleVaultAgentOp(
     }
     case 'snippets.create': {
       const built = buildSnippetFromAgentDraft(snippetDraftFromParams(params), deps.snippets);
-      if (!built.ok) return { ok: false, error: built.error };
+      if (isFailedResult(built)) return { ok: false, error: built.error };
       const merged = applySnippetCreateToVault(deps.snippets, deps.getHosts(), built.snippet);
       deps.updateSnippets(merged.snippets);
       deps.updateHosts(merged.hosts);
@@ -1065,7 +1066,7 @@ export async function handleVaultAgentOp(
       const existing = deps.snippets.find((entry) => entry.id === snippetId);
       if (!existing) return { ok: false, error: `Snippet "${snippetId}" was not found.` };
       const patched = applySnippetAgentPatch(existing, snippetDraftFromParams(params));
-      if (!patched.ok) return { ok: false, error: patched.error };
+      if (isFailedResult(patched)) return { ok: false, error: patched.error };
       const merged = applySnippetUpdateToVault(
         deps.snippets,
         deps.getHosts(),
@@ -1111,7 +1112,7 @@ export async function handleVaultAgentOp(
         deps.snippets,
         { forceKind: 'script' },
       );
-      if (!built.ok) return { ok: false, error: built.error };
+      if (isFailedResult(built)) return { ok: false, error: built.error };
       const merged = applySnippetCreateToVault(deps.snippets, deps.getHosts(), built.snippet);
       deps.updateSnippets(merged.snippets);
       deps.updateHosts(merged.hosts);
@@ -1124,7 +1125,7 @@ export async function handleVaultAgentOp(
         return { ok: false, error: `Script "${scriptId}" was not found.` };
       }
       const patched = applySnippetAgentPatch(existing, snippetDraftFromParams(params), { forceKind: 'script' });
-      if (!patched.ok) return { ok: false, error: patched.error };
+      if (isFailedResult(patched)) return { ok: false, error: patched.error };
       const merged = applySnippetUpdateToVault(
         deps.snippets,
         deps.getHosts(),
@@ -1174,21 +1175,21 @@ export async function handleVaultAgentOp(
       const runId = String(params.runId || '');
       if (!runId) return { ok: false, error: 'runId is required.' };
       const result = await stopScriptRun(runId);
-      if (!result.ok) return { ok: false, error: `Script run "${runId}" was not found or could not be stopped.` };
+      if (isFailedResult(result)) return { ok: false, error: `Script run "${runId}" was not found or could not be stopped.` };
       return { ok: true, runId };
     }
     case 'scripts.run.pause': {
       const runId = String(params.runId || '');
       if (!runId) return { ok: false, error: 'runId is required.' };
       const result = await pauseScriptRun(runId);
-      if (!result.ok) return { ok: false, error: `Script run "${runId}" was not found or could not be paused.` };
+      if (isFailedResult(result)) return { ok: false, error: `Script run "${runId}" was not found or could not be paused.` };
       return { ok: true, runId };
     }
     case 'scripts.run.resume': {
       const runId = String(params.runId || '');
       if (!runId) return { ok: false, error: 'runId is required.' };
       const result = await resumeScriptRun(runId);
-      if (!result.ok) return { ok: false, error: `Script run "${runId}" was not found or could not be resumed.` };
+      if (isFailedResult(result)) return { ok: false, error: `Script run "${runId}" was not found or could not be resumed.` };
       return { ok: true, runId };
     }
     case 'scripts.targets.set': {
@@ -1199,7 +1200,7 @@ export async function handleVaultAgentOp(
         targets: params.targets,
         targetsAllHosts: params.targetsAllHosts,
       });
-      if (!patched.ok) return { ok: false, error: patched.error };
+      if (isFailedResult(patched)) return { ok: false, error: patched.error };
       const merged = applySnippetUpdateToVault(
         deps.snippets,
         deps.getHosts(),
@@ -1225,10 +1226,10 @@ export async function handleVaultAgentOp(
       const host = deps.getHosts().find((entry) => entry.id === hostId);
       if (!host) return { ok: false, error: `Host "${hostId}" was not found.` };
       const scriptIds = parseOptionalStringArray(params.scriptIds, 'scriptIds');
-      if (scriptIds && 'error' in scriptIds) return { ok: false, error: scriptIds.error };
+      if (isErrorResult(scriptIds)) return { ok: false, error: scriptIds.error };
       if (!scriptIds) return { ok: false, error: 'scriptIds is required.' };
       const nextHost = setHostConnectScriptIds(host, scriptIds, deps.snippets);
-      if (!nextHost.ok) return { ok: false, error: nextHost.error };
+      if (isFailedResult(nextHost)) return { ok: false, error: nextHost.error };
       const nextHosts = deps.getHosts().map((entry) => (
         entry.id === hostId ? nextHost.host : entry
       ));
@@ -1250,7 +1251,7 @@ export async function handleVaultAgentOp(
       const result = createPortForwardingRule(deps.getPortForwardingRules(), effectiveHosts, params, {
         id: crypto.randomUUID(), now: Date.now(),
       });
-      if (!result.ok) return result;
+      if (isFailedResult(result)) return result;
       deps.updatePortForwardingRules(result.value.rules);
       return { ok: true, rule: sanitizePortForwardRuleForAgent(result.value.rule) };
     }
@@ -1260,7 +1261,7 @@ export async function handleVaultAgentOp(
       const existingRule = currentRules.find((entry) => entry.id === ruleId);
       const effectiveHosts = deps.getHosts().map((host) => deps.resolveEffectiveHost(host));
       let result = updatePortForwardingRule(currentRules, effectiveHosts, ruleId, params);
-      if (!result.ok) return result;
+      if (isFailedResult(result)) return result;
       if (
         existingRule
         && hasPortForwardingConnectionChanged(existingRule, result.value.rule)
@@ -1276,7 +1277,7 @@ export async function handleVaultAgentOp(
           ruleId,
           params,
         );
-        if (!result.ok) return result;
+        if (isFailedResult(result)) return result;
         const stoppedRule = {
           ...result.value.rule,
           status: 'inactive' as const,
@@ -1299,7 +1300,7 @@ export async function handleVaultAgentOp(
       const result = duplicatePortForwardingRule(deps.getPortForwardingRules(), effectiveHosts, ruleId, {
         id: crypto.randomUUID(), now: Date.now(),
       });
-      if (!result.ok) return result;
+      if (isFailedResult(result)) return result;
       deps.updatePortForwardingRules(result.value.rules);
       return { ok: true, rule: sanitizePortForwardRuleForAgent(result.value.rule) };
     }
@@ -1319,7 +1320,7 @@ export async function handleVaultAgentOp(
       if (!rule.hostId) return { ok: false, error: 'Rule has no associated host.' };
       const effectiveHosts = deps.getHosts().map((host) => deps.resolveEffectiveHost(host));
       const validatedHost = validatePortForwardingHost(effectiveHosts, rule.hostId);
-      if (!validatedHost.ok) return validatedHost;
+      if (isFailedResult(validatedHost)) return validatedHost;
       const host = validatedHost.value;
       try {
         resolveHostAuth({ host, keys: deps.keys, identities: deps.identities });

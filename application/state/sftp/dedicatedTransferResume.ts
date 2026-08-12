@@ -30,6 +30,7 @@ import {
   promoteDirectoryReplaceStage as promoteDirectoryReplacePaths,
 } from "./directoryReplacePromotion";
 import { sftpTransferCenterStore } from "../sftpTransferCenterStore";
+import { isFailedResult } from '../../../lib/resultNarrowing';
 
 export interface DedicatedResumeDeps {
   hosts: readonly Host[];
@@ -626,7 +627,7 @@ async function resumeSingleFileWithDedicatedSession(
   }
 
   const resolved = resolveResumeHosts(task, deps);
-  if (!resolved.ok) return { success: false, error: resolved.error };
+  if (isFailedResult(resolved)) return { success: false, error: resolved.error };
   const { endpoints } = resolved;
 
   let sourceSftpId: string | undefined;
@@ -1007,7 +1008,7 @@ async function resumeDirectoryWithDedicatedSession(
   }
 
   const resolved = resolveResumeHosts(parent, deps);
-  if (!resolved.ok) return { success: false, error: resolved.error };
+  if (isFailedResult(resolved)) return { success: false, error: resolved.error };
   const { endpoints } = resolved;
 
   const existingChildren = options?.children ?? [];

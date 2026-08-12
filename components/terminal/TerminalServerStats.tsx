@@ -7,7 +7,7 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from '../ui/hover-card'
 import { Tooltip, TooltipContent, TooltipTrigger } from '../ui/tooltip';
 import { formatNetSpeed } from './terminalHelpers';
 import { useServerStats } from '../../application/state/useServerStats';
-import { formatDiskCapacityGb, resolveTerminalDiskSummary } from './serverStatsFormat';
+import { formatDiskCapacityRange, resolveTerminalDiskSummary } from './serverStatsFormat';
 
 interface TerminalServerStatsProps {
   sessionId: string;
@@ -263,7 +263,7 @@ export const TerminalServerStats: React.FC<TerminalServerStatsProps> = ({
                         diskSummary.percent !== null && diskSummary.percent >= 80 && diskSummary.percent < 90 && "text-amber-400"
                       )}>
                         {diskSummary.used !== null && diskSummary.total !== null && diskSummary.percent !== null
-                          ? `${formatDiskCapacityGb(diskSummary.used)}/${formatDiskCapacityGb(diskSummary.total)}G (${diskSummary.percent}%)`
+                          ? `${formatDiskCapacityRange(diskSummary.used, diskSummary.total)} (${diskSummary.percent}%)`
                           : diskSummary.percent !== null
                             ? `${diskSummary.percent}%`
                             : '--'}
@@ -295,7 +295,7 @@ export const TerminalServerStats: React.FC<TerminalServerStatsProps> = ({
                                   "text-[11px] font-medium whitespace-nowrap",
                                   disk.percent >= 90 ? "text-red-400" : disk.percent >= 80 ? "text-amber-400" : "text-emerald-400"
                                 )}>
-                                  {formatDiskCapacityGb(disk.used)}/{formatDiskCapacityGb(disk.total)}G ({disk.percent}%)
+                                  {formatDiskCapacityRange(disk.used, disk.total)} ({disk.percent}%)
                                 </span>
                               </div>
                               <div className="w-full h-1.5 bg-muted rounded-full overflow-hidden">

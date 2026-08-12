@@ -29,7 +29,7 @@ const pushUint32 = (parts: number[], value: number) => {
   parts.push(value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff);
 };
 
-const concatZipParts = (header: number[], ...parts: Uint8Array[]): Uint8Array => {
+const concatZipParts = (header: number[], ...parts: Uint8Array[]): Uint8Array<ArrayBuffer> => {
   const headerBytes = Uint8Array.from(header);
   const chunk = new Uint8Array(
     headerBytes.length + parts.reduce((total, part) => total + part.length, 0),
@@ -46,8 +46,10 @@ const concatZipParts = (header: number[], ...parts: Uint8Array[]): Uint8Array =>
 
 export const buildTextFilesZipBlob = (files: TextZipFile[]): Blob => {
   const encoder = new TextEncoder();
-  const chunks: Uint8Array[] = [];
-  const centralDirectory: Uint8Array[] = [];
+  // Pinned to ArrayBuffer: BlobPart rejects the ArrayBufferLike default that
+  // TypeScript 5.7 gives Uint8Array.
+  const chunks: Uint8Array<ArrayBuffer>[] = [];
+  const centralDirectory: Uint8Array<ArrayBuffer>[] = [];
   let offset = 0;
 
   files.forEach((file) => {

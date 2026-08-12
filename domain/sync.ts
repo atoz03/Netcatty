@@ -222,15 +222,26 @@ export interface ProviderConnection {
  * JSON `null` when a schema uses `type: "null"`. Presence is property
  * existence for `config`; do not use truthiness (`||` / `Boolean`).
  */
+/**
+ * Credential-bearing fields, with `config` left open: plugin providers persist
+ * whatever their schema declares, which the built-in WebDAV/S3 shapes do not
+ * cover. These helpers only ask whether the property is present.
+ */
+type ProviderConnectionData = {
+  tokens?: OAuthTokens;
+  config?: unknown;
+  credential?: PluginSyncCredentialRef;
+};
+
 export const hasProviderConnectionData = (
-  connection: Pick<ProviderConnection, 'tokens' | 'config' | 'credential'>,
+  connection: ProviderConnectionData,
 ): boolean =>
   connection.tokens != null
   || Object.prototype.hasOwnProperty.call(connection, 'config')
   || connection.credential != null;
 
 export const isProviderReadyForSync = (
-  connection: Pick<ProviderConnection, 'status' | 'tokens' | 'config'>,
+  connection: ProviderConnectionData & Pick<ProviderConnection, 'status'>,
 ): boolean =>
   connection.status === 'connected'
   || connection.status === 'syncing'

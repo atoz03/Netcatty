@@ -239,8 +239,10 @@ const pushUint32 = (parts: number[], value: number) => {
 
 export const buildSnippetImportSamplesZip = (files: SnippetImportSampleFile[] = SNIPPET_IMPORT_SAMPLE_FILES): Blob => {
   const encoder = new TextEncoder();
-  const chunks: Array<Uint8Array> = [];
-  const centralDirectory: Uint8Array[] = [];
+  // Pinned to ArrayBuffer: BlobPart rejects the ArrayBufferLike default that
+  // TypeScript 5.7 gives Uint8Array.
+  const chunks: Array<Uint8Array<ArrayBuffer>> = [];
+  const centralDirectory: Uint8Array<ArrayBuffer>[] = [];
   let offset = 0;
 
   files.forEach((file) => {

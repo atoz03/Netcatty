@@ -8,6 +8,13 @@ import {
 import { ToolOutputStore } from './toolOutputStore';
 import { buildTerminalWriteFingerprint, ToolResultDedup } from './toolResultDedup';
 import { collectPreservedTerminalWriteFingerprints } from './turnDrivers/cattyMessageBuilder';
+import type { NetcattyBridge as CattyExecutorBridge } from '../cattyAgent/executor';
+
+/**
+ * Catalog tools only reach for the handful of bridge methods each test stubs,
+ * so a partial object stands in for the full NetcattyBridge surface.
+ */
+const stubBridge = (partial: Record<string, unknown>) => partial as unknown as CattyExecutorBridge;
 
 describe('capabilityTools session queue keys', () => {
   it('does not queue read-only harness tools behind terminal session writes', () => {
@@ -43,7 +50,7 @@ describe('capabilityTools result fitting', () => {
     const partialOutput = `${'build output\n'.repeat(20_000)}FATAL_MID=E_CONN_RESET_7319`;
     const longError = `API_TOKEN=tok_live_1234567890 ${'diagnostic '.repeat(2_000)}`;
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {
+      stubBridge({
         aiExec: async () => ({
           ok: false,
           error: longError,
@@ -51,7 +58,7 @@ describe('capabilityTools result fitting', () => {
           stderr: '',
           exitCode: -1,
         }),
-      },
+      }),
       {
         sessions: [{
           sessionId: 'session-1',
@@ -95,7 +102,7 @@ describe('capabilityTools result fitting', () => {
     const store = new ToolOutputStore();
     const body = `${'note line\n'.repeat(1000)}important ending`;
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {
+      stubBridge({
         aiCapability: async () => ({
           ok: true,
           note: {
@@ -104,7 +111,7 @@ describe('capabilityTools result fitting', () => {
             content: body,
           },
         }),
-      },
+      }),
       { sessions: [] },
       [],
       'auto',
@@ -142,7 +149,7 @@ describe('capabilityTools result fitting', () => {
       content: body,
     });
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {},
+      stubBridge({}),
       { sessions: [] },
       [],
       'auto',
@@ -175,7 +182,7 @@ describe('capabilityTools result fitting', () => {
       content: 'x'.repeat(50_000),
     });
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {}, { sessions: [] }, [], 'auto', undefined, 'chat-1', store, dedup,
+      stubBridge({}), { sessions: [] }, [], 'auto', undefined, 'chat-1', store, dedup,
     );
     const reader = withCattyToolContext(tools.tool_output_read, toolsContext.tool_output_read);
 
@@ -193,12 +200,12 @@ describe('capabilityTools result fitting', () => {
     const dedup = new ToolResultDedup();
     dedup.beginTurn();
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {
+      stubBridge({
         aiExec: async () => {
           executions += 1;
           return { ok: true, stdout: 'deployed once', stderr: '', exitCode: 0 };
         },
-      },
+      }),
       {
         sessions: [{
           sessionId: 'session-1',
@@ -232,12 +239,12 @@ describe('capabilityTools result fitting', () => {
     const dedup = new ToolResultDedup();
     dedup.beginTurn();
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {
+      stubBridge({
         aiExec: async () => {
           executions += 1;
           return { ok: true, stdout: `run ${executions}`, stderr: '', exitCode: 0 };
         },
-      },
+      }),
       {
         sessions: [{
           sessionId: 'session-1',
@@ -314,13 +321,13 @@ describe('capabilityTools result fitting', () => {
     let starts = 0;
     const dedup = new ToolResultDedup();
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      { aiCapability: async () => ({
+      stubBridge({ aiCapability: async () => ({
         ok: true,
         jobId: `job-${++starts}`,
         status: 'running',
         command: 'deploy --password swordfish',
         output: 'x'.repeat(30_000),
-      }) },
+      }) }),
       { sessions: [] }, [], 'auto', undefined, 'chat-start', undefined, dedup,
     );
     const start = withCattyToolContext(tools.terminal_start, toolsContext.terminal_start);
@@ -351,7 +358,7 @@ describe('capabilityTools result fitting', () => {
 describe('capabilityTools terminal context reader', () => {
   it('reads terminal context from the only scoped terminal when sessionId is omitted', async () => {
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {},
+      stubBridge({}),
       {
         sessions: [{
           sessionId: 'session-1',
@@ -398,7 +405,7 @@ describe('capabilityTools terminal context reader', () => {
     const store = new ToolOutputStore();
     const body = `${'terminal line output '.repeat(900)}important ending`;
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {},
+      stubBridge({}),
       {
         sessions: [{
           sessionId: 'session-1',
@@ -451,7 +458,7 @@ describe('capabilityTools terminal context reader', () => {
 
   it('asks for sessionId when multiple scoped terminals are available', async () => {
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {},
+      stubBridge({}),
       {
         sessions: [
           { sessionId: 'session-1', hostId: 'host-1', hostname: 'a', label: 'a', connected: true },
@@ -479,7 +486,7 @@ describe('capabilityTools terminal context reader', () => {
     const dedup = new ToolResultDedup();
     dedup.beginTurn();
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {},
+      stubBridge({}),
       {
         sessions: [{
           sessionId: 'session-1',
@@ -527,11 +534,11 @@ describe('capabilityTools terminal polling', () => {
     const store = new ToolOutputStore();
     const dedup = new ToolResultDedup();
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {
+      stubBridge({
         aiCapability: async (method: string) => method.includes('jobStart')
           ? { ok: true, jobId: 'job-owned', status: 'running', nextOffset: 0 }
           : { ok: true, jobId: 'job-owned', status: 'running', output: 'x'.repeat(30_000), nextOffset: 30_000 },
-      },
+      }),
       { sessions: [] }, [], 'auto', undefined, 'chat-owned', store, dedup,
     );
     await withCattyToolContext(tools.terminal_start, toolsContext.terminal_start)
@@ -548,7 +555,7 @@ describe('capabilityTools terminal polling', () => {
     const dedup = new ToolResultDedup();
     dedup.beginTurn();
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {
+      stubBridge({
         aiCapability: async () => ({
           ok: true,
           jobId: 'job-1',
@@ -559,7 +566,7 @@ describe('capabilityTools terminal polling', () => {
           nextOffset: 17,
           totalOutputChars: 17,
         }),
-      },
+      }),
       { sessions: [] },
       [],
       'auto',
@@ -581,7 +588,7 @@ describe('capabilityTools terminal polling', () => {
     const store = new ToolOutputStore();
     const rawOutput = `${'x '.repeat(400)}\n${'log line\n'.repeat(500)}MONITOR_MIDDLE_EVIDENCE_7319\n${'tail line\n'.repeat(500)}`;
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {
+      stubBridge({
         aiCapability: async () => ({
           ok: true,
           jobId: 'monitor-job-unique',
@@ -590,7 +597,7 @@ describe('capabilityTools terminal polling', () => {
           output: rawOutput,
           nextOffset: 9_000,
         }),
-      },
+      }),
       { sessions: [] },
       [],
       'auto',
@@ -616,7 +623,7 @@ describe('capabilityTools terminal polling', () => {
   it('does not count empty monitor polls as output bursts', async () => {
     let polls = 0;
     const { tools, toolsContext } = createCattyToolsFromCatalog(
-      {
+      stubBridge({
         aiCapability: async () => ({
           ok: true,
           jobId: 'quiet-monitor-job',
@@ -625,7 +632,7 @@ describe('capabilityTools terminal polling', () => {
           output: polls++ < 12 ? '' : 'first new line',
           nextOffset: 0,
         }),
-      },
+      }),
       { sessions: [] },
       [],
       'auto',

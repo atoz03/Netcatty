@@ -1,9 +1,42 @@
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 import test from 'node:test';
 import { CattyTurnDriver } from './turnDrivers/cattyTurnDriver';
 import type { TurnDriverContext, TurnInput } from './turnDrivers/types';
 
-const mcpServerBridge = await import('../../../electron/bridges/mcpServerBridge.cjs');
+type AttachmentInput = {
+  base64Data?: string;
+  mediaType?: string;
+  filename?: string;
+  filePath?: string;
+};
+
+type McpServerBridgeTestApi = {
+  cleanup(): void;
+  updateAttachmentMetadata(attachments: AttachmentInput[], chatSessionId?: string): void;
+  handleListAttachments(input: { chatSessionId: string }): {
+    ok: boolean;
+    attachments?: Array<{
+      filename: string;
+      mediaType: string;
+      filePath: string;
+      sizeBytes: number;
+    }>;
+  };
+  handleReadAttachment(input: { chatSessionId: string; filename: string }): {
+    ok: boolean;
+    text?: string;
+  };
+};
+
+// Loaded through createRequire rather than `await import(...)`: a static import
+// would pull the whole Electron main bridge tree into this (renderer) TS
+// program, and those modules use `with (ctx)`, which is a grammar error under
+// this tsconfig's forced module detection.
+const requireCjs = createRequire(import.meta.url);
+const mcpServerBridge = requireCjs(
+  '../../../electron/bridges/mcpServerBridge.cjs',
+) as McpServerBridgeTestApi;
 
 function createTurnContext(): TurnDriverContext {
   return {

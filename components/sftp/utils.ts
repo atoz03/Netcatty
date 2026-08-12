@@ -24,6 +24,15 @@ import {
 import React from 'react';
 import type { LucideIcon } from 'lucide-react';
 import { SftpFileEntry } from '../../types';
+// The `export { ... } from` re-export below does not bind these names locally,
+// so import the ones this module actually uses.
+import {
+    DEFAULT_SFTP_COLUMN_VISIBILITY,
+    type ColumnWidths,
+    type SftpColumnVisibility,
+    type SortField,
+    type SortOrder,
+} from '../../application/state/sftp/columnLayout';
 import {
   formatDate as formatDateFromState,
   isNavigableDirectory,

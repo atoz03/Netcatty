@@ -1,4 +1,4 @@
-import type { UploadResult } from "../../../lib/uploadService.types";
+import type { UploadResult } from "../../lib/uploadService.types";
 
 export type ReportSftpUploadResultsOptions = {
   results: readonly UploadResult[];

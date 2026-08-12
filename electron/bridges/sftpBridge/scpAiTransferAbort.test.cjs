@@ -34,6 +34,41 @@ function createMockStream() {
   return ee;
 }
 
+/**
+ * Hook the fixed step sequence promoteLocalTransfer publishes through:
+ *   1. staged -> .ready    2. target -> .backup
+ *   3. .ready -> target    4. .backup -> target (rollback)
+ *
+ * Step 1 is a rename, but falls back to copyFile when the staging directory
+ * and the download target sit on different mounts (EXDEV). Hooking only
+ * fs.promises.rename therefore makes step 1 invisible on such machines and
+ * shifts every later ordinal by one, so count both. copyFile has exactly one
+ * call site in transferBridge — that fallback — so nothing else is counted.
+ *
+ * `before` runs instead of the operation when it throws; `after` runs once the
+ * operation succeeded. Both receive the 1-based step and the call arguments.
+ */
+function hookPromotionSteps(t, { before, after } = {}) {
+  const originalRename = fs.promises.rename;
+  const originalCopyFile = fs.promises.copyFile;
+  const state = { step: 0 };
+  const run = async (impl, args) => {
+    const step = state.step + 1;
+    if (before) await before(step, args);
+    const result = await impl(...args);
+    state.step = step;
+    if (after) await after(step, args);
+    return result;
+  };
+  fs.promises.rename = (...args) => run(originalRename, args);
+  fs.promises.copyFile = (...args) => run(originalCopyFile, args);
+  t.after(() => {
+    fs.promises.rename = originalRename;
+    fs.promises.copyFile = originalCopyFile;
+  });
+  return state;
+}
+
 describe("AI/MCP SCP transfer abort on shipped download/upload entry points", () => {
   let tmpDir;
   let sftpClients;
@@ -532,17 +567,13 @@ describe("AI/MCP SCP transfer abort on shipped download/upload entry points", ()
     await fs.promises.writeFile(path.join(secondDir, "target.bin"), secondOriginal);
     await fs.promises.symlink(path.basename(firstDir), parentLink);
 
-    const originalRename = fs.promises.rename;
-    let renameCalls = 0;
-    fs.promises.rename = async (...args) => {
-      await originalRename(...args);
-      renameCalls += 1;
-      if (renameCalls === 1) {
+    hookPromotionSteps(t, {
+      async after(step) {
+        if (step !== 1) return;
         await fs.promises.unlink(parentLink);
         await fs.promises.symlink(path.basename(secondDir), parentLink);
-      }
-    };
-    t.after(() => { fs.promises.rename = originalRename; });
+      },
+    });
 
     await assert.rejects(
       () => sftpBridge.downloadSftpToLocal(null, {
@@ -778,14 +809,11 @@ describe("AI/MCP SCP transfer abort on shipped download/upload entry points", ()
     const original = Buffer.from("existing-local-content");
     fs.writeFileSync(localPath, original);
 
-    const originalRename = fs.promises.rename;
-    let renameCalls = 0;
-    fs.promises.rename = async (...args) => {
-      await originalRename(...args);
-      renameCalls += 1;
-      if (renameCalls === 3) controller.abort();
-    };
-    t.after(() => { fs.promises.rename = originalRename; });
+    const promotion = hookPromotionSteps(t, {
+      after(step) {
+        if (step === 3) controller.abort();
+      },
+    });
 
     await assert.rejects(
       () => sftpBridge.downloadSftpToLocal(null, {
@@ -796,7 +824,7 @@ describe("AI/MCP SCP transfer abort on shipped download/upload entry points", ()
       }),
       /cancel|abort/i,
     );
-    assert.equal(renameCalls >= 4, true, "the published file should be rolled back to the backup");
+    assert.equal(promotion.step >= 4, true, "the published file should be rolled back to the backup");
     assert.deepEqual(fs.readFileSync(localPath), original);
   });
 
@@ -871,25 +899,23 @@ describe("AI/MCP SCP transfer abort on shipped download/upload entry points", ()
     const localPath = path.join(tmpDir, "pre-publish-rollback-failure.bin");
     fs.writeFileSync(localPath, Buffer.from("existing-local-content"));
 
-    const originalRename = fs.promises.rename;
-    let renameCalls = 0;
     let readyPath = null;
     let backupPath = null;
-    fs.promises.rename = async (...args) => {
-      renameCalls += 1;
-      if (renameCalls === 3) {
+    hookPromotionSteps(t, {
+      before(step) {
+        if (step !== 3) return;
         const error = new Error("injected backup restore failure");
         error.code = "EIO";
         throw error;
-      }
-      await originalRename(...args);
-      if (renameCalls === 1) readyPath = args[1];
-      if (renameCalls === 2) {
-        backupPath = args[1];
-        controller.abort();
-      }
-    };
-    t.after(() => { fs.promises.rename = originalRename; });
+      },
+      after(step, args) {
+        if (step === 1) readyPath = args[1];
+        if (step === 2) {
+          backupPath = args[1];
+          controller.abort();
+        }
+      },
+    });
 
     await assert.rejects(
       () => sftpBridge.downloadSftpToLocal(null, {

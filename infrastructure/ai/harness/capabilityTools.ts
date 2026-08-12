@@ -57,12 +57,24 @@ type CattyToolSpec = {
   };
 };
 
+/**
+ * A tool built from the capability catalog. Derived from the builder rather
+ * than `ReturnType<typeof tool>`, which — with no type arguments — collapses to
+ * `Tool<never, never>` and rejects every real tool.
+ */
+export type CattyTool = ReturnType<typeof createCatalogTool>;
+
 export type CattyToolsBundle = {
-  tools: Record<string, ReturnType<typeof tool>>;
+  tools: Record<string, CattyTool>;
   toolsContext: Record<string, CattyToolContext>;
 };
 
-function buildZodObject(shape: Record<string, FieldShape>): z.ZodObject<Record<string, z.ZodTypeAny>> {
+/**
+ * Returned as a ZodType with a concrete output type: catalog shapes are built
+ * at runtime, and the loose `ZodObject<Record<string, ZodTypeAny>>` leaves the
+ * AI SDK unable to infer a tool's input, collapsing it to `never`.
+ */
+function buildZodObject(shape: Record<string, FieldShape>): z.ZodType<Record<string, unknown>> {
   const entries: Record<string, z.ZodTypeAny> = {};
   for (const [key, field] of Object.entries(shape)) {
     let schema: z.ZodTypeAny = field.type === 'number' ? z.number() : z.string();
@@ -388,7 +400,9 @@ export function resolveSessionQueueKeyForTests(
 function createCatalogTool(spec: CattyToolSpec) {
   const inputSchema = buildZodObject(spec.inputShape);
 
-  return tool({
+  // Generics are pinned because the input schema is assembled at runtime:
+  // inference from a dynamically built ZodObject collapses INPUT to `never`.
+  return tool<Record<string, unknown>, unknown, CattyToolContext>({
     description: spec.description,
     inputSchema,
     contextSchema: cattyToolContextSchema,
@@ -747,7 +761,7 @@ export function createCattyToolsFromCatalog(
     toolResultDedup,
   });
 
-  const catalogTools: Record<string, ReturnType<typeof tool>> = {};
+  const catalogTools: Record<string, CattyTool> = {};
   const toolsContext: Record<string, CattyToolContext> = {};
 
   for (const rawSpec of cattyToolSpecs as CattyToolSpec[]) {
@@ -761,23 +775,36 @@ export function createCattyToolsFromCatalog(
   return { tools: catalogTools, toolsContext };
 }
 
-/** Test helper: attach shared context when calling tool.execute directly. */
-export function withCattyToolContext<T extends { execute: (...args: never[]) => unknown }>(
+/** Input/return shape of a catalog-built tool's execute, from a caller's side. */
+type CattyToolExecute = (
+  input: Record<string, unknown>,
+  options?: Record<string, unknown>,
+) => Promise<unknown>;
+
+/**
+ * Test helper: attach shared context when calling tool.execute directly.
+ *
+ * Catalog tools are built at runtime, so their static type is
+ * `ReturnType<typeof tool>` — i.e. `Tool<never, never>`, whose `execute` is
+ * optional and takes `never` parameters. Deriving the call signature from that
+ * type yields `never`, so model the caller-facing shape explicitly instead.
+ */
+export function withCattyToolContext<T extends { execute?: unknown }>(
   toolInstance: T,
   context: CattyToolContext,
   toolCallId = 'test-call',
-): T {
-  const original = toolInstance.execute.bind(toolInstance);
+): Omit<T, 'execute'> & { execute: CattyToolExecute } {
+  const original = (toolInstance.execute as CattyToolExecute).bind(toolInstance);
   return {
     ...toolInstance,
-    execute: (input: Parameters<T['execute']>[0], options?: Partial<Parameters<T['execute']>[1]>) =>
+    execute: (input, options) =>
       original(input, {
         toolCallId,
         messages: [],
         ...options,
         context,
-      } as Parameters<T['execute']>[1]),
-  } as T;
+      }),
+  } as Omit<T, 'execute'> & { execute: CattyToolExecute };
 }
 
 export { tryFetchHostEnvironment };

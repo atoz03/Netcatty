@@ -32,9 +32,26 @@ import {
   shouldOfferOsc7SetupAction,
 } from "./osc7Setup";
 
+/**
+ * Isolate a setup run from the developer's own terminal.
+ *
+ * When it cannot find a sibling shell, the script falls back to scanning /proc
+ * for any shell sharing this process's SSH_CONNECTION and then adopts *that*
+ * shell's HOME. Run over SSH that resolves to the developer's login shell, so
+ * the temp HOME is ignored and the real rc file gets rewritten. CI has no
+ * SSH_CONNECTION, which is why this only misbehaves locally.
+ *
+ * Clearing it keeps the probe empty without setting NETCATTY_OSC7_FORCE_SHELL,
+ * which would suppress the setup markers these tests assert on.
+ */
+const sandboxSetupEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => ({
+  ...env,
+  SSH_CONNECTION: "",
+});
+
 const runSetup = (env: NodeJS.ProcessEnv) => {
   execFileSync("/bin/sh", ["-c", buildOsc7SetupCommand()], {
-    env: { ...process.env, ZDOTDIR: "", XDG_CONFIG_HOME: "", ...env },
+    env: { ...process.env, ZDOTDIR: "", XDG_CONFIG_HOME: "", ...sandboxSetupEnv(env) },
     stdio: "pipe",
   });
 };
@@ -734,13 +751,13 @@ test("bash snippet handles exported array PROMPT_COMMAND", () => {
 test("buildOsc7SetupCommand preserves setup failure status", () => {
   withTempHome("netcatty-osc7-unsupported-shell-", (home) => {
     const result = spawnSync("/bin/sh", ["-c", buildOsc7SetupCommand()], {
-      env: {
+      env: sandboxSetupEnv({
         ...process.env,
         HOME: home,
         SHELL: "/bin/unknown",
         ZDOTDIR: "",
         XDG_CONFIG_HOME: "",
-      },
+      }),
       encoding: "utf8",
     });
 
@@ -752,7 +769,7 @@ test("buildOsc7SetupCommand preserves setup failure status", () => {
 test("buildOsc7SetupExecCommand configures bash through a background exec shell", () => {
   withTempHome("netcatty-osc7-exec-bash-", (home) => {
     const output = execFileSync("/bin/sh", ["-c", buildOsc7SetupExecCommand()], {
-      env: { ...process.env, HOME: home, SHELL: "/bin/bash" },
+      env: sandboxSetupEnv({ ...process.env, HOME: home, SHELL: "/bin/bash" }),
       stdio: "pipe",
     }).toString("utf8");
 
@@ -932,7 +949,7 @@ test("buildOsc7SetupExecCommand honors exported zsh ZDOTDIR fallback", (t) => {
   withTempHome("netcatty-osc7-exec-zsh-", (home) => {
     const zdotdir = join(home, ".config", "zsh");
     const output = execFileSync("/bin/sh", ["-c", buildOsc7SetupExecCommand()], {
-      env: { ...process.env, HOME: home, SHELL: zshPath, ZDOTDIR: zdotdir },
+      env: sandboxSetupEnv({ ...process.env, HOME: home, SHELL: zshPath, ZDOTDIR: zdotdir }),
       stdio: "pipe",
     }).toString("utf8");
 
@@ -1014,13 +1031,13 @@ test("buildOsc7SetupCommand can be pasted into supported shells", () => {
 
       const output = execFileSync(shellPath, ["-c", buildOsc7SetupCommand()], {
         cwd: specialCwd,
-        env: {
+        env: sandboxSetupEnv({
           ...process.env,
           HOME: home,
           SHELL: shellPath,
           ZDOTDIR: zdotdir,
           XDG_CONFIG_HOME: xdgConfigHome,
-        },
+        }),
         stdio: "pipe",
       }).toString("utf8");
 
@@ -1155,13 +1172,13 @@ test("buildOsc7SetupCommand runs under strict unset-variable mode", () => {
   for (const shellPath of existingShells(["/bin/bash", "/bin/zsh"])) {
     withTempHome(`netcatty-osc7-strict-${basename(shellPath)}-`, (home) => {
       execFileSync(shellPath, ["-uc", buildOsc7SetupCommand()], {
-        env: {
+        env: sandboxSetupEnv({
           ...process.env,
           HOME: home,
           SHELL: shellPath,
           ZDOTDIR: undefined,
           XDG_CONFIG_HOME: undefined,
-        },
+        }),
         stdio: "pipe",
       });
     });

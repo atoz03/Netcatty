@@ -213,8 +213,8 @@ test("stable releases propose Nix metadata through a pull request", () => {
     "Nix PR creation must prefer the triage-capable token and safely fall back to the job token",
   );
   assert.ok(
-    nixJob[0].includes("token: ${{ secrets.RELEASE_TOKEN }}"),
-    "Nix branch pushes must keep using the release token",
+    nixJob[0].includes("token: ${{ secrets.RELEASE_TOKEN || github.token }}"),
+    "Nix branch pushes must keep preferring the release token, falling back to the job token for forks",
   );
   assert.match(nixJob[0], /automation\/nix-release-/);
   assert.match(nixJob[0], /candidate_tree/);

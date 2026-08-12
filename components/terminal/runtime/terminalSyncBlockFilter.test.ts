@@ -72,17 +72,20 @@ test("active sync blocks refresh the timeout on each chunk", () => {
     resetTerminalSyncBlockFilter(term);
     assert.equal(filterTerminalSessionData(term, SYNC_START), SYNC_START);
 
+    // Each chunk restarts the expiry window, so a block that keeps streaming
+    // stays open well past a single timeout period.
     mock.timers.tick(SYNC_BLOCK_TIMEOUT_MS - 1);
     assert.equal(filterTerminalSessionData(term, "frame-a"), "frame-a");
+    assert.equal(isTerminalSyncBlockOpen(term), true);
 
     mock.timers.tick(SYNC_BLOCK_TIMEOUT_MS - 1);
-    assert.equal(filterTerminalSessionData(term, CURSOR_HOME), "");
-    assert.equal(filterTerminalSessionData(term, CLEAR), "");
+    assert.equal(isTerminalSyncBlockOpen(term), true);
 
     assert.equal(
       filterTerminalSessionData(term, `frame-b${SYNC_END}`),
       `frame-b${SYNC_END}`,
     );
+    assert.equal(isTerminalSyncBlockOpen(term), false);
   } finally {
     resetTerminalSyncBlockFilter(term);
     mock.timers.reset();

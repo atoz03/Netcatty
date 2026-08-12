@@ -12,14 +12,18 @@ registerHooks({
         shortCircuit: true,
       };
     }
+    if (specifier.endsWith(".css")) {
+      return {
+        url: "data:text/javascript,export default {}",
+        shortCircuit: true,
+      };
+    }
     return nextResolve(specifier, context);
   },
-  load(url, context, nextLoad) {
-    if (url.endsWith(".css")) {
-      return { format: "module", source: "export default {};", shortCircuit: true };
-    }
-    return nextLoad(url, context);
-  },
+  // No load hook: a sync load hook forces Node to validate every downstream
+  // result, and CommonJS deps (react/jsx-runtime) legitimately return no
+  // source, which throws ERR_INVALID_RETURN_PROPERTY_VALUE. Stubbing CSS at
+  // resolve time keeps the chain untouched.
 });
 
 const { useWorkspaceDetachPointerDrag } = await import("./TerminalLayerSupport");

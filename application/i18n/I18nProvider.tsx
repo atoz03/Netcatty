@@ -39,7 +39,10 @@ const resolveMessage = (resolvedLocale: string, key: string): string | undefined
   return MESSAGES_BY_LOCALE[DEFAULT_UI_LOCALE]?.[key];
 };
 
-export const I18nProvider: React.FC<{ locale: string; children: React.ReactNode }> = ({
+// PropsWithChildren rather than a required `children` prop: callers that pass
+// children as createElement's rest argument satisfy it at runtime but not in
+// the props object, which is how every test renders this provider.
+export const I18nProvider: React.FC<React.PropsWithChildren<{ locale: string }>> = ({
   locale,
   children,
 }) => {

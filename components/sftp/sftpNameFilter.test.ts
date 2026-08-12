@@ -5,7 +5,9 @@ import { readFileSync } from 'node:fs';
 import { filterSftpEntriesByName, filterSftpTreeEntriesByName } from './utils.ts';
 
 const entry = (name: string, type: 'file' | 'directory' = 'file') => ({ name, type });
-const isDirectory = (e: { type: string }) => e.type === 'directory';
+// Typed as the real entry so T infers from the entry list rather than
+// collapsing to the `{ name: string }` constraint.
+const isDirectory = (e: ReturnType<typeof entry>) => e.type === 'directory';
 
 test('SFTP name filter returns all entries when term is empty', () => {
   const files = [entry('..'), entry('README.md'), entry('src')];

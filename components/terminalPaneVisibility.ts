@@ -67,7 +67,9 @@ export function resolveInactiveTerminalPaneStyle<T extends TerminalPaneStyle>(
   lastVisibleSize: TerminalPaneHiddenSize | null,
   hibernateHiddenTabs: boolean,
   preserveLastVisibleSize = false,
-): T {
+  // The three chrome properties are added here, so they belong in the signature
+  // rather than leaving callers to read them off the bare layout style.
+): T & { visibility: "visible" | "hidden"; pointerEvents: "none"; zIndex: number } {
   return {
     ...layoutStyle,
     visibility: hibernateHiddenTabs ? "hidden" : "visible",

@@ -220,7 +220,9 @@ export function VirtualizedHostCollection<T>({
       lastRequestedActiveKeyRef.current = null;
       return;
     }
-    if (request.status === "unchanged") return;
+    // Positive check: subtracting the three non-request statuses one at a time
+    // leaves the member in the union rather than narrowing to the request shape.
+    if (request.status !== "request") return;
     lastRequestedActiveKeyRef.current = request.key;
     pendingFocusKeyRef.current = request.key;
     virtualizer.scrollToIndex(Math.floor(request.index / columns), { align: "auto" });
@@ -505,7 +507,9 @@ export function VirtualizedGroupedHostCollection<T>({
       lastRequestedActiveKeyRef.current = null;
       return;
     }
-    if (request.status === "unchanged") return;
+    // Positive check: subtracting the three non-request statuses one at a time
+    // leaves the member in the union rather than narrowing to the request shape.
+    if (request.status !== "request") return;
     lastRequestedActiveKeyRef.current = request.key;
     const rowIndex = virtualRowIndexByItemIndex.get(request.index) ?? -1;
     pendingFocusKeyRef.current = request.key;

@@ -232,8 +232,9 @@ function createFakeTerminalFromLargeWrappedBlock({
   };
 }
 
-function createFakeTerminal(lineText: string, options: { lineCount?: number } = {}) {
+function createFakeTerminal(lineText: string, options: { lineCount?: number; rows?: number } = {}) {
   const lineCount = options.lineCount ?? 1;
+  const rows = options.rows ?? 3;
   let translateCount = 0;
   const translatedLineIndexes: number[] = [];
   const createLineAtIndex = (text: string, index: number) =>
@@ -265,7 +266,7 @@ function createFakeTerminal(lineText: string, options: { lineCount?: number } = 
     render?: () => void;
   } = {};
   const term = {
-    rows: 3,
+    rows,
     cols: 80,
     buffer: {
       active: {
@@ -2461,6 +2462,42 @@ test("scroll refresh reuses wrapped scan misses across visible rows", () => {
       getLineCount() < 1_000,
       `expected scroll chunk to share wrapped scan cache, got ${getLineCount()} getLine calls`,
     );
+    highlighter.dispose();
+    resetTerminalOutputPressure(term as never);
+  } finally {
+    raf.restore();
+  }
+});
+
+test("in-place rewrite of a decorated line retires its stale highlight", async () => {
+  const raf = installAnimationFrameQueue();
+  try {
+    const rows = 24;
+    const harness = createFakeTerminal("plain", { lineCount: rows, rows });
+    const { term, handlers } = harness;
+    // Row 5 sits away from the cursor and off the nine-point viewport probe, so
+    // only content-aware invalidation can notice that its text changed.
+    harness.setLineText(5, "connect 192.168.1.1 ok");
+
+    const highlighter = new KeywordHighlighter(term as never);
+    highlighter.setRules([{
+      id: "ip",
+      label: "IP",
+      patterns: ["\\b\\d{1,3}(?:\\.\\d{1,3}){3}\\b"],
+      color: "#EC4899",
+      enabled: true,
+    }], true);
+    raf.flush();
+    assert.equal(harness.getActiveDecorationCount(), 1);
+
+    // Same length, so the row keeps its cell layout; a stale decoration would
+    // simply repaint unrelated characters in the rule colour.
+    harness.setLineText(5, "connect the gateway ok");
+    handlers.writeParsed?.();
+    await new Promise((resolve) => { setTimeout(resolve, 220); });
+    raf.flush();
+
+    assert.equal(harness.getActiveDecorationCount(), 0);
     highlighter.dispose();
     resetTerminalOutputPressure(term as never);
   } finally {

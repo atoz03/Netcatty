@@ -46,6 +46,8 @@ interface LineDecorationState {
   decorations: IDecoration[];
   signature: string;
   indexedLine: number;
+  /** Hash of the row text these decorations were computed from. */
+  textHash: number;
 }
 
 type RefreshReason = "scroll" | "write" | "full";
@@ -485,6 +487,7 @@ export class KeywordHighlighter implements IDisposable {
     lineY: number,
     ranges: readonly CachedDecorationRange[],
     signature: string,
+    textHash: number,
     cursorAbsoluteY: number,
   ) {
     const offset = lineY - cursorAbsoluteY;
@@ -517,6 +520,7 @@ export class KeywordHighlighter implements IDisposable {
       marker,
       decorations,
       signature,
+      textHash,
       indexedLine: this.toIndexedLine(lineY),
     };
     marker.onDispose(() => {
@@ -1168,8 +1172,7 @@ export class KeywordHighlighter implements IDisposable {
     return probe;
   }
 
-  private hashProbeText(text: string): number {
-    const sampleLimit = 512;
+  private hashProbeText(text: string, sampleLimit = 512): number {
     let hash = 2166136261;
     const maxLen = Math.min(text.length, sampleLimit);
     for (let index = 0; index < maxLen; index += 1) {
@@ -1178,6 +1181,51 @@ export class KeywordHighlighter implements IDisposable {
     }
     hash ^= text.length;
     return hash >>> 0;
+  }
+
+  /**
+   * Whole-row hash. The viewport probe samples a prefix for speed, but a
+   * decoration can sit past that prefix on a long row, so stale detection has
+   * to cover the entire text.
+   */
+  private hashDecorationText(text: string): number {
+    return this.hashProbeText(text, text.length);
+  }
+
+  /**
+   * Mark decorated rows whose text no longer matches what produced their
+   * decorations.
+   *
+   * Write-driven invalidation is otherwise inferred from cursor movement plus a
+   * nine-point viewport probe. A program that rewrites a row in place away from
+   * the cursor — scroll regions, `\r` overwrites, status redraws — slips past
+   * both, leaving the decoration anchored to a marker whose content has since
+   * changed, so the rule's colour lands on unrelated characters. Only decorated
+   * rows can show a stale highlight and keyword matches are sparse, so
+   * re-hashing the ones on screen is cheap insurance.
+   *
+   * Deliberately scoped to the visible rows rather than the overscan band: only
+   * what is on screen can show the wrong colour, and widening it would make
+   * every keystroke echo pay for rows nobody is looking at.
+   */
+  private markChangedDecoratedLinesDirty(rangeStart: number, rangeEnd: number): void {
+    if (this.dirtyAllInRenderRange || this.lineDecorations.size === 0) return;
+    const buffer = this.term?.buffer?.active;
+    if (!buffer) return;
+
+    // Walk the rows, not the decoration map: retention keeps up to a thousand
+    // off-screen entries, and the index is already keyed by line.
+    this.syncLineDecorationIndex();
+    for (let lineY = Math.max(0, rangeStart); lineY <= rangeEnd; lineY += 1) {
+      const state = this.lineDecorations.get(this.toIndexedLine(lineY));
+      if (!state || state.marker.isDisposed || state.marker.line !== lineY) continue;
+      const lineText = buffer.getLine(lineY)?.translateToString(true) ?? "";
+      if (this.hashDecorationText(lineText) === state.textHash) continue;
+      this.addDirtyRange(lineY, lineY);
+      // addDirtyRange escalates to "everything" once the segment budget blows;
+      // there is nothing left to narrow down after that.
+      if (this.dirtyAllInRenderRange) return;
+    }
   }
 
   private collectViewportProbeDiffLines(
@@ -1361,6 +1409,11 @@ export class KeywordHighlighter implements IDisposable {
         this.addDirtyRange(snapshot.viewportY - padding, prev.viewportY - 1 + padding);
       }
     }
+
+    this.markChangedDecoratedLinesDirty(
+      snapshot.viewportY,
+      snapshot.viewportY + rows - 1,
+    );
   }
 
   private decayWriteBurst(now: number) {
@@ -1541,6 +1594,7 @@ export class KeywordHighlighter implements IDisposable {
       }
 
       const signature = this.buildRangesSignature(cachedRanges);
+      const textHash = this.hashDecorationText(lineText);
       const existing = this.getLineDecorationState(lineY);
       if (
         existing &&
@@ -1550,11 +1604,15 @@ export class KeywordHighlighter implements IDisposable {
         existing.marker.line === lineY &&
         existing.signature === signature
       ) {
+        // Same ranges from different text (e.g. a status field rewritten in
+        // place at equal width) — keep the decorations but re-anchor the hash,
+        // or the row reports itself dirty on every subsequent write.
+        existing.textHash = textHash;
         continue;
       }
 
       this.disposeLineDecorations(lineY, existing);
-      this.applyLineDecorations(lineY, cachedRanges, signature, cursorAbsoluteY);
+      this.applyLineDecorations(lineY, cachedRanges, signature, textHash, cursorAbsoluteY);
     }
   }
 

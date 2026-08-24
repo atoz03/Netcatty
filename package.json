@@ -169,6 +169,7 @@
     "cpu-features": "npm:empty-npm-package@1.0.0",
     "axios": "1.19.0",
     "node-abi": "4.31.0",
-    "@electron/asar": "4.2.0"
+    "@electron/asar": "4.2.0",
+    "dompurify": "3.4.14"
   }
 }

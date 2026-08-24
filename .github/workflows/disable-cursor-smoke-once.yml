@@ -1,0 +1,39 @@
+name: Disable scheduled Cursor smoke once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/disable-cursor-smoke-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  disable-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: main
+          token: ${{ secrets.TRIAGE_GITHUB_TOKEN || github.token }}
+
+      - name: Remove scheduled trigger from Cursor sandbox smoke
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/cursor-automation.yml')
+          text = p.read_text()
+          old = """    if: >-\n      (github.event_name == 'workflow_dispatch' && inputs.sandbox_smoke == true) ||\n      (github.event_name == 'schedule' && github.event.schedule == '17 3 * * *')\n"""
+          new = """    if: github.event_name == 'workflow_dispatch' && inputs.sandbox_smoke == true\n"""
+          if text.count(old) != 1:
+              raise SystemExit(f'expected exactly one sandbox smoke condition, found {text.count(old)}')
+          p.write_text(text.replace(old, new, 1))
+          PY
+          git rm .github/workflows/disable-cursor-smoke-once.yml
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add .github/workflows/cursor-automation.yml
+          git commit -m "chore: disable scheduled Cursor sandbox smoke"
+          git push origin HEAD:main

@@ -1,15 +1,15 @@
 name: Disable scheduled Cursor smoke once
 
 on:
-  workflow_run:
-    workflows: [Cursor automation]
-    types: [completed]
+  issue_comment:
+    types: [created]
 
 permissions:
   contents: write
 
 jobs:
   disable-smoke:
+    if: github.event.issue.pull_request && github.event.comment.body == '<!-- netcatty-disable-cursor-smoke-once -->'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

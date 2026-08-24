@@ -37,3 +37,5 @@ jobs:
           git add .github/workflows/cursor-automation.yml
           git commit -m "chore: disable scheduled Cursor sandbox smoke"
           git push origin HEAD:main
+
+# trigger helper

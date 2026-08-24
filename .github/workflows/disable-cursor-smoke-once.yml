@@ -1,10 +1,9 @@
 name: Disable scheduled Cursor smoke once
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - .github/workflows/disable-cursor-smoke-once.yml
+  workflow_run:
+    workflows: [Cursor automation]
+    types: [completed]
 
 permissions:
   contents: write
@@ -37,5 +36,3 @@ jobs:
           git add .github/workflows/cursor-automation.yml
           git commit -m "chore: disable scheduled Cursor sandbox smoke"
           git push origin HEAD:main
-
-# trigger helper

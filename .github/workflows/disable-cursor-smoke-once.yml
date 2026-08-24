@@ -1,15 +1,14 @@
 name: Disable scheduled Cursor smoke once
 
 on:
-  issue_comment:
-    types: [created]
+  create:
 
 permissions:
   contents: write
 
 jobs:
   disable-smoke:
-    if: github.event.issue.pull_request && github.event.comment.body == '<!-- netcatty-disable-cursor-smoke-once -->'
+    if: github.event.ref_type == 'branch' && github.event.ref == 'automation/disable-cursor-smoke-trigger'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -36,3 +35,4 @@ jobs:
           git add .github/workflows/cursor-automation.yml
           git commit -m "chore: disable scheduled Cursor sandbox smoke"
           git push origin HEAD:main
+          git push origin --delete automation/disable-cursor-smoke-trigger || true

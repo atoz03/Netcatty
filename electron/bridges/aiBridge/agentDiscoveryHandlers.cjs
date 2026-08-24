@@ -1,23 +1,16 @@
 /* eslint-disable no-undef */
-function getCursorPlatformPackageName(platform = process.platform, arch = process.arch) {
-  if (platform === "darwin" && (arch === "arm64" || arch === "x64")) return `@cursor/sdk-darwin-${arch}`;
-  if (platform === "linux" && (arch === "arm64" || arch === "x64")) return `@cursor/sdk-linux-${arch}`;
-  if (platform === "win32" && arch === "x64") return "@cursor/sdk-win32-x64";
-  return null;
-}
+const { detectCursorSdkInstalled: detectCursorSdkInstalledFromDisk } = require("./cursorSdkProbe.cjs");
 
 async function probeCursorSdkAvailability(shellEnv, options = {}) {
-  const platformPackageName = getCursorPlatformPackageName();
+  const detectSdk = typeof options?.detectCursorSdkInstalled === "function"
+    ? options.detectCursorSdkInstalled
+    : detectCursorSdkInstalledFromDisk;
 
   let sdkInstalled = false;
-  if (platformPackageName) {
-    try {
-      await import("@cursor/sdk");
-      require.resolve(`${platformPackageName}/package.json`);
-      sdkInstalled = true;
-    } catch {
-      sdkInstalled = false;
-    }
+  try {
+    sdkInstalled = Boolean(await detectSdk());
+  } catch {
+    sdkInstalled = false;
   }
 
   const hasEnvApiKey = Boolean(shellEnv?.CURSOR_API_KEY);
@@ -95,6 +88,7 @@ function registerAgentDiscoveryHandlers(ctx) {
         cursorSdkStatus = await probeCursorSdkAvailability(shellEnv, {
           apiKeyPresent: Boolean(options?.apiKeyPresent),
           probeCursorCliAuth,
+          detectCursorSdkInstalled,
         });
         if (!cursorSdkStatus.available) continue;
       }
@@ -198,6 +192,7 @@ function registerAgentDiscoveryHandlers(ctx) {
       const cursorSdkStatus = await probeCursorSdkAvailability(shellEnv, {
         apiKeyPresent: Boolean(apiKeyPresent),
         probeCursorCliAuth,
+        detectCursorSdkInstalled,
       });
       // Prefer CLI bin only when CLI login is proven. Otherwise do not use a
       // PATH `agent` binary (generic name) for API-key/SDK path identity.

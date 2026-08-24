@@ -155,6 +155,12 @@ function loadBridgeWithMocks(options = {}) {
           ? options.probeGrokAuth(...args)
           : { authenticated: false, authSource: null },
     },
+    // Stubbed so these tests describe SDK-present vs SDK-absent behaviour
+    // explicitly, instead of inheriting whether the optional @cursor/sdk
+    // dependency happens to be installed in node_modules.
+    "./aiBridge/cursorSdkProbe.cjs": {
+      detectCursorSdkInstalled: async () => Boolean(options.cursorSdkInstalled),
+    },
     "./ai/ptyExec.cjs": {
       execViaPty: async () => {
         throw new Error("execViaPty should not be called in this test");
@@ -751,6 +757,7 @@ test("resolve-cli probes Windows Claude exe paths with spaces", { skip: process.
 
 test("resolve-cli reports Cursor SDK installed but unavailable without an API key", async () => {
   const { bridge, restore } = loadBridgeWithMocks({
+    cursorSdkInstalled: true,
     resolveCliFromPath: () => null,
   });
   const ipcMain = createIpcMainStub();
@@ -781,6 +788,7 @@ test("resolve-cli reports Cursor SDK installed but unavailable without an API ke
 
 test("resolve-cli separates Cursor SDK installation from API key availability", async () => {
   const { bridge, restore } = loadBridgeWithMocks({
+    cursorSdkInstalled: true,
     normalizeCliPathForPlatform: () => "/Applications/Cursor.app/Contents/MacOS/Cursor",
     resolveCliFromPath: () => null,
   });
@@ -815,6 +823,7 @@ test("resolve-cli separates Cursor SDK installation from API key availability", 
 
 test("resolve-cli ignores custom Cursor paths and stores the SDK sentinel path", async () => {
   const { bridge, restore } = loadBridgeWithMocks({
+    cursorSdkInstalled: true,
     normalizeCliPathForPlatform: () => "/tmp/not-cursor",
     resolveCliFromPath: () => null,
     shellEnv: { CURSOR_API_KEY: "cur-key" },
@@ -850,6 +859,7 @@ test("resolve-cli ignores custom Cursor paths and stores the SDK sentinel path",
 
 test("resolve-cli exposes Cursor SDK support when installed and authenticated", async () => {
   const { bridge, restore } = loadBridgeWithMocks({
+    cursorSdkInstalled: true,
     resolveCliFromPath: () => null,
     shellEnv: { CURSOR_API_KEY: "cur-key" },
   });
@@ -881,6 +891,7 @@ test("resolve-cli exposes Cursor SDK support when installed and authenticated", 
 
 test("resolve-cli exposes Cursor SDK support when API key is saved in settings", async () => {
   const { bridge, restore } = loadBridgeWithMocks({
+    cursorSdkInstalled: true,
     resolveCliFromPath: () => "/usr/local/bin/cursor",
   });
   const ipcMain = createIpcMainStub();
@@ -914,6 +925,7 @@ test("resolve-cli exposes Cursor SDK support when API key is saved in settings",
 
 test("resolve-cli reports settings as Cursor auth source when settings and env keys both exist", async () => {
   const { bridge, restore } = loadBridgeWithMocks({
+    cursorSdkInstalled: true,
     resolveCliFromPath: () => "/usr/local/bin/cursor",
     shellEnv: { CURSOR_API_KEY: "env-key" },
   });
@@ -939,6 +951,7 @@ test("resolve-cli reports settings as Cursor auth source when settings and env k
 test("resolve-cli can refresh shell env before resolving Cursor", async () => {
   let refreshed = false;
   const { bridge, restore } = loadBridgeWithMocks({
+    cursorSdkInstalled: true,
     resolveCliFromPath: () => null,
     shellEnv: { CURSOR_API_KEY: "cur-key" },
     invalidateShellEnvCache: () => { refreshed = true; },
@@ -992,6 +1005,7 @@ test("discover exposes Cursor when CLI login succeeds without API key", async ()
 
 test("discover exposes Cursor SDK support when API key is saved in settings", async () => {
   const { bridge, restore } = loadBridgeWithMocks({
+    cursorSdkInstalled: true,
     resolveCliFromPath: () => null,
   });
   const ipcMain = createIpcMainStub();
@@ -1042,6 +1056,7 @@ test("resolve-cli exposes Cursor CLI login without API key", async () => {
 test("discover can refresh shell env before scanning Cursor", async () => {
   let refreshed = false;
   const { bridge, restore } = loadBridgeWithMocks({
+    cursorSdkInstalled: true,
     resolveCliFromPath: () => null,
     shellEnv: () => (refreshed ? { CURSOR_API_KEY: "cur-key" } : {}),
     invalidateShellEnvCache: () => { refreshed = true; },

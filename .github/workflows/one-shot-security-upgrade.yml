@@ -1,0 +1,91 @@
+name: One-shot security dependency upgrade
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/one-shot-security-upgrade.yml
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  upgrade:
+    if: github.repository == 'atoz03/Netcatty'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RELEASE_TAG: v1.1.80
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Upgrade Electron and refresh vulnerable dependencies
+        run: |
+          set -euo pipefail
+          npm install --package-lock-only --ignore-scripts --save-dev electron@42.9.3
+          npm audit fix --package-lock-only --ignore-scripts || true
+
+      - name: Validate lockfile
+        run: npm ci --ignore-scripts
+
+      - name: Run final npm audit
+        id: audit
+        shell: bash
+        run: |
+          set +e
+          npm audit --json > /tmp/npm-audit.json
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -ne 0 ]; then
+            cp /tmp/npm-audit.json .github/security-audit-result.json
+          else
+            rm -f .github/security-audit-result.json
+          fi
+
+      - name: Commit dependency refresh and remove helper
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/one-shot-security-upgrade.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A package.json package-lock.json .github
+          git commit -m "chore(security): upgrade Electron and refresh dependencies"
+          git push origin HEAD:main
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Stop before release if audit still reports vulnerabilities
+        if: steps.audit.outputs.rc != '0'
+        run: |
+          echo "npm audit still reports vulnerabilities; see .github/security-audit-result.json on main." >&2
+          exit 1
+
+      - name: Create release tag
+        if: steps.audit.outputs.rc == '0'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1; then
+            echo "Tag ${RELEASE_TAG} already exists." >&2
+            exit 1
+          fi
+          git tag -a "${RELEASE_TAG}" -m "${RELEASE_TAG}"
+          git push origin "${RELEASE_TAG}"
+
+      - name: Start release build
+        if: steps.audit.outputs.rc == '0'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run build.yml --ref "${RELEASE_TAG}" -f publish_release=true

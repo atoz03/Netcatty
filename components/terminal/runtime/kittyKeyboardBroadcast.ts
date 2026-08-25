@@ -6,6 +6,12 @@ import {
   type KittyKeyboardEvent,
   type KittyKeyboardModeState,
 } from "./kittyKeyboardProtocol";
+import type { TerminalSettings } from "../../../domain/models";
+import {
+  isBareShiftEnterLineEnding,
+  resolveShiftEnterPayload,
+  shouldSendShiftEnterText,
+} from "./shiftEnterText";
 
 export type KittyKeyboardBroadcastInput =
   | {
@@ -190,15 +196,46 @@ export const flushKittyKeyboardBroadcastReleases = (
   releases.clear();
 };
 
+type ResolveKittyKeyboardBroadcastOptions = {
+  kittyProtocolEnabled: boolean;
+  kittyMode: KittyKeyboardModeState;
+  applicationCursorMode: boolean;
+  encodedKeys: Set<string>;
+  legacySuppressedKeys?: Set<string>;
+  /** Target buffer: remap Shift+Enter per peer, not from the broadcast source. */
+  alternateScreen?: boolean;
+  shiftEnterSettings?: Pick<
+    TerminalSettings,
+    "shiftEnterNewlineEnabled" | "shiftEnterNewlineText"
+  >;
+};
+
+const resolveShiftEnterBroadcastPayload = (
+  input: Extract<KittyKeyboardBroadcastInput, { kind: "key" }>,
+  options: ResolveKittyKeyboardBroadcastOptions,
+  candidate: string | null,
+): ResolvedKittyKeyboardBroadcastInput | null => {
+  if (
+    !shouldSendShiftEnterText(input.event, options.shiftEnterSettings) ||
+    candidate === null ||
+    !isBareShiftEnterLineEnding(candidate)
+  ) {
+    return null;
+  }
+  const payload = resolveShiftEnterPayload(options.shiftEnterSettings, {
+    alternateScreen: options.alternateScreen === true,
+  });
+  if (!payload.data) return null;
+  return {
+    data: payload.data,
+    kittyEncoded: payload.kind === "key",
+    urgentInterrupt: false,
+  };
+};
+
 export const resolveKittyKeyboardBroadcastInput = (
   input: KittyKeyboardBroadcastInput,
-  options: {
-    kittyProtocolEnabled: boolean;
-    kittyMode: KittyKeyboardModeState;
-    applicationCursorMode: boolean;
-    encodedKeys: Set<string>;
-    legacySuppressedKeys?: Set<string>;
-  },
+  options: ResolveKittyKeyboardBroadcastOptions,
 ): ResolvedKittyKeyboardBroadcastInput | null => {
   if (input.kind === "text") {
     if (options.kittyProtocolEnabled && shouldEncodeKittyCompositionText(options.kittyMode)) {
@@ -237,6 +274,8 @@ export const resolveKittyKeyboardBroadcastInput = (
       options.encodedKeys.add(identity);
       legacySuppressedKeys.add(identity);
     }
+    const remapped = resolveShiftEnterBroadcastPayload(input, options, encoded);
+    if (remapped) return remapped;
     return { data: encoded, kittyEncoded: true, urgentInterrupt: false };
   }
   if (!input.fallbackToLegacy || input.event.type === "keyup") return null;
@@ -244,6 +283,8 @@ export const resolveKittyKeyboardBroadcastInput = (
   if (!legacy) return null;
   options.encodedKeys.add(identity);
   legacySuppressedKeys.add(identity);
+  const remapped = resolveShiftEnterBroadcastPayload(input, options, legacy);
+  if (remapped) return remapped;
   return {
     data: legacy,
     kittyEncoded: false,
@@ -252,13 +293,7 @@ export const resolveKittyKeyboardBroadcastInput = (
 };
 
 export const createKittyKeyboardBroadcastHandler = (options: {
-  resolveOptions: () => {
-    kittyProtocolEnabled: boolean;
-    kittyMode: KittyKeyboardModeState;
-    applicationCursorMode: boolean;
-    encodedKeys: Set<string>;
-    legacySuppressedKeys?: Set<string>;
-  };
+  resolveOptions: () => ResolveKittyKeyboardBroadcastOptions;
   getSessionId: () => string | null;
   isSensitiveInput?: () => boolean;
   isConnected: () => boolean;

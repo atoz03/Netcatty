@@ -77,9 +77,11 @@ function parseArgs(argv) {
     hostId: null,
     filename: null,
     snippetId: null,
+    scriptId: null,
     ruleId: null,
     notes: null,
     variables: null,
+    targetGroups: null,
     multiLineRunMode: null,
     command: [],
   };
@@ -172,6 +174,11 @@ function parseArgs(argv) {
       i += 1;
       continue;
     }
+    if (arg === "--script-id") {
+      opts.scriptId = readFlagValue(args, i + 1);
+      i += 1;
+      continue;
+    }
     if (arg === "--rule-id") {
       opts.ruleId = readFlagValue(args, i + 1);
       i += 1;
@@ -184,6 +191,11 @@ function parseArgs(argv) {
     }
     if (arg === "--variables") {
       opts.variables = readFlagValue(args, i + 1);
+      i += 1;
+      continue;
+    }
+    if (arg === "--target-groups") {
+      opts.targetGroups = readFlagValue(args, i + 1);
       i += 1;
       continue;
     }
@@ -401,7 +413,7 @@ async function run() {
     process.stdout.write(opts.json
       ? `${JSON.stringify(payload, null, 2)}\n`
       : `${payload.capabilities.map((entry) => entry.command.join(" ")).join("\n")}\n`);
-    process.exit(0);
+    return;
   }
 
   let client = null;

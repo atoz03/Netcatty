@@ -15,6 +15,7 @@ import {
   describeSftpIncomingKind,
   getSftpConflictTypeKey,
 } from "../domain/sftpConflict";
+import { isMissingStatError } from "../domain/sftpStatError";
 
 // ============================================================================
 // Types
@@ -288,9 +289,13 @@ async function uploadEntriesWithOptionalCompression(
 
   const statTarget = async (path: string) => {
     try {
-      return await bridge.statSftp?.(sftpId, path) ?? null;
-    } catch {
-      return null;
+      // Prefer no-follow lstat so Replace can unlink a symlink instead of
+      // writing through it. Followed statSftp stays for source sizing / resume.
+      return await (bridge.lstatSftp ?? bridge.statSftp)?.(sftpId, path) ?? null;
+    } catch (error) {
+      if (isMissingStatError(error)) return null;
+      // e.g. LSTAT ENOTSUP: unknown target type — fail closed, do not upload.
+      throw error;
     }
   };
   const groupInfos = await Promise.all(rootGroups.map(async ([key, groupEntries]) => {
@@ -440,19 +445,27 @@ async function uploadEntries(
 
   const statTarget = async (path: string) => {
     try {
-      if (isLocal) return await bridge.statLocal?.(path);
-      if (sftpId) return await bridge.statSftp?.(sftpId, path);
-    } catch {
-      return null;
+      // Prefer no-follow lstat for destinations so Replace can unlink a
+      // symlink instead of writing through it. Followed stat* stays for
+      // source sizing / resume (link size must not become totalBytes).
+      if (isLocal) return await (bridge.lstatLocal ?? bridge.statLocal)?.(path);
+      if (sftpId) return await (bridge.lstatSftp ?? bridge.statSftp)?.(sftpId, path);
+    } catch (error) {
+      if (isMissingStatError(error)) return null;
+      // e.g. LSTAT ENOTSUP: unknown target type — fail closed, do not upload.
+      throw error;
     }
     return null;
   };
 
-  const deleteTarget = async (path: string) => {
+  const deleteTarget = async (
+    path: string,
+    expectedType?: "file" | "directory" | "symlink",
+  ) => {
     if (isLocal) {
-      await bridge.deleteLocalFile?.(path);
+      await bridge.deleteLocalFile?.(path, expectedType);
     } else if (sftpId) {
-      await bridge.deleteSftp?.(sftpId, path);
+      await bridge.deleteSftp?.(sftpId, path, expectedType);
     }
   };
 
@@ -580,7 +593,13 @@ async function uploadEntries(
           });
           continue;
         }
-        await deleteTarget(rootTargetPath);
+        // Preserve confirmed remote regular files so stage+rename can restore
+        // mode bits (#2954). Local writes do not use that transaction, so
+        // unlink local files first to avoid truncating every alias of a hard
+        // linked inode. Directories and symlinks must always be cleared.
+        if (isLocal || existing.type !== "file") {
+          await deleteTarget(rootTargetPath, existing.type);
+        }
         resolved.push(...groupEntries);
         continue;
       }

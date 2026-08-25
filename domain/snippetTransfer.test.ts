@@ -192,6 +192,73 @@ test("buildSnippetExportPayload preserves multi-line run mode", () => {
   assert.equal(payload.snippets[0].multiLineRunMode, "lineDelay");
 });
 
+test("snippet export and import preserve dynamic group scope", () => {
+  const exported = buildSnippetExportPayload({
+    snippets: [
+      snippet({
+        id: "script-1",
+        label: "Watch production",
+        command: "nct.log('matched')",
+        kind: "script",
+        trigger: "onOutput",
+        triggerPattern: "ERROR",
+        targetGroups: ["Production", "Production/Web"],
+      }),
+    ],
+    snippetPackages: [],
+    exportedAt: "2026-08-11T00:00:00.000Z",
+  });
+  const parsed = parseSnippetImportPayload(JSON.stringify(exported));
+  const result = mergeSnippetImportPayload({
+    existingSnippets: [],
+    existingSnippetPackages: [],
+    payload: parsed,
+    conflictAction: "skip",
+    createId: () => "imported-script",
+  });
+
+  assert.deepEqual(parsed.snippets[0].targetGroups, ["Production", "Production/Web"]);
+  assert.deepEqual(result.snippets[0].targetGroups, ["Production", "Production/Web"]);
+  assert.equal(result.snippets[0].trigger, "onOutput");
+});
+
+test("snippet export and import preserve an explicitly empty dynamic group scope", () => {
+  const exported = buildSnippetExportPayload({
+    snippets: [snippet({
+      id: "disabled-scope",
+      label: "Disabled scope",
+      kind: "script",
+      trigger: "onOutput",
+      triggerPattern: "ERROR",
+      targetGroups: [],
+      command: "nct.log('disabled-scope')",
+    })],
+    snippetPackages: [],
+  });
+  const parsed = parseSnippetImportPayload(JSON.stringify(exported));
+  const result = mergeSnippetImportPayload({
+    existingSnippets: [],
+    existingSnippetPackages: [],
+    payload: parsed,
+    conflictAction: "skip",
+    createId: () => "imported-disabled-scope",
+  });
+
+  assert.deepEqual(exported.snippets[0].targetGroups, []);
+  assert.deepEqual(parsed.snippets[0].targetGroups, []);
+  assert.deepEqual(result.snippets[0].targetGroups, []);
+});
+
+test("snippet import normalizes dynamic group paths", () => {
+  const parsed = parseSnippetImportPayload(JSON.stringify([{
+    label: "Imported group scope",
+    command: "nct.log('normalize-groups')",
+    kind: "script",
+    targetGroups: [" Production\\\\Web ", "Production//Web"],
+  }]));
+  assert.deepEqual(parsed.snippets[0].targetGroups, ["Production/Web"]);
+});
+
 test("mergeSnippetImportPayload keeps existing empty snippet packages", () => {
   const payload = parseSnippetImportPayload(JSON.stringify({
     kind: "netcatty.snippets",

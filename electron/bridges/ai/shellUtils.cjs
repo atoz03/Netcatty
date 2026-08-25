@@ -56,8 +56,26 @@ function formatSyntheticEcho(command) {
 // such a line can't trick prompt-driven shell-kind selection.
 const POWERSHELL_PROMPT_PATTERN = /^PS(?:\s+\S.*)?>$/;
 
+// Default cmd.exe prompt (e.g. `C:\>`, `C:\Users\alice>`, `D:\data>`).
+// Drive letter + optional path + `>`. Rejects `C: >` (space before `>`) and
+// PowerShell's `PS C:\...>` (handled by POWERSHELL_PROMPT_PATTERN first).
+const CMD_PROMPT_PATTERN = /^[A-Za-z]:(?:\\[^<>"|]*)?>$/;
+
+// Classic `user@host:...$` / `user@host:...#` login prompt (bash/zsh in WSL,
+// remote Linux, etc.). Intentionally narrow so custom / fish prompts do not
+// flip a Windows DefaultShell soft hint.
+const POSIX_PROMPT_PATTERN = /^[^\s@]+@[^\s:]+(?::[^\n\r]*)?[#$]$/;
+
 function isDefaultPowerShellPromptLine(line) {
   return POWERSHELL_PROMPT_PATTERN.test(String(line || ""));
+}
+
+function isDefaultCmdPromptLine(line) {
+  return CMD_PROMPT_PATTERN.test(String(line || "").replace(/\s+$/, ""));
+}
+
+function isDefaultPosixPromptLine(line) {
+  return POSIX_PROMPT_PATTERN.test(String(line || "").replace(/\s+$/, ""));
 }
 
 function extractTrailingIdlePrompt(output) {
@@ -76,7 +94,11 @@ function extractTrailingIdlePrompt(output) {
     return lastLine;
   }
 
-  if (/^[^\s@]+@[^\s:]+(?::[^\n\r]*)?[#$]$/.test(rightTrimmed)) {
+  if (isDefaultPosixPromptLine(rightTrimmed)) {
+    return lastLine;
+  }
+
+  if (isDefaultCmdPromptLine(rightTrimmed)) {
     return lastLine;
   }
 
@@ -126,8 +148,8 @@ function trackSessionIdlePrompt(session, chunk) {
 
 // Return `session.lastIdlePrompt` only if the PTY's recent rolling tail
 // still ends with it. The cached prompt is updated only when
-// extractTrailingIdlePrompt recognizes a known shape (PowerShell or
-// `user@host[:path][#$]`); a remote shell switch into cmd.exe, an
+// extractTrailingIdlePrompt recognizes a known shape (PowerShell, cmd.exe,
+// or `user@host[:path][#$]`); a remote shell switch into another shell, an
 // oh-my-posh / starship / custom PS1, or any unrecognized prompt would
 // otherwise leave a stale value behind, which `resolveEffectiveShellKind`
 // would then keep using to coerce future commands into a PowerShell
@@ -250,15 +272,19 @@ function resolveWindowsShimToNativeExe(command, platform = process.platform) {
   return null;
 }
 
-function prepareCommandForSpawn(command, args) {
+function prepareCommandForSpawn(command, args, options = {}) {
   const spawnArgs = Array.isArray(args) ? args : [];
   if (!shouldUseShellForCommand(command)) {
     return { command, args: spawnArgs, shell: false };
   }
 
-  const nativeExePath = resolveWindowsShimToNativeExe(command);
-  if (nativeExePath) {
-    return { command: nativeExePath, args: spawnArgs, shell: false };
+  // Cursor's Windows installer .cmd launches node.exe + index.js. Unwrapping
+  // to the first quoted .exe would drop the script and run node with CLI args.
+  if (options.unwrapNativeExe !== false) {
+    const nativeExePath = resolveWindowsShimToNativeExe(command);
+    if (nativeExePath) {
+      return { command: nativeExePath, args: spawnArgs, shell: false };
+    }
   }
 
   return {
@@ -941,6 +967,8 @@ module.exports = {
   extractTrailingIdlePrompt,
   getFreshIdlePrompt,
   isDefaultPowerShellPromptLine,
+  isDefaultCmdPromptLine,
+  isDefaultPosixPromptLine,
   trackSessionIdlePrompt,
   looksLikeIdleAutoLogout,
   isLocalhostHostname,

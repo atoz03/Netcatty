@@ -34,7 +34,7 @@ test("password-prompt input is classified before prompt state reset and cannot b
   );
   assert.match(
     runtimeSource,
-    /const sensitive = ctx\.passwordPromptActiveRef\?\.current === true;[\s\S]*?const willBroadcastInput = !sensitive &&/u,
+    /const sensitive = ctx\.passwordPromptActiveRef\?\.current === true;[\s\S]*?const canBroadcastInput = !sensitive &&[\s\S]*?const willBroadcastInput = canBroadcastInput && options\?\.skipBroadcast !== true;/u,
   );
   assert.match(
     runtimeSource,

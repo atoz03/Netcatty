@@ -486,6 +486,8 @@ declare global {
           droppedOutputAlternateScreenAction?: "enter" | "leave";
           /** True while Mosh is still on the ephemeral SSH handshake PTY. */
           moshHandshake?: boolean;
+          /** The Mosh SSH bootstrap is blocked on input that Netcatty cannot answer automatically. */
+          moshHandshakeRequiresUserInput?: boolean;
           terminalPerf?: NetcattyTerminalOutputPerfMeta;
           /** Original host output units acknowledged even when an interceptor changes display length. */
           pluginPipelineIngressBytes?: number;

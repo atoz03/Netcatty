@@ -42,3 +42,23 @@ test("parseArgs consumes snippet multi-line run mode flag", () => {
   assert.equal(opts.multiLineRunMode, "lineDelay");
   assert.equal(opts.json, true);
 });
+
+test("parseArgs consumes dynamic script group targets", () => {
+  const { positionals, opts } = parseArgs([
+    "node",
+    "netcatty-tool-cli",
+    "scripts",
+    "targets",
+    "set",
+    "--script-id",
+    "script-1",
+    "--target-groups",
+    '["Production","Staging/Web"]',
+    "--json",
+  ]);
+
+  assert.deepEqual(positionals, ["scripts", "targets", "set"]);
+  assert.equal(opts.scriptId, "script-1");
+  assert.equal(opts.targetGroups, '["Production","Staging/Web"]');
+  assert.equal(opts.json, true);
+});

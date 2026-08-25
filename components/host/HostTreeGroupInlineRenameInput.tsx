@@ -4,7 +4,7 @@ import { cn } from '../../lib/utils';
 
 type HostTreeGroupInlineRenameInputProps = {
   initialName: string;
-  onCommit: (name: string) => void;
+  onCommit: (name: string) => boolean | void | Promise<boolean | void>;
   onCancel: () => void;
   className?: string;
   style?: React.CSSProperties;
@@ -19,7 +19,7 @@ export const HostTreeGroupInlineRenameInput: React.FC<HostTreeGroupInlineRenameI
 }) => {
   const inputRef = useRef<HTMLInputElement>(null);
   const [value, setValue] = useState(initialName);
-  const committedRef = useRef(false);
+  const submittingRef = useRef(false);
 
   useEffect(() => {
     const input = inputRef.current;
@@ -28,15 +28,20 @@ export const HostTreeGroupInlineRenameInput: React.FC<HostTreeGroupInlineRenameI
     input.select();
   }, []);
 
-  const commit = () => {
-    if (committedRef.current) return;
-    committedRef.current = true;
-    onCommit(value);
+  const commit = async () => {
+    if (submittingRef.current) return;
+    submittingRef.current = true;
+    try {
+      const committed = await onCommit(value);
+      if (committed === false) submittingRef.current = false;
+    } catch {
+      submittingRef.current = false;
+    }
   };
 
   const cancel = () => {
-    if (committedRef.current) return;
-    committedRef.current = true;
+    if (submittingRef.current) return;
+    submittingRef.current = true;
     onCancel();
   };
 
@@ -49,7 +54,7 @@ export const HostTreeGroupInlineRenameInput: React.FC<HostTreeGroupInlineRenameI
       onChange={(event) => setValue(event.target.value)}
       onBlur={() => {
         queueMicrotask(() => {
-          commit();
+          void commit();
         });
       }}
       onClick={(event) => event.stopPropagation()}
@@ -64,7 +69,7 @@ export const HostTreeGroupInlineRenameInput: React.FC<HostTreeGroupInlineRenameI
         event.stopPropagation();
         if (event.key === 'Enter') {
           event.preventDefault();
-          commit();
+          void commit();
         }
         if (event.key === 'Escape') {
           event.preventDefault();

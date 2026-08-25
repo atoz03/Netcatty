@@ -158,6 +158,15 @@ describe("scpBackend browse/manage with fake exec", () => {
     assert.ok(commands.some((c) => c.command.includes("chmod 000 -- '/tmp/zero-mode'")));
   });
 
+  it("unlinks without a directory probe or recursive delete", async () => {
+    await backend.unlink("/tmp/a b/link");
+    const matching = commands.filter((c) => c.command.includes("/tmp/a b/link"));
+    assert.equal(matching.length, 1);
+    assert.match(matching[0].command, /rm -f -- '\/tmp\/a b\/link'/);
+    assert.doesNotMatch(matching[0].command, /rm -rf/);
+    assert.doesNotMatch(matching[0].command, /rmdir/);
+  });
+
   it("stats a remote path", async () => {
     const st = await backend.stat("/home/test/readme.txt");
     assert.equal(st.size, 5);

@@ -15,11 +15,11 @@ const TRIGGER_GUIDE = `## Triggers and host targeting
 | trigger | Behavior |
 |---------|----------|
 | manual | Run from Vault or via scripts_run / snippets_run |
-| onConnect | Runs after SSH connect (global targetsAllHosts scripts first, then host connectScriptIds queue) |
+| onConnect | Runs after SSH connect (global targetsAllHosts, dynamic targetGroups, then host connectScriptIds queue) |
 | onOutput | Runs when terminal output matches triggerPattern (regex) |
 
-Use \`targets\` (host id array) or \`targetsAllHosts: true\` to scope manual/onOutput runs.
-For per-host onConnect order, use \`host_connect_scripts_set\` or link targets and sync connect queue.`;
+Use \`targets\` (host id array), \`targetGroups\` (dynamic group path array), or \`targetsAllHosts: true\` to scope runs. Group paths include nested groups and are resolved against the latest host inventory.
+For per-host onConnect order, use \`host_connect_scripts_set\`. Group-scoped scripts remain inherited and are not copied into host queues.`;
 
 const NCT_API = `## nct API reference
 

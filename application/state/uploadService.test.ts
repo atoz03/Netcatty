@@ -490,6 +490,374 @@ test("does not replace an existing directory when uploading a same-named file", 
   assert.match(results[0].error ?? "", /directory/i);
 });
 
+test("file replace leaves the remote destination so upload can restore mode bits", async () => {
+  // Deleting before overwrite recreates the inode with umask defaults and drops
+  // bits like +x (#2954). Keep the target so stage+rename can restore mode.
+  const file = new File(["new-bytes"], "tool.sh", { lastModified: 1234 });
+  Object.defineProperty(file, "path", { value: "/local/tool.sh" });
+  const deletedPaths: string[] = [];
+  const deletedTypes: Array<string | undefined> = [];
+  const uploadedPaths: string[] = [];
+
+  const results = await uploadFromFileList(
+    [file],
+    {
+      targetPath: "/usr/local/bin",
+      sftpId: "sftp-1",
+      isLocal: false,
+      bridge: {
+        mkdirSftp: async () => {},
+        statSftp: async (_sftpId, path) =>
+          path === "/usr/local/bin/tool.sh"
+            ? { type: "file", size: 9, lastModified: 1000 }
+            : null,
+        deleteSftp: async (_sftpId, path, expectedType) => {
+          deletedPaths.push(path);
+          deletedTypes.push(expectedType);
+        },
+        startStreamTransfer: async ({ targetPath: path }) => {
+          uploadedPaths.push(path);
+          return { transferId: "upload-1" };
+        },
+      },
+      joinPath: (base, name) => `${base}/${name}`,
+      resolveConflict: async () => "replace",
+    },
+  );
+
+  assert.deepEqual(deletedPaths, [], "file replace must not delete before upload");
+  assert.deepEqual(uploadedPaths, ["/usr/local/bin/tool.sh"]);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].success, true);
+});
+
+test("file replace unlinks an existing symlink before upload", async () => {
+  // Leaving the symlink would let in-place upload follow it and overwrite the
+  // link target outside the displayed directory.
+  // Conflict checks use lstatSftp so Replace unlinks the link first.
+  const file = new File(["new-bytes"], "tool.sh", { lastModified: 1234 });
+  Object.defineProperty(file, "path", { value: "/local/tool.sh" });
+  const deletedPaths: string[] = [];
+  const deletedTypes: Array<string | undefined> = [];
+  const uploadedPaths: string[] = [];
+
+  const results = await uploadFromFileList(
+    [file],
+    {
+      targetPath: "/usr/local/bin",
+      sftpId: "sftp-1",
+      isLocal: false,
+      bridge: {
+        mkdirSftp: async () => {},
+        // Followed stat would report type "file" and skip pre-delete.
+        statSftp: async () => ({ type: "file", size: 4096, lastModified: 1000 }),
+        lstatSftp: async (_sftpId, path) =>
+          path === "/usr/local/bin/tool.sh"
+            ? { type: "symlink", size: 12, lastModified: 1000 }
+            : null,
+        deleteSftp: async (_sftpId, path, expectedType) => {
+          deletedPaths.push(path);
+          deletedTypes.push(expectedType);
+        },
+        startStreamTransfer: async ({ targetPath: path }) => {
+          uploadedPaths.push(path);
+          return { transferId: "upload-1" };
+        },
+      },
+      joinPath: (base, name) => `${base}/${name}`,
+      resolveConflict: async () => "replace",
+    },
+  );
+
+  assert.deepEqual(deletedPaths, ["/usr/local/bin/tool.sh"]);
+  assert.deepEqual(deletedTypes, ["symlink"]);
+  assert.deepEqual(uploadedPaths, ["/usr/local/bin/tool.sh"]);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].success, true);
+});
+
+test("LSTAT ENOTSUP is not treated as an absent destination during conflict check", async () => {
+  // If unsupported LSTAT is swallowed as "missing", upload skips Replace and may
+  // write through an existing symlink to a target outside the displayed dir.
+  const file = new File(["new-bytes"], "tool.sh", { lastModified: 1234 });
+  Object.defineProperty(file, "path", { value: "/local/tool.sh" });
+  let uploaded = 0;
+  let conflictPrompts = 0;
+
+  await assert.rejects(
+    () => uploadFromFileList(
+      [file],
+      {
+        targetPath: "/usr/local/bin",
+        sftpId: "sftp-1",
+        isLocal: false,
+        bridge: {
+          mkdirSftp: async () => {},
+          lstatSftp: async () => {
+            const error = new Error(
+              "Remote server does not support LSTAT; cannot classify path without following symlinks",
+            ) as Error & { code: string; lstatUnavailable: boolean };
+            error.code = "ENOTSUP";
+            error.lstatUnavailable = true;
+            throw error;
+          },
+          startStreamTransfer: async () => {
+            uploaded += 1;
+            return { transferId: "upload-1" };
+          },
+        },
+        joinPath: (base, name) => `${base}/${name}`,
+        resolveConflict: async () => {
+          conflictPrompts += 1;
+          return "replace";
+        },
+      },
+    ),
+    (error: Error & { code?: string }) => {
+      assert.equal(error.code, "ENOTSUP");
+      assert.match(String(error.message), /does not support LSTAT/i);
+      return true;
+    },
+  );
+
+  assert.equal(uploaded, 0, "must not upload when destination type is unknown");
+  assert.equal(conflictPrompts, 0, "must not pretend destination is missing");
+});
+
+test("ENOENT from lstat still means absent destination for conflict check", async () => {
+  const file = new File(["new-bytes"], "tool.sh", { lastModified: 1234 });
+  Object.defineProperty(file, "path", { value: "/local/tool.sh" });
+  const uploadedPaths: string[] = [];
+
+  const results = await uploadFromFileList(
+    [file],
+    {
+      targetPath: "/usr/local/bin",
+      sftpId: "sftp-1",
+      isLocal: false,
+      bridge: {
+        mkdirSftp: async () => {},
+        lstatSftp: async () => {
+          const error = new Error("No such file") as Error & { code: string };
+          error.code = "ENOENT";
+          throw error;
+        },
+        startStreamTransfer: async ({ targetPath: path }) => {
+          uploadedPaths.push(path);
+          return { transferId: "upload-1" };
+        },
+      },
+      joinPath: (base, name) => `${base}/${name}`,
+      resolveConflict: async () => {
+        throw new Error("absent destination must not prompt for conflict");
+      },
+    },
+  );
+
+  assert.deepEqual(uploadedPaths, ["/usr/local/bin/tool.sh"]);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].success, true);
+});
+
+test("Electron-wrapped lstat absence still means absent destination", async () => {
+  const file = new File(["new-bytes"], "tool.sh", { lastModified: 1234 });
+  Object.defineProperty(file, "path", { value: "/local/tool.sh" });
+  const uploadedPaths: string[] = [];
+
+  const results = await uploadFromFileList(
+    [file],
+    {
+      targetPath: "/usr/local/bin",
+      sftpId: "sftp-1",
+      isLocal: false,
+      bridge: {
+        mkdirSftp: async () => {},
+        lstatSftp: async () => {
+          throw new Error("Error invoking remote method 'netcatty:sftp:lstat': Error: No such file");
+        },
+        startStreamTransfer: async ({ targetPath: path }) => {
+          uploadedPaths.push(path);
+          return { transferId: "upload-1" };
+        },
+      },
+      joinPath: (base, name) => `${base}/${name}`,
+      resolveConflict: async () => {
+        throw new Error("absent destination must not prompt for conflict");
+      },
+    },
+  );
+
+  assert.deepEqual(uploadedPaths, ["/usr/local/bin/tool.sh"]);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].success, true);
+});
+
+test("compressed-upload LSTAT ENOTSUP is not treated as an absent destination", async (t) => {
+  let compressedStarts = 0;
+  installCompressedUploadBridge(t, {
+    onStart: () => { compressedStarts += 1; },
+  });
+  let streamCalls = 0;
+
+  await assert.rejects(
+    () => uploadFromFileList(
+      [createPickedFolderFile()],
+      {
+        targetPath: "/remote",
+        sftpId: "sftp-1",
+        isLocal: false,
+        bridge: {
+          mkdirSftp: async () => {},
+          lstatSftp: async () => {
+            const error = new Error(
+              "Remote server does not support LSTAT; cannot classify path without following symlinks",
+            ) as Error & { code: string; lstatUnavailable: boolean };
+            error.code = "ENOTSUP";
+            error.lstatUnavailable = true;
+            throw error;
+          },
+          startStreamTransfer: async (payload) => {
+            streamCalls += 1;
+            return { transferId: payload.transferId };
+          },
+        },
+        joinPath: (base, name) => `${base}/${name}`,
+        useCompressedUpload: true,
+        resolveConflict: async () => "merge",
+      },
+    ),
+    (error: Error & { code?: string }) => {
+      assert.equal(error.code, "ENOTSUP");
+      return true;
+    },
+  );
+
+  assert.equal(compressedStarts, 0);
+  assert.equal(streamCalls, 0);
+});
+
+test("directory replace unlinks an existing symlink before mkdir", async () => {
+  // No-follow lstat reports symlink; Replace must unlink then create the dir
+  // (followed stat used to classify symlink-to-dir as directory and succeed).
+  const file = new File(["nested"], "file.txt", { lastModified: 1234 });
+  Object.defineProperty(file, "path", { value: "/local/docs/file.txt" });
+  Object.defineProperty(file, "webkitRelativePath", { value: "docs/file.txt" });
+  const deletedPaths: string[] = [];
+  const deletedTypes: Array<string | undefined> = [];
+  const madeDirs: string[] = [];
+  const uploadedPaths: string[] = [];
+
+  const results = await uploadFromFileList(
+    [file],
+    {
+      targetPath: "/remote",
+      sftpId: "sftp-1",
+      isLocal: false,
+      bridge: {
+        mkdirSftp: async (_sftpId, path) => {
+          madeDirs.push(path);
+        },
+        lstatSftp: async (_sftpId, path) =>
+          path === "/remote/docs"
+            ? { type: "symlink", size: 8, lastModified: 1000 }
+            : null,
+        deleteSftp: async (_sftpId, path, expectedType) => {
+          deletedPaths.push(path);
+          deletedTypes.push(expectedType);
+        },
+        startStreamTransfer: async ({ targetPath: path }) => {
+          uploadedPaths.push(path);
+          return { transferId: "upload-dir-1" };
+        },
+      },
+      joinPath: (base, name) => `${base}/${name}`,
+      resolveConflict: async () => "replace",
+    },
+  );
+
+  assert.deepEqual(deletedPaths, ["/remote/docs"]);
+  assert.deepEqual(deletedTypes, ["symlink"]);
+  assert.ok(madeDirs.includes("/remote/docs"), `expected mkdir after unlink, got ${JSON.stringify(madeDirs)}`);
+  assert.deepEqual(uploadedPaths, ["/remote/docs/file.txt"]);
+  assert.equal(results.some((r) => r.success), true);
+});
+
+test("local file replace unlinks an existing symlink before writeLocalFile", async () => {
+  // Pathless File uploads fall back to writeLocalFile, which follows symlinks.
+  // Conflict checks use lstatLocal so Replace unlinks the link first.
+  const file = new File(["new-bytes"], "tool.sh", { lastModified: 1234 });
+  const deletedPaths: string[] = [];
+  const deletedTypes: Array<string | undefined> = [];
+  const writtenPaths: string[] = [];
+
+  const results = await uploadFromFileList(
+    [file],
+    {
+      targetPath: "/Users/me/bin",
+      sftpId: null,
+      isLocal: true,
+      bridge: {
+        mkdirSftp: async () => {},
+        lstatLocal: async (path) =>
+          path === "/Users/me/bin/tool.sh"
+            ? { type: "symlink", size: 12, lastModified: 1000 }
+            : null,
+        deleteLocalFile: async (path, expectedType) => {
+          deletedPaths.push(path);
+          deletedTypes.push(expectedType);
+        },
+        writeLocalFile: async (path) => {
+          writtenPaths.push(path);
+        },
+      },
+      joinPath: (base, name) => `${base}/${name}`,
+      resolveConflict: async () => "replace",
+    },
+  );
+
+  assert.deepEqual(deletedPaths, ["/Users/me/bin/tool.sh"]);
+  assert.deepEqual(deletedTypes, ["symlink"]);
+  assert.deepEqual(writtenPaths, ["/Users/me/bin/tool.sh"]);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].success, true);
+});
+
+test("local file replace unlinks a regular file before writeLocalFile", async () => {
+  const file = new File(["new-bytes"], "tool.sh", { lastModified: 1234 });
+  const operations: string[] = [];
+
+  const results = await uploadFromFileList(
+    [file],
+    {
+      targetPath: "/Users/me/bin",
+      sftpId: null,
+      isLocal: true,
+      bridge: {
+        mkdirSftp: async () => {},
+        lstatLocal: async (path) =>
+          path === "/Users/me/bin/tool.sh"
+            ? { type: "file", size: 12, lastModified: 1000 }
+            : null,
+        deleteLocalFile: async (path, expectedType) => {
+          operations.push(`delete:${path}:${expectedType}`);
+        },
+        writeLocalFile: async (path) => {
+          operations.push(`write:${path}`);
+        },
+      },
+      joinPath: (base, name) => `${base}/${name}`,
+      resolveConflict: async () => "replace",
+    },
+  );
+
+  assert.deepEqual(operations, [
+    "delete:/Users/me/bin/tool.sh:file",
+    "write:/Users/me/bin/tool.sh",
+  ]);
+  assert.equal(results.length, 1);
+  assert.equal(results[0].success, true);
+});
+
 test("counts apply-to-all upload conflicts by incoming and existing type", async () => {
   const files = [
     new File(["local"], "existing-file", { lastModified: 1234 }),

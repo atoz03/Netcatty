@@ -2,7 +2,12 @@
 
 const { StringDecoder } = require("node:string_decoder");
 const iconv = require("iconv-lite");
-const { stripAnsi, isDefaultPowerShellPromptLine } = require("./shellUtils.cjs");
+const {
+  stripAnsi,
+  isDefaultPowerShellPromptLine,
+  isDefaultCmdPromptLine,
+  isDefaultPosixPromptLine,
+} = require("./shellUtils.cjs");
 const { classifyLocalShellType } = require("../../../lib/localShell.cjs");
 
 // Build a stateful decoder for a full exec call. Serial data events can
@@ -94,6 +99,24 @@ function isPowerShellPrompt(prompt) {
   return isDefaultPowerShellPromptLine(lastLine);
 }
 
+function isCmdPrompt(prompt) {
+  const lastLine = stripAnsi(String(prompt || ""))
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .pop()
+    .replace(/\s+$/, "");
+  return isDefaultCmdPromptLine(lastLine);
+}
+
+function isPosixPrompt(prompt) {
+  const lastLine = stripAnsi(String(prompt || ""))
+    .replace(/\r/g, "\n")
+    .split("\n")
+    .pop()
+    .replace(/\s+$/, "");
+  return isDefaultPosixPromptLine(lastLine);
+}
+
 // Prompt-driven override is intentionally narrow: only flip to PowerShell
 // when the session has no confirmed shell type. This keeps the issue #841
 // fix working for remote Windows shells that never set shellKind at connect
@@ -102,18 +125,22 @@ function isPowerShellPrompt(prompt) {
 // mis-wrapped command.
 //
 // Remote login-shell probing stores a *soft* hint (`loginShellHint` /
-// session._loginShellKind) without pinning session.shellKind for fish/posix:
+// session._loginShellKind) without pinning session.shellKind:
 //   - hint "fish"  → fish wrapper (issue #1854) without permanent pin
 //   - hint "posix" → native posix wrapper evaluated by interactive bash/zsh
 //                    (NOT sh -c / dash — Codex P2 on #2061)
+//   - hint "powershell" / "cmd" → Windows DefaultShell (issue #2959) without
+//     permanent pin, so a live opposing PS/cmd prompt can still win, and a
+//     live `user@host:...$` POSIX prompt (e.g. WSL nesting) can override too
 //   - live PS ...> still overrides when base kind is open
+//   - live C:\...> selects cmd when base kind is open (Windows OpenSSH default)
 //
 // Universe of shellKind values (see lib/localShell.cjs:23-33 and
 // terminalBridge.cjs:368, :932, :1074):
 //   "posix" | "powershell" | "cmd" | "fish" | "unknown" | "raw" | "" | undefined
 // Excluded on purpose from prompt override:
-//   - "posix" / "fish" / "cmd": confirmed — never override.
-//   - "powershell": already correct; no override needed (would be a no-op).
+//   - "posix" / "fish" / "cmd" / "powershell": confirmed local/spawn kinds —
+//     never override (anti-spoof for #841).
 //   - "raw": serial / network device — execViaRawPty bypasses buildWrappedCommand.
 const SHELL_KINDS_OPEN_TO_PROMPT_OVERRIDE = new Set([
   "",
@@ -124,19 +151,49 @@ const LOGIN_SHELL_HINTS = new Set(["posix", "fish", "powershell", "cmd"]);
 
 function resolveEffectiveShellKind(shellKind, expectedPrompt, options = {}) {
   const baseKind = shellKind || "";
-  if (
-    SHELL_KINDS_OPEN_TO_PROMPT_OVERRIDE.has(baseKind) &&
-    isPowerShellPrompt(expectedPrompt)
-  ) {
-    return "powershell";
+  const hint = options.loginShellHint || "";
+  if (SHELL_KINDS_OPEN_TO_PROMPT_OVERRIDE.has(baseKind)) {
+    if (isPowerShellPrompt(expectedPrompt)) {
+      return "powershell";
+    }
+    if (isCmdPrompt(expectedPrompt)) {
+      return "cmd";
+    }
+    // Windows OpenSSH DefaultShell soft hint + nested WSL/bash: live
+    // `user@host:...$` must win so AI does not type a PS/cmd wrapper into
+    // a POSIX shell and hang on markers. Fish/posix soft hints stay put —
+    // those login shells already share this prompt family.
+    if (
+      isPosixPrompt(expectedPrompt)
+      && (hint === "powershell" || hint === "cmd")
+    ) {
+      return "posix";
+    }
   }
   if (baseKind) return baseKind;
 
   // Soft login-shell hint from remote probe (not a permanent pin).
-  const hint = options.loginShellHint || "";
   if (LOGIN_SHELL_HINTS.has(hint)) return hint;
 
   return "posix";
+}
+
+// Discard unfinished prompt-line input before the agent wrapper so typed-but-
+// not-entered text is not concatenated onto the injected command (#2962).
+// Raw/serial devices have no portable line-kill binding; leave them alone.
+function buildPendingInputClearPrefix(shellKind) {
+  switch (shellKind) {
+    case "raw":
+      return "";
+    case "cmd":
+      return "\x1b";
+    case "powershell":
+      // Escape = Windows-mode PSReadLine RevertLine (issue reporter default).
+      // Ctrl+U/Ctrl+K also fire for Emacs/Vi when those bindings exist.
+      return "\x1b\x15\x0b";
+    default:
+      return "\x15\x0b";
+  }
 }
 
 function buildPosixWrapperBody(command, marker) {
@@ -391,6 +448,7 @@ module.exports = {
   subscribeToPtyData,
   hasExpectedPromptSuffix,
   resolveEffectiveShellKind,
+  buildPendingInputClearPrefix,
   buildWrappedCommand,
   findEndMarker,
   normalizePtyOutput,

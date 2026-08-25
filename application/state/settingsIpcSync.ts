@@ -15,6 +15,7 @@ import {
   STORAGE_KEY_DISABLE_TERMINAL_FONT_ZOOM,
   STORAGE_KEY_RESTORE_PREVIOUS_SESSION,
   STORAGE_KEY_RESTORE_TERMINAL_CWD,
+  STORAGE_KEY_STARTUP_LANDING,
   STORAGE_KEY_SESSION_LOGS_DIR,
   STORAGE_KEY_SESSION_LOGS_ENABLED,
   STORAGE_KEY_SESSION_LOGS_FORMAT,
@@ -60,6 +61,7 @@ import {
   migrateIncomingTerminalFontId,
 } from './settingsStateDefaults';
 import { isTerminalSidePanelAutoOpenTab, type TerminalSidePanelAutoOpenTab } from '../../domain/terminalSidePanelAutoOpen';
+import { isStartupLanding, type StartupLanding } from '../../domain/startupLanding';
 import type { AppearanceSyncEvent } from './appearanceSync';
 
 interface UseSettingsIpcSyncParams {
@@ -102,6 +104,7 @@ interface UseSettingsIpcSyncParams {
   setDisableTerminalFontZoomState: Dispatch<SetStateAction<boolean>>;
   setRestorePreviousSessionState: Dispatch<SetStateAction<boolean>>;
   setRestoreTerminalCwdState: Dispatch<SetStateAction<boolean>>;
+  setStartupLandingState: Dispatch<SetStateAction<StartupLanding>>;
   setSftpTransferConcurrencyState: Dispatch<SetStateAction<number>>;
   setSshTransportIdleTtlMsState: Dispatch<SetStateAction<number>>;
 }
@@ -146,6 +149,7 @@ export function useSettingsIpcSync({
   setDisableTerminalFontZoomState,
   setRestorePreviousSessionState,
   setRestoreTerminalCwdState,
+  setStartupLandingState,
   setSftpTransferConcurrencyState,
   setSshTransportIdleTtlMsState,
 }: UseSettingsIpcSyncParams) {
@@ -304,6 +308,9 @@ export function useSettingsIpcSync({
       if (key === STORAGE_KEY_RESTORE_TERMINAL_CWD && typeof value === 'boolean') {
         setRestoreTerminalCwdState((prev) => (prev === value ? prev : value));
       }
+      if (key === STORAGE_KEY_STARTUP_LANDING && isStartupLanding(value)) {
+        setStartupLandingState((prev) => (prev === value ? prev : value));
+      }
       if (key === STORAGE_KEY_SFTP_TRANSFER_CONCURRENCY && typeof value === 'number') {
         setSftpTransferConcurrencyState((prev) => (prev === value ? prev : value));
       }
@@ -348,6 +355,7 @@ export function useSettingsIpcSync({
     setDisableTerminalFontZoomState,
     setRestorePreviousSessionState,
     setRestoreTerminalCwdState,
+    setStartupLandingState,
     setSftpTransferConcurrencyState,
     setSshTransportIdleTtlMsState,
     setTerminalFontFamilyId,

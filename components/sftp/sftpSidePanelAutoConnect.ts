@@ -135,3 +135,66 @@ export function shouldResetSftpSidePanelSourceSession(
   if (!previousSessionId) return false;
   return nextSessionId !== previousSessionId;
 }
+
+/**
+ * True when the SFTP side panel must rebind onto a fresh SSH transport.
+ * Covers focus switches (session id change) and same-tab reconnect /
+ * Start over, where the id is stable but the underlying channel was replaced.
+ */
+export function shouldRebindSftpSidePanelSourceSession(params: {
+  previousSessionId: string | null | undefined;
+  nextSessionId: string | null | undefined;
+  previousStatus?: string | null;
+  nextStatus?: string | null;
+}): boolean {
+  if (shouldResetSftpSidePanelSourceSession(params.previousSessionId, params.nextSessionId)) {
+    return true;
+  }
+  if (!params.nextSessionId) return false;
+  if (params.previousSessionId !== params.nextSessionId) return false;
+  if (params.nextStatus !== "connected") return false;
+  if (params.previousStatus == null) return false;
+  return params.previousStatus !== "connected";
+}
+
+/**
+ * While the linked terminal is actively connecting, wait for its transport so
+ * SFTP can reuse it. A terminal left disconnected must not block standalone
+ * SFTP fallback.
+ */
+export function shouldDeferSftpSidePanelAutoConnectForSession(params: {
+  activeSessionId?: string | null;
+  sessionStatus?: string | null;
+}): boolean {
+  if (!params.activeSessionId) return false;
+  return params.sessionStatus === "connecting";
+}
+
+/**
+ * While the last linked SSH session is not the active reusable source,
+ * remember its non-connected status so a background reconnect still rebinds
+ * when that session becomes active again.
+ */
+export function resolveSftpSidePanelTrackedSourceStatusUpdate(params: {
+  trackedSessionId?: string | null;
+  sessionStatus?: string | null;
+}): { sessionId: string; status: string } | null {
+  if (!params.trackedSessionId) return null;
+  if (!params.sessionStatus || params.sessionStatus === "connected") return null;
+  return {
+    sessionId: params.trackedSessionId,
+    status: params.sessionStatus,
+  };
+}
+
+/** Keep the tracked source status when focus temporarily has no reusable SSH. */
+export function rememberSftpSidePanelSourceStatus(params: {
+  previousStatus?: string | null;
+  activeSessionId?: string | null;
+  activeSessionStatus?: string | null;
+}): string | null {
+  if (params.activeSessionId && params.activeSessionStatus) {
+    return params.activeSessionStatus;
+  }
+  return params.previousStatus ?? null;
+}

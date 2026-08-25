@@ -100,45 +100,10 @@ export const XTERM_PERFORMANCE_CONFIG = {
     largeBufferThreshold: 1024 * 1024, // 1MB
   },
 
-  // Keyword highlighting optimizations
+  // Output-pressure quiet window shared by optional terminal side work.
   highlighting: {
-    // Debounce time for viewport scanning (ms)
-    // Higher values = better scrolling performance, but slower highlight "catch up"
-    debounceMs: 100,
-    // Minimum interval between immediate (rAF) refreshes in ms.
-    // Prevents heavy output (e.g. tail -f) from refreshing every frame.
-    immediateMinIntervalMs: 16,
-    // Number of unique line scan results to keep cached.
-    cacheEntries: 1200,
-    // Retain matched-line markers across nearby scrollback without allowing a
-    // broad rule to register unbounded xterm trim listeners.
-    persistentDecorationViewports: 20,
-    minPersistentDecorationLines: 200,
-    maxPersistentDecorationLines: 1200,
-    // Keep decorations for lines just outside the viewport so small scrolls
-    // don't constantly dispose/recreate them. Scales with current terminal rows.
-    overscanViewportRatio: 2.0,
-    // Dirty scan padding around cursor/viewport deltas for write bursts.
-    dirtyScanPadding: 2,
-    // Dynamic dirty-line cap scales with viewport rows.
-    dirtyLinesPerViewportRow: 6,
-    // Clamp the dynamic dirty-line cap to avoid extremes.
-    minDirtyLines: 200,
-    maxDirtyLines: 1200,
-    // Max processing time per refresh pass when handling dirty lines (ms).
-    writeRefreshBudgetMs: 4,
-    // Process dirty contiguous lines in chunks so budget checks can preempt.
-    dirtySegmentChunkSize: 48,
-    // Keep highlighting deprioritized briefly after a large output burst.
-    // Longer quiet window lets xterm paint bulk dumps (cat/yes/tail) without
-    // competing decoration scans every few hundred ms.
+    // Let large output settle before deferred work catches up.
     largeOutputQuietMs: 480,
-    // Give interactive typing priority over keyword highlight catch-up.
-    inputQuietMs: 180,
-    // Extra debounce while large-output / long-line pressure is active.
-    largeOutputDebounceMs: 280,
-    // Floor for immediate refresh interval under output pressure.
-    largeOutputImmediateMinIntervalMs: 120,
   },
 };
 

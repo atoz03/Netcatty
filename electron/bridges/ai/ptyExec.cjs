@@ -18,6 +18,7 @@ const {
   subscribeToPtyData,
   hasExpectedPromptSuffix,
   resolveEffectiveShellKind,
+  buildPendingInputClearPrefix,
   buildWrappedCommand,
   findEndMarker,
   normalizePtyOutput,
@@ -581,7 +582,8 @@ function startPtyJob(ptyStream, command, options) {
     }
   }
 
-  ptyStream.write(buildWrappedCommand(command, resolvedShellKind, marker));
+  const wrapped = buildWrappedCommand(command, resolvedShellKind, marker);
+  ptyStream.write(`${buildPendingInputClearPrefix(resolvedShellKind)}${wrapped}`);
 
   return {
     marker,

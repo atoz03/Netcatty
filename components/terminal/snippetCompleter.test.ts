@@ -42,6 +42,57 @@ test("filters by host targets when set", () => {
   assert.deepEqual(getSnippetSuggestions("restart", [scoped, global], { hostId: "host-2" }).map((o) => o.snippet?.id).sort(), ["g", "t"]);
 });
 
+test("filters dynamic group targets using nested host group membership", () => {
+  const scoped = snip({
+    id: "grouped",
+    label: "deploy-group",
+    targetGroups: ["Production"],
+  });
+  const mixed = snip({
+    id: "mixed",
+    label: "deploy-mixed",
+    targets: ["host-explicit"],
+    targetGroups: ["Staging"],
+  });
+
+  assert.deepEqual(
+    getSnippetSuggestions("deploy", [scoped, mixed], {
+      hostId: "host-prod",
+      hostGroup: "Production/Web",
+    }).map((item) => item.snippet?.id),
+    ["grouped"],
+  );
+  assert.deepEqual(
+    getSnippetSuggestions("deploy", [scoped, mixed], {
+      hostId: "host-staging",
+      hostGroup: "Staging/API",
+    }).map((item) => item.snippet?.id),
+    ["mixed"],
+  );
+  assert.deepEqual(
+    getSnippetSuggestions("deploy", [scoped, mixed], {
+      hostId: "host-dev",
+      hostGroup: "Development",
+    }),
+    [],
+  );
+});
+
+test("does not surface a snippet with an explicitly empty group scope", () => {
+  const disabled = snip({
+    id: "disabled-group-scope",
+    label: "deploy-disabled",
+    targetGroups: [],
+  });
+  assert.deepEqual(
+    getSnippetSuggestions("deploy", [disabled], {
+      hostId: "host-prod",
+      hostGroup: "Production",
+    }),
+    [],
+  );
+});
+
 test("no match returns empty; empty input returns empty", () => {
   assert.deepEqual(getSnippetSuggestions("zzz", [snip({})], {}), []);
   assert.deepEqual(getSnippetSuggestions("", [snip({})], {}), []);

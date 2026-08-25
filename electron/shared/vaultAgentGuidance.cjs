@@ -23,7 +23,8 @@ const VAULT_SCRIPTS_GUIDANCE =
   + "Call scripts_reference before authoring scripts. scripts_run with wait=true blocks until completion; "
   + "use scripts_runs_list / scripts_run_stop / scripts_run_pause / scripts_run_resume for lifecycle. "
   + "Triggers: manual, onConnect (runs after connect), onOutput (regex triggerPattern). "
-  + "Host linking: scripts_targets_set; per-host connect order: host_connect_scripts_list / host_connect_scripts_set.";
+  + "Host/group linking: scripts_targets_set supports targets and dynamic targetGroups; "
+  + "per-host connect order: host_connect_scripts_list / host_connect_scripts_set.";
 
 function appendVaultAgentGuidance(description) {
   const base = typeof description === "string" ? description.trim() : "";

@@ -75,7 +75,11 @@ test("PR validation runs once per commit and includes a production build", () =>
   assert.match(testWorkflow, /sudo apt-get install -y fish xvfb/);
   assert.match(
     testWorkflow,
-    /- name: Test terminal decoration performance\s*\n\s*env:\s*\n\s*NETCATTY_TERMINAL_PERF_SHOW_WINDOW: "1"\s*\n\s*# GitHub-hosted runners do not configure Electron's SUID sandbox helper\.\s*\n\s*run: xvfb-run -a \.\/node_modules\/\.bin\/electron --no-sandbox scripts\/xterm-decoration-performance\.live\.test\.cjs/,
+    /- name: Test terminal keyword highlight performance\s*\n\s*env:\s*\n\s*NETCATTY_TERMINAL_PERF_SHOW_WINDOW: "1"\s*\n\s*# GitHub-hosted runners do not configure Electron's SUID sandbox helper\.\s*\n\s*run: xvfb-run -a \.\/node_modules\/\.bin\/electron --no-sandbox scripts\/xterm-keyword-highlight-performance\.live\.test\.cjs/,
+  );
+  assert.match(
+    buildWorkflow,
+    /- name: Test macOS Option column selection\s*\n\s*if: matrix\.name == 'macos'\s*\n\s*run: npm run test:xterm-macos-selection/,
   );
   assert.match(testWorkflow, /- name: Build\s*\n\s*run: npm run build/);
   assert.doesNotMatch(testWorkflow, /\n  mosh-windows-conpty:/);
@@ -111,6 +115,8 @@ test("package validation avoids duplicate branch runs and scopes PR builds", () 
     "scripts/afterPackMacUuid.cjs",
     "scripts/beforePackCursorSdk.cjs",
     "scripts/nodePtyConptyPatch.cjs",
+    "scripts/patch-xterm-macos-column-selection.cjs",
+    "scripts/xterm-macos-column-selection.live.test.cjs",
     "scripts/linux/**",
     "skills/**",
   ]) {

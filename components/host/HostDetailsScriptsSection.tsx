@@ -1,10 +1,11 @@
-import { Globe, Link2, Play, Trash2 } from 'lucide-react';
+import { FolderTree, Globe, Link2, Play, Trash2 } from 'lucide-react';
 import React, { useCallback, useMemo, useState, type DragEvent } from 'react';
 import type { Host, Snippet } from '@/domain/models';
 import {
   appendHostConnectScript,
   getEditableHostConnectScriptIds,
   getGlobalConnectScripts,
+  getGroupConnectScriptsForHost,
   removeHostConnectScript,
   reorderHostConnectScript,
 } from '@/domain/hostConnectScripts.ts';
@@ -63,6 +64,16 @@ export const HostDetailsScriptsSection: React.FC<HostDetailsScriptsSectionProps>
     () => getEditableHostConnectScriptIds(host, snippets),
     [host, snippets],
   );
+  const groupScripts = useMemo(
+    () => getGroupConnectScriptsForHost(host, snippets).filter(
+      (script) => !script.id || !queueIds.includes(script.id),
+    ),
+    [host, queueIds, snippets],
+  );
+  const groupScriptIds = useMemo(
+    () => new Set(groupScripts.map((script) => script.id)),
+    [groupScripts],
+  );
   const queuedScripts = useMemo(
     () => queueIds
       .map((id) => scriptById(snippets, id))
@@ -73,10 +84,11 @@ export const HostDetailsScriptsSection: React.FC<HostDetailsScriptsSectionProps>
     () => scripts.filter((script) => {
       if (!script.id) return false;
       if (script.targetsAllHosts) return false;
+      if (groupScriptIds.has(script.id)) return false;
       if (queueIds.includes(script.id)) return false;
       return true;
     }),
-    [queueIds, scripts],
+    [groupScriptIds, queueIds, scripts],
   );
   const linkOptions = useMemo(
     () => linkableScripts.map((script) => ({
@@ -163,6 +175,41 @@ export const HostDetailsScriptsSection: React.FC<HostDetailsScriptsSectionProps>
                   <div className="min-w-0 flex-1">
                     <div className="text-sm font-medium truncate">{script.label || t('scripts.running.unnamed')}</div>
                     <div className="text-[10px] text-muted-foreground truncate">{triggerLabel(script, t)}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {groupScripts.length > 0 ? (
+          <div className="space-y-2">
+            <div className="flex items-center gap-1.5">
+              <FolderTree size={12} className="text-muted-foreground shrink-0" />
+              <label className="text-xs text-muted-foreground">
+                {t('hostDetails.automation.groupScripts')}
+              </label>
+            </div>
+            <p className="text-[10px] text-muted-foreground leading-relaxed">
+              {t('hostDetails.automation.groupScriptsHint')}
+            </p>
+            <div className="space-y-1.5">
+              {groupScripts.map((script) => (
+                <div
+                  key={script.id}
+                  className="flex items-center gap-2.5 px-2.5 py-2 rounded-md border border-border/50 bg-primary/5"
+                >
+                  <VaultEntityIcon
+                    className={cn(vaultEntityIconSmClass, vaultAutomationScriptIconClass)}
+                    icon={<Play size={14} />}
+                  />
+                  <div className="min-w-0 flex-1">
+                    <div className="text-sm font-medium truncate">
+                      {script.label || t('scripts.running.unnamed')}
+                    </div>
+                    <div className="text-[10px] text-muted-foreground truncate">
+                      {script.targetGroups?.join(', ')}
+                    </div>
                   </div>
                 </div>
               ))}

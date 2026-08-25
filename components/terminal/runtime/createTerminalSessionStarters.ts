@@ -51,6 +51,10 @@ import {
   hasUsableProxyConfig,
   resolveProxyConfigAuth,
 } from "../../../domain/proxyProfiles";
+import {
+  advanceMonotonicConnectionProgress,
+  resolveHopConnectionProgress,
+} from "../connectionProgress";
 import { hasConnectionPassedTcpDial } from "../connectionTimeouts";
 import { resolveHostSshConnectionTimeouts } from "../../../domain/sshConnectionTimeouts";
 import { isPluginHostProtocol, sanitizePluginConnection } from "../../../domain/pluginConnection";
@@ -540,8 +544,8 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         }
 
         ctx.setProgressLogs((prev) => [...prev, logLine]);
-        const hopProgress = (hop / total) * 80 + 10;
-        ctx.setProgressValue(Math.min(95, hopProgress));
+        const hopProgress = resolveHopConnectionProgress(hop, total);
+        ctx.setProgressValue((prev) => advanceMonotonicConnectionProgress(prev, hopProgress));
       });
       if (unsub) unsubscribeChainProgress = unsub;
     }
@@ -1133,10 +1137,9 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       // handshake uses an ephemeral SSH PTY first; writing too early lands
       // input on that PTY and is lost on the swap (issue #2199).
       //
-      // Do not gate status=connected on ready: interactive password/OTP
-      // prompts during the SSH handshake need the overlay dismissed so the
-      // user can type into the terminal. Scripts wait on moshShellReady in
-      // Terminal.tsx instead.
+      // Keep the progress overlay until mosh-client is ready. The attachment
+      // path still dismisses it early for an interactive password/OTP prompt
+      // so the user can type into the terminal.
       //
       // Subscribe BEFORE startMoshSession: a fast passwordless handshake can
       // emit ready before the await returns, and the event is not replayed.
@@ -1152,6 +1155,8 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       const runMoshStartup = () => {
         disposeMoshReady?.();
         disposeMoshReady = undefined;
+        ctx.setIsConnectionAwaitingUserInput?.(false);
+        if (!ctx.hasConnectedRef.current) ctx.updateStatus("connected");
         cancelPendingStartupCommand = scheduleStartupCommand(ctx, term, attachedSessionId, () => {
           cancelPendingStartupCommand = undefined;
         });
@@ -1222,6 +1227,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         // hibernate detaches exit listeners without closing the session and
         // would otherwise cancel a still-pending startup command.
         onExit: cleanupMoshStartupWait,
+        deferConnectionDuringMoshHandshake: Boolean(ctx.terminalBackend.onMoshSessionReady),
         sudoAutofillPassword: resolveSavedSudoAutofillPassword(),
         sudoAutofillCandidates: resolveSudoAutofillCandidates(),
       })) {
@@ -1797,7 +1803,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         { replayBacklog: true },
       );
 
-      ctx.disposeExitRef.current = ctx.terminalBackend.onSessionExit(id, (evt) => {
+      ctx.disposeExitRef.current = ctx.terminalBackend.onSessionExit(id, async (evt) => {
         ctx.updateStatus("disconnected");
         const exitMessage = `\r\n[session closed${evt?.exitCode !== undefined ? ` (code ${evt.exitCode})` : ""}]`;
         writeTerminalLine(ctx, term, exitMessage);
@@ -1810,6 +1816,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
 
         if (ctx.onTerminalDataCapture && ctx.serializeAddonRef.current) {
           try {
+            await ctx.prepareKeywordHighlightSerialization?.();
             const terminalData = ctx.serializeAddonRef.current.serialize();
             logger.info("[Terminal] Serialized terminal data", {
               sessionId: ctx.sessionId,

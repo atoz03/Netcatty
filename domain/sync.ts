@@ -313,6 +313,9 @@ export interface SyncPayload {
     uiFontFamilyId?: string;
     uiLanguage?: string;
     customCSS?: string;
+    noteFontFamily?: string;
+    noteFontSize?: number;
+    noteCodeFontSize?: number;
     // Terminal
     terminalTheme?: string;
     followAppTerminalTheme?: boolean;
@@ -369,9 +372,11 @@ export interface SyncPayload {
       defaultAgentId?: string;
       commandBlocklist?: string[];
       commandTimeout?: number;
+      responseIdleTimeout?: number;
       maxIterations?: number;
       agentModelMap?: Record<string, string>;
       agentProviderMap?: Record<string, string>;
+      agentThinkingMap?: Record<string, string>;
       webSearchConfig?: Record<string, unknown> | null;
       quickMessages?: Array<Record<string, unknown>>;
       showTerminalSelectionAction?: boolean;
@@ -703,6 +708,8 @@ export const SYNC_STORAGE_KEYS = {
   DEVICE_ID: 'netcatty_device_id_v1',
   DEVICE_NAME: 'netcatty_device_name_v1',
   SYNC_CONFIG: 'netcatty_sync_config_v2',
+  /** Auto-sync prefs (autoSync / interval / syncStrategy); kept separate from version stamps. */
+  SYNC_PREFERENCES: 'netcatty_sync_preferences_v1',
   PROVIDER_GITHUB: 'netcatty_provider_github_v1',
   PROVIDER_GOOGLE: 'netcatty_provider_google_v1',
   PROVIDER_ONEDRIVE: 'netcatty_provider_onedrive_v1',

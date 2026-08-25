@@ -84,8 +84,14 @@ function buildModeRestores(dir, names, removeIndices, modes) {
  * @param {(data: Buffer) => void} opts.onData
  *   Called with raw bytes during normal (non-ZMODEM) operation.
  *   The caller is responsible for charset-aware decoding (UTF-8, iconv, etc.).
- * @param {(buf: Buffer) => void} opts.writeToRemote
+ * @param {(buf: Buffer) => boolean | void} opts.writeToRemote
  *   Write raw bytes back to the remote side (PTY / SSH stream / socket).
+ *   Prefer returning the underlying stream.write() boolean so uploads can
+ *   honor backpressure.
+ * @param {((opts?: { signal?: AbortSignal }) => Promise<void> | void)} [opts.waitForTransportDrain]
+ *   Optional. When writeToRemote returns false, the upload loop awaits this
+ *   before sending more file data (typically waitForWritableDrain(stream)).
+ *   Callers should forward `opts.signal` so cancel can abort a blocked drain.
  * @param {() => import('electron').WebContents | null} opts.getWebContents
  *   Returns the Electron WebContents for sending progress IPC events.
  * @param {string} [opts.label]
@@ -106,6 +112,7 @@ function createZmodemSentry(opts) {
   let currentZSession = null;
   let _needsDrain = false;
   let _sawUploadBackpressure = false;
+  let transferAbortController = null;
   const pendingEchoes = [];
   let pendingTerminalSuppression = null;
   let cancelInterruptTimer = null;
@@ -422,7 +429,15 @@ function createZmodemSentry(opts) {
       });
 
       // Provide a drain helper so the upload loop can pause when the
-      // underlying transport's write buffer is full.
+      // underlying transport's write buffer is full. Prefer a real stream
+      // drain (waitForTransportDrain) so large rz uploads do not flood SSH
+      // and drop the session before the remote has the full file (#2967).
+      const onUploadTimeout = () => {
+        ignoreDetectionUntil = Date.now() + 1000;
+        cooldownUntil = Date.now() + COOLDOWN_MS;
+      };
+      transferAbortController = new AbortController();
+      const transferSignal = transferAbortController.signal;
       const transferOpts = {
         ...opts,
         getDragDropUpload: () => dragDropUpload,
@@ -432,18 +447,20 @@ function createZmodemSentry(opts) {
         resetUploadBackpressure: () => {
           _sawUploadBackpressure = false;
         },
-        onUploadTimeout: () => {
-          ignoreDetectionUntil = Date.now() + 1000;
-          cooldownUntil = Date.now() + COOLDOWN_MS;
-        },
-        waitForDrain: () => {
-          if (!_needsDrain) return Promise.resolve();
-          _needsDrain = false;
-          // Yield to the event loop so Node can flush buffered writes to
-          // the kernel.  Using setImmediate (not setTimeout) avoids any
-          // fixed delay — we resume as soon as the I/O phase completes.
-          return new Promise((resolve) => setImmediate(resolve));
-        },
+        onUploadTimeout,
+        waitForDrain: createZmodemUploadDrainWaiter({
+          getNeedsDrain: () => _needsDrain,
+          clearNeedsDrain: () => {
+            _needsDrain = false;
+          },
+          signal: transferSignal,
+          waitForTransportDrain: typeof opts.waitForTransportDrain === "function"
+            ? (drainOpts) => opts.waitForTransportDrain(drainOpts)
+            : undefined,
+          // Drain timeouts bypass waitForUploadHandshake; recover the same way.
+          onUploadTimeout,
+          writeToRemote: opts.writeToRemote,
+        }),
       };
       handleTransfer(zsession, transferType, transferOpts)
         .then(() => {
@@ -454,6 +471,8 @@ function createZmodemSentry(opts) {
         })
         .catch((err) => {
           if (currentZSession !== zsession) return;
+          // cancel() already reported Transfer cancelled and cleared currentZSession.
+          if (isZmodemCancelledError(err)) return;
           console.error(`[ZMODEM][${label}] Transfer error:`, err.message || err);
           try { zsession.abort(); } catch { /* ignore */ }
           safeSend(getWebContents(), "netcatty:zmodem:error", {
@@ -462,6 +481,9 @@ function createZmodemSentry(opts) {
           });
         })
         .finally(() => {
+          if (transferAbortController?.signal === transferSignal) {
+            transferAbortController = null;
+          }
           // Only clear state if this is still the active session
           if (currentZSession === zsession) {
             active = false;
@@ -554,6 +576,11 @@ function createZmodemSentry(opts) {
           try { writeToRemote(Buffer.from("\x03")); } catch { /* ignore */ }
         }, 150);
 
+        // If the upload loop is parked on SSH backpressure, wake it now.
+        // The ZMODEM session is already aborted and must not resume on a late
+        // drain event from the still-connected transport.
+        try { transferAbortController?.abort(); } catch { /* ignore */ }
+        transferAbortController = null;
         active = false;
         currentZSession = null;
         // Enter cooldown: discard incoming data briefly while the remote
@@ -585,6 +612,10 @@ function createZmodemSentry(opts) {
         currentZSession = null;
         cooldownUntil = Date.now() + COOLDOWN_MS;
         scheduleRemoteInterruptAfterCancel(transferRole);
+        // Unblock an SSH upload parked on transport drain so open file
+        // descriptors and drag-drop temporary files release promptly.
+        try { transferAbortController?.abort(); } catch { /* ignore */ }
+        transferAbortController = null;
         safeSend(getWebContents(), "netcatty:zmodem:error", {
           sessionId,
           error: "Transfer cancelled",
@@ -644,6 +675,10 @@ function createZmodemSentry(opts) {
 const UPLOAD_FILE_END_TIMEOUT_MS = 45000;
 const UPLOAD_BACKPRESSURE_FILE_END_TIMEOUT_MS = 120000;
 const UPLOAD_SESSION_CLOSE_TIMEOUT_MS = 15000;
+/** Max wait for a single transport drain after write() returned false. */
+const UPLOAD_DRAIN_TIMEOUT_MS = 60000;
+/** Upload read/send chunk size. */
+const UPLOAD_CHUNK_SIZE = 64 * 1024;
 
 function resolveTimeoutMs(value, fallback) {
   return Number.isFinite(value) && value >= 0 ? value : fallback;
@@ -670,6 +705,204 @@ function withTimeout(promise, ms, message = "ZMODEM handshake timeout") {
 
 function isZmodemTimeoutError(err) {
   return err && err.code === "NETCATTY_ZMODEM_TIMEOUT";
+}
+
+function isZmodemCancelledError(err) {
+  return err && err.code === "NETCATTY_ZMODEM_CANCELLED";
+}
+
+function createZmodemCancelledError() {
+  const err = new Error("Transfer cancelled");
+  err.code = "NETCATTY_ZMODEM_CANCELLED";
+  return err;
+}
+
+/**
+ * Wait until a Node writable stream reports it can accept more data.
+ * Used after stream.write() returns false so ZMODEM uploads do not flood
+ * the SSH/TCP buffer (issue #2967).
+ *
+ * Resolves immediately when `writableNeedDrain` is already false (drain may
+ * have fired between write(false) and this call). Rejects on close/end/error
+ * so a dead transport stops the upload loop instead of looking like a successful
+ * drain (wrappers that catch write failures and return true would otherwise keep
+ * scanning the file until a later handshake timeout). When timeoutMs is greater
+ * than zero, rejects after that long without writableLength progress; slow SSH
+ * links may take longer overall while a fully stalled peer stays bounded. When
+ * `signal` aborts (user cancel), rejects with NETCATTY_ZMODEM_CANCELLED so a
+ * blocked drain wait cannot retain the open upload file after cancel.
+ *
+ * @param {NodeJS.WritableStream | null | undefined} stream
+ * @param {{
+ *   timeoutMs?: number,
+ *   progressIntervalMs?: number,
+ *   getProgressValue?: () => unknown,
+ *   signal?: AbortSignal,
+ * }} [opts]
+ * @returns {Promise<void>}
+ */
+function waitForWritableDrain(stream, opts = {}) {
+  if (!stream || typeof stream.once !== "function") {
+    return new Promise((resolve) => setImmediate(resolve));
+  }
+  if (stream.writableNeedDrain === false) {
+    return Promise.resolve();
+  }
+
+  const timeoutMs = resolveTimeoutMs(opts.timeoutMs, UPLOAD_DRAIN_TIMEOUT_MS);
+  const signal = opts.signal;
+  if (signal?.aborted) {
+    return Promise.reject(createZmodemCancelledError());
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer = null;
+    const readProgressValue = typeof opts.getProgressValue === "function"
+      ? opts.getProgressValue
+      : () => Number.isFinite(stream.writableLength) ? Number(stream.writableLength) : null;
+    let lastProgressAt = Date.now();
+    let lastProgressValue = readProgressValue();
+    const onDrain = () => finish();
+    const onAbort = () => finish(createZmodemCancelledError());
+    const onTransportGone = (cause) => {
+      if (cause instanceof Error) {
+        finish(cause);
+        return;
+      }
+      const err = new Error("Transport closed during drain wait");
+      err.code = "NETCATTY_ZMODEM_TRANSPORT_CLOSED";
+      finish(err);
+    };
+    const finish = (err) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      try { stream.off("drain", onDrain); } catch { /* ignore */ }
+      try { stream.off("close", onTransportGone); } catch { /* ignore */ }
+      try { stream.off("end", onTransportGone); } catch { /* ignore */ }
+      try { stream.off("error", onTransportGone); } catch { /* ignore */ }
+      if (signal) {
+        try { signal.removeEventListener("abort", onAbort); } catch { /* ignore */ }
+      }
+      if (err) reject(err);
+      else resolve();
+    };
+
+    stream.once("drain", onDrain);
+    stream.once("close", onTransportGone);
+    stream.once("end", onTransportGone);
+    stream.once("error", onTransportGone);
+    if (signal) {
+      signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    const scheduleTimeoutCheck = () => {
+      if (timeoutMs <= 0 || settled) return;
+      const configuredInterval = Number(opts.progressIntervalMs);
+      const intervalMs = Number.isFinite(configuredInterval) && configuredInterval > 0
+        ? Math.min(configuredInterval, timeoutMs)
+        : timeoutMs;
+      const idleMs = Date.now() - lastProgressAt;
+      timer = setTimeout(() => {
+        const currentProgressValue = readProgressValue();
+        if (!Object.is(currentProgressValue, lastProgressValue)) {
+          lastProgressAt = Date.now();
+        }
+        lastProgressValue = currentProgressValue;
+        if (Date.now() - lastProgressAt < timeoutMs) {
+          scheduleTimeoutCheck();
+          return;
+        }
+        const err = new Error("Transport drain timeout");
+        err.code = "NETCATTY_ZMODEM_TIMEOUT";
+        finish(err);
+      }, Math.max(1, Math.min(intervalMs, timeoutMs - idleMs)));
+    };
+    scheduleTimeoutCheck();
+
+    // Drain may have cleared between write(false) and listener attach.
+    if (stream.writableNeedDrain === false) finish();
+  });
+}
+
+/**
+ * Build the upload-loop drain waiter used by createZmodemSentry.
+ * When the transport provides waitForTransportDrain, pause until that
+ * promise settles. Otherwise fall back to one event-loop yield.
+ *
+ * Transport-drain timeouts reject with NETCATTY_ZMODEM_TIMEOUT and never
+ * pass through waitForUploadHandshake, so apply the same onUploadTimeout +
+ * abortRemoteProcess recovery here before rethrowing (stuck rz after cancel).
+ * Transfer cancellation rejects with NETCATTY_ZMODEM_CANCELLED and must not
+ * run that timeout recovery (cancel already aborted the remote).
+ *
+ * @param {{
+ *   getNeedsDrain: () => boolean,
+ *   clearNeedsDrain: () => void,
+ *   waitForTransportDrain?: (opts?: { signal?: AbortSignal }) => Promise<void> | void,
+ *   signal?: AbortSignal,
+ *   onUploadTimeout?: () => void,
+ *   writeToRemote?: (data: any) => void,
+ * }} opts
+ * @returns {() => Promise<void>}
+ */
+function createZmodemUploadDrainWaiter(opts) {
+  return async function waitForDrain() {
+    if (!opts.getNeedsDrain()) return;
+
+    if (typeof opts.waitForTransportDrain === "function") {
+      try {
+        const drainOpts = opts.signal ? { signal: opts.signal } : undefined;
+        await racePromiseWithAbortSignal(
+          opts.waitForTransportDrain(drainOpts),
+          opts.signal,
+        );
+      } catch (err) {
+        if (isZmodemTimeoutError(err)) {
+          try { opts.onUploadTimeout?.(); } catch { /* ignore */ }
+          if (typeof opts.writeToRemote === "function") {
+            abortRemoteProcess(opts.writeToRemote);
+          }
+        }
+        throw err;
+      } finally {
+        opts.clearNeedsDrain();
+      }
+      return;
+    }
+
+    opts.clearNeedsDrain();
+    await new Promise((resolve) => setImmediate(resolve));
+  };
+}
+
+/**
+ * Resolve when `promise` settles, or reject with NETCATTY_ZMODEM_CANCELLED
+ * if `signal` aborts first. Used so cancel unblocks upload drain waits even
+ * when a transport helper ignores the AbortSignal.
+ *
+ * @param {Promise<void> | void} promise
+ * @param {AbortSignal | undefined} signal
+ * @returns {Promise<void>}
+ */
+function racePromiseWithAbortSignal(promise, signal) {
+  if (!signal) return Promise.resolve(promise);
+  if (signal.aborted) return Promise.reject(createZmodemCancelledError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(createZmodemCancelledError());
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (err) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(err);
+      },
+    );
+  });
 }
 
 /**
@@ -849,14 +1082,13 @@ async function handleUpload(zsession, opts) {
     }
 
     // Read and send in chunks
-    const CHUNK_SIZE = 64 * 1024; // Leave room for inbound ZMODEM control frames
     const fd = fs.openSync(filePath, "r");
-    const buf = Buffer.alloc(CHUNK_SIZE);
+    const buf = Buffer.alloc(UPLOAD_CHUNK_SIZE);
     let sent = 0;
 
     try {
       while (true) {
-        const bytesRead = fs.readSync(fd, buf, 0, CHUNK_SIZE);
+        const bytesRead = fs.readSync(fd, buf, 0, UPLOAD_CHUNK_SIZE);
         if (bytesRead === 0) break;
 
         // zmodem.js send() is synchronous and triggers writeToRemote via
@@ -1145,4 +1377,14 @@ function safeSend(contents, channel, data) {
   }
 }
 
-module.exports = { createZmodemSentry, buildUploadPlan, buildModeRestores, handleUpload, handleDownload };
+module.exports = {
+  createZmodemSentry,
+  buildUploadPlan,
+  buildModeRestores,
+  handleUpload,
+  handleDownload,
+  waitForWritableDrain,
+  createZmodemUploadDrainWaiter,
+  UPLOAD_CHUNK_SIZE,
+  UPLOAD_DRAIN_TIMEOUT_MS,
+};

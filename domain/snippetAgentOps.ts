@@ -8,6 +8,7 @@ import {
 import { isScriptSnippet } from './snippetScript.ts';
 import { getNextVaultOrder } from './vaultOrder.ts';
 import { isErrorResult } from '../lib/resultNarrowing.ts';
+import { normalizeGroupTargetPaths } from './hostGroupPathMutations.ts';
 
 export type SnippetAgentListItem = ReturnType<typeof serializeSnippetForAgentList>;
 export type SnippetAgentDetail = ReturnType<typeof serializeSnippetForAgentGet>;
@@ -23,6 +24,9 @@ export function serializeSnippetForAgentList(snippet: Snippet) {
     kind: snippet.kind ?? 'snippet',
     tags: snippet.tags ?? [],
     targets: snippet.targets ?? [],
+    // Preserve the distinction between a legacy unscoped script (missing) and
+    // an explicit empty group scope (disabled after its last group is deleted).
+    targetGroups: snippet.targetGroups,
     targetsAllHosts: snippet.targetsAllHosts ?? false,
     package: snippet.package,
     shortkey: snippet.shortkey,
@@ -56,6 +60,7 @@ export type SnippetAgentDraft = {
   kind?: unknown;
   tags?: unknown;
   targets?: unknown;
+  targetGroups?: unknown;
   targetsAllHosts?: unknown;
   package?: unknown;
   shortkey?: unknown;
@@ -194,10 +199,20 @@ export function buildSnippetFromAgentDraft(
 
   const targetsAllHosts = parseOptionalBoolean(draft.targetsAllHosts);
   let targets: string[] | undefined;
+  let targetGroups: string[] | undefined;
   if (!targetsAllHosts) {
     const targetsResult = parseTargets(draft.targets);
     if (isErrorResult(targetsResult)) return { ok: false, error: targetsResult.error };
     targets = targetsResult && targetsResult.length > 0 ? targetsResult : undefined;
+    const targetGroupsResult = parseStringArray(draft.targetGroups, 'targetGroups');
+    if (targetGroupsResult && !Array.isArray(targetGroupsResult)) {
+      return { ok: false, error: targetGroupsResult.error };
+    }
+    targetGroups = draft.targetGroups === undefined
+      ? undefined
+      : Array.isArray(targetGroupsResult)
+        ? normalizeGroupTargetPaths(targetGroupsResult)
+        : undefined;
   }
 
   const triggerPatternRaw = typeof draft.triggerPattern === 'string' ? draft.triggerPattern : undefined;
@@ -217,6 +232,7 @@ export function buildSnippetFromAgentDraft(
     kind,
     tags: tags && tags.length > 0 ? tags : undefined,
     targets: targetsAllHosts ? undefined : targets,
+    targetGroups: targetsAllHosts ? undefined : targetGroups,
     targetsAllHosts: targetsAllHosts || undefined,
     package: typeof draft.package === 'string' && draft.package.trim() ? draft.package.trim() : undefined,
     shortkey: typeof draft.shortkey === 'string' && draft.shortkey.trim() ? draft.shortkey.trim() : undefined,
@@ -284,20 +300,41 @@ export function applySnippetAgentPatch(
   const prevTargetIds = existing.targets ? [...existing.targets] : undefined;
 
   let targetsAllHosts = existing.targetsAllHosts;
-  if (patch.targets !== undefined && patch.targetsAllHosts === undefined) {
+  if (
+    (patch.targets !== undefined || patch.targetGroups !== undefined)
+    && patch.targetsAllHosts === undefined
+  ) {
     targetsAllHosts = false;
   } else if (patch.targetsAllHosts !== undefined) {
     targetsAllHosts = parseOptionalBoolean(patch.targetsAllHosts) ?? false;
   }
 
   let targets = existing.targets;
-  if (patch.targets !== undefined || patch.targetsAllHosts !== undefined) {
+  let targetGroups = existing.targetGroups;
+  if (
+    patch.targets !== undefined
+    || patch.targetGroups !== undefined
+    || patch.targetsAllHosts !== undefined
+  ) {
     if (targetsAllHosts) {
       targets = undefined;
+      targetGroups = undefined;
     } else {
       const targetsResult = parseTargets(patch.targets ?? existing.targets ?? []);
       if (isErrorResult(targetsResult)) return { ok: false, error: targetsResult.error };
       targets = targetsResult && targetsResult.length > 0 ? targetsResult : undefined;
+      const targetGroupsResult = parseStringArray(
+        patch.targetGroups ?? existing.targetGroups ?? [],
+        'targetGroups',
+      );
+      if (targetGroupsResult && !Array.isArray(targetGroupsResult)) {
+        return { ok: false, error: targetGroupsResult.error };
+      }
+      targetGroups = patch.targetGroups === undefined
+        ? existing.targetGroups
+        : Array.isArray(targetGroupsResult)
+          ? normalizeGroupTargetPaths(targetGroupsResult)
+          : undefined;
     }
   }
 
@@ -322,6 +359,7 @@ export function applySnippetAgentPatch(
     kind,
     tags: tags && tags.length > 0 ? tags : undefined,
     targets,
+    targetGroups,
     targetsAllHosts: targetsAllHosts || undefined,
     package: patch.package !== undefined
       ? (typeof patch.package === 'string' && patch.package.trim() ? patch.package.trim() : undefined)
@@ -450,7 +488,7 @@ export function summarizeConnectScriptsForHost(host: Host, snippets: Snippet[]) 
 
 export function applyScriptTargetsPatch(
   snippet: Snippet,
-  params: { targets?: unknown; targetsAllHosts?: unknown },
+  params: { targets?: unknown; targetGroups?: unknown; targetsAllHosts?: unknown },
 ): { ok: true; snippet: Snippet; prevTargetIds?: string[] } | { ok: false; error: string } {
   return applySnippetAgentPatch(snippet, params, { forceKind: 'script' });
 }

@@ -59,6 +59,14 @@ import {
 } from '../../domain/portForwardingAgentOps';
 import { deleteGroup, upsertGroup } from '../../domain/vaultGroupAgentOps';
 import { isErrorResult, isFailedResult } from '../../lib/resultNarrowing';
+import {
+  remapSnippetTargetGroupPaths,
+  removeSnippetTargetGroupPaths,
+} from '../../domain/hostGroupPathMutations';
+import type {
+  VaultGroupMutationResult,
+  VaultGroupMutationState,
+} from '../../domain/vaultGroupMutation';
 
 const SENSITIVE_HOST_KEYS = new Set([
   'password',
@@ -318,6 +326,7 @@ function snippetDraftFromParams(params: Record<string, unknown>) {
     kind: params.kind,
     tags: params.tags,
     targets: params.targets,
+    targetGroups: params.targetGroups,
     targetsAllHosts: params.targetsAllHosts,
     package: params.package,
     shortkey: params.shortkey,
@@ -424,6 +433,9 @@ export interface VaultAgentApiDeps {
   updatePortForwardingRules: (rules: PortForwardingRule[]) => void;
   updateManagedSources: (sources: ManagedSource[]) => void;
   updateHosts: (hosts: Host[]) => void;
+  commitVaultGroupMutation: (
+    mutate: (current: VaultGroupMutationState) => VaultGroupMutationResult,
+  ) => Promise<VaultGroupMutationResult | { ok: false; superseded: true }>;
   saveKeyPassphrase: (keyPath: string, passphrase: string) => Promise<void>;
   saveImportedKeyPassphrase?: (
     keyPath: string,
@@ -436,7 +448,9 @@ export interface VaultAgentApiDeps {
   }>;
   removeKeyPassphrases: (keyPaths: string[]) => Promise<void> | void;
   updateNotes: (notes: VaultNote[]) => boolean | void;
-  updateSnippets: (snippets: Snippet[]) => void;
+  updateSnippets: (
+    snippets: Snippet[] | ((current: Snippet[]) => Snippet[]),
+  ) => void;
   startTunnel: (
     rule: PortForwardingRule,
     host: Host,
@@ -1010,35 +1024,76 @@ export async function handleVaultAgentOp(
     }
     case 'group.create':
     case 'group.update': {
-      const result = upsertGroup({
-        groups: deps.getCustomGroups(),
-        configs: deps.getGroupConfigs(),
-        hosts: deps.getHosts(),
-        managedSources: deps.getManagedSources(),
-      }, params.path, params.defaults, deps.identities, deps.proxyProfiles, {
-        create: op === 'group.create',
-        newPath: params.newPath,
-      });
-      if (isFailedResult(result)) return result;
-      deps.updateCustomGroups(result.state.groups);
-      deps.updateGroupConfigs(result.state.configs);
-      deps.updateHosts(result.state.hosts);
-      deps.updateManagedSources(result.state.managedSources);
-      return { ok: true, group: sanitizeGroupConfigForAgent(result.config ?? { path: String(params.path) }) };
+      let committed: Awaited<ReturnType<VaultAgentApiDeps['commitVaultGroupMutation']>>;
+      let savedConfig: GroupConfig | undefined;
+      try {
+        committed = await deps.commitVaultGroupMutation((current) => {
+          const result = upsertGroup({
+            groups: current.groups,
+            configs: current.configs,
+            hosts: current.hosts,
+            managedSources: current.managedSources,
+          }, params.path, params.defaults, deps.identities, deps.proxyProfiles, {
+            create: op === 'group.create',
+            newPath: params.newPath,
+          });
+          if ('error' in result) return result;
+          savedConfig = result.config;
+          return {
+            ok: true,
+            state: {
+              ...result.state,
+              snippets: op === 'group.update' && result.config?.path
+                ? remapSnippetTargetGroupPaths(
+                    current.snippets,
+                    String(params.path),
+                    result.config.path,
+                  )
+                : current.snippets,
+            },
+          };
+        });
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+      if (!committed.ok) {
+        return 'superseded' in committed
+          ? { ok: false, error: 'The Vault changed while the group was being saved. Please retry.' }
+          : committed;
+      }
+      return { ok: true, group: sanitizeGroupConfigForAgent(savedConfig ?? { path: String(params.path) }) };
     }
     case 'group.delete': {
       const deleteHosts = parseOptionalBoolean(params.deleteHosts);
       if (params.deleteHosts !== undefined && deleteHosts === undefined) {
         return { ok: false, error: 'deleteHosts must be true or false.' };
       }
-      const result = deleteGroup({
-        groups: deps.getCustomGroups(), configs: deps.getGroupConfigs(), hosts: deps.getHosts(),
-        managedSources: deps.getManagedSources(),
-      }, params.path, deleteHosts ?? false);
-      if (isFailedResult(result)) return result;
-      deps.updateCustomGroups(result.state.groups);
-      deps.updateGroupConfigs(result.state.configs);
-      deps.updateHosts(result.state.hosts);
+      let committed: Awaited<ReturnType<VaultAgentApiDeps['commitVaultGroupMutation']>>;
+      try {
+        committed = await deps.commitVaultGroupMutation((current) => {
+          const result = deleteGroup({
+            groups: current.groups,
+            configs: current.configs,
+            hosts: current.hosts,
+            managedSources: current.managedSources,
+          }, params.path, deleteHosts ?? false);
+          if ('error' in result) return result;
+          return {
+            ok: true,
+            state: {
+              ...result.state,
+              snippets: removeSnippetTargetGroupPaths(current.snippets, [String(params.path)]),
+            },
+          };
+        });
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) };
+      }
+      if (!committed.ok) {
+        return 'superseded' in committed
+          ? { ok: false, error: 'The Vault changed while the group was being deleted. Please retry.' }
+          : committed;
+      }
       return { ok: true, path: String(params.path), deletedHosts: deleteHosts ?? false };
     }
     case 'snippets.list': {
@@ -1198,6 +1253,7 @@ export async function handleVaultAgentOp(
       if (!existing) return { ok: false, error: `Script "${scriptId}" was not found.` };
       const patched = applyScriptTargetsPatch(existing, {
         targets: params.targets,
+        targetGroups: params.targetGroups,
         targetsAllHosts: params.targetsAllHosts,
       });
       if (isFailedResult(patched)) return { ok: false, error: patched.error };

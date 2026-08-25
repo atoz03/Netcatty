@@ -1376,9 +1376,10 @@ test("startMosh defers startup commands until mosh-client is ready", async () =>
 
   await createTerminalSessionStarters(ctx as never).startMosh(term as never);
 
-  // Handshake output dismisses the overlay (connected) but must not send startup input yet.
+  // Ordinary handshake output must not dismiss the connection overlay before
+  // the interactive Mosh client is ready.
   dataCb?.("ssh login banner\r\n", { moshHandshake: true });
-  assert.equal(ctx.hasConnectedRef.current, true);
+  assert.equal(ctx.hasConnectedRef.current, false);
   assert.deepEqual(sent, []);
   assert.ok(readyCb, "expected onMoshSessionReady subscription");
 
@@ -1389,6 +1390,7 @@ test("startMosh defers startup commands until mosh-client is ready", async () =>
 
   readyCb?.({ sessionId: "mosh-session" });
   await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(ctx.hasConnectedRef.current, true);
   assert.ok(sent.some((chunk) => chunk.includes("echo from-snippet")));
 });
 

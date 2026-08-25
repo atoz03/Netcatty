@@ -17,8 +17,13 @@ type UseHostTreeInlineGroupActionsParams = {
   hosts: Host[];
   managedSources: ManagedSource[];
   onUpdateCustomGroups: (groups: string[]) => void;
-  onUpdateHosts: (hosts: Host[]) => void;
-  onUpdateManagedSources: (sources: ManagedSource[]) => void;
+  onCommitGroupPathChange: (
+    sourcePath: string,
+    nextPath: string,
+  ) => Promise<
+    | { ok: true }
+    | { ok: false; error?: string; superseded?: true }
+  >;
   selectedGroupPath: string | null;
   setSelectedGroupPath: (path: string | null) => void;
   ensurePathExpanded: (path: string) => void;
@@ -31,8 +36,7 @@ export function useHostTreeInlineGroupActions({
   hosts,
   managedSources,
   onUpdateCustomGroups,
-  onUpdateHosts,
-  onUpdateManagedSources,
+  onCommitGroupPathChange,
   selectedGroupPath,
   setSelectedGroupPath,
   ensurePathExpanded,
@@ -73,9 +77,9 @@ export function useHostTreeInlineGroupActions({
     hostTreeInlineGroupEditStore.clear();
   }, [customGroups, onUpdateCustomGroups]);
 
-  const commitInlineGroupRename = useCallback((rawName: string) => {
+  const commitInlineGroupRename = useCallback(async (rawName: string): Promise<boolean> => {
     const edit = hostTreeInlineGroupEditStore.getEdit();
-    if (!edit) return;
+    if (!edit) return false;
 
     const result = applyGroupPathRename({
       renameTargetPath: edit.groupPath,
@@ -88,32 +92,32 @@ export function useHostTreeInlineGroupActions({
     if (result.ok === false) {
       if (result.error === 'unchanged') {
         hostTreeInlineGroupEditStore.clear();
-        return;
+        return true;
       }
       if (result.error === 'required') {
         if (edit.isNew) {
           cancelInlineGroupEdit();
-          return;
+          return true;
         }
         toast.error(t('vault.groups.errors.required'));
-        return;
+        return false;
       }
       if (result.error === 'invalidChars') {
         toast.error(t('vault.groups.errors.invalidChars'));
-        return;
+        return false;
       }
       if (result.error === 'duplicatePath') {
         toast.error(t('vault.groups.errors.duplicatePath'));
-        return;
+        return false;
       }
-      return;
+      return false;
     }
 
-    if (result.updatedManagedSources.some((source, index) => source !== managedSources[index])) {
-      onUpdateManagedSources(result.updatedManagedSources);
+    const committed = await onCommitGroupPathChange(edit.groupPath, result.nextPath);
+    if (!committed.ok) {
+      toast.error(committed.error || t('common.error'));
+      return false;
     }
-    onUpdateCustomGroups(result.updatedGroups);
-    onUpdateHosts(result.updatedHosts);
 
     if (
       selectedGroupPath
@@ -127,14 +131,13 @@ export function useHostTreeInlineGroupActions({
     }
 
     hostTreeInlineGroupEditStore.clear();
+    return true;
   }, [
     cancelInlineGroupEdit,
     customGroups,
     hosts,
     managedSources,
-    onUpdateCustomGroups,
-    onUpdateHosts,
-    onUpdateManagedSources,
+    onCommitGroupPathChange,
     selectedGroupPath,
     setSelectedGroupPath,
     t,

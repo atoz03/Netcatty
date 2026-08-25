@@ -6,9 +6,13 @@ const { existsSync } = require("node:fs");
 const {
   isConfirmedShellKind,
   PROBE_OUTPUT_MARKER,
+  WINDOWS_NO_DEFAULT_SHELL_MARKER,
   classifyShellKindFromRemotePath,
   buildRemoteLoginShellProbeCommand,
+  buildRemoteWindowsLoginShellProbeCommand,
   parseRemoteLoginShellProbeOutput,
+  parseRemoteWindowsLoginShellProbeOutput,
+  isWindowsOpenSshRemote,
   createSshConnExecProbe,
   createSessionExecProbe,
   ensureSessionShellKind,
@@ -28,8 +32,100 @@ test("classifies remote login shell paths", () => {
   assert.equal(classifyShellKindFromRemotePath("/bin/zsh"), "posix");
   assert.equal(classifyShellKindFromRemotePath("/usr/bin/pwsh"), "powershell");
   assert.equal(classifyShellKindFromRemotePath("/bin/cmd.exe"), "cmd");
+  assert.equal(
+    classifyShellKindFromRemotePath(
+      "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    ),
+    "powershell",
+  );
+  assert.equal(
+    classifyShellKindFromRemotePath("C:\\Windows\\System32\\cmd.exe"),
+    "cmd",
+  );
   assert.equal(classifyShellKindFromRemotePath("/usr/bin/nu"), null);
   assert.equal(classifyShellKindFromRemotePath(""), null);
+});
+
+test("isWindowsOpenSshRemote matches OpenSSH_for_Windows banners", () => {
+  assert.equal(isWindowsOpenSshRemote("OpenSSH_for_Windows_9.5"), true);
+  assert.equal(isWindowsOpenSshRemote("SSH-2.0-OpenSSH_for_Windows_8.1"), true);
+  assert.equal(isWindowsOpenSshRemote("OpenSSH_9.6"), false);
+  assert.equal(isWindowsOpenSshRemote(""), false);
+  assert.equal(isWindowsOpenSshRemote(undefined), false);
+});
+
+test("Windows login-shell probe uses reg query for DefaultShell", () => {
+  const command = buildRemoteWindowsLoginShellProbeCommand();
+  assert.match(command, /reg query/i);
+  assert.match(command, /HKLM\\SOFTWARE\\OpenSSH/i);
+  assert.match(command, /DefaultShell/);
+  // Force cmd.exe so ERRORLEVEL works under powershell DefaultShell too.
+  assert.match(command, /cmd\.exe/i);
+  // Missing-value marker only after confirming the OpenSSH key is readable
+  // (`if not errorlevel 1`), not on every reg failure (access denied / missing
+  // key under a readable parent). Parent SOFTWARE readability must not imply
+  // OpenSSH absence — ACL is per-key.
+  assert.match(command, /if errorlevel 1/i);
+  assert.match(command, /if not errorlevel 1/i);
+  assert.doesNotMatch(command, /HKLM\\SOFTWARE(?!\\OpenSSH)/);
+  assert.match(command, new RegExp(WINDOWS_NO_DEFAULT_SHELL_MARKER));
+  // Missing DefaultShell diagnostics may still land on stderr; redirect keeps
+  // REG_SZ success lines visible when hosts split streams.
+  assert.match(command, /2>&1/);
+});
+
+test("parseRemoteWindowsLoginShellProbeOutput reads DefaultShell and missing-key default", () => {
+  assert.equal(
+    parseRemoteWindowsLoginShellProbeOutput(
+      "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\OpenSSH\r\n    DefaultShell    REG_SZ    C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\r\n",
+    ),
+    "powershell",
+  );
+  assert.equal(
+    parseRemoteWindowsLoginShellProbeOutput(
+      "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\OpenSSH\r\n    DefaultShell    REG_SZ    C:\\Windows\\System32\\cmd.exe\r\n",
+    ),
+    "cmd",
+  );
+  // Locale-independent marker from ERRORLEVEL (preferred path): OpenSSH key
+  // readable, DefaultShell value absent.
+  assert.equal(
+    parseRemoteWindowsLoginShellProbeOutput(
+      `错误: 系统找不到指定的注册表项或值。\r\n${WINDOWS_NO_DEFAULT_SHELL_MARKER}\r\n`,
+    ),
+    "cmd",
+  );
+  assert.equal(
+    parseRemoteWindowsLoginShellProbeOutput(
+      `${WINDOWS_NO_DEFAULT_SHELL_MARKER}\r\n`,
+    ),
+    "cmd",
+  );
+  // English diagnostic kept as fallback for older fixtures / probe output.
+  assert.equal(
+    parseRemoteWindowsLoginShellProbeOutput(
+      "ERROR: The system was unable to find the specified registry key or value.\r\n",
+    ),
+    "cmd",
+  );
+  // Localized text alone must not classify — that was the P2 hang risk.
+  assert.equal(
+    parseRemoteWindowsLoginShellProbeOutput("错误: 系统找不到指定的注册表项或值。\r\n"),
+    null,
+  );
+  // Access denied / policy blocks must stay unclassified (no missing-value
+  // marker). Treating them as cmd permanently pins the wrong wrapper on
+  // PowerShell DefaultShell hosts.
+  assert.equal(
+    parseRemoteWindowsLoginShellProbeOutput("ERROR: Access is denied.\r\n"),
+    null,
+  );
+  assert.equal(
+    parseRemoteWindowsLoginShellProbeOutput("错误: 拒绝访问。\r\n"),
+    null,
+  );
+  assert.equal(parseRemoteWindowsLoginShellProbeOutput(""), null);
+  assert.equal(parseRemoteWindowsLoginShellProbeOutput("reg: command not found\n"), null);
 });
 
 test("parseRemoteLoginShellProbeOutput reads classifiable probe output lines", () => {
@@ -255,13 +351,263 @@ test("ensureSessionShellKind uses a session-level exec probe when provided", asy
   assert.equal(probes, 1);
 });
 
-test("ensureSessionShellKind pins powershell login shells", async () => {
+test("ensureSessionShellKind soft-hints powershell login shells without pinning", async () => {
   const session = { protocol: "ssh" };
   await ensureSessionShellKind(session, {
     execProbe: async () => `${PROBE_OUTPUT_MARKER}/usr/bin/pwsh\n`,
   });
-  assert.equal(session.shellKind, "powershell");
+  assert.equal(session.shellKind, undefined);
   assert.equal(session._loginShellKind, "powershell");
+  assert.equal(session._shellKindProbeSettled, true);
+  assert.equal(
+    resolveEffectiveShellKind(session.shellKind, "", {
+      loginShellHint: session._loginShellKind,
+    }),
+    "powershell",
+  );
+  // Live cmd prompt overrides a PowerShell DefaultShell soft hint.
+  assert.equal(
+    resolveEffectiveShellKind(session.shellKind, "C:\\Users\\alice>", {
+      loginShellHint: session._loginShellKind,
+    }),
+    "cmd",
+  );
+  // Live POSIX prompt (WSL) overrides a PowerShell soft hint.
+  assert.equal(
+    resolveEffectiveShellKind(session.shellKind, "user@host:~$", {
+      loginShellHint: session._loginShellKind,
+    }),
+    "posix",
+  );
+});
+
+test("ensureSessionShellKind uses Windows DefaultShell probe for OpenSSH_for_Windows", async () => {
+  // Issue #2959: Unix `exec sh -c` probes never classify Windows OpenSSH, so AI
+  // fell through to a posix wrapper, hung, and Stop/Ctrl+C tore down the tab.
+  const probed = [];
+  const session = {
+    protocol: "ssh",
+    remoteSshVersion: "OpenSSH_for_Windows_9.5",
+  };
+  const kind = await ensureSessionShellKind(session, {
+    execProbe: async (command) => {
+      probed.push(command);
+      return (
+        "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\OpenSSH\r\n" +
+        "    DefaultShell    REG_SZ    C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\r\n"
+      );
+    },
+  });
+  assert.equal(kind, undefined);
+  assert.equal(session.shellKind, undefined);
+  assert.equal(session._loginShellKind, "powershell");
+  assert.equal(session._shellKindProbeSettled, true);
+  assert.equal(probed.length, 1);
+  assert.match(probed[0], /reg query/i);
+  assert.doesNotMatch(probed[0], /getent passwd/);
+  assert.equal(
+    resolveEffectiveShellKind(session.shellKind, "", {
+      loginShellHint: session._loginShellKind,
+    }),
+    "powershell",
+  );
+});
+
+test("ensureSessionShellKind soft-hints cmd when Windows OpenSSH has no DefaultShell value", async () => {
+  const session = {
+    protocol: "ssh",
+    remoteSshVersion: "OpenSSH_for_Windows_8.1",
+  };
+  const kind = await ensureSessionShellKind(session, {
+    execProbe: async () =>
+      `错误: 系统找不到指定的注册表项或值。\r\n${WINDOWS_NO_DEFAULT_SHELL_MARKER}\r\n`,
+  });
+  assert.equal(kind, undefined);
+  assert.equal(session.shellKind, undefined);
+  assert.equal(session._loginShellKind, "cmd");
+  assert.equal(session._shellKindProbeSettled, true);
+  assert.equal(
+    resolveEffectiveShellKind(session.shellKind, "", {
+      loginShellHint: session._loginShellKind,
+    }),
+    "cmd",
+  );
+  // Live PowerShell prompt overrides a cmd DefaultShell soft hint.
+  assert.equal(
+    resolveEffectiveShellKind(session.shellKind, "PS C:\\Users\\alice>", {
+      loginShellHint: session._loginShellKind,
+    }),
+    "powershell",
+  );
+});
+
+test("ensureSessionShellKind does not pin cmd when Windows reg probe is access-denied", async () => {
+  // Codex P2: access denied must not share the missing-value → cmd path.
+  let probes = 0;
+  const session = {
+    protocol: "ssh",
+    remoteSshVersion: "OpenSSH_for_Windows_9.5",
+  };
+  const kind = await ensureSessionShellKind(session, {
+    execProbe: async () => {
+      probes += 1;
+      // Live probe no longer echoes WINDOWS_NO_DEFAULT_SHELL_MARKER here.
+      return "ERROR: Access is denied.\r\n";
+    },
+  });
+  assert.equal(kind, undefined);
+  assert.equal(session.shellKind, undefined);
+  assert.equal(session._shellKindProbeSettled, true);
+  assert.equal(probes, 1);
+});
+
+test("ensureSessionShellKind settles Windows OpenSSH without pinning when reg probe is empty", async () => {
+  let probes = 0;
+  const session = {
+    protocol: "ssh",
+    remoteSshVersion: "OpenSSH_for_Windows_9.5",
+  };
+  const kind = await ensureSessionShellKind(session, {
+    execProbe: async () => {
+      probes += 1;
+      return "";
+    },
+  });
+  assert.equal(kind, undefined);
+  assert.equal(session.shellKind, undefined);
+  assert.equal(session._shellKindProbeSettled, true);
+  assert.equal(probes, 1);
+
+  // Settled: do not re-probe on the next AI exec.
+  await ensureSessionShellKind(session, {
+    execProbe: async () => {
+      probes += 1;
+      return "";
+    },
+  });
+  assert.equal(probes, 1);
+});
+
+test("ensureSessionShellKind retries Windows OpenSSH probe after null/timeout", async () => {
+  // Codex P1: timeout/channel failure must not settleWithoutKind — otherwise
+  // later AI execs permanently use the POSIX wrapper on Windows.
+  let probes = 0;
+  const session = {
+    protocol: "ssh",
+    remoteSshVersion: "OpenSSH_for_Windows_9.5",
+  };
+  const failThenSucceed = async () => {
+    probes += 1;
+    if (probes === 1) return null;
+    return (
+      "\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\OpenSSH\r\n" +
+      "    DefaultShell    REG_SZ    C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\r\n"
+    );
+  };
+
+  const first = await ensureSessionShellKind(session, {
+    execProbe: failThenSucceed,
+  });
+  assert.equal(first, undefined);
+  assert.equal(session.shellKind, undefined);
+  assert.equal(session._shellKindProbeSettled, undefined);
+  assert.equal(session._shellKindProbePromise, null);
+
+  const second = await ensureSessionShellKind(session, {
+    execProbe: failThenSucceed,
+  });
+  assert.equal(second, undefined);
+  assert.equal(session.shellKind, undefined);
+  assert.equal(session._loginShellKind, "powershell");
+  assert.equal(session._shellKindProbeSettled, true);
+  assert.equal(probes, 2);
+});
+
+test("ensureSessionShellKind falls back to Windows reg probe when Unix probe yields nothing", async () => {
+  const probed = [];
+  const session = { protocol: "ssh" };
+  const kind = await ensureSessionShellKind(session, {
+    execProbe: async (command) => {
+      probed.push(command);
+      if (/reg query/i.test(command)) {
+        return (
+          "HKEY_LOCAL_MACHINE\\SOFTWARE\\OpenSSH\n" +
+          "    DefaultShell    REG_SZ    C:\\Windows\\System32\\cmd.exe\n"
+        );
+      }
+      return "no marker here\n";
+    },
+  });
+  assert.equal(kind, undefined);
+  assert.equal(session.shellKind, undefined);
+  assert.equal(session._loginShellKind, "cmd");
+  assert.equal(session._shellKindProbeSettled, true);
+  assert.equal(probed.length, 2);
+  assert.match(probed[0], /getent passwd|exec sh -c/);
+  assert.match(probed[1], /reg query/i);
+});
+
+test("ensureSessionShellKind settles completed unclassifiable Windows fallback without re-probing", async () => {
+  // Codex P2: when remoteSshVersion is missing, Unix probe returns non-marker
+  // bytes, and Windows reg returns access-denied, settle so later AI execs do
+  // not re-run both probes forever. Null/timeout still retries.
+  let probes = 0;
+  const session = { protocol: "ssh" };
+  const kind = await ensureSessionShellKind(session, {
+    execProbe: async (command) => {
+      probes += 1;
+      if (/reg query/i.test(command)) {
+        return "ERROR: Access is denied.\r\n";
+      }
+      return "no marker here\n";
+    },
+  });
+  assert.equal(kind, undefined);
+  assert.equal(session.shellKind, undefined);
+  assert.equal(session._loginShellKind, undefined);
+  assert.equal(session._shellKindProbeSettled, true);
+  assert.equal(probes, 2);
+
+  await ensureSessionShellKind(session, {
+    execProbe: async () => {
+      probes += 1;
+      return "should not run\n";
+    },
+  });
+  assert.equal(probes, 2);
+});
+
+test("ensureSessionShellKind retries Windows fallback after null/timeout when banner missing", async () => {
+  let probes = 0;
+  const session = { protocol: "ssh" };
+  const first = await ensureSessionShellKind(session, {
+    execProbe: async (command) => {
+      probes += 1;
+      if (/reg query/i.test(command)) return null;
+      return "no marker here\n";
+    },
+  });
+  assert.equal(first, undefined);
+  assert.equal(session._shellKindProbeSettled, undefined);
+  assert.equal(session._shellKindProbePromise, null);
+  assert.equal(probes, 2);
+
+  const second = await ensureSessionShellKind(session, {
+    execProbe: async (command) => {
+      probes += 1;
+      if (/reg query/i.test(command)) {
+        return (
+          "HKEY_LOCAL_MACHINE\\SOFTWARE\\OpenSSH\n" +
+          "    DefaultShell    REG_SZ    C:\\Windows\\System32\\cmd.exe\n"
+        );
+      }
+      return "no marker here\n";
+    },
+  });
+  assert.equal(second, undefined);
+  assert.equal(session._loginShellKind, "cmd");
+  assert.equal(session._shellKindProbeSettled, true);
+  assert.equal(probes, 4);
 });
 
 test("ensureSessionShellKindForExec cancels when Stop fires during the probe", async () => {
@@ -373,6 +719,35 @@ test("createSshConnExecProbe returns stdout from conn.exec", async () => {
   const command = buildRemoteLoginShellProbeCommand();
   assert.equal(await probe(command, 1000), "/usr/bin/fish\n");
   assert.equal(seenCommand, command);
+});
+
+test("createSshConnExecProbe includes stderr so missing DefaultShell is classifiable", async () => {
+  // Codex P1: reg.exe writes the missing-value error only on stderr. Dropping
+  // it made Windows OpenSSH probes settle without a kind and hang on POSIX
+  // wrappers when the interactive prompt was unrecognized.
+  // Codex P2: the live probe also echoes WINDOWS_NO_DEFAULT_SHELL_MARKER via
+  // ERRORLEVEL so non-English hosts do not depend on localized stderr text.
+  const { EventEmitter } = require("node:events");
+  const conn = {
+    exec(_command, cb) {
+      const stream = new EventEmitter();
+      stream.stderr = new EventEmitter();
+      stream.close = () => {};
+      queueMicrotask(() => {
+        stream.stderr.emit(
+          "data",
+          Buffer.from("错误: 系统找不到指定的注册表项或值。\r\n"),
+        );
+        stream.emit("data", Buffer.from(`${WINDOWS_NO_DEFAULT_SHELL_MARKER}\r\n`));
+        stream.emit("close", 1);
+      });
+      cb(null, stream);
+    },
+  };
+  const probe = createSshConnExecProbe(conn);
+  const output = await probe(buildRemoteWindowsLoginShellProbeCommand(), 1000);
+  assert.match(output, new RegExp(WINDOWS_NO_DEFAULT_SHELL_MARKER));
+  assert.equal(parseRemoteWindowsLoginShellProbeOutput(output), "cmd");
 });
 
 test("createSshConnExecProbe closes a channel that arrives after timeout", async () => {

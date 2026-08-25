@@ -12,15 +12,18 @@ const {
   DEFAULT_FOREGROUND_PTY_CAPTURE_CHARS,
   resolveEffectiveShellKind,
   execViaChannel,
+  execViaRawPty,
 } = require("./ptyExec.cjs");
 const {
+  buildPendingInputClearPrefix,
   buildWrappedCommand,
 } = require("./ptyExecHelpers.cjs");
 
 class ShellBackedPty extends EventEmitter {
   write(data) {
     if (data === "\x03") return;
-    const result = spawnSync("sh", ["-c", String(data)], { encoding: "utf8" });
+    const script = String(data).replace(/^\x15\x0b/, "");
+    const result = spawnSync("sh", ["-c", script], { encoding: "utf8" });
     queueMicrotask(() => {
       this.emit("data", Buffer.from(result.stdout));
     });
@@ -73,7 +76,7 @@ test("foreground PTY capture preserves UTF-8 and markers split across chunks", a
       if (!marker) return;
       queueMicrotask(() => {
         const start = Buffer.from(`${marker}_S\n`);
-        const content = Buffer.from("中文回复", "utf8");
+        const content = Buffer.from("中文回夝", "utf8");
         const end = Buffer.from(`\n${marker}_E:0\n`);
         this.emit("data", start.subarray(0, 7));
         this.emit("data", start.subarray(7));
@@ -90,7 +93,7 @@ test("foreground PTY capture preserves UTF-8 and markers split across chunks", a
     timeoutMs: 1_000,
   });
   assert.equal(result.ok, true);
-  assert.equal(result.stdout, "中文回复");
+  assert.equal(result.stdout, "中文回夝");
 });
 
 test("foreground PTY timeout returns only a bounded tail", async () => {
@@ -166,6 +169,16 @@ test("uses PowerShell wrapping when a session with no confirmed shell sees a Pow
     resolveEffectiveShellKind(undefined, "PS C:\\Users\\alice>"),
     "powershell",
   );
+});
+
+test("uses cmd wrapping when a session with no confirmed shell sees a cmd.exe prompt", () => {
+  // Windows OpenSSH defaults to cmd.exe; without this override AI types a
+  // posix wrapper into cmd and hangs until Stop (issue #2959).
+  assert.equal(
+    resolveEffectiveShellKind(undefined, "C:\\Users\\alice>"),
+    "cmd",
+  );
+  assert.equal(resolveEffectiveShellKind("unknown", "C:\\>"), "cmd");
 });
 
 test("uses PowerShell wrapping when shellKind is 'unknown'", () => {
@@ -262,7 +275,7 @@ test("does not misclassify command output that happens to contain 'PS'", () => {
   assert.equal(resolveEffectiveShellKind(undefined, "ZIPS>"), "posix");
 });
 
-test("loginShellHint selects fish/posix without pinning confirmed shellKind", () => {
+test("loginShellHint selects fish/posix/powershell/cmd without pinning confirmed shellKind", () => {
   assert.equal(
     resolveEffectiveShellKind(undefined, "user@host:~$", { loginShellHint: "fish" }),
     "fish",
@@ -270,6 +283,14 @@ test("loginShellHint selects fish/posix without pinning confirmed shellKind", ()
   assert.equal(
     resolveEffectiveShellKind(undefined, "user@host:~$", { loginShellHint: "posix" }),
     "posix",
+  );
+  assert.equal(
+    resolveEffectiveShellKind(undefined, "", { loginShellHint: "powershell" }),
+    "powershell",
+  );
+  assert.equal(
+    resolveEffectiveShellKind(undefined, "", { loginShellHint: "cmd" }),
+    "cmd",
   );
   // Live PowerShell prompt still wins over a posix/fish login hint.
   assert.equal(
@@ -280,11 +301,77 @@ test("loginShellHint selects fish/posix without pinning confirmed shellKind", ()
     resolveEffectiveShellKind(undefined, "PS C:\\Users\\alice>", { loginShellHint: "fish" }),
     "powershell",
   );
+  // Live opposing Windows prompt wins over a Windows DefaultShell soft hint.
+  assert.equal(
+    resolveEffectiveShellKind(undefined, "C:\\Users\\alice>", { loginShellHint: "powershell" }),
+    "cmd",
+  );
+  assert.equal(
+    resolveEffectiveShellKind(undefined, "PS C:\\Users\\alice>", { loginShellHint: "cmd" }),
+    "powershell",
+  );
+  // Live POSIX prompt (e.g. WSL nested from Windows OpenSSH) overrides a
+  // PowerShell/cmd soft hint so AI does not type a Windows wrapper into bash.
+  assert.equal(
+    resolveEffectiveShellKind(undefined, "user@host:~$", { loginShellHint: "powershell" }),
+    "posix",
+  );
+  assert.equal(
+    resolveEffectiveShellKind(undefined, "alice@wsl:/mnt/c$", { loginShellHint: "cmd" }),
+    "posix",
+  );
   // Confirmed shellKind is never overridden by a login hint.
   assert.equal(
     resolveEffectiveShellKind("posix", "user@host:~$", { loginShellHint: "fish" }),
     "posix",
   );
+});
+
+test("pending-input clear prefix covers interactive shells and skips raw devices", () => {
+  assert.equal(buildPendingInputClearPrefix("posix"), "\x15\x0b");
+  assert.equal(buildPendingInputClearPrefix("fish"), "\x15\x0b");
+  assert.equal(buildPendingInputClearPrefix("powershell"), "\x1b\x15\x0b");
+  assert.equal(buildPendingInputClearPrefix("cmd"), "\x1b");
+  assert.equal(buildPendingInputClearPrefix("raw"), "");
+});
+
+test("startPtyJob writes the clear prefix before the wrapper", async () => {
+  const writes = [];
+  class CapturePty extends EventEmitter {
+    write(data) {
+      writes.push(String(data));
+    }
+  }
+  const pty = new CapturePty();
+  const job = startPtyJob(pty, "echo hi", {
+    shellKind: "posix",
+    timeoutMs: 50,
+    expectedPrompt: "$ ",
+  });
+  assert.equal(writes.length, 1);
+  assert.ok(writes[0].startsWith("\x15\x0b"));
+  assert.match(writes[0], /__NCMCP_/);
+  job.cancel();
+  pty.emit("data", Buffer.from("$ "));
+  await job.resultPromise;
+});
+
+test("execViaRawPty does not prepend a line-clear before device commands", async () => {
+  const writes = [];
+  const port = new EventEmitter();
+  port.write = (data) => {
+    writes.push(String(data));
+  };
+  const abort = new AbortController();
+  const resultPromise = execViaRawPty(port, "show version", {
+    timeoutMs: 200,
+    idleMs: 20,
+    abortSignal: abort.signal,
+  });
+  assert.deepEqual(writes, ["show version\r"]);
+  abort.abort();
+  const result = await resultPromise;
+  assert.equal(result.ok, false);
 });
 
 test("cmd wrapper uses interactive cmd variable expansion", () => {

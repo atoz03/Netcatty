@@ -19,6 +19,7 @@ import {
   encodeKittyKeyEvent,
   setKittyKeyboardModeFlags,
 } from "./kittyKeyboardProtocol";
+import { SHIFT_ENTER_CSI_U_SEQUENCE } from "./shiftEnterText";
 
 test("routes normalized Kitty input to the target session only", () => {
   const received: KittyKeyboardBroadcastInput[] = [];
@@ -518,6 +519,59 @@ test("enhanced sources can fall back to reliable legacy data for plain targets",
       encodedKeys: new Set<string>(),
     }), { data, kittyEncoded: false, urgentInterrupt: false });
   }
+});
+
+test("Shift+Enter broadcast remaps from each target buffer when Kitty collapses the chord", () => {
+  const alternateOnly = createKittyKeyboardModeState();
+  setKittyKeyboardModeFlags(alternateOnly, 0b00100);
+  const shiftEnter = {
+    kind: "key" as const,
+    fallbackToLegacy: true,
+    event: {
+      type: "keydown" as const,
+      key: "Enter",
+      code: "Enter",
+      shiftKey: true,
+    },
+  };
+
+  assert.deepEqual(resolveKittyKeyboardBroadcastInput(shiftEnter, {
+    kittyProtocolEnabled: true,
+    kittyMode: alternateOnly,
+    applicationCursorMode: false,
+    encodedKeys: new Set<string>(),
+    alternateScreen: true,
+  }), {
+    data: SHIFT_ENTER_CSI_U_SEQUENCE,
+    kittyEncoded: true,
+    urgentInterrupt: false,
+  });
+
+  assert.deepEqual(resolveKittyKeyboardBroadcastInput(shiftEnter, {
+    kittyProtocolEnabled: true,
+    kittyMode: createKittyKeyboardModeState(),
+    applicationCursorMode: false,
+    encodedKeys: new Set<string>(),
+    alternateScreen: false,
+  }), {
+    data: "\n",
+    kittyEncoded: false,
+    urgentInterrupt: false,
+  });
+
+  const disambiguate = createKittyKeyboardModeState();
+  setKittyKeyboardModeFlags(disambiguate, 0b00001);
+  assert.deepEqual(resolveKittyKeyboardBroadcastInput(shiftEnter, {
+    kittyProtocolEnabled: true,
+    kittyMode: disambiguate,
+    applicationCursorMode: false,
+    encodedKeys: new Set<string>(),
+    alternateScreen: true,
+  }), {
+    data: SHIFT_ENTER_CSI_U_SEQUENCE,
+    kittyEncoded: true,
+    urgentInterrupt: false,
+  });
 });
 
 test("plain Kitty targets preserve modified non-ASCII keys without a legacy fallback", () => {

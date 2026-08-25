@@ -4,6 +4,7 @@ import { beforeEach, test } from "node:test";
 import {
   createWriteCoalescer,
   MAX_PENDING_WRITE_COALESCE_BYTES,
+  WRITE_COALESCE_BURST_MS,
   type WriteCoalescerOptions,
 } from "./writeCoalescer.ts";
 
@@ -84,6 +85,53 @@ test("microtask schedule mode flushes after the current turn without rAF", async
 
   await Promise.resolve();
   assert.deepEqual(writes, ["ab"]);
+  coalescer.dispose();
+});
+
+test("burst mode flushes idle output on the next microtask", async () => {
+  const writes: string[] = [];
+  const coalescer = createWriteCoalescer((data) => writes.push(data), {
+    resolveScheduleMode: () => "burst",
+  });
+
+  coalescer.push("a");
+  coalescer.push("b");
+  assert.equal(writes.length, 0);
+  await Promise.resolve();
+  assert.deepEqual(writes, ["ab"]);
+  coalescer.dispose();
+});
+
+test("burst mode merges writes that arrive inside the 16ms window", () => {
+  const writes: string[] = [];
+  let now = 1000;
+  const timeouts: Array<{ callback: () => void; ms: number }> = [];
+  const coalescer = createWriteCoalescer((data) => writes.push(data), {
+    resolveScheduleMode: () => "burst",
+    now: () => now,
+    burstWindowMs: WRITE_COALESCE_BURST_MS,
+    scheduleTimeout(callback, ms) {
+      timeouts.push({ callback, ms: ms ?? 0 });
+      return () => {
+        const index = timeouts.findIndex((entry) => entry.callback === callback);
+        if (index >= 0) timeouts.splice(index, 1);
+      };
+    },
+  });
+
+  coalescer.push("first");
+  coalescer.flushSync();
+  assert.deepEqual(writes, ["first"]);
+
+  now += 4;
+  coalescer.push("second");
+  coalescer.push("third");
+  assert.deepEqual(writes, ["first"]);
+  assert.equal(timeouts.length, 1);
+  assert.ok(timeouts[0]!.ms <= WRITE_COALESCE_BURST_MS);
+
+  timeouts[0]!.callback();
+  assert.deepEqual(writes, ["first", "secondthird"]);
   coalescer.dispose();
 });
 

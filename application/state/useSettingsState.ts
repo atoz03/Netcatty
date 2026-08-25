@@ -12,6 +12,11 @@ import {
 } from './terminalSettingsStore';
 import { SyncConfig, TerminalSettings, HotkeyScheme, CustomKeyBindings, DEFAULT_KEY_BINDINGS, KeyBinding, UILanguage, SessionLogFormat, normalizeTerminalSettings } from '../../domain/models';
 import {
+  normalizeAppLockTimeoutMinutes,
+  type AppLockSettings,
+  type AppLockTimeoutMinutes,
+} from '../../domain/appLock';
+import {
   DEFAULT_HTTP_NETWORK_PROXY,
   areHttpNetworkProxySettingsEqual,
   normalizeHttpNetworkProxySettings,
@@ -52,6 +57,7 @@ import {
   STORAGE_KEY_SESSION_LOGS_ENABLED,
   STORAGE_KEY_RESTORE_PREVIOUS_SESSION,
   STORAGE_KEY_RESTORE_TERMINAL_CWD,
+  STORAGE_KEY_STARTUP_LANDING,
   STORAGE_KEY_SESSION_LOGS_DIR,
   STORAGE_KEY_SESSION_LOGS_FORMAT,
   STORAGE_KEY_SESSION_LOGS_TIMESTAMPS_ENABLED,
@@ -146,6 +152,10 @@ import {
   type HostClickBehavior,
 } from './settingsStateDefaults';
 import { isHostClickBehavior } from '../../domain/hostClickBehavior';
+import {
+  resolveStartupLandingSetting,
+  type StartupLanding,
+} from '../../domain/startupLanding';
 import { resolveRestorePreviousSessionSetting, resolveRestoreTerminalCwdSetting } from './sessionRestoreSettings';
 import { sessionRestoreStorage } from './sessionRestoreStorage';
 import { useSettingsStorageSync } from './settingsStorageSync';
@@ -333,6 +343,13 @@ export const useSettingsState = (options: { enableSettingsSync?: boolean; enable
     const stored = readStoredString(STORAGE_KEY_UI_LANGUAGE);
     return resolveSupportedLocale(stored || DEFAULT_UI_LOCALE);
   });
+  const [appLockSettings, setAppLockSettingsState] = useState<AppLockSettings>({
+    enabled: false,
+    timeoutMinutes: 15,
+    systemUnlockEnabled: false,
+    systemUnlockAutoPromptEnabled: false,
+    passwordVerifier: null,
+  });
   const [terminalSettings, setTerminalSettingsState] = useState<TerminalSettings>(() => {
     const stored = localStorageAdapter.read<TerminalSettings>(STORAGE_KEY_TERM_SETTINGS);
     return normalizeTerminalSettings(stored);
@@ -430,6 +447,9 @@ export const useSettingsState = (options: { enableSettingsSync?: boolean; enable
   const [restoreTerminalCwd, setRestoreTerminalCwdState] = useState<boolean>(() => {
     const stored = localStorageAdapter.readBoolean(STORAGE_KEY_RESTORE_TERMINAL_CWD);
     return resolveRestoreTerminalCwdSetting(stored);
+  });
+  const [startupLanding, setStartupLandingState] = useState<StartupLanding>(() => {
+    return resolveStartupLandingSetting(readStoredString(STORAGE_KEY_STARTUP_LANDING));
   });
   const [sftpTransferConcurrency, setSftpTransferConcurrencyState] = useState<number>(() => {
     return resolveSftpTransferConcurrency(() =>
@@ -779,6 +799,53 @@ export const useSettingsState = (options: { enableSettingsSync?: boolean; enable
     notifySettingsChanged(STORAGE_KEY_WORKSPACE_FOCUS_STYLE, style);
   }, [notifySettingsChanged]);
 
+  const setAppLockTimeoutMinutes = useCallback((timeoutMinutes: AppLockTimeoutMinutes) => {
+    void netcattyBridge.get()?.setAppLockTimeoutMinutes?.(normalizeAppLockTimeoutMinutes(timeoutMinutes))
+      ?.then((next) => {
+        if (next) setAppLockSettingsState(next);
+      })
+      .catch(() => {});
+  }, []);
+
+  const requestAppLockEnable = useCallback(async () => {
+    const next = await netcattyBridge.get()?.requestAppLockEnable?.();
+    if (next && !('ok' in next)) {
+      setAppLockSettingsState(next);
+    }
+    return next ?? appLockSettings;
+  }, [appLockSettings]);
+
+  const requestAppLockDisable = useCallback(async (currentPassword: string) => {
+    const next = await netcattyBridge.get()?.requestAppLockDisable?.(currentPassword);
+    if (next && !('ok' in next)) {
+      setAppLockSettingsState(next);
+    }
+    return next ?? appLockSettings;
+  }, [appLockSettings]);
+
+  const requestAppLockPasswordChange = useCallback(async (input: {
+    currentPassword?: string;
+    nextPassword: string;
+  }) => {
+    const next = await netcattyBridge.get()?.requestAppLockPasswordChange?.(input);
+    if (next && !('ok' in next)) {
+      setAppLockSettingsState(next);
+    }
+    return next ?? appLockSettings;
+  }, [appLockSettings]);
+
+  const setAppLockSystemUnlockEnabled = useCallback(async (input: {
+    enabled: boolean;
+    currentPassword?: string;
+    autoPromptEnabled?: boolean;
+  }) => {
+    const next = await netcattyBridge.get()?.setAppLockSystemUnlockEnabled?.(input);
+    if (next && !('ok' in next)) {
+      setAppLockSettingsState(next);
+    }
+    return next ?? appLockSettings;
+  }, [appLockSettings]);
+
   const syncAppearanceFromStorage = useCallback((incoming?: AppearanceSyncEvent) => {
     const current = appearanceStateRef.current;
     const nextAppearance = resolveAppearanceSyncState(
@@ -854,6 +921,10 @@ export const useSettingsState = (options: { enableSettingsSync?: boolean; enable
     // Language
     const storedLang = readStoredString(STORAGE_KEY_UI_LANGUAGE);
     if (storedLang) setUiLanguage(storedLang as UILanguage);
+
+    void netcattyBridge.get()?.getAppLockSettings?.().then((next) => {
+      if (next) setAppLockSettingsState(next);
+    }).catch(() => {});
 
     // Terminal
     const storedTermTheme = readStoredString(STORAGE_KEY_TERM_THEME);
@@ -955,6 +1026,7 @@ export const useSettingsState = (options: { enableSettingsSync?: boolean; enable
     setRestorePreviousSessionState(resolveRestorePreviousSessionSetting(storedRestorePreviousSession));
     const storedRestoreTerminalCwd = localStorageAdapter.readBoolean(STORAGE_KEY_RESTORE_TERMINAL_CWD);
     setRestoreTerminalCwdState(resolveRestoreTerminalCwdSetting(storedRestoreTerminalCwd));
+    setStartupLandingState(resolveStartupLandingSetting(readStoredString(STORAGE_KEY_STARTUP_LANDING)));
 
     // Workspace focus style
     const storedFocusStyle = readStoredString(STORAGE_KEY_WORKSPACE_FOCUS_STYLE);
@@ -1123,6 +1195,7 @@ export const useSettingsState = (options: { enableSettingsSync?: boolean; enable
     setDisableTerminalFontZoomState,
     setRestorePreviousSessionState,
     setRestoreTerminalCwdState,
+    setStartupLandingState,
     setSftpTransferConcurrencyState,
     setSshTransportIdleTtlMsState,
   });
@@ -1145,6 +1218,25 @@ export const useSettingsState = (options: { enableSettingsSync?: boolean; enable
     };
   }, [enableSettingsSync]);
 
+  useEffect(() => {
+    const bridge = netcattyBridge.get();
+    let sawPushedSettings = false;
+
+    const unsubscribe = bridge?.onAppLockSettingsChanged?.((next) => {
+      sawPushedSettings = true;
+      setAppLockSettingsState(next);
+    }) ?? (() => {});
+
+    void bridge?.getAppLockSettings?.().then((next) => {
+      if (!next || sawPushedSettings) return;
+      setAppLockSettingsState(next);
+    }).catch(() => {});
+
+    return () => {
+      unsubscribe();
+    };
+  }, []);
+
   useSettingsStorageSync({
     enabled: enableSettingsSync,
     theme, lightUiThemeId, darkUiThemeId, accentMode, customAccent,
@@ -1153,7 +1245,7 @@ export const useSettingsState = (options: { enableSettingsSync?: boolean; enable
     terminalThemeId, followAppTerminalTheme, terminalFontFamilyId, terminalFontSize,
     sftpDoubleClickBehavior, sftpAutoSync, sftpShowHiddenFiles,
     sftpUseCompressedUpload, sftpSkipUnchanged, sftpAutoOpenSidebar, sftpFollowTerminalCwd, sftpDefaultViewMode,
-    showRecentHosts, hostClickBehavior, showOnlyUngroupedHostsInRoot, showSftpTab, showHostTreeSidebar, terminalSidePanelAutoOpen, terminalSidePanelAutoOpenTab, shellOnlyTabNumberShortcuts, showTabNumberBadges, disableTerminalFontZoom, restorePreviousSession, restoreTerminalCwd,
+    showRecentHosts, hostClickBehavior, showOnlyUngroupedHostsInRoot, showSftpTab, showHostTreeSidebar, terminalSidePanelAutoOpen, terminalSidePanelAutoOpenTab, shellOnlyTabNumberShortcuts, showTabNumberBadges, disableTerminalFontZoom, restorePreviousSession, restoreTerminalCwd, startupLanding,
     editorWordWrap, sessionLogsEnabled, sessionLogsDir, sessionLogsFormat, sessionLogsTimestampsEnabled, sshDebugLogsEnabled, sshDeepLinkEnabled, jmsDeepLinkEnabled, explorerContextMenuEnabled,
     globalHotkeyEnabled, autoUpdateEnabled, windowOpacity, appIconVariant,
     setTheme, setLightUiThemeId, setDarkUiThemeId, setAccentMode,
@@ -1163,7 +1255,7 @@ export const useSettingsState = (options: { enableSettingsSync?: boolean; enable
     setFollowAppTerminalThemeState, setTerminalFontFamilyId, setTerminalFontSize: applyIncomingTerminalFontSize,
     setSftpDoubleClickBehavior, setSftpAutoSync, setSftpShowHiddenFiles,
     setSftpUseCompressedUpload, setSftpSkipUnchanged, setSftpAutoOpenSidebar, setSftpFollowTerminalCwd, setSftpDefaultViewMode,
-    setShowRecentHostsState, setHostClickBehaviorState, setShowOnlyUngroupedHostsInRootState, setShowSftpTabState, setShowHostTreeSidebarState, setTerminalSidePanelAutoOpenState, setTerminalSidePanelAutoOpenTabState, setShellOnlyTabNumberShortcutsState, setShowTabNumberBadgesState, setDisableTerminalFontZoomState, setRestorePreviousSessionState, setRestoreTerminalCwdState,
+    setShowRecentHostsState, setHostClickBehaviorState, setShowOnlyUngroupedHostsInRootState, setShowSftpTabState, setShowHostTreeSidebarState, setTerminalSidePanelAutoOpenState, setTerminalSidePanelAutoOpenTabState, setShellOnlyTabNumberShortcutsState, setShowTabNumberBadgesState, setDisableTerminalFontZoomState, setRestorePreviousSessionState, setRestoreTerminalCwdState, setStartupLandingState,
     setEditorWordWrapState, setSessionLogsEnabled, setSessionLogsDir, setSessionLogsFormat, setSessionLogsTimestampsEnabled, setSshDebugLogsEnabled, setSshDeepLinkEnabledState: applyIncomingSshDeepLinkEnabled, setJmsDeepLinkEnabledState: applyIncomingJmsDeepLinkEnabled, setExplorerContextMenuEnabledState: applyIncomingExplorerContextMenuEnabled,
     setGlobalHotkeyEnabled, setWindowOpacity: applyIncomingWindowOpacity, setAppIconVariant, setAutoUpdateEnabled, setWorkspaceFocusStyleState,
     setSftpTransferConcurrencyState, setSshTransportIdleTtlMsState,
@@ -1358,6 +1450,13 @@ export const useSettingsState = (options: { enableSettingsSync?: boolean; enable
     localStorageAdapter.writeBoolean(STORAGE_KEY_RESTORE_TERMINAL_CWD, enabled);
     if (!persistMountedRef.current) return;
     notifySettingsChanged(STORAGE_KEY_RESTORE_TERMINAL_CWD, enabled);
+  }, [notifySettingsChanged]);
+
+  const setStartupLanding = useCallback((landing: StartupLanding) => {
+    setStartupLandingState(landing);
+    localStorageAdapter.writeString(STORAGE_KEY_STARTUP_LANDING, landing);
+    if (!persistMountedRef.current) return;
+    notifySettingsChanged(STORAGE_KEY_STARTUP_LANDING, landing);
   }, [notifySettingsChanged]);
 
   // Apply and persist custom CSS
@@ -1897,6 +1996,12 @@ export const useSettingsState = (options: { enableSettingsSync?: boolean; enable
     updateSyncConfig,
     uiLanguage,
     setUiLanguage,
+    appLockSettings,
+    setAppLockTimeoutMinutes,
+    requestAppLockEnable,
+    requestAppLockDisable,
+    requestAppLockPasswordChange,
+    setAppLockSystemUnlockEnabled,
     terminalThemeId,
     setTerminalThemeId,
     followAppTerminalTheme,
@@ -1964,6 +2069,8 @@ export const useSettingsState = (options: { enableSettingsSync?: boolean; enable
     setRestorePreviousSession,
     restoreTerminalCwd,
     setRestoreTerminalCwd,
+    startupLanding,
+    setStartupLanding,
     sftpTransferConcurrency,
     setSftpTransferConcurrency,
     sshTransportIdleTtlMs,

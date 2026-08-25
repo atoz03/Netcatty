@@ -1271,6 +1271,11 @@
         "optional": true,
         "description": "Optional JSON array of vault host IDs."
       },
+      "targetGroups": {
+        "type": "string",
+        "optional": true,
+        "description": "Optional JSON array of dynamic vault group paths."
+      },
       "targetsAllHosts": {
         "type": "string",
         "optional": true,
@@ -1363,6 +1368,11 @@
         "type": "string",
         "optional": true,
         "description": "Optional JSON array of vault host IDs."
+      },
+      "targetGroups": {
+        "type": "string",
+        "optional": true,
+        "description": "Optional JSON array of dynamic vault group paths."
       },
       "targetsAllHosts": {
         "type": "string",
@@ -1510,6 +1520,11 @@
         "optional": true,
         "description": "Optional JSON array of vault host IDs."
       },
+      "targetGroups": {
+        "type": "string",
+        "optional": true,
+        "description": "Optional JSON array of dynamic vault group paths."
+      },
       "targetsAllHosts": {
         "type": "string",
         "optional": true,
@@ -1577,6 +1592,11 @@
         "type": "string",
         "optional": true,
         "description": "Optional JSON array of vault host IDs."
+      },
+      "targetGroups": {
+        "type": "string",
+        "optional": true,
+        "description": "Optional JSON array of dynamic vault group paths."
       },
       "targetsAllHosts": {
         "type": "string",
@@ -1784,7 +1804,7 @@
     "toolName": "scripts_targets_set",
     "rpcMethod": "vault/scripts/targets/set",
     "localExecution": false,
-    "description": "Set host targets or targetsAllHosts for an automation script. onConnect scripts sync host connect queues.",
+    "description": "Set host IDs, dynamic group paths, or targetsAllHosts for an automation script. onConnect host IDs sync host connect queues.",
     "inputShape": {
       "scriptId": {
         "type": "string",
@@ -1795,6 +1815,11 @@
         "type": "string",
         "optional": true,
         "description": "JSON array of vault host IDs (omit when targetsAllHosts=true)."
+      },
+      "targetGroups": {
+        "type": "string",
+        "optional": true,
+        "description": "JSON array of dynamic vault group paths (omit when targetsAllHosts=true)."
       },
       "targetsAllHosts": {
         "type": "string",
@@ -1817,7 +1842,7 @@
     "toolName": "host_connect_scripts_list",
     "rpcMethod": "vault/host/connectScripts/list",
     "localExecution": false,
-    "description": "List resolved onConnect automation scripts for a host (global scripts first, then host queue).",
+    "description": "List resolved onConnect automation scripts for a host (global, dynamic group, then host queue).",
     "inputShape": {
       "hostId": {
         "type": "string",
@@ -1840,7 +1865,7 @@
     "toolName": "host_connect_scripts_set",
     "rpcMethod": "vault/host/connectScripts/set",
     "localExecution": false,
-    "description": "Set ordered onConnect script IDs for a host (host-specific queue; globals run separately). Sets per-host onConnect script queue order. Global targetsAllHosts scripts run first automatically.",
+    "description": "Set ordered onConnect script IDs for a host (host-specific queue; globals run separately). Sets per-host onConnect script queue order. Global and matching dynamic-group scripts run first automatically.",
     "inputShape": {
       "hostId": {
         "type": "string",

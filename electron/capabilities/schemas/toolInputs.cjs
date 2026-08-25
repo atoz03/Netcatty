@@ -217,6 +217,7 @@ const TOOL_INPUT_FIELDS = Object.freeze({
     kind: { type: "string", optional: true, description: "snippet (default) or script for nct automation." },
     tags: { type: "string", optional: true, description: "Optional JSON array of tag strings." },
     targets: { type: "string", optional: true, description: "Optional JSON array of vault host IDs." },
+    targetGroups: { type: "string", optional: true, description: "Optional JSON array of dynamic vault group paths." },
     targetsAllHosts: { type: "string", optional: true, description: "Set true to target all connectable hosts." },
     package: { type: "string", optional: true, description: "Optional vault package path." },
     shortkey: { type: "string", optional: true, description: "Optional keyboard shortcut." },
@@ -234,6 +235,7 @@ const TOOL_INPUT_FIELDS = Object.freeze({
     kind: { type: "string", optional: true, description: "snippet or script." },
     tags: { type: "string", optional: true, description: "Optional JSON array of tag strings." },
     targets: { type: "string", optional: true, description: "Optional JSON array of vault host IDs." },
+    targetGroups: { type: "string", optional: true, description: "Optional JSON array of dynamic vault group paths." },
     targetsAllHosts: { type: "string", optional: true, description: "Set true to target all connectable hosts." },
     package: { type: "string", optional: true, description: "Optional vault package path." },
     shortkey: { type: "string", optional: true, description: "Optional keyboard shortcut." },
@@ -256,6 +258,7 @@ const TOOL_INPUT_FIELDS = Object.freeze({
     content: { type: "string", description: "JavaScript automation source using nct.* API." },
     tags: { type: "string", optional: true, description: "Optional JSON array of tag strings." },
     targets: { type: "string", optional: true, description: "Optional JSON array of vault host IDs." },
+    targetGroups: { type: "string", optional: true, description: "Optional JSON array of dynamic vault group paths." },
     targetsAllHosts: { type: "string", optional: true, description: "Set true to target all connectable hosts." },
     package: { type: "string", optional: true, description: "Optional vault package path." },
     description: { type: "string", optional: true, description: "Optional script description." },
@@ -268,6 +271,7 @@ const TOOL_INPUT_FIELDS = Object.freeze({
     content: { type: "string", optional: true, description: "New JavaScript source." },
     tags: { type: "string", optional: true, description: "Optional JSON array of tag strings." },
     targets: { type: "string", optional: true, description: "Optional JSON array of vault host IDs." },
+    targetGroups: { type: "string", optional: true, description: "Optional JSON array of dynamic vault group paths." },
     targetsAllHosts: { type: "string", optional: true, description: "Set true to target all connectable hosts." },
     package: { type: "string", optional: true, description: "Optional vault package path." },
     description: { type: "string", optional: true, description: "Optional script description." },
@@ -298,6 +302,7 @@ const TOOL_INPUT_FIELDS = Object.freeze({
   "vault.scripts.targets.set": {
     scriptId: { type: "string", description: "Script ID." },
     targets: { type: "string", optional: true, description: "JSON array of vault host IDs (omit when targetsAllHosts=true)." },
+    targetGroups: { type: "string", optional: true, description: "JSON array of dynamic vault group paths (omit when targetsAllHosts=true)." },
     targetsAllHosts: { type: "string", optional: true, description: "Set true to target all connectable hosts." },
   },
   "vault.host.connectScripts.list": {
@@ -406,7 +411,7 @@ const MODEL_DESCRIPTION_HINTS = Object.freeze({
   "vault.scripts.reference":
     "Returns full Netcatty automation script syntax reference (nct API, triggers, host targeting). Read before authoring scripts.",
   "vault.host.connectScripts.set":
-    "Sets per-host onConnect script queue order. Global targetsAllHosts scripts run first automatically.",
+    "Sets per-host onConnect script queue order. Global and matching dynamic-group scripts run first automatically.",
 });
 
 module.exports = {

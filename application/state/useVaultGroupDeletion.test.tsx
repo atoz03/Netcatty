@@ -31,19 +31,16 @@ test("group deletion removes saved settings in the same Vault transaction", asyn
       managedSources: storedSources,
       onReadPersistedHosts: async () => [],
       onReadPersistedManagedSources: () => storedSources,
-      onCommitVaultImportTransaction: async (
-        _hosts,
-        updateGroups,
-        updateSources,
-        updateGroupConfigs,
-      ) => {
-        committedGroupConfigs = updateGroupConfigs?.(storedGroupConfigs) ?? storedGroupConfigs;
-        return {
-          status: "persisted",
-          groups: updateGroups(storedGroups),
-          sources: updateSources(storedSources),
-          groupConfigs: committedGroupConfigs,
-        };
+      onCommitVaultGroupMutation: async (mutate) => {
+        const result = mutate({
+          groups: storedGroups,
+          configs: storedGroupConfigs,
+          hosts: [],
+          managedSources: storedSources,
+          snippets: [],
+        });
+        if (result.ok) committedGroupConfigs = result.state.configs;
+        return result;
       },
     });
     return null;
@@ -102,14 +99,9 @@ test("group deletion restores managed files when the persisted Vault cannot be r
       onClearAndRemoveManagedSources: async () => async () => {
         restoreCount += 1;
       },
-      onCommitVaultImportTransaction: async () => {
+      onCommitVaultGroupMutation: async () => {
         commitCount += 1;
-        return {
-          status: "persisted",
-          groups: [],
-          sources: [],
-          groupConfigs: [],
-        };
+        throw new Error("unexpected commit");
       },
     });
     return null;
@@ -187,21 +179,15 @@ test("group deletion retries file clearing when another managed source enters th
           restoreCount += 1;
         };
       },
-      onCommitVaultImportTransaction: async (
-        _hosts,
-        updateGroups,
-        updateSources,
-        updateGroupConfigs,
-        expectedHosts,
-      ) => {
+      onCommitVaultGroupMutation: async (mutate) => {
         commitCount += 1;
-        assert.deepEqual(expectedHosts, []);
-        return {
-          status: "persisted",
-          groups: updateGroups(["Production"]),
-          sources: updateSources([firstSource, concurrentSource]),
-          groupConfigs: updateGroupConfigs?.([]) ?? [],
-        };
+        return mutate({
+          groups: ["Production"],
+          configs: [],
+          hosts: [],
+          managedSources: [firstSource, concurrentSource],
+          snippets: [],
+        });
       },
     });
     return null;
@@ -227,4 +213,68 @@ test("group deletion retries file clearing when another managed source enters th
   ]);
   assert.equal(restoreCount, 1);
   assert.equal(commitCount, 1);
+});
+
+test("group deletion restores managed files and does not report success when commit fails", async () => {
+  const actEnvironment = globalThis as typeof globalThis & {
+    IS_REACT_ACT_ENVIRONMENT?: boolean;
+  };
+  const previousActEnvironment = actEnvironment.IS_REACT_ACT_ENVIRONMENT;
+  actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
+
+  const source: ManagedSource = {
+    id: "managed-production",
+    type: "ssh_config",
+    filePath: "/tmp/managed-production.conf",
+    groupName: "Production",
+    lastSyncedAt: 1,
+  };
+  let deleteGroups: ((paths: Iterable<string>) => Promise<void>) | undefined;
+  let renderer: ReactTestRenderer | null = null;
+  let restoreCount = 0;
+  let reportedCount = 0;
+
+  const Probe = () => {
+    deleteGroups = useVaultGroupDeletion({
+      customGroups: ["Production"],
+      hosts: [],
+      groupConfigs: [],
+      managedSources: [source],
+      onReadPersistedHosts: async () => [],
+      onReadPersistedManagedSources: () => [source],
+      onClearAndRemoveManagedSources: async () => async () => {
+        restoreCount += 1;
+      },
+      onCommitVaultGroupMutation: async () => {
+        throw new Error("Vault quota exhausted");
+      },
+      onDeletedPaths: () => {
+        reportedCount += 1;
+      },
+    });
+    return null;
+  };
+
+  let deletionError: unknown;
+  try {
+    await act(async () => {
+      renderer = create(React.createElement(Probe));
+    });
+    try {
+      await act(async () => {
+        await deleteGroups?.(["Production"]);
+      });
+    } catch (error) {
+      deletionError = error;
+    }
+  } finally {
+    await act(async () => {
+      renderer?.unmount();
+    });
+    actEnvironment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+  }
+
+  assert.match(String(deletionError), /quota exhausted/i);
+  assert.equal(restoreCount, 1);
+  assert.equal(reportedCount, 0);
 });

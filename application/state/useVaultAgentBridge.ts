@@ -16,6 +16,10 @@ import {
   resolveDefaultKeyPassphraseAliases,
 } from '../defaultKeyPassphrases';
 import { getNotesActions, getNotesSnapshot, subscribeNotes } from './notesStore';
+import type {
+  VaultGroupMutationResult,
+  VaultGroupMutationState,
+} from '../../domain/vaultGroupMutation';
 
 export interface UseVaultAgentBridgeInput {
   hosts: Host[];
@@ -29,12 +33,17 @@ export interface UseVaultAgentBridgeInput {
   terminalSettings?: Pick<TerminalSettings, 'keepaliveInterval' | 'keepaliveCountMax'>;
   updateHosts: (hosts: Host[]) => void;
   updateKeys: (keys: SSHKey[]) => Promise<unknown> | unknown;
-  updateSnippets: (snippets: Snippet[]) => void;
+  updateSnippets: (
+    snippets: Snippet[] | ((current: Snippet[]) => Snippet[]),
+  ) => void;
   customGroups: string[];
   updateCustomGroups: (groups: string[]) => void;
   groupConfigs: GroupConfig[];
   updateGroupConfigs: (configs: GroupConfig[]) => void;
   updateManagedSources: (sources: ManagedSource[]) => void;
+  commitVaultGroupMutation: (
+    mutate: (current: VaultGroupMutationState) => VaultGroupMutationResult,
+  ) => Promise<VaultGroupMutationResult | { ok: false; superseded: true }>;
   updatePortForwardingRules: (rules: PortForwardingRule[]) => void;
   /** Optional override; defaults to notesStore so App need not subscribe to notes. */
   notes?: VaultNote[];
@@ -185,6 +194,17 @@ export function useVaultAgentBridge(input: UseVaultAgentBridgeInput): void {
           vaultSnapshotRef.current.hosts = hosts;
           current.updateHosts(hosts);
         },
+        commitVaultGroupMutation: async (mutate) => {
+          const result = await current.commitVaultGroupMutation(mutate);
+          if (result.ok) {
+            vaultSnapshotRef.current.customGroups = result.state.groups;
+            vaultSnapshotRef.current.groupConfigs = result.state.configs;
+            vaultSnapshotRef.current.hosts = result.state.hosts;
+            vaultSnapshotRef.current.managedSources = result.state.managedSources;
+            vaultSnapshotRef.current.snippets = result.state.snippets;
+          }
+          return result;
+        },
         saveKeyPassphrase: (keyPath, passphrase) => rememberKeyPassphrase({
           keyPath,
           passphrase,
@@ -222,9 +242,11 @@ export function useVaultAgentBridge(input: UseVaultAgentBridgeInput): void {
           vaultSnapshotRef.current.notes = notes;
           applyUpdateNotes(notes);
         },
-        updateSnippets: (nextSnippets) => {
-          vaultSnapshotRef.current.snippets = nextSnippets;
-          current.updateSnippets(nextSnippets);
+        updateSnippets: (snippetUpdate) => {
+          vaultSnapshotRef.current.snippets = typeof snippetUpdate === 'function'
+            ? snippetUpdate(vaultSnapshotRef.current.snippets)
+            : snippetUpdate;
+          current.updateSnippets(snippetUpdate);
         },
         startTunnel: current.startTunnel,
         stopTunnel: current.stopTunnel,

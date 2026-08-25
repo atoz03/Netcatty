@@ -5,6 +5,7 @@ import {
   resolveVaultAgentEffectiveHost,
   resolveVaultAgentNotes,
 } from './useVaultAgentBridge';
+import type { Host } from '../../domain/models';
 import { publishNotesSnapshot } from './notesStore';
 
 type Snapshot = Parameters<typeof haveSameVaultAgentSnapshot>[0];
@@ -28,10 +29,10 @@ describe('haveSameVaultAgentSnapshot', () => {
 
 describe('resolveVaultAgentEffectiveHost', () => {
   it('uses the latest snapshotted group defaults', () => {
-    const host = {
+    const host: Host = {
       id: 'host-1', label: 'Host', hostname: 'host.test', username: 'root',
       group: 'production', tags: [], os: 'linux',
-    } as const;
+    };
 
     assert.equal(
       resolveVaultAgentEffectiveHost(host, [{ path: 'production', protocol: 'telnet' }], []).protocol,

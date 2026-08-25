@@ -1,5 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const { readFileSync } = require("node:fs");
+const path = require("node:path");
 
 const config = require("../electron-builder.config.cjs");
 
@@ -27,6 +29,15 @@ test("build.files includes shared terminal flow constants for main process", () 
     config.files.includes("infrastructure/config/terminalFlowConstants.json"),
     "terminalFlowConstants.cjs requires sibling terminalFlowConstants.json at packaged startup",
   );
+});
+
+test("build.files includes the prompt classifier required by Mosh", () => {
+  assert.ok(
+    config.files.includes("domain/terminalPromptSecurity.shared.cjs"),
+    "packaged Mosh bootstrap requires the shared prompt classifier",
+  );
+  const promptSecurity = require("../domain/terminalPromptSecurity.shared.cjs");
+  assert.equal(promptSecurity.isUntrustedTerminalInputPrompt("验证码："), true);
 });
 
 test("unpacked Tool CLI includes capability runtime dependencies", () => {
@@ -91,8 +102,35 @@ test("asarUnpack keeps Cursor SDK runtime deps unpacked", () => {
   assert.ok(config.asarUnpack.includes("node_modules/sqlite3/**/*"));
 });
 
-test("beforePack installs missing Cursor SDK platform runtime packages", () => {
+test("beforePack installs missing Cursor SDK packages and builds Windows Hello helper", () => {
   assert.equal(config.beforePack, "./scripts/beforePackCursorSdk.cjs");
+});
+
+test("Windows packaging includes the Windows Hello helper executable", () => {
+  assert.ok(
+    Array.isArray(config.win.extraResources),
+    "win.extraResources must be an array",
+  );
+  assert.ok(
+    config.win.extraResources.some((entry) => (
+      entry &&
+      entry.from === "electron/bridges/windowsHelloHelper/build/${arch}/NetcattyWindowsHello.exe" &&
+      entry.to === "windowsHello/NetcattyWindowsHello.exe"
+    )),
+    "Windows package must include the Windows Hello helper executable for the target arch",
+  );
+  assert.ok(
+    config.files.includes("!electron/bridges/windowsHelloHelper/build/**/*"),
+    "Windows Hello build output must not also be copied into app.asar",
+  );
+});
+
+test("Windows package arch is controlled by pack script CLI flags", () => {
+  assert.deepEqual(
+    config.win.target,
+    ["nsis", "portable", "zip"],
+    "win.target must not hard-code x64 and arm64 or pack:win-x64 will still invoke arm64 beforePack hooks",
+  );
 });
 
 test("packaged app declares ssh, telnet, and jms URL protocol support", () => {
@@ -149,6 +187,7 @@ test("build.files excludes Vite-bundled renderer-only packages", () => {
     "!node_modules/lexical/**/*",
     "!node_modules/@lexical/**/*",
     "!node_modules/@codemirror/**/*",
+    "!node_modules/katex/**/*",
     "!node_modules/shiki/**/*",
     "!node_modules/@shiki/**/*",
   ]) {
@@ -157,6 +196,14 @@ test("build.files excludes Vite-bundled renderer-only packages", () => {
       `build.files must exclude Vite-bundled renderer package: ${glob}`,
     );
   }
+});
+
+test("KaTeX distribution keeps its license notice", () => {
+  const notice = readFileSync(
+    path.join(__dirname, "..", "public", "licenses", "KaTeX-LICENSE.txt"),
+    "utf8",
+  );
+  assert.match(notice, /Copyright \(c\) 2013-2020 Khan Academy and other contributors/);
 });
 
 test("linux packaging uses multi-size build/icons instead of a single 1024px override", async () => {
@@ -233,11 +280,8 @@ test("Windows package arch is controlled by pack script CLI flags", () => {
 });
 
 test("windows packaging includes a zip archive target", () => {
-  const winTargets = config.win.target.map((entry) => (
-    typeof entry === "string" ? entry : entry.target
-  ));
   assert.ok(
-    winTargets.includes("zip"),
+    config.win.target.includes("zip"),
     "windows package builds must publish a zip archive for no-install environments",
   );
 });

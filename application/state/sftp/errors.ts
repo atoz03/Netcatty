@@ -17,3 +17,5 @@ export const isSessionError = (err: unknown): boolean => {
     msg.includes("timed out")
   );
 };
+
+export { isMissingStatError } from "../../../domain/sftpStatError";

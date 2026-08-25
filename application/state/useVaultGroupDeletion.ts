@@ -1,7 +1,12 @@
 import { useCallback, useRef } from "react";
 
 import type { GroupConfig, Host, ManagedSource } from "../../domain/models";
+import { removeSnippetTargetGroupPaths } from "../../domain/hostGroupPathMutations";
 import { buildVaultGroupDeletion } from "../../domain/vaultGroupDeletion";
+import type {
+  VaultGroupMutationResult,
+  VaultGroupMutationState,
+} from "../../domain/vaultGroupMutation";
 import {
   type VaultLockHandle,
   withVaultImportLock,
@@ -26,7 +31,7 @@ export function useVaultGroupDeletion({
   managedSources,
   onReadPersistedHosts,
   onReadPersistedManagedSources,
-  onCommitVaultImportTransaction,
+  onCommitVaultGroupMutation,
   onClearAndRemoveManagedSource,
   onClearAndRemoveManagedSources,
   onDeletedPaths,
@@ -37,22 +42,10 @@ export function useVaultGroupDeletion({
   managedSources: ManagedSource[];
   onReadPersistedHosts: () => Promise<Host[]>;
   onReadPersistedManagedSources: () => ManagedSource[];
-  onCommitVaultImportTransaction: (
-    hosts: Host[],
-    updateGroups: (current: string[]) => string[],
-    updateSources: (current: ManagedSource[]) => ManagedSource[],
-    updateGroupConfigs?: (current: GroupConfig[]) => GroupConfig[],
-    expectedHosts?: Host[],
+  onCommitVaultGroupMutation: (
+    mutate: (current: VaultGroupMutationState) => VaultGroupMutationResult,
     lock?: VaultLockHandle | null,
-  ) => Promise<
-    | {
-      status: "persisted";
-      groups: string[];
-      sources: ManagedSource[];
-      groupConfigs: GroupConfig[];
-    }
-    | { status: "superseded" }
-  >;
+  ) => Promise<VaultGroupMutationResult | { ok: false; superseded: true }>;
   onClearAndRemoveManagedSource?: (source: ManagedSource) => Promise<() => Promise<void>>;
   onClearAndRemoveManagedSources?: (sources: ManagedSource[]) => Promise<() => Promise<void>>;
   onDeletedPaths?: (selectedRoots: string[]) => void;
@@ -120,29 +113,16 @@ export function useVaultGroupDeletion({
           }
           deletion = refreshedDeletion;
 
-          const expectedHosts = latestRef.current.hosts;
           const expectedSources = deletion.sourcesToRemove;
-          const nextHosts = deletion.hosts.filter(
-            (host) => !additionallyDeletedHostIds.has(host.id),
-          );
-          const transaction = await onCommitVaultImportTransaction(
-            nextHosts,
-            (currentGroups) => buildVaultGroupDeletion({
-              selectedPaths,
-              deleteHosts,
-              customGroups: currentGroups,
-              hosts: [],
-              groupConfigs: [],
-              managedSources: [],
-            }).customGroups,
-            (currentSources) => {
+          const transaction = await onCommitVaultGroupMutation(
+            (current) => {
               const currentDeletion = buildVaultGroupDeletion({
                 selectedPaths,
                 deleteHosts,
-                customGroups: [],
-                hosts: [],
-                groupConfigs: [],
-                managedSources: currentSources,
+                customGroups: current.groups,
+                hosts: current.hosts,
+                groupConfigs: current.configs,
+                managedSources: current.managedSources,
               });
               if (!managedSourceSnapshotsMatch(
                 expectedSources,
@@ -150,29 +130,40 @@ export function useVaultGroupDeletion({
               )) {
                 throw RETRY_VAULT_GROUP_DELETION;
               }
-              const removedIds = new Set(expectedSources.map((source) => source.id));
-              return currentSources.filter((source) => !removedIds.has(source.id));
+              return {
+                ok: true,
+                state: {
+                  groups: currentDeletion.customGroups,
+                  hosts: currentDeletion.hosts.filter(
+                    (host) => !additionallyDeletedHostIds.has(host.id),
+                  ),
+                  configs: currentDeletion.groupConfigs,
+                  managedSources: current.managedSources.filter(
+                    (source) => !currentDeletion.sourcesToRemove.some(
+                      (removed) => removed.id === source.id,
+                    ),
+                  ),
+                  snippets: removeSnippetTargetGroupPaths(
+                    current.snippets,
+                    currentDeletion.selectedRoots,
+                  ),
+                },
+              };
             },
-            (currentGroupConfigs) => buildVaultGroupDeletion({
-              selectedPaths,
-              deleteHosts,
-              customGroups: [],
-              hosts: [],
-              groupConfigs: currentGroupConfigs,
-              managedSources: [],
-            }).groupConfigs,
-            expectedHosts,
             lock,
           );
-          if (transaction.status === "superseded") {
-            // Release the lock so concurrent host saves can finish before retry.
+          if (!transaction.ok && "superseded" in transaction) {
+            // Release the lock so concurrent saves can finish before retry.
             return { status: "retry" as const, restoreManagedFiles };
           }
+          if ("error" in transaction) {
+            throw new Error(transaction.error);
+          }
           latestRef.current = {
-            customGroups: transaction.groups,
-            hosts: nextHosts,
-            groupConfigs: transaction.groupConfigs,
-            managedSources: transaction.sources,
+            customGroups: transaction.state.groups,
+            hosts: transaction.state.hosts,
+            groupConfigs: transaction.state.configs,
+            managedSources: transaction.state.managedSources,
           };
           return {
             status: "done" as const,
@@ -205,7 +196,7 @@ export function useVaultGroupDeletion({
   }, [
     onClearAndRemoveManagedSource,
     onClearAndRemoveManagedSources,
-    onCommitVaultImportTransaction,
+    onCommitVaultGroupMutation,
     onDeletedPaths,
     onReadPersistedHosts,
     onReadPersistedManagedSources,

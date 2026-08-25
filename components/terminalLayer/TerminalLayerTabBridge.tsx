@@ -4,7 +4,7 @@ import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useSyn
 import { useActiveTabId } from '../../application/state/activeTabStore';
 import { sessionCapabilitiesStore } from '../../application/state/sessionCapabilitiesStore';
 import { useSystemManagerBackend } from '../../application/state/useSystemManagerBackend';
-import { canReuseTerminalConnection } from '../../application/state/terminalConnectionReuse';
+import { isTerminalSessionEligibleForSftpReuse } from '../../application/state/terminalConnectionReuse';
 import { resolveSystemSidebarSession } from '../../domain/systemManager/resolveSystemSession';
 import type { TerminalContextReader } from '../../domain/terminalContextRead';
 import { useSystemCapabilitiesWarmup } from '../../application/state/useSystemManager';
@@ -143,12 +143,15 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     return sftpHostForTab.get(activeTabId) ?? null;
   }, [activeSession, activeTabId, activeWorkspace, focusedSessionId, isSftpOpenForCurrentTab, sessionHostsMap, sftpHostForTab]);
 
+  // Keep the same-endpoint SSH session id across disconnected/connecting so
+  // SftpSidePanel can observe status transitions and rebind after Start over.
+  // Transport reuse for openSftp still requires status === "connected".
   const activeTerminalSessionIdForSftp = useMemo((): string | null => {
     if (!isSftpOpenForCurrentTab || !sftpActiveHost) return null;
     const sessionId = activeWorkspace ? focusedSessionId : activeSession?.id;
     if (!sessionId) return null;
     const session = sessions.find((candidate) => candidate.id === sessionId);
-    if (!session || !canReuseTerminalConnection(session)) return null;
+    if (!session || !isTerminalSessionEligibleForSftpReuse(session)) return null;
     const sessionHost = sessionHostsMap.get(session.id);
     if (!sessionHost) return null;
     const sameEndpoint =
@@ -436,6 +439,10 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     handleHistoryDelete: s.handleHistoryDelete,
     handleHistoryRun: s.handleHistoryRun,
     handleFocusSidePanelPane: s.handleFocusSidePanelPane,
+    handleMagnifySidePanelPane: s.handleMagnifySidePanelPane,
+    handleRestoreMagnifiedPane: s.handleRestoreMagnifiedPane,
+    handleMagnifyTerminalPane: s.handleMagnifyTerminalPane,
+    handleTerminalPaneInteraction: s.handleTerminalPaneInteraction,
     handleSplitSidePanelPane: s.handleSplitSidePanelPane,
     handleCloseSidePanelPane: s.handleCloseSidePanelPane,
     handleResizeSidePanelSplit: s.handleResizeSidePanelSplit,
@@ -520,6 +527,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     keys: s.keys,
     knownHosts: s.knownHosts,
     MessageSquare: s.MessageSquare,
+    magnifiedPane: s.magnifiedPane,
     mountedAiTabIds: s.mountedAiTabIds,
     mountedSftpTabIds: s.mountedSftpTabIds,
     notesMountedTabIds: s.notesMountedTabIds,
@@ -652,6 +660,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     isFocusMode,
     isSidePanelOpenForCurrentTab,
     isTerminalLayerVisible,
+    s.magnifiedPane,
     resizing,
     resolveAIExecutorContext,
     sessionHostsMap,

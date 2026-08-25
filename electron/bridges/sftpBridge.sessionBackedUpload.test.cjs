@@ -1926,7 +1926,7 @@ test("abort during staged mode setup prevents promotion", async (t) => {
   assert.deepEqual(remoteFiles.get("/usr/local/bin/tool"), Buffer.from("old-tool"));
 });
 
-test("parent-dir permission on staged path falls back to in-place for new files", async (t) => {
+test("parent-dir permission on staged path does not risk an in-place create race", async (t) => {
   const tempRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "netcatty-stage-perm-"));
   t.after(async () => {
     await fs.promises.rm(tempRoot, { recursive: true, force: true });
@@ -1963,17 +1963,275 @@ test("parent-dir permission on staged path falls back to in-place for new files"
     fileProtocol: "sftp",
   });
 
-  await sftpBridge.uploadLocalToSftp(null, {
-    sftpId: opened.sftpId,
-    localPath,
-    remotePath: "/ro-dir/file.bin",
-    encoding: "utf-8",
+  await assert.rejects(
+    () => sftpBridge.uploadLocalToSftp(null, {
+      sftpId: opened.sftpId,
+      localPath,
+      remotePath: "/ro-dir/file.bin",
+      encoding: "utf-8",
+    }),
+    /Permission denied/,
+  );
+
+  assert.equal(fastPutCalls.length, 1, "must not directly create after the staged attempt fails");
+  assert.match(fastPutCalls[0].remotePath, /\.netcatty-upload-.*\.part$/);
+  assert.equal(remoteFiles.has("/ro-dir/file.bin"), false);
+});
+
+test("staged permission failure preserves an existing destination", async (t) => {
+  const tempRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "netcatty-inplace-mode-"));
+  t.after(async () => {
+    await fs.promises.rm(tempRoot, { recursive: true, force: true });
+  });
+  tempDirBridge.init?.({ getPath: () => tempRoot });
+
+  const localPath = path.join(tempRoot, "tool.bin");
+  const payload = Buffer.from("replaced-bytes");
+  await fs.promises.writeFile(localPath, payload);
+
+  const { channel, fastPutCalls, remoteFiles, remoteMeta, chmodCalls } = createSessionChannel({
+    onFastPut(_local, remotePath) {
+      if (String(remotePath).includes(".netcatty-upload-")) {
+        const err = new Error("Permission denied");
+        err.code = 3;
+        return { error: err };
+      }
+      // Simulate servers that recreate the inode on in-place OPEN|CREAT|TRUNC
+      // with umask defaults (losing the prior executable bit).
+      remoteMeta.set("/usr/local/bin/tool", { mode: 0o100644 });
+      return null;
+    },
+  });
+  remoteMeta.set("/usr/local/bin/tool", { mode: 0o100755 });
+  remoteFiles.set("/usr/local/bin/tool", Buffer.from("old-tool"));
+
+  const connection = {
+    sftp(callback) { callback(null, channel); },
+  };
+  const sftpClients = new Map();
+  sftpBridge.init({
+    electronModule: { webContents: { fromId: () => null } },
+    sessions: new Map([["session-inplace-mode", { conn: connection }]]),
+    sftpClients,
+  });
+  const opened = await sftpBridge.openSftpForSession(null, {
+    sessionId: "session-inplace-mode",
+    fileProtocol: "sftp",
   });
 
-  assert.ok(fastPutCalls.length >= 2, "expected staged attempt then in-place");
+  await assert.rejects(
+    () => sftpBridge.uploadLocalToSftp(null, {
+      sftpId: opened.sftpId,
+      localPath,
+      remotePath: "/usr/local/bin/tool",
+      encoding: "utf-8",
+    }),
+    /Permission denied/,
+  );
+  assert.equal(fastPutCalls.length, 1, "must not directly overwrite the existing file");
   assert.match(fastPutCalls[0].remotePath, /\.netcatty-upload-.*\.part$/);
-  assert.equal(fastPutCalls[fastPutCalls.length - 1].remotePath, "/ro-dir/file.bin");
-  assert.deepEqual(remoteFiles.get("/ro-dir/file.bin"), payload);
+  assert.deepEqual(chmodCalls, []);
+  assert.equal(remoteMeta.get("/usr/local/bin/tool")?.mode & 0o777, 0o755);
+  assert.deepEqual(remoteFiles.get("/usr/local/bin/tool"), Buffer.from("old-tool"));
+});
+
+test("staged permission failure does not reach a later mode restore failure", async (t) => {
+  const tempRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "netcatty-inplace-mode-fail-"));
+  t.after(async () => {
+    await fs.promises.rm(tempRoot, { recursive: true, force: true });
+  });
+  tempDirBridge.init?.({ getPath: () => tempRoot });
+
+  const localPath = path.join(tempRoot, "tool.bin");
+  await fs.promises.writeFile(localPath, Buffer.from("replaced-bytes"));
+  const { channel, remoteFiles, remoteMeta } = createSessionChannel({
+    onFastPut(_local, remotePath) {
+      if (String(remotePath).includes(".netcatty-upload-")) {
+        const err = new Error("Permission denied");
+        err.code = 3;
+        return { error: err };
+      }
+      remoteMeta.set("/usr/local/bin/tool", { mode: 0o100644 });
+      return null;
+    },
+  });
+  remoteMeta.set("/usr/local/bin/tool", { mode: 0o100755 });
+  remoteFiles.set("/usr/local/bin/tool", Buffer.from("old-tool"));
+  channel.chmod = (_targetPath, _mode, callback) => {
+    const error = new Error("in-place chmod failed");
+    error.code = "EIO";
+    callback(error);
+  };
+
+  const sftpClients = new Map();
+  sftpBridge.init({
+    electronModule: { webContents: { fromId: () => null } },
+    sessions: new Map([["session-inplace-mode-fail", { conn: { sftp: (cb) => cb(null, channel) } }]]),
+    sftpClients,
+  });
+  const opened = await sftpBridge.openSftpForSession(null, {
+    sessionId: "session-inplace-mode-fail",
+    fileProtocol: "sftp",
+  });
+
+  await assert.rejects(
+    () => sftpBridge.uploadLocalToSftp(null, {
+      sftpId: opened.sftpId,
+      localPath,
+      remotePath: "/usr/local/bin/tool",
+      encoding: "utf-8",
+    }),
+    /Permission denied/,
+  );
+  assert.deepEqual(remoteFiles.get("/usr/local/bin/tool"), Buffer.from("old-tool"));
+  assert.equal(remoteMeta.get("/usr/local/bin/tool")?.mode & 0o777, 0o755);
+});
+
+test("SCP staged permission failure preserves an existing destination", async () => {
+  const finalPath = "/usr/local/bin/tool";
+  const files = new Map([[finalPath, Buffer.from("old")]]);
+  const modes = new Map([[finalPath, 0o100755]]);
+  const chmodCalls = [];
+  let uploadCalls = 0;
+  const missing = (candidate) => {
+    const error = new Error(`ENOENT: ${candidate}`);
+    error.code = "ENOENT";
+    return error;
+  };
+  const backend = {
+    async stat(candidate) {
+      if (!files.has(candidate)) throw missing(candidate);
+      return {
+        type: "file",
+        isDirectory: false,
+        isSymbolicLink: false,
+        size: files.get(candidate).length,
+        mode: modes.get(candidate) ?? 0o100644,
+        permissions: "rwxr-xr-x",
+        modifyTime: 1,
+      };
+    },
+    async chmod(candidate, mode) {
+      chmodCalls.push({ path: candidate, mode });
+      modes.set(candidate, 0o100000 | (mode & 0o7777));
+    },
+    async rename(from, to) {
+      if (!files.has(from)) throw missing(from);
+      if (files.has(to)) throw new Error(`EEXIST: ${to}`);
+      files.set(to, files.get(from));
+      files.delete(from);
+      if (modes.has(from)) {
+        modes.set(to, modes.get(from));
+        modes.delete(from);
+      }
+    },
+    async remove(candidate) {
+      files.delete(candidate);
+      modes.delete(candidate);
+    },
+  };
+  const client = {
+    __netcattyFileProtocol: "scp",
+    __netcattyScpBackend: backend,
+  };
+
+  await assert.rejects(
+    () => sftpBridge.runRemoteUploadTransaction(client, "/tmp/local.bin", finalPath, {
+      expectedSize: 3,
+      async uploadFile(_path, uploadTarget) {
+        uploadCalls += 1;
+        if (uploadTarget.generatedStagePath) {
+          const err = new Error("Permission denied creating stage");
+          err.code = "EACCES";
+          throw err;
+        }
+        files.set(uploadTarget.logicalPath, Buffer.from("new"));
+        modes.set(uploadTarget.logicalPath, 0o100644);
+      },
+    }),
+    /Permission denied creating stage/,
+  );
+  assert.equal(uploadCalls, 1);
+  assert.deepEqual(files.get(finalPath), Buffer.from("old"));
+  assert.deepEqual(chmodCalls, []);
+  assert.equal(modes.get(finalPath) & 0o777, 0o755);
+});
+
+test("SCP staged permission failure never commits an existing destination", async () => {
+  const finalPath = "/usr/local/bin/tool";
+  const files = new Map([[finalPath, Buffer.from("old")]]);
+  const modes = new Map([[finalPath, 0o100755]]);
+  const chmodCalls = [];
+  const controller = new AbortController();
+  const missing = (candidate) => {
+    const error = new Error(`ENOENT: ${candidate}`);
+    error.code = "ENOENT";
+    return error;
+  };
+  const backend = {
+    async stat(candidate) {
+      if (!files.has(candidate)) throw missing(candidate);
+      return {
+        type: "file",
+        isDirectory: false,
+        isSymbolicLink: false,
+        size: files.get(candidate).length,
+        mode: modes.get(candidate) ?? 0o100644,
+        permissions: "rwxr-xr-x",
+        modifyTime: 1,
+      };
+    },
+    async chmod(candidate, mode, options = {}) {
+      if (options.signal?.aborted) {
+        throw new Error("Transfer cancelled");
+      }
+      chmodCalls.push({ path: candidate, mode, hadSignal: Boolean(options.signal) });
+      modes.set(candidate, 0o100000 | (mode & 0o7777));
+    },
+    async rename(from, to) {
+      if (!files.has(from)) throw missing(from);
+      if (files.has(to)) throw new Error(`EEXIST: ${to}`);
+      files.set(to, files.get(from));
+      files.delete(from);
+      if (modes.has(from)) {
+        modes.set(to, modes.get(from));
+        modes.delete(from);
+      }
+    },
+    async remove(candidate) {
+      files.delete(candidate);
+      modes.delete(candidate);
+    },
+  };
+  const client = {
+    __netcattyFileProtocol: "scp",
+    __netcattyScpBackend: backend,
+  };
+
+  let committed = false;
+  await assert.rejects(
+    () => sftpBridge.runRemoteUploadTransaction(client, "/tmp/local.bin", finalPath, {
+      expectedSize: 3,
+      signal: controller.signal,
+      commitPromotion() {
+        committed = true;
+      },
+      async uploadFile(_path, uploadTarget) {
+        if (uploadTarget.generatedStagePath) {
+          const err = new Error("Permission denied creating stage");
+          err.code = "EACCES";
+          throw err;
+        }
+        files.set(uploadTarget.logicalPath, Buffer.from("new"));
+        modes.set(uploadTarget.logicalPath, 0o100644);
+      },
+    }),
+    /Permission denied creating stage/,
+  );
+  assert.equal(committed, false);
+  assert.deepEqual(chmodCalls, []);
+  assert.equal(modes.get(finalPath) & 0o777, 0o755);
+  assert.deepEqual(files.get(finalPath), Buffer.from("old"));
 });
 
 test("no-lstat new upload aborted during staged size verify leaves no final", async (t) => {

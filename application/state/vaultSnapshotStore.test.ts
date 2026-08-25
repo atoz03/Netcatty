@@ -81,6 +81,7 @@ test('vault actions register and unregister', () => {
     readPersistedManagedSources: noop,
     commitPluginImporterData: noop,
     commitVaultImportTransaction: noop,
+    commitVaultGroupMutation: noop,
     updateHostDistro: noop,
     updateHostLastConnected: noop,
     addShellHistoryEntry: noop,

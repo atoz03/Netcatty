@@ -64,6 +64,16 @@ test("overview tab reuses the shared server stats source", () => {
   assert.doesNotMatch(source, /backend\.getServerStats/);
 });
 
+test("overview network interfaces show cumulative RX/TX totals alongside rates", () => {
+  const source = readFileSync(new URL("./SystemOverviewTab.tsx", import.meta.url), "utf8");
+
+  assert.match(source, /stats\.netInterfaces\.slice\(0, 5\)\.map/);
+  assert.match(source, /formatBytes\(iface\.rxBytes\)/);
+  assert.match(source, /formatBytes\(iface\.txBytes\)/);
+  assert.match(source, /formatThroughput\(iface\.rxSpeed\)/);
+  assert.match(source, /formatThroughput\(iface\.txSpeed\)/);
+});
+
 test("overview tab stays mounted and only pauses polling while another system tab is active", () => {
   const source = readFileSync(new URL("./SystemManagerSidePanel.tsx", import.meta.url), "utf8");
 

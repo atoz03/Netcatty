@@ -670,11 +670,11 @@ export const enqueueCoalescedTerminalWrite = (
     }, {
       getMaxPendingBytes: () => resolveCoalescerByteCap(term),
       shouldFlushScheduledFrame: () => terminalWriteCoalescerFlushGates.get(term)?.() ?? true,
-      // Tabby streams normal-screen output without waiting for vsync. Keep rAF
-      // for alternate-screen TUIs (including the enter-alt burst before xterm
-      // has switched buffer.active.type) so multi-chunk repaints stay atomic.
-      // When rAF is unavailable (Node unit tests), prefer the "raf" mode so the
-      // coalescer falls back to an immediate flush (legacy test contract).
+      // Keep rAF for alternate-screen TUIs (including the enter-alt burst
+      // before xterm has switched buffer.active.type) so multi-chunk
+      // repaints stay atomic. Normal-screen output uses Electerm-style burst
+      // coalescing. When rAF is unavailable (Node unit tests), prefer "raf"
+      // so the coalescer falls back to an immediate flush (legacy contract).
       resolveScheduleMode: ({ nextChunk }): WriteCoalesceScheduleMode => {
         const preapplied = preappliedAltScreenNeedsRafByTerm.get(term);
         if (preapplied !== undefined) {
@@ -693,7 +693,9 @@ export const enqueueCoalescedTerminalWrite = (
         const canUseMicrotask = typeof queueMicrotask === "function"
           && typeof globalThis.requestAnimationFrame === "function";
         if (canUseMicrotask) {
-          return "microtask";
+          // Electerm-style 16ms merge after a recent flush; idle echo still
+          // uses a microtask so typing does not wait a frame.
+          return "burst";
         }
         return "raf";
       },

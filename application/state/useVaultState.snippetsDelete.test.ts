@@ -66,7 +66,7 @@ test("updateSnippets disk writes take the shared vault lock", () => {
   // and be visible to waitForPendingVaultWrites.
   assert.match(
     source,
-    /const updateSnippets = useCallback\(\(\s*data: Snippet\[\],\s*options\?: \{ replace\?: boolean \},\s*\) => \{[\s\S]*withVaultImportLock\("vault", async \(\) => \{[\s\S]*localStorageAdapter\.write\(STORAGE_KEY_SNIPPETS, rebased\)/,
+    /const updateSnippets = useCallback\(\([\s\S]*withVaultImportLock\("vault", async \(\) => \{[\s\S]*localStorageAdapter\.write\(STORAGE_KEY_SNIPPETS, rebased\)/,
   );
   assert.match(
     source,
@@ -95,6 +95,24 @@ test("updateSnippets rebases onto the latest persisted snapshot under the lock",
   );
 });
 
+test("updateSnippets functional updates derive from the latest in-memory snapshot", () => {
+  // Group deletion can wait for managed-source cleanup. A script created while
+  // it waits must still be present when the deletion callback removes the old
+  // group path, so updater callbacks must not derive from the initiating render.
+  assert.match(
+    source,
+    /data: Snippet\[\] \| \(\(current: Snippet\[\]\) => Snippet\[\]\)/,
+  );
+  assert.match(
+    source,
+    /const updater = typeof data === "function" \? data : null;[\s\S]*const current = snippetsRef\.current;[\s\S]*typeof data === "function" \? data\(current\) : data/,
+  );
+  assert.match(
+    source,
+    /updater\(rebaseSnippetVaultWrite\(\{\s*base,\s*ours: current,\s*theirs: latestPersisted,\s*\}\)\)/,
+  );
+});
+
 test("clearVaultData replaces snippets without additive rebase", () => {
   // Clear All Local Data must not preserve concurrent disk-only snippet adds
   // that rebaseSnippetVaultWrite would otherwise keep.
@@ -108,7 +126,7 @@ test("clearVaultData replaces snippets without additive rebase", () => {
   );
   assert.match(
     source,
-    /replace\s*\?\s*cleaned\s*:\s*rebaseSnippetVaultWrite/,
+    /replace\s*\?\s*cleaned\s*:\s*updater\s*\?\s*updater\(rebaseSnippetVaultWrite/,
   );
   assert.match(
     source,
@@ -145,7 +163,7 @@ test("updateSnippets keeps the persisted rebase ancestor across superseded saves
   );
   assert.match(
     source,
-    /const base = snippetsWriteBaseRef\.current \?\? snippetsRef\.current/,
+    /const current = snippetsRef\.current;\s*const base = snippetsWriteBaseRef\.current \?\? current/,
   );
   assert.match(
     source,

@@ -6,6 +6,7 @@ import {
 } from '@/domain/snippetScript.ts';
 import {
   getRunnableHostsForSnippet,
+  resolveSnippetTargetGroupsForSave,
 } from '@/domain/snippetTargets.ts';
 import {
   removeHostConnectScript,
@@ -54,11 +55,13 @@ export const QuickScriptEditorDialog: React.FC<QuickScriptEditorDialogProps> = (
   const [open, setOpen] = useState(false);
   const [editingSnippet, setEditingSnippet] = useState<Partial<Snippet>>(createBlankScript);
   const [targetSelection, setTargetSelection] = useState<string[]>([]);
+  const [targetGroupSelection, setTargetGroupSelection] = useState<string[]>([]);
 
   useEffect(() => {
     const handler = () => {
       setEditingSnippet(createBlankScript());
       setTargetSelection([]);
+      setTargetGroupSelection([]);
       setOpen(true);
     };
     window.addEventListener('netcatty:scripts:add', handler);
@@ -71,6 +74,7 @@ export const QuickScriptEditorDialog: React.FC<QuickScriptEditorDialogProps> = (
       if (!snippet || !isScriptSnippet(snippet)) return;
       setEditingSnippet(snippet);
       setTargetSelection(snippet.targetsAllHosts ? [] : (snippet.targets ?? []));
+      setTargetGroupSelection(snippet.targetsAllHosts ? [] : (snippet.targetGroups ?? []));
       setOpen(true);
     };
     window.addEventListener('netcatty:snippets:edit', handler);
@@ -112,6 +116,7 @@ export const QuickScriptEditorDialog: React.FC<QuickScriptEditorDialogProps> = (
       if (detail.editAfterSave) {
         setEditingSnippet(snippet);
         setTargetSelection([]);
+        setTargetGroupSelection([]);
         setOpen(true);
       }
     };
@@ -132,8 +137,12 @@ export const QuickScriptEditorDialog: React.FC<QuickScriptEditorDialogProps> = (
   const runnableSnippet = useMemo(() => ({
     ...(editingSnippet as Snippet),
     targets: editingSnippet.targetsAllHosts ? [] : targetSelection,
+    targetGroups: resolveSnippetTargetGroupsForSave(
+      editingSnippet,
+      targetGroupSelection,
+    ),
     targetsAllHosts: editingSnippet.targetsAllHosts || undefined,
-  }), [editingSnippet, targetSelection]);
+  }), [editingSnippet, targetGroupSelection, targetSelection]);
 
   const runTargets = useMemo(
     () => getRunnableHostsForSnippet(runnableSnippet, hosts),
@@ -174,6 +183,10 @@ export const QuickScriptEditorDialog: React.FC<QuickScriptEditorDialogProps> = (
       tags: editingSnippet.tags ?? [],
       package: packagePath,
       targets: editingSnippet.targetsAllHosts ? [] : targetSelection,
+      targetGroups: resolveSnippetTargetGroupsForSave(
+        editingSnippet,
+        targetGroupSelection,
+      ),
       targetsAllHosts: editingSnippet.targetsAllHosts || undefined,
       kind: 'script',
       language: editingSnippet.language ?? 'javascript',
@@ -182,7 +195,7 @@ export const QuickScriptEditorDialog: React.FC<QuickScriptEditorDialogProps> = (
       triggerPattern: editingSnippet.triggerPattern,
       order: editingSnippet.order,
     };
-  }, [editingSnippet, onCreatePackage, packages, targetSelection]);
+  }, [editingSnippet, onCreatePackage, packages, targetGroupSelection, targetSelection]);
 
   const persistSnippet = useCallback((): Snippet | null => {
     const savedSnippet = buildSavedSnippet();
@@ -238,10 +251,12 @@ export const QuickScriptEditorDialog: React.FC<QuickScriptEditorDialogProps> = (
   const handleTargetsAllHostsChange = useCallback((checked: boolean) => {
     if (checked) {
       setTargetSelection([]);
+      setTargetGroupSelection([]);
       setEditingSnippet((prev) => ({
         ...prev,
         targetsAllHosts: true,
         targets: [],
+        targetGroups: undefined,
       }));
       return;
     }
@@ -266,6 +281,8 @@ export const QuickScriptEditorDialog: React.FC<QuickScriptEditorDialogProps> = (
       selectedHostIds={targetSelection}
       onSelectHost={handleSelectHost}
       onSelectionChange={handleSelectionChange}
+      selectedGroupPaths={targetGroupSelection}
+      onGroupSelectionChange={setTargetGroupSelection}
       targetsAllHosts={Boolean(editingSnippet.targetsAllHosts)}
       onTargetsAllHostsChange={handleTargetsAllHostsChange}
     />

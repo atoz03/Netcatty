@@ -18,6 +18,21 @@ function normalizeLocalTreeLimit(value, fallback) {
   return Number.isSafeInteger(value) && value >= 0 ? value : fallback;
 }
 
+let cachedLocalUserInfo;
+function localOwnerFromStat(stat) {
+  if (process.platform === "win32") return undefined;
+  if (!stat || typeof stat.uid !== "number") return undefined;
+  try {
+    cachedLocalUserInfo ??= os.userInfo();
+    if (cachedLocalUserInfo.uid === stat.uid && cachedLocalUserInfo.username) {
+      return cachedLocalUserInfo.username;
+    }
+  } catch {
+    // userInfo() can throw when the process has no passwd entry.
+  }
+  return String(stat.uid);
+}
+
 function createLocalTreeTraversalBudget(limits = {}) {
   return {
     directories: 0,
@@ -168,6 +183,9 @@ async function listLocalDir(event, payload) {
         // Windows hidden attribute: resolved from the batched lookup.
         const hidden = isWindows ? hiddenSet.has(entry.name) : false;
 
+        // Follow the target for size/mtime/type; owner is the directory entry itself.
+        const ownerStat = type === "symlink" ? await fs.promises.lstat(fullPath) : stat;
+        const owner = localOwnerFromStat(ownerStat);
         result[i] = {
           name: entry.name,
           type,
@@ -175,6 +193,7 @@ async function listLocalDir(event, payload) {
           size: `${stat.size} bytes`,
           lastModified: stat.mtime.toISOString(),
           hidden,
+          ...(owner ? { owner } : {}),
         };
       } catch (err) {
         // Handle broken symlinks - lstat doesn't follow symlinks
@@ -186,6 +205,7 @@ async function listLocalDir(event, payload) {
             if (lstat.isSymbolicLink()) {
               // Broken symlink
               const hidden = isWindows ? hiddenSet.has(brokenEntry.name) : false;
+              const owner = localOwnerFromStat(lstat);
               result[i] = {
                 name: brokenEntry.name,
                 type: "symlink",
@@ -193,6 +213,7 @@ async function listLocalDir(event, payload) {
                 size: `${lstat.size} bytes`,
                 lastModified: lstat.mtime.toISOString(),
                 hidden,
+                ...(owner ? { owner } : {}),
               };
               return;
             }
@@ -259,8 +280,16 @@ async function writeLocalFile(event, payload) {
  * Delete a local file or directory
  */
 async function deleteLocalFile(event, payload) {
-  const stat = await fs.promises.stat(payload.path);
-  if (stat.isDirectory()) {
+  const stat = await fs.promises.lstat(payload.path);
+  const actualType = stat.isDirectory() ? "directory" : stat.isSymbolicLink() ? "symlink" : "file";
+  if (payload.expectedType && actualType !== payload.expectedType) {
+    const error = new Error(
+      `Local target changed before replace: expected ${payload.expectedType}, found ${actualType}`,
+    );
+    error.code = "ESTALE";
+    throw error;
+  }
+  if (actualType === "directory") {
     await fs.promises.rm(payload.path, { recursive: true, force: true });
   } else {
     await fs.promises.unlink(payload.path);
@@ -295,10 +324,26 @@ async function mkdirLocal(event, payload) {
 }
 
 /**
- * Get local file statistics
+ * Get local file statistics (follows symlinks — size/mtime of the target).
+ * Resume and upload sizing rely on target bytes, not the link node.
  */
 async function statLocal(event, payload) {
   const stat = await fs.promises.stat(payload.path);
+  return {
+    name: path.basename(payload.path),
+    type: stat.isDirectory() ? "directory" : "file",
+    size: stat.size,
+    lastModified: stat.mtime.getTime(),
+  };
+}
+
+/**
+ * Get local path metadata without following symlinks.
+ * Conflict resolution needs this so Replace can unlink a link instead of
+ * writing through it via writeLocalFile.
+ */
+async function lstatLocal(event, payload) {
+  const stat = await fs.promises.lstat(payload.path);
   return {
     name: path.basename(payload.path),
     type: stat.isDirectory() ? "directory" : stat.isSymbolicLink() ? "symlink" : "file",
@@ -593,6 +638,11 @@ async function listDrives() {
   return letters.filter((_, idx) => results[idx].status === "fulfilled").map((letter) => letter + ":");
 }
 
+async function extractLocalArchive(_event, payload) {
+  const { extractLocalArchiveFile } = require("./sftpBridge/archiveExtract.cjs");
+  return extractLocalArchiveFile(payload?.path);
+}
+
 /**
  * Register IPC handlers for local filesystem operations
  */
@@ -602,8 +652,10 @@ function registerHandlers(ipcMain) {
   ipcMain.handle("netcatty:local:write", writeLocalFile);
   ipcMain.handle("netcatty:local:delete", deleteLocalFile);
   ipcMain.handle("netcatty:local:rename", renameLocalFile);
+  ipcMain.handle("netcatty:local:extract", extractLocalArchive);
   ipcMain.handle("netcatty:local:mkdir", mkdirLocal);
   ipcMain.handle("netcatty:local:stat", statLocal);
+  ipcMain.handle("netcatty:local:lstat", lstatLocal);
   ipcMain.handle("netcatty:local:tree", listLocalTree);
   ipcMain.handle("netcatty:local:homedir", getHomeDir);
   ipcMain.handle("netcatty:local:drives", listDrives);
@@ -619,8 +671,10 @@ module.exports = {
   writeLocalFile,
   deleteLocalFile,
   renameLocalFile,
+  extractLocalArchive,
   mkdirLocal,
   statLocal,
+  lstatLocal,
   collectLocalTreeEntries,
   createLocalTreeTraversalBudget,
   MAX_LOCAL_TREE_DIRECTORIES,

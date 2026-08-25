@@ -1,12 +1,16 @@
 import type { TerminalSession } from "../../domain/models";
 
-export function canReuseTerminalConnection(session: TerminalSession): boolean {
+/** SSH (non-mosh/et) sessions that can back SFTP once the transport is up. */
+export function isTerminalSessionEligibleForSftpReuse(session: TerminalSession): boolean {
   return (
-    (session.protocol === "ssh" || session.protocol === undefined) &&
-    !session.moshEnabled &&
-    !session.etEnabled &&
-    session.status === "connected"
+    (session.protocol === "ssh" || session.protocol === undefined)
+    && !session.moshEnabled
+    && !session.etEnabled
   );
+}
+
+export function canReuseTerminalConnection(session: TerminalSession): boolean {
+  return isTerminalSessionEligibleForSftpReuse(session) && session.status === "connected";
 }
 
 type CloneSessionOptions = {

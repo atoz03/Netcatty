@@ -49,7 +49,7 @@ export function resolveHibernateSnapshotCapturePayload(
 export async function serializeTerminalCloseFallback(
   term: XTerm,
   serializeAddon: SerializeAddon,
-  options: { preferWasm?: boolean } = {},
+  options: { preferWasm?: boolean; prepare?: () => Promise<void> } = {},
 ): Promise<TerminalCloseCapturePayload | null> {
   const snapshot = await serializeTerminalForHibernate(term, serializeAddon, options);
   return resolveHibernateSnapshotCapturePayload(snapshot);

@@ -899,8 +899,7 @@ test("leave-alt CSI clears latch even while buffer still reports alternate", () 
     // Buffer flips to normal after leave is written; latch must be gone.
     (term.buffer.active as { type: string }).type = "normal";
     enqueueCoalescedTerminalWrite(term, "shell after tui", () => {});
-    assert.equal(microtasks.length, 1);
-    assert.equal(frames.length, 0);
+    assert.equal(frames.length, 0, "must not stay on rAF after leave-alt");
   } finally {
     resetTerminalWriteCoalescer(term);
     globalThis.queueMicrotask = originalMicrotask;
@@ -956,8 +955,7 @@ test("enter-then-leave in one chunk does not latch rAF forever", () => {
     microtasks.length = 0;
 
     enqueueCoalescedTerminalWrite(term, "ordinary shell output", () => {});
-    assert.equal(microtasks.length, 1);
-    assert.equal(frames.length, 0);
+    assert.equal(frames.length, 0, "must not latch rAF after enter-then-leave");
   } finally {
     resetTerminalWriteCoalescer(term);
     globalThis.queueMicrotask = originalMicrotask;

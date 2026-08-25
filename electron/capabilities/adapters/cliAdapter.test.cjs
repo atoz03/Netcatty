@@ -74,6 +74,15 @@ test("buildCatalogCliParams maps snippet multi-line run mode", () => {
   assert.equal(params.multiLineRunMode, "lineDelay");
 });
 
+test("buildCatalogCliParams maps dynamic script group targets", () => {
+  const params = buildCatalogCliParams("vault.scripts.targets.set", {
+    scriptId: "script-1",
+    targetGroups: '["Production","Staging/Web"]',
+  }, fakeCreateError);
+  assert.equal(params.scriptId, "script-1");
+  assert.equal(params.targetGroups, '["Production","Staging/Web"]');
+});
+
 test("buildCatalogCliParams throws for missing required fields", () => {
   assert.throws(
     () => buildCatalogCliParams("vault.host.get", {}, fakeCreateError),

@@ -48,7 +48,7 @@ const {
 } = require("./sshAuthHelper.cjs");
 const sessionLogStreamManager = require("./sessionLogStreamManager.cjs");
 const { trackSessionIdlePrompt, looksLikeIdleAutoLogout } = require("./ai/shellUtils.cjs");
-const { createZmodemSentry } = require("./zmodemHelper.cjs");
+const { createZmodemSentry, waitForWritableDrain } = require("./zmodemHelper.cjs");
 const tempDirBridge = require("./tempDirBridge.cjs");
 const {
   buildAlgorithms,
@@ -472,6 +472,7 @@ const {
   releaseConnectionRef,
   transferConnectionRef,
   consumePendingShellReconnectRisk,
+  markEndpointNoIdlePark,
   findReusableSession,
   findTransportByEndpoint,
   resolveTransportForReuse,
@@ -690,7 +691,7 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
         connOpts.privateKey = effectivePrivateKey;
         if (effectivePassphrase) {
           connOpts.passphrase = effectivePassphrase;
-        } else if (jump.privateKey && isKeyEncrypted(jump.privateKey)) {
+        } else if (isKeyEncrypted(effectivePrivateKey)) {
           // Key is encrypted but no passphrase provided — prompt the user
           console.log(`[Chain] Hop ${i + 1}: key is encrypted, requesting passphrase`);
           sendProgress(i + 1, totalHops + 1, hopLabel, 'auth-attempt', 'waiting for user input...');
@@ -969,7 +970,7 @@ const startSessionApi = createStartSessionApi({
   quoteShellArg,
   fs, path, os, net, crypto, Buffer, process, console, setTimeout, clearTimeout,
   createProxySocket, attachX11Forwarding, createPtyOutputBuffer, sessionLogStreamManager,
-  trackSessionIdlePrompt, looksLikeIdleAutoLogout, createZmodemSentry, enableSshNoDelay, enableTcpNoDelay,
+  trackSessionIdlePrompt, looksLikeIdleAutoLogout, createZmodemSentry, waitForWritableDrain, enableSshNoDelay, enableTcpNoDelay,
   iconv, getSessionDecoder, resetSessionDecoders, sessionEncodings, sessionDecoders, encodeTerminalInput,
   normalizeTerminalEncoding,
   trackAck,
@@ -982,7 +983,7 @@ const startSessionApi = createStartSessionApi({
   get selectZmodemDownloadDirectory() { return selectZmodemDownloadDirectory; },
   preparePrivateKeyForAuth, loadFirstIdentityFileForAuth, prepareSystemSshAgentForAuth, hasUserConfiguredKey, isPasswordProvided, createKeyboardInteractiveHandler, createOrderedStringAuthHandler, createAuthPhase, markAuthPhasePartialSuccess, canRepeatKeyboardInteractive, shouldSkipKiPasswordAutoFill,
   createConnectionRef, acquireConnectionRef, releaseConnectionRef, transferConnectionRef,
-  consumePendingShellReconnectRisk,
+  consumePendingShellReconnectRisk, markEndpointNoIdlePark,
   findReusableSession, findTransportByEndpoint, resolveTransportForReuse, discardAllTransports,
   beginTransportDial, waitForTransportDial, completeTransportDial, failTransportDial,
   buildConnectionReuseEndpoint,

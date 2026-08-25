@@ -21,6 +21,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v7
@@ -50,11 +52,18 @@ jobs:
       - name: Test
         run: npm test
 
-      - name: Test terminal decoration performance
+      - name: Test terminal keyword highlight performance
         env:
           NETCATTY_TERMINAL_PERF_SHOW_WINDOW: "1"
         # GitHub-hosted runners do not configure Electron's SUID sandbox helper.
-        run: xvfb-run -a ./node_modules/.bin/electron --no-sandbox scripts/xterm-decoration-performance.live.test.cjs
+        run: xvfb-run -a ./node_modules/.bin/electron --no-sandbox scripts/xterm-keyword-highlight-performance.live.test.cjs
+
+      - name: Test terminal keyword highlight throughput
+        env:
+          NETCATTY_TERMINAL_PERF_MAIN_REF: ${{ github.event.pull_request.base.sha || 'HEAD^' }}
+          NETCATTY_TERMINAL_PERF_ROUNDS: "3"
+          NETCATTY_TERMINAL_PERF_SHOW_WINDOW: "1"
+        run: xvfb-run -a ./node_modules/.bin/electron --no-sandbox scripts/xterm-keyword-highlight-throughput.live.test.cjs
 
       - name: Build
         run: npm run build

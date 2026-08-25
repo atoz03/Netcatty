@@ -4,6 +4,35 @@ import { netcattyBridge } from "../infrastructure/services/netcattyBridge";
 let shellCache: DiscoveredShell[] | null = null;
 let shellPromise: Promise<DiscoveredShell[]> | null = null;
 
+/**
+ * Resolve discovered shells, awaiting the in-flight discovery when needed.
+ * Safe to call from cold-start paths that must not create a session before
+ * WSL/Git-Bash IDs can be classified and labeled.
+ */
+export async function ensureDiscoveredShells(): Promise<DiscoveredShell[]> {
+  if (shellCache) return shellCache;
+
+  const bridge = netcattyBridge.get();
+  if (!bridge?.discoverShells) return [];
+
+  if (!shellPromise) {
+    shellPromise = bridge.discoverShells().then((result) => {
+      shellCache = result;
+      return result;
+    }).catch((err) => {
+      console.warn("Failed to discover shells:", err);
+      shellPromise = null;
+      throw err;
+    });
+  }
+
+  try {
+    return await shellPromise;
+  } catch {
+    return shellCache ?? [];
+  }
+}
+
 export function useDiscoveredShells(): DiscoveredShell[] {
   const [shells, setShells] = useState<DiscoveredShell[]>(shellCache ?? []);
 
@@ -13,21 +42,13 @@ export function useDiscoveredShells(): DiscoveredShell[] {
       return;
     }
 
-    const bridge = netcattyBridge.get();
-    if (!bridge?.discoverShells) return;
-
-    if (!shellPromise) {
-      shellPromise = bridge.discoverShells();
-    }
-
-    shellPromise.then((result) => {
-      shellCache = result;
-      setShells(result);
-    }).catch((err) => {
-      console.warn("Failed to discover shells:", err);
-      // Clear the failed promise so the next mount can retry
-      shellPromise = null;
+    let cancelled = false;
+    void ensureDiscoveredShells().then((result) => {
+      if (!cancelled) setShells(result);
     });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   return shells;

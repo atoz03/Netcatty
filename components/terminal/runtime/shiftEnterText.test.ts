@@ -4,9 +4,13 @@ import { readFileSync } from "node:fs";
 
 import {
   decodeTerminalTextEscapes,
+  doesKittyEncodingPreserveShiftEnter,
   getShiftEnterSubmittedInput,
+  isBareShiftEnterLineEnding,
   isShiftEnterLineContinuationText,
+  resolveShiftEnterPayload,
   resolveShiftEnterText,
+  SHIFT_ENTER_CSI_U_SEQUENCE,
   shouldSendShiftEnterText,
 } from "./shiftEnterText";
 
@@ -79,6 +83,61 @@ test("shift enter handler respects the terminal setting toggle", () => {
   );
 });
 
+test("bare line-ending Shift+Enter text is detected for TUI passthrough", () => {
+  assert.equal(isBareShiftEnterLineEnding("\n"), true);
+  assert.equal(isBareShiftEnterLineEnding("\r"), true);
+  assert.equal(isBareShiftEnterLineEnding("\r\n"), true);
+  assert.equal(isBareShiftEnterLineEnding(" \\\n"), false);
+  assert.equal(isBareShiftEnterLineEnding("sudo whoami\n"), false);
+  assert.equal(isBareShiftEnterLineEnding(""), false);
+});
+
+test("Kitty encodings that collapse Shift+Enter to CR/LF do not preserve the chord", () => {
+  assert.equal(doesKittyEncodingPreserveShiftEnter(null), false);
+  assert.equal(doesKittyEncodingPreserveShiftEnter(""), false);
+  assert.equal(doesKittyEncodingPreserveShiftEnter("\r"), false);
+  assert.equal(doesKittyEncodingPreserveShiftEnter("\n"), false);
+  assert.equal(doesKittyEncodingPreserveShiftEnter(SHIFT_ENTER_CSI_U_SEQUENCE), true);
+});
+
+test("main-buffer Shift+Enter keeps configured send text", () => {
+  assert.deepEqual(resolveShiftEnterPayload(), {
+    kind: "text",
+    data: "\n",
+  });
+  assert.deepEqual(
+    resolveShiftEnterPayload(
+      { shiftEnterNewlineText: " \\\\\\n" },
+      { alternateScreen: false },
+    ),
+    { kind: "text", data: " \\\n" },
+  );
+});
+
+test("alternate-screen Shift+Enter sends CSI-u when configured text is a bare line ending", () => {
+  assert.deepEqual(
+    resolveShiftEnterPayload(undefined, { alternateScreen: true }),
+    { kind: "key", data: SHIFT_ENTER_CSI_U_SEQUENCE },
+  );
+  assert.deepEqual(
+    resolveShiftEnterPayload(
+      { shiftEnterNewlineText: "\\r\\n" },
+      { alternateScreen: true },
+    ),
+    { kind: "key", data: SHIFT_ENTER_CSI_U_SEQUENCE },
+  );
+});
+
+test("alternate-screen Shift+Enter keeps custom non-line-ending send text", () => {
+  assert.deepEqual(
+    resolveShiftEnterPayload(
+      { shiftEnterNewlineText: " \\\\\\n" },
+      { alternateScreen: true },
+    ),
+    { kind: "text", data: " \\\n" },
+  );
+});
+
 test("runtime routes Shift+Enter text through the shared input handler", () => {
   const source = readFileSync(
     new URL("./createXTermRuntime.ts", import.meta.url),
@@ -87,15 +146,24 @@ test("runtime routes Shift+Enter text through the shared input handler", () => {
 
   assert.match(
     source,
-    /const handleTerminalInputData = \(\s+data: string,\s+options\?: \{ source\?: "terminal" \| "shift-enter" \| "kitty" \},\s+\) => \{/s,
+    /const handleTerminalInputData = \(\s+data: string,\s+options\?: \{\s+source\?: "terminal" \| "shift-enter" \| "kitty";\s+[\s\S]*?skipBroadcast\?: boolean;\s+\},\s+\) => \{/s,
+  );
+  // Remap when Kitty encoding does not preserve Shift+Enter (not merely flags===0).
+  assert.match(
+    source,
+    /if \(\s*shouldSendShiftEnterText\([\s\S]*?\) &&\s*!doesKittyEncodingPreserveShiftEnter\(kittySequenceForKeyDown\)\s*\) \{[\s\S]*?const shiftEnterPayload = resolveShiftEnterPayload\([\s\S]*?\)[\s\S]*?\}\s*if \(kittySequenceForKeyDown\)/s,
   );
   assert.match(
     source,
-    /if \(textToSend\) \{\s+handleTerminalInputData\(textToSend, \{ source: "shift-enter" \}\);/s,
+    /if \(shiftEnterPayload\.kind === "key"\) \{[\s\S]*?handleTerminalInputData\(shiftEnterPayload\.data, \{ source: "kitty" \}\);[\s\S]*?\} else \{[\s\S]*?handleTerminalInputData\(shiftEnterPayload\.data, \{\s*source: "shift-enter",\s*skipBroadcast: true,\s*\}\);[\s\S]*?\}\s*const forwarded = broadcastKittyInput\(\{\s*kind: "key",\s*event: kittyEvent,\s*fallbackToLegacy: true,\s*\}\);/s,
   );
   assert.match(
     source,
-    /!isKittyKeyboardModeActive\(kittyKeyboardMode\) &&\s+shouldSendShiftEnterText/,
+    /const canBroadcastInput = !sensitive &&[\s\S]*?const willBroadcastInput = canBroadcastInput && options\?\.skipBroadcast !== true;[\s\S]*?if \(!canBroadcastInput && !handlingKittyBroadcast\) \{\s*prepareSudoAutofillInput/s,
+  );
+  assert.match(
+    source,
+    /alternateScreen: term\.buffer\.active\.type === "alternate",\s*shiftEnterSettings: ctx\.terminalSettingsRef\.current,/s,
   );
   assert.match(source, /getShiftEnterSubmittedInput\(data\)/);
   assert.match(source, /inputSource !== "shift-enter"/);

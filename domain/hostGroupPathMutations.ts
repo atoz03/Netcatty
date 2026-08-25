@@ -1,4 +1,83 @@
-import type { Host, ManagedSource } from '../types';
+import type { Host, ManagedSource, Snippet } from '../types';
+
+export function normalizeGroupTargetPath(value: string): string {
+  return value
+    .replace(/\\/g, '/')
+    .split('/')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join('/');
+}
+
+export function normalizeGroupTargetPaths(values: Iterable<string>): string[] {
+  return Array.from(new Set(
+    [...values].map(normalizeGroupTargetPath).filter(Boolean),
+  ));
+}
+
+function replaceGroupPathPrefix(path: string, sourcePath: string, nextPath: string): string {
+  if (path === sourcePath) return nextPath;
+  if (path.startsWith(`${sourcePath}/`)) return nextPath + path.slice(sourcePath.length);
+  return path;
+}
+
+export function remapSnippetTargetGroupPaths(
+  snippets: Snippet[],
+  sourceValue: string,
+  nextValue: string,
+): Snippet[] {
+  const sourcePath = normalizeGroupTargetPath(sourceValue);
+  const nextPath = normalizeGroupTargetPath(nextValue);
+  if (!sourcePath || !nextPath || sourcePath === nextPath) return snippets;
+
+  let changed = false;
+  const nextSnippets = snippets.map((snippet) => {
+    if (!snippet.targetGroups?.length) return snippet;
+    const targetGroups = normalizeGroupTargetPaths(
+      snippet.targetGroups.map((path) => replaceGroupPathPrefix(
+        normalizeGroupTargetPath(path), sourcePath, nextPath,
+      )),
+    );
+    if (
+      targetGroups.length === snippet.targetGroups.length
+      && targetGroups.every((path, index) => path === snippet.targetGroups?.[index])
+    ) return snippet;
+    changed = true;
+    return { ...snippet, targetGroups };
+  });
+  return changed ? nextSnippets : snippets;
+}
+
+export function removeSnippetTargetGroupPaths(
+  snippets: Snippet[],
+  removedValues: Iterable<string>,
+): Snippet[] {
+  const removedPaths = [...removedValues]
+    .map(normalizeGroupTargetPath)
+    .filter(Boolean);
+  if (removedPaths.length === 0) return snippets;
+  const isRemoved = (path: string) => removedPaths.some(
+    (removed) => path === removed || path.startsWith(`${removed}/`),
+  );
+
+  let changed = false;
+  const nextSnippets = snippets.map((snippet) => {
+    if (snippet.targetGroups === undefined) return snippet;
+    const targetGroups = normalizeGroupTargetPaths(snippet.targetGroups).filter(
+      (path) => !isRemoved(path),
+    );
+    if (
+      targetGroups.length === snippet.targetGroups.length
+      && targetGroups.every((path, index) => path === snippet.targetGroups?.[index])
+    ) return snippet;
+    changed = true;
+    // An absent scope keeps the legacy onOutput "current session" behavior.
+    // Preserve an explicit empty list when the last selected group disappears
+    // so the script is disabled instead of silently widening to every host.
+    return { ...snippet, targetGroups };
+  });
+  return changed ? nextSnippets : snippets;
+}
 
 export function groupDisplayName(groupPath: string): string {
   return groupPath.split('/').filter(Boolean).pop() ?? groupPath;

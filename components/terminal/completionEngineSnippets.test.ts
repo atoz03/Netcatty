@@ -19,6 +19,27 @@ test("getCompletions does not surface snippets past the command position", async
   assert.equal(out.find((s) => s.source === "snippet"), undefined);
 });
 
+test("getCompletions applies dynamic group targets to the current host", async () => {
+  const groupedSnippet: Snippet = {
+    ...deploySnippet,
+    targetGroups: ["Production"],
+  };
+
+  const matching = await getCompletions("dep", {
+    hostId: "host-prod",
+    hostGroup: "Production/Web",
+    snippets: [groupedSnippet],
+  });
+  const outside = await getCompletions("dep", {
+    hostId: "host-dev",
+    hostGroup: "Development",
+    snippets: [groupedSnippet],
+  });
+
+  assert.ok(matching.some((suggestion) => suggestion.source === "snippet"));
+  assert.equal(outside.some((suggestion) => suggestion.source === "snippet"), false);
+});
+
 test("getCompletions returns more than 8 snippet matches when default maxSuggestions allows it", async () => {
   const snippets: Snippet[] = Array.from({ length: 20 }, (_, i) => ({
     id: `s${i}`,

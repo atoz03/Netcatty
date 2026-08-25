@@ -134,6 +134,9 @@ export class PluginTerminalVisualProviderHost implements IDisposable {
   readonly #disposables: IDisposable[] = [];
   readonly #matcherDecorations: Array<IDecoration | IMarker | undefined> = [];
   readonly #annotationDecorations: Array<IDecoration | IMarker | undefined> = [];
+  #visibleAnnotations: readonly PluginTerminalAnnotation[] = Object.freeze([]);
+  #annotationAnchorLine: number | null = null;
+  #annotationMarker: IMarker | null = null;
   readonly #requestControllers = new Set<AbortController>();
   readonly #matcherRequestControllers = new Set<AbortController>();
   #matcherTimer: ReturnType<typeof setTimeout> | undefined;
@@ -196,6 +199,9 @@ export class PluginTerminalVisualProviderHost implements IDisposable {
     }
     this.#isProviderAvailable = options.isProviderAvailable ?? (() => true);
     this.#disposables.push(this.#term.onWriteParsed(() => {
+      if (this.#annotationMarker && !this.#annotationMarker.isDisposed) {
+        this.#annotationAnchorLine = this.#annotationMarker.line;
+      }
       this.#matcherGeneration += 1;
       for (const controller of this.#matcherRequestControllers) controller.abort();
       this.#matcherRequestControllers.clear();
@@ -432,11 +438,23 @@ export class PluginTerminalVisualProviderHost implements IDisposable {
     }
   }
 
-  #renderAnnotations(annotations: readonly PluginTerminalAnnotation[]): void {
+  #renderAnnotations(
+    annotations: readonly PluginTerminalAnnotation[],
+    anchorLine?: number | null,
+  ): void {
     disposeAll(this.#annotationDecorations);
-    if (annotations.length === 0 || this.#disposed || !this.#active || !this.#visible) return;
-    const marker = this.#term.registerMarker(0);
+    this.#annotationMarker = null;
+    this.#visibleAnnotations = Object.freeze([...annotations]);
+    if (annotations.length === 0 || this.#disposed || !this.#active || !this.#visible) {
+      this.#annotationAnchorLine = null;
+      return;
+    }
+    const buffer = this.#term.buffer.active;
+    const cursorLine = buffer.baseY + buffer.cursorY;
+    const marker = this.#term.registerMarker((anchorLine ?? cursorLine) - cursorLine);
     if (!marker) return;
+    this.#annotationMarker = marker;
+    this.#annotationAnchorLine = marker.line;
     const decoration = this.#term.registerDecoration({ marker, anchor: 'right', x: 0, width: 1, layer: 'top' });
     const text = annotations.map((annotation) => annotation.text).join(' | ').slice(0, 512);
     const description = annotations.map((annotation) => annotation.description).filter(Boolean).join('\n');
@@ -452,6 +470,19 @@ export class PluginTerminalVisualProviderHost implements IDisposable {
       element.style.transform = 'translateX(calc(-100% - 4px))';
     });
     this.#annotationDecorations.push(decoration, marker);
+  }
+
+  /** Recreate markers disposed by a terminal history replay without re-querying plugins. */
+  terminalRebuilt(): void {
+    if (this.#visibleAnnotations.length === 0) return;
+    this.#renderAnnotations(this.#visibleAnnotations, this.#annotationAnchorLine);
+  }
+
+  #clearAnnotations(): void {
+    disposeAll(this.#annotationDecorations);
+    this.#annotationMarker = null;
+    this.#visibleAnnotations = Object.freeze([]);
+    this.#annotationAnchorLine = null;
   }
 
   setActive(active: boolean, terminalBackground?: string): void {
@@ -475,7 +506,7 @@ export class PluginTerminalVisualProviderHost implements IDisposable {
     this.#backgroundGeneration += 1;
     this.#pendingSemantics.splice(0);
     disposeAll(this.#matcherDecorations);
-    disposeAll(this.#annotationDecorations);
+    this.#clearAnnotations();
     this.#renderBackground([]);
   }
 
@@ -493,7 +524,7 @@ export class PluginTerminalVisualProviderHost implements IDisposable {
     this.#pendingSemantics.splice(0);
     if (!visible) {
       disposeAll(this.#matcherDecorations);
-      disposeAll(this.#annotationDecorations);
+      this.#clearAnnotations();
       this.#renderBackground([]);
     }
     if (visible && this.#active) {
@@ -510,7 +541,7 @@ export class PluginTerminalVisualProviderHost implements IDisposable {
     this.#backgroundGeneration += 1;
     this.#abortProviderRequests();
     this.#pendingSemantics.splice(0);
-    disposeAll(this.#annotationDecorations);
+    this.#clearAnnotations();
     if (!this.#isProviderAvailable('terminal.background')) this.#renderBackground([]);
     if (!this.#isProviderAvailable('terminal.matcher')) disposeAll(this.#matcherDecorations);
     if (this.#active && this.#visible) {
@@ -557,7 +588,7 @@ export class PluginTerminalVisualProviderHost implements IDisposable {
     this.#abortProviderRequests();
     this.#pendingSemantics.splice(0);
     disposeAll(this.#matcherDecorations);
-    disposeAll(this.#annotationDecorations);
+    this.#clearAnnotations();
     this.#backgroundOverlay?.remove();
     this.#backgroundOverlay = null;
     disposeAll(this.#disposables);

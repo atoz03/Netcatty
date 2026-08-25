@@ -3,7 +3,8 @@ import { isScriptSnippet } from './snippetScript.ts';
 import {
   getScriptsLinkedToHost,
   linkHostToScript,
-  snippetAppliesToHost,
+  snippetTargetsHostExplicitly,
+  snippetTargetsHostGroup,
   unlinkHostFromScripts,
 } from './snippetTargets.ts';
 import { sortByVaultOrder } from './vaultOrder.ts';
@@ -64,7 +65,7 @@ export function migrateHostConnectScriptIds(host: Host, snippets: Snippet[]): st
     if (!scriptId || seen.has(scriptId)) return;
     const snippet = scriptById(snippets, scriptId);
     if (!snippet || !isOnConnectScript(snippet)) return;
-    if (!snippetAppliesToHost(snippet, host.id) && !snippet.targetsAllHosts) return;
+    if (!snippetTargetsHostExplicitly(snippet, host.id) && !snippet.targetsAllHosts) return;
     seen.add(scriptId);
     ordered.push(scriptId);
   };
@@ -80,7 +81,7 @@ export function migrateHostConnectScriptIds(host: Host, snippets: Snippet[]): st
   for (const snippet of sortByVaultOrder(snippets)) {
     if (!isOnConnectScript(snippet)) continue;
     if (snippet.targetsAllHosts) continue;
-    if (!snippetAppliesToHost(snippet, host.id)) continue;
+    if (!snippetTargetsHostExplicitly(snippet, host.id)) continue;
     push(snippet.id);
   }
 
@@ -134,17 +135,32 @@ export function hasUnresolvedConnectScriptBindings(host: Host, snippets: Snippet
   return false;
 }
 
-/** Resolve full onConnect run list: global scripts first, then host queue; dedupe favors host queue. */
+/** Group-scoped onConnect scripts inherited dynamically from the host's current group. */
+export function getGroupConnectScriptsForHost(host: Host, snippets: Snippet[]): Snippet[] {
+  return sortByVaultOrder(
+    snippets.filter(
+      (snippet) => isOnConnectScript(snippet)
+        && !snippet.targetsAllHosts
+        && snippetTargetsHostGroup(snippet, host),
+    ),
+  );
+}
+
+/** Resolve full onConnect run list: global, group-inherited, then host queue. */
 export function resolveConnectScriptsForHost(host: Host, snippets: Snippet[]): Snippet[] {
   const hostIds = getHostConnectScriptIds(host, snippets);
   const hostIdSet = new Set(hostIds);
   const globals = getGlobalConnectScripts(snippets).filter(
     (snippet) => snippet.id && !hostIdSet.has(snippet.id),
   );
+  const inheritedIds = new Set(globals.map((snippet) => snippet.id));
+  const groupScripts = getGroupConnectScriptsForHost(host, snippets).filter(
+    (snippet) => snippet.id && !hostIdSet.has(snippet.id) && !inheritedIds.has(snippet.id),
+  );
   const hostScripts = hostIds
     .map((id) => scriptById(snippets, id))
     .filter((snippet): snippet is Snippet => Boolean(snippet));
-  return [...globals, ...hostScripts];
+  return [...globals, ...groupScripts, ...hostScripts];
 }
 
 /**
@@ -244,7 +260,7 @@ function connectQueueSnippetNeedsPromote(snippet: Snippet, hostId: string): bool
   if (!isScriptSnippet(snippet)) return false;
   if (snippet.trigger !== 'onConnect') return true;
   if (snippet.targetsAllHosts) return false;
-  return !snippetAppliesToHost(snippet, hostId);
+  return !snippetTargetsHostExplicitly(snippet, hostId);
 }
 
 function snippetTargetsEqual(left: Snippet, right: Snippet): boolean {
@@ -252,7 +268,11 @@ function snippetTargetsEqual(left: Snippet, right: Snippet): boolean {
   const leftTargets = left.targets ?? [];
   const rightTargets = right.targets ?? [];
   if (leftTargets.length !== rightTargets.length) return false;
-  return leftTargets.every((id, index) => id === rightTargets[index]);
+  if (!leftTargets.every((id, index) => id === rightTargets[index])) return false;
+  const leftGroups = left.targetGroups ?? [];
+  const rightGroups = right.targetGroups ?? [];
+  if (leftGroups.length !== rightGroups.length) return false;
+  return leftGroups.every((path, index) => path === rightGroups[index]);
 }
 
 /**
@@ -338,8 +358,8 @@ export function syncSnippetsForHostConnectQueueSave(
       !newlyAdded
       && baselineItem
       && isScriptSnippet(baselineItem)
-      && (Boolean(baselineItem.targetsAllHosts) || snippetAppliesToHost(baselineItem, hostId))
-      && !(Boolean(item.targetsAllHosts) || snippetAppliesToHost(item, hostId))
+      && (Boolean(baselineItem.targetsAllHosts) || snippetTargetsHostExplicitly(baselineItem, hostId))
+      && !(Boolean(item.targetsAllHosts) || snippetTargetsHostExplicitly(item, hostId))
     ) {
       // Concurrent target removal for this host: do not re-link on save.
       demotedDropIds.add(scriptId);

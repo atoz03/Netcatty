@@ -775,6 +775,7 @@ export const tryAttachSessionToTerminal = (
     onConnected?: (meta?: TerminalSessionDataMeta) => void;
     onExit?: (evt: TerminalSessionExitEvent) => void;
     requireExplicitConnectionReady?: boolean;
+    deferConnectionDuringMoshHandshake?: boolean;
     convertLfToCrlf?: boolean;
     sudoAutofillPassword?: string;
     sudoAutofillCandidates?: SudoPasswordAutofillCandidate[];
@@ -837,6 +838,7 @@ export const attachSessionToTerminal = (
     onConnected?: (meta?: TerminalSessionDataMeta) => void;
     onExit?: (evt: TerminalSessionExitEvent) => void;
     requireExplicitConnectionReady?: boolean;
+    deferConnectionDuringMoshHandshake?: boolean;
     convertLfToCrlf?: boolean;
     sudoAutofillPassword?: string;
     sudoAutofillCandidates?: SudoPasswordAutofillCandidate[];
@@ -885,6 +887,13 @@ export const attachSessionToTerminal = (
   const markConnectedOnFirstOutput = (meta?: TerminalSessionDataMeta) => {
     const pluginConnectionReady = meta?.pluginConnectionReady === true;
     if (opts?.requireExplicitConnectionReady === true && !pluginConnectionReady) return;
+    if (
+      opts?.deferConnectionDuringMoshHandshake === true
+      && meta?.moshHandshake === true
+      && meta?.moshHandshakeRequiresUserInput !== true
+    ) {
+      return;
+    }
     if (ctx.hasConnectedRef.current && !pluginConnectionReady) return;
     if (!ctx.hasConnectedRef.current) {
       ctx.updateStatus("connected");
@@ -945,18 +954,16 @@ export const attachSessionToTerminal = (
       data = sudoAutofill?.handleOutput(data) ?? data;
       writeSessionData(ctx, term, data, ingressBytes, meta);
       ctx.onTerminalOutput?.(data, meta);
-      // Mark connected on first visible output so the connection overlay
-      // dismisses and interactive Mosh handshake prompts (password/OTP)
-      // remain reachable. Startup commands / pending scripts are gated
-      // separately on netcatty:mosh:ready so they do not hit the handshake
-      // PTY (#2199).
+      // Ordinary transports connect on first visible output. Mosh defers that
+      // transition until ready unless its SSH bootstrap explicitly reports
+      // that it is blocked on input Netcatty could not answer automatically.
       markConnectedOnFirstOutput(meta);
     },
     { replayBacklog: true },
   );
   ctx.terminalBackend.notifyTerminalSessionDisplayReady?.(id);
 
-  ctx.disposeExitRef.current = ctx.terminalBackend.onSessionExit(id, (evt) => {
+  ctx.disposeExitRef.current = ctx.terminalBackend.onSessionExit(id, async (evt) => {
     // The backend is already gone. In particular, an observe popup must not
     // run its normal pause/snapshot/restore handoff while closing afterward.
     if (ctx.sessionRef.current === id) {
@@ -971,6 +978,7 @@ export const attachSessionToTerminal = (
 
     if (ctx.onTerminalDataCapture && ctx.serializeAddonRef.current) {
       try {
+        await ctx.prepareKeywordHighlightSerialization?.();
         const terminalData = ctx.serializeAddonRef.current.serialize();
         ctx.onTerminalDataCapture(ctx.sessionId, terminalData);
       } catch (err) {

@@ -6,10 +6,12 @@
  * per chunk, which can tear TUI frames (missing box borders, clipped bottom
  * rows). Batching keeps rendering atomic per schedule turn.
  *
- * Schedule modes (Tabby-inspired):
+ * Schedule modes (Tabby + Electerm-inspired):
  * - `raf`: wait for the next animation frame (best for alternate-screen TUIs)
- * - `microtask`: flush after the current JS turn (normal-screen bulk / echo —
- *   closer to Tabby's direct write, still coalesces same-turn chunks)
+ * - `microtask`: flush after the current JS turn (same-turn merge only)
+ * - `burst`: idle output still flushes next microtask; writes that arrive
+ *   inside a 16ms window after the last flush wait and merge (Electerm's
+ *   attach-addon flood path). Never drops bytes.
  *
  * Ported from superset-sh/superset (issues #2241 / #2244):
  * apps/desktop/src/renderer/lib/terminal/write-coalescer.ts
@@ -27,6 +29,11 @@ export {
 
 /** Maximum time pending output may wait for its primary scheduler. */
 export const WRITE_COALESCE_FALLBACK_DRAIN_MS = 50;
+/**
+ * Electerm-style burst window. After a flush, further chunks wait up to this
+ * long so a log flood becomes ~60 writes/s instead of one write per IPC turn.
+ */
+export const WRITE_COALESCE_BURST_MS = 16;
 
 export type WriteCoalescer = {
   push(chunk: string): void;
@@ -38,7 +45,7 @@ export type WriteCoalescer = {
   dispose(): void;
 };
 
-export type WriteCoalesceScheduleMode = "raf" | "microtask";
+export type WriteCoalesceScheduleMode = "raf" | "microtask" | "burst";
 
 export type WriteCoalesceScheduleContext = {
   /** Chunk about to be (or just) enqueued. */
@@ -63,6 +70,8 @@ export type WriteCoalescerOptions = {
   resolveScheduleMode?: (ctx: WriteCoalesceScheduleContext) => WriteCoalesceScheduleMode;
   getMaxPendingBytes?: () => number;
   shouldFlushScheduledFrame?: () => boolean;
+  now?: () => number;
+  burstWindowMs?: number;
 };
 
 const scheduleRafFrame = (callback: () => void): (() => void) | null => {
@@ -149,6 +158,7 @@ export const createWriteCoalescer = (
   let cancelPendingSchedule: (() => void) | null = null;
   let scheduledMode: WriteCoalesceScheduleMode | null = null;
   let disposed = false;
+  let lastFlushTime = 0;
   const customScheduleFrame = options.scheduleFrame;
   const scheduleTimeout = options.scheduleTimeout ?? defaultScheduleTimeout;
   const fallbackDrainMs = options.fallbackDrainMs ?? WRITE_COALESCE_FALLBACK_DRAIN_MS;
@@ -156,6 +166,12 @@ export const createWriteCoalescer = (
   const getMaxPendingBytes = options.getMaxPendingBytes
     ?? (() => MAX_PENDING_WRITE_COALESCE_BYTES);
   const shouldFlushScheduledFrame = options.shouldFlushScheduledFrame ?? (() => true);
+  const now = options.now ?? (() => (
+    typeof performance !== "undefined" && typeof performance.now === "function"
+      ? performance.now()
+      : Date.now()
+  ));
+  const burstWindowMs = options.burstWindowMs ?? WRITE_COALESCE_BURST_MS;
 
   const cancelScheduledDrain = (): void => {
     if (cancelPendingSchedule !== null) {
@@ -208,6 +224,23 @@ export const createWriteCoalescer = (
       flushSync();
     };
 
+    if (mode === "burst") {
+      const elapsed = lastFlushTime === 0 ? burstWindowMs : now() - lastFlushTime;
+      if (lastFlushTime > 0 && elapsed < burstWindowMs) {
+        const waitMs = Math.max(1, burstWindowMs - elapsed);
+        const cancel = scheduleTimeout(onScheduled, waitMs);
+        if (cancel === null) {
+          if (!shouldFlushScheduledFrame()) return;
+          flushSync();
+          return;
+        }
+        cancelPendingSchedule = cancel;
+        scheduledMode = "burst";
+        return;
+      }
+      mode = "microtask";
+    }
+
     const primaryCancel = scheduleByMode(mode, onScheduled, customScheduleFrame);
     const fallbackCancel = mode === "raf"
       && fallbackDrainMs > 0
@@ -234,6 +267,7 @@ export const createWriteCoalescer = (
     const batch = pending.length === 1 ? pending[0]! : pending.join("");
     pending = [];
     pendingBytes = 0;
+    lastFlushTime = now();
     (writeOverride ?? write)(batch);
   };
 
@@ -245,6 +279,7 @@ export const createWriteCoalescer = (
     const dropped = pendingBytes;
     pending = [];
     pendingBytes = 0;
+    lastFlushTime = 0;
     onDropped?.(dropped);
   };
 
@@ -275,7 +310,7 @@ export const createWriteCoalescer = (
     // Upgrade microtask → rAF when a later chunk enters a TUI: the first shell
     // chunk may have scheduled a same-turn flush before the alt-screen CSI
     // arrived, which would tear the first repaint (Codex PR review).
-    if (scheduledMode === "microtask" && mode === "raf") {
+    if ((scheduledMode === "microtask" || scheduledMode === "burst") && mode === "raf") {
       cancelScheduledDrain();
       armSchedule("raf");
     }

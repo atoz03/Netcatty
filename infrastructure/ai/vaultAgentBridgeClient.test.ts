@@ -14,6 +14,13 @@ type DepsSeed = {
   managedSources?: ManagedSource[];
 };
 
+function applySnippetUpdate(
+  current: Snippet[],
+  update: Snippet[] | ((snippets: Snippet[]) => Snippet[]),
+): Snippet[] {
+  return typeof update === 'function' ? update(current) : update;
+}
+
 function createDeps(
   overrides: Partial<VaultAgentApiDeps> & DepsSeed = {},
 ): VaultAgentApiDeps {
@@ -54,6 +61,23 @@ function createDeps(
     updateHosts: (nextHosts) => {
       hosts = nextHosts;
     },
+    commitVaultGroupMutation: async (mutate) => {
+      const result = mutate({
+        groups: customGroups,
+        configs: groupConfigs,
+        hosts,
+        managedSources,
+        snippets,
+      });
+      if (result.ok) {
+        customGroups = result.state.groups;
+        groupConfigs = result.state.configs;
+        hosts = result.state.hosts;
+        managedSources = result.state.managedSources;
+        snippets = result.state.snippets;
+      }
+      return result;
+    },
     saveKeyPassphrase: async () => {},
     resolveKeyPassphraseAliases: async (keyPath) => [keyPath],
     readKeyPassphrases: async () => ({ values: [], unreadable: false }),
@@ -61,8 +85,8 @@ function createDeps(
     updateNotes: (nextNotes) => {
       notes = nextNotes;
     },
-    updateSnippets: (nextSnippets) => {
-      snippets = nextSnippets;
+    updateSnippets: (snippetUpdate) => {
+      snippets = applySnippetUpdate(snippets, snippetUpdate);
     },
     startTunnel: async () => ({ success: true }),
     stopTunnel: async () => ({ success: true }),
@@ -89,9 +113,9 @@ function createDeps(
       base.updateNotes(nextNotes);
       overrides.updateNotes?.(nextNotes);
     },
-    updateSnippets: (nextSnippets) => {
-      base.updateSnippets(nextSnippets);
-      overrides.updateSnippets?.(nextSnippets);
+    updateSnippets: (snippetUpdate) => {
+      base.updateSnippets(snippetUpdate);
+      overrides.updateSnippets?.(snippetUpdate);
     },
     updateCustomGroups: (groups) => {
       base.updateCustomGroups(groups);
@@ -1806,6 +1830,70 @@ describe('handleVaultAgentOp vault management gaps', () => {
     assert.equal(deps.getCustomGroups().includes('prod'), false);
     assert.equal(deps.getHosts()[0]?.group, undefined);
   });
+
+  it('group path updates transform the latest snippet snapshot', async () => {
+    const original: Snippet = {
+      id: 'deploy', label: 'Deploy', command: 'nct.log(1)', kind: 'script',
+      targetGroups: ['prod'],
+    };
+    let committedSnippets: Snippet[] = [];
+    const deps = createDeps({
+      snippets: [original],
+      customGroups: ['prod'],
+      commitVaultGroupMutation: async (mutate) => {
+        const result = mutate({
+          groups: ['prod'],
+          configs: [],
+          hosts: [],
+          managedSources: [],
+          snippets: [{ ...original, command: 'nct.log(2)' }],
+        });
+        if (result.ok) committedSnippets = result.state.snippets;
+        return result;
+      },
+    });
+
+    const result = await handleVaultAgentOp('group.update', {
+      path: 'prod',
+      newPath: 'production',
+    }, deps);
+
+    assert.equal(result.ok, true);
+    assert.equal(committedSnippets[0]?.command, 'nct.log(2)');
+    assert.deepEqual(committedSnippets[0]?.targetGroups, ['production']);
+  });
+
+  it('does not report group update success when the joint Vault commit fails', async () => {
+    const deps = createDeps({
+      customGroups: ['prod'],
+      commitVaultGroupMutation: async () => {
+        throw new Error('Vault quota exhausted');
+      },
+    });
+
+    const result = await handleVaultAgentOp('group.update', {
+      path: 'prod', newPath: 'production',
+    }, deps);
+
+    assert.equal(result.ok, false);
+    assert.match(String(result.error), /quota exhausted/i);
+    assert.deepEqual(deps.getCustomGroups(), ['prod']);
+  });
+
+  it('does not report group delete success when the joint Vault commit fails', async () => {
+    const deps = createDeps({
+      customGroups: ['prod'],
+      commitVaultGroupMutation: async () => {
+        throw new Error('Vault quota exhausted');
+      },
+    });
+
+    const result = await handleVaultAgentOp('group.delete', { path: 'prod' }, deps);
+
+    assert.equal(result.ok, false);
+    assert.match(String(result.error), /quota exhausted/i);
+    assert.deepEqual(deps.getCustomGroups(), ['prod']);
+  });
 });
 
 describe('handleVaultAgentOp snippets and scripts', () => {
@@ -1814,7 +1902,7 @@ describe('handleVaultAgentOp snippets and scripts', () => {
     const deps = createDeps({
       snippets: [],
       updateSnippets: (nextSnippets) => {
-        updated.push(nextSnippets);
+        updated.push(applySnippetUpdate([], nextSnippets));
       },
     });
 
@@ -1840,7 +1928,7 @@ describe('handleVaultAgentOp snippets and scripts', () => {
     const deps = createDeps({
       snippets: [],
       updateSnippets: (nextSnippets) => {
-        updated.push(nextSnippets);
+        updated.push(applySnippetUpdate([], nextSnippets));
       },
     });
 
@@ -1863,7 +1951,7 @@ describe('handleVaultAgentOp snippets and scripts', () => {
     const deps = createDeps({
       snippets: [{ id: 'snippet-1', label: 'Login', command: 'admin\npassword', kind: 'snippet' }],
       updateSnippets: (nextSnippets) => {
-        updated.push(nextSnippets);
+        updated.push(applySnippetUpdate([], nextSnippets));
       },
     });
 
@@ -1948,7 +2036,7 @@ describe('handleVaultAgentOp snippets and scripts', () => {
     const deps = createDeps({
       snippets,
       updateSnippets: (next) => {
-        updated.push(next);
+        updated.push(applySnippetUpdate(snippets, next));
       },
     });
 

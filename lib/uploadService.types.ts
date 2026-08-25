@@ -69,13 +69,18 @@ export interface UploadBridge {
   writeLocalFile?: (path: string, data: ArrayBuffer) => Promise<void>;
   mkdirLocal?: (path: string) => Promise<void>;
   statLocal?: (path: string) => Promise<{ type: 'file' | 'directory' | 'symlink'; size: number; lastModified: number } | null>;
-  deleteLocalFile?: (path: string) => Promise<void>;
+  /** No-follow local metadata so Replace can unlink symlinks before writeLocalFile. */
+  lstatLocal?: (path: string) => Promise<{ type: 'file' | 'directory' | 'symlink'; size: number; lastModified: number } | null>;
+  deleteLocalFile?: (path: string, expectedType?: 'file' | 'directory' | 'symlink') => Promise<void>;
   stageUploadFile?: (file: File, taskId: string) => Promise<string>;
   cancelStagedUploadFile?: (taskId: string) => Promise<unknown>;
   deleteTempFile?: (path: string) => Promise<unknown>;
   mkdirSftp: (sftpId: string, path: string) => Promise<void>;
+  /** Followed remote metadata — resume / sizing must use target bytes, not the link node. */
   statSftp?: (sftpId: string, path: string) => Promise<{ type: 'file' | 'directory' | 'symlink'; size: number; lastModified: number } | null>;
-  deleteSftp?: (sftpId: string, path: string) => Promise<void>;
+  /** No-follow remote metadata so Replace can unlink symlinks before in-place upload. */
+  lstatSftp?: (sftpId: string, path: string) => Promise<{ type: 'file' | 'directory' | 'symlink'; size: number; lastModified: number } | null>;
+  deleteSftp?: (sftpId: string, path: string, expectedType?: 'file' | 'directory' | 'symlink') => Promise<void>;
   /** Stream transfer using local file path (avoids loading file into memory) */
   startStreamTransfer?: (
     options: {

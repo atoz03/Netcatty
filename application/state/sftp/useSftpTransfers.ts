@@ -12,6 +12,7 @@ import {
   describeSftpExistingKind,
   describeSftpIncomingKind,
   getSftpConflictTypeKey,
+  shouldUnlinkSftpConflictBeforeReplace,
 } from "../../../domain/sftpConflict";
 import {
   findActivePathConflict,
@@ -23,6 +24,7 @@ import { netcattyBridge } from "../../../infrastructure/services/netcattyBridge"
 import { logger } from "../../../lib/logger";
 import { sftpTransferCenterStore } from "../sftpTransferCenterStore";
 import { SftpPane } from "./types";
+import { isMissingStatError } from "./errors";
 import { useSftpDirectoryTransferOps } from "./transferDirectoryOps";
 import { useSftpTransferConflictOps } from "./transferConflictOps";
 import { useSftpTransferTaskOps } from "./transferTaskOps";
@@ -444,7 +446,7 @@ export const useSftpTransfers = ({
     cleanupTaskArtifacts,
   });
 
-  const { statTargetPath, getDuplicateTarget } = useSftpTransferConflictOps();
+  const { statTargetPath, getDuplicateTarget, deleteTargetPath } = useSftpTransferConflictOps();
 
   const { transferFile, transferDirectory } = useSftpDirectoryTransferOps({
     ownerId,
@@ -740,8 +742,10 @@ export const useSftpTransfers = ({
               newModified: sourceStat?.mtime || Date.now(),
             };
           }
-        } catch {
-          // ignore
+        } catch (error) {
+          // Missing path = no conflict. ENOTSUP / unknown type fail closed.
+          if (isMissingStatError(error)) return null;
+          throw error;
         }
         return null;
       })();
@@ -781,6 +785,13 @@ export const useSftpTransfers = ({
               retryable: false,
             });
             return "failed";
+          }
+
+          if (
+            defaultAction === "replace"
+            && shouldUnlinkSftpConflictBeforeReplace(conflict.existingType)
+          ) {
+            await deleteTargetPath(task, targetPane, targetSftpId, targetEncoding, "symlink");
           }
 
           const duplicateTarget = defaultAction === "duplicate"
@@ -834,7 +845,14 @@ export const useSftpTransfers = ({
       // Try same-host directory optimization first; falls back to recursive transfer
       // if remote cp is unavailable (e.g. Windows SSH servers).
       let dirHandledBySameHost = false;
-      if (task.isDirectory && task.resumable === false && sameHost && encodingSafeForExec && sourceSftpId) {
+      if (
+        task.isDirectory
+        && !task.replaceExistingTarget
+        && task.resumable === false
+        && sameHost
+        && encodingSafeForExec
+        && sourceSftpId
+      ) {
         if (cancelledTasksRef.current.has(task.id)) {
           throw new Error("Transfer cancelled");
         }
@@ -1537,6 +1555,7 @@ export const useSftpTransfers = ({
 
       const updatedTasks: TransferTask[] = [];
       const blockedReplaceTasks: Array<{ task: TransferTask; conflict: FileConflict }> = [];
+      const failedReplaceTasks: Array<{ task: TransferTask; error: string }> = [];
 
       for (const affectedTask of affectedTasks) {
         if (cancelledTasksRef.current.has(affectedTask.id)) continue;
@@ -1567,6 +1586,34 @@ export const useSftpTransfers = ({
           ) {
             blockedReplaceTasks.push({ task: affectedTask, conflict: affectedConflict });
             continue;
+          }
+          if (
+            affectedConflict
+            && shouldUnlinkSftpConflictBeforeReplace(affectedConflict.existingType)
+          ) {
+            const endpoints = resolveTaskEndpoints(affectedTask);
+            if (!endpoints?.targetPane.connection) continue;
+            const targetSftpId = endpoints.targetPane.connection.isLocal
+              ? null
+              : sftpSessionsRef.current.get(endpoints.targetPane.connection.id) ?? null;
+            const targetEncoding = endpoints.targetPane.connection.isLocal
+              ? "auto"
+              : endpoints.targetPane.filenameEncoding || "auto";
+            try {
+              await deleteTargetPath(
+                affectedTask,
+                endpoints.targetPane,
+                targetSftpId,
+                targetEncoding,
+                "symlink",
+              );
+            } catch (error) {
+              failedReplaceTasks.push({
+                task: affectedTask,
+                error: error instanceof Error ? error.message : String(error),
+              });
+              continue;
+            }
           }
           updatedTask = {
             ...affectedTask,
@@ -1603,6 +1650,24 @@ export const useSftpTransfers = ({
                 conflict: undefined,
               }
             : t,
+          ),
+        );
+      }
+
+      if (failedReplaceTasks.length > 0) {
+        const failedErrors = new Map(
+          failedReplaceTasks.map(({ task: failedTask, error }) => [failedTask.id, error]),
+        );
+        setTransfers((prev) =>
+          prev.map((candidate) => failedErrors.has(candidate.id)
+            ? {
+                ...candidate,
+                status: "failed" as TransferStatus,
+                endTime: Date.now(),
+                error: failedErrors.get(candidate.id),
+                conflict: undefined,
+              }
+            : candidate,
           ),
         );
       }

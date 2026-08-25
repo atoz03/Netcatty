@@ -2,6 +2,9 @@ import type { TerminalSettings } from "../../../domain/models";
 
 export const DEFAULT_SHIFT_ENTER_TEXT = "\\n";
 
+/** Kitty CSI-u encoding for Shift+Enter (keycode 13, modifier shift → 2). */
+export const SHIFT_ENTER_CSI_U_SEQUENCE = "\u001b[13;2u";
+
 type ShiftEnterEvent = Pick<
   KeyboardEvent,
   "altKey" | "ctrlKey" | "key" | "metaKey" | "shiftKey" | "type"
@@ -69,6 +72,47 @@ export function resolveShiftEnterText(
   return decodeTerminalTextEscapes(
     typeof configured === "string" ? configured : DEFAULT_SHIFT_ENTER_TEXT,
   );
+}
+
+export function isBareShiftEnterLineEnding(text: string): boolean {
+  return text === "\n" || text === "\r" || text === "\r\n";
+}
+
+/**
+ * True when Kitty encoding already keeps Shift+Enter distinct from plain Enter.
+ * Non-preserving flag sets (e.g. alternate-key or associated-text alone) still
+ * encode Shift+Enter as a bare CR/LF, so the alternate-screen remap must run.
+ */
+export function doesKittyEncodingPreserveShiftEnter(
+  encoded: string | null | undefined,
+): boolean {
+  return typeof encoded === "string"
+    && encoded.length > 0
+    && !isBareShiftEnterLineEnding(encoded);
+}
+
+export type ShiftEnterPayload =
+  | { kind: "text"; data: string }
+  | { kind: "key"; data: string };
+
+/**
+ * Resolve what Shift+Enter should write.
+ *
+ * On the main buffer, keep the configured send-text (default LF) so shell /
+ * Claude-style multiline prompts keep working. On the alternate screen (full-
+ * screen TUIs), bare line-ending remaps collapse Shift+Enter into Ctrl+Enter /
+ * LF for apps like Codex; send CSI-u Shift+Enter instead so the TUI can see
+ * the real chord. Custom send-text (e.g. shell continuation) is unchanged.
+ */
+export function resolveShiftEnterPayload(
+  settings?: Pick<TerminalSettings, "shiftEnterNewlineText">,
+  options?: { alternateScreen?: boolean },
+): ShiftEnterPayload {
+  const text = resolveShiftEnterText(settings);
+  if (options?.alternateScreen && isBareShiftEnterLineEnding(text)) {
+    return { kind: "key", data: SHIFT_ENTER_CSI_U_SEQUENCE };
+  }
+  return { kind: "text", data: text };
 }
 
 export function isShiftEnterLineContinuationText(text: string): boolean {

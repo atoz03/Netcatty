@@ -1,5 +1,6 @@
 import type { Snippet } from "./models";
 import { normalizeVaultOrder } from "./vaultOrder";
+import { normalizeGroupTargetPaths } from "./hostGroupPathMutations";
 
 export const SNIPPET_EXPORT_KIND = "netcatty.snippets" as const;
 export const SNIPPET_EXPORT_VERSION = 2 as const;
@@ -12,6 +13,7 @@ export type SnippetExportItem = {
   command: string;
   tags?: string[];
   package?: string;
+  targetGroups?: string[];
   shortkey?: string;
   noAutoRun?: boolean;
   multiLineRunMode?: Snippet["multiLineRunMode"];
@@ -101,6 +103,7 @@ const toExportItem = (snippet: Snippet): SnippetExportItem => ({
   command: snippet.command,
   tags: Array.isArray(snippet.tags) ? [...snippet.tags] : [],
   package: snippet.package || "",
+  ...(snippet.targetGroups !== undefined ? { targetGroups: [...snippet.targetGroups] } : {}),
   ...(snippet.shortkey ? { shortkey: snippet.shortkey } : {}),
   ...(snippet.noAutoRun ? { noAutoRun: snippet.noAutoRun } : {}),
   ...(snippet.multiLineRunMode ? { multiLineRunMode: snippet.multiLineRunMode } : {}),
@@ -148,6 +151,11 @@ const sanitizeImportItem = (value: unknown): SnippetExportItem | null => {
       ? uniqueStrings(value.tags)
       : [],
     package: typeof value.package === "string" ? value.package.trim() : "",
+    targetGroups: Array.isArray(value.targetGroups)
+      ? normalizeGroupTargetPaths(value.targetGroups.filter(
+          (entry): entry is string => typeof entry === "string",
+        ))
+      : undefined,
     shortkey: typeof value.shortkey === "string" && value.shortkey.trim()
       ? value.shortkey.trim()
       : undefined,
@@ -247,6 +255,7 @@ const toImportedSnippet = (item: SnippetExportItem, id: string, order?: number):
   tags: item.tags || [],
   package: item.package || "",
   targets: [],
+  ...(item.targetGroups !== undefined ? { targetGroups: [...item.targetGroups] } : {}),
   ...(item.shortkey ? { shortkey: item.shortkey } : {}),
   ...(item.noAutoRun ? { noAutoRun: item.noAutoRun } : {}),
   ...(item.multiLineRunMode ? { multiLineRunMode: item.multiLineRunMode } : {}),

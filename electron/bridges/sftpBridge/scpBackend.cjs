@@ -30,6 +30,7 @@ const {
   buildStatCommand,
   buildMkdirCommand,
   buildDeleteCommand,
+  buildUnlinkCommand,
   buildRenameCommand,
   buildChmodCommand,
   buildHomeCommand,
@@ -179,6 +180,7 @@ function createScpBackend(deps = {}) {
       size: `${sizeNum} bytes`,
       lastModified: new Date(rec.modifyTime || Date.now()).toISOString(),
       permissions: rec.permissions,
+      ...(rec.owner ? { owner: rec.owner } : {}),
       // raw fields for internal use
       _size: sizeNum,
       _modifyTime: rec.modifyTime,
@@ -215,6 +217,13 @@ function createScpBackend(deps = {}) {
       }
     }
     await runOrThrow(buildDeleteCommand(remotePath, { recursive, encoding }), { signal });
+    return true;
+  }
+
+  async function unlink(remotePath, options = {}) {
+    const signal = options.signal || null;
+    const encoding = options.encoding || "utf-8";
+    await runOrThrow(buildUnlinkCommand(remotePath, encoding), { signal });
     return true;
   }
 
@@ -979,6 +988,7 @@ function createScpBackend(deps = {}) {
     stat,
     mkdir,
     remove,
+    unlink,
     rename,
     chmod,
     homeDir,

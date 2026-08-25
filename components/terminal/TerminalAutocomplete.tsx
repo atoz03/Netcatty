@@ -21,6 +21,7 @@ interface TerminalAutocompleteProps {
   termRef: RefObject<XTerm | null>;
   sessionId: string;
   hostId: string;
+  hostGroup?: string;
   hostOs: "linux" | "windows" | "macos";
   settings?: Partial<AutocompleteSettings>;
   protocol?: string;
@@ -63,6 +64,7 @@ export function TerminalAutocomplete({
   termRef,
   sessionId,
   hostId,
+  hostGroup,
   hostOs,
   settings,
   protocol,
@@ -119,6 +121,7 @@ export function TerminalAutocomplete({
         ...(options.cwd ? { cwd: options.cwd } : {}),
       },
       hostOs,
+      hostGroup,
       cwdSource: options.cwdSource,
       snippets: options.snippets,
       maximum: options.maxResults ?? 15,
@@ -126,12 +129,13 @@ export function TerminalAutocomplete({
       signal: options.signal,
       onLatePathSuggestions: options.onLatePathSuggestions,
     });
-  }, [allowHostStyleGreaterThanPrompt, hostId, hostOs, isPluginCompletionProviderAvailable, protocol, sensitiveInputActiveRef, sessionId, settings?.historyScope, status, workspaceId]);
+  }, [allowHostStyleGreaterThanPrompt, hostGroup, hostId, hostOs, isPluginCompletionProviderAvailable, protocol, sensitiveInputActiveRef, sessionId, settings?.historyScope, status, workspaceId]);
   const autocomplete = useTerminalAutocomplete({
     termRef,
     containerRef,
     sessionId,
     hostId,
+    hostGroup,
     hostOs,
     settings,
     onAcceptText,

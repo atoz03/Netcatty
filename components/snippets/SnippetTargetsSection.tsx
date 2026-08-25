@@ -1,3 +1,4 @@
+import { FolderTree, Server } from 'lucide-react';
 import React from 'react';
 import { DistroAvatar } from '../DistroAvatar';
 import { Button } from '@/components/ui/button';
@@ -10,6 +11,8 @@ export interface SnippetTargetsSectionProps {
   t: (key: string, params?: Record<string, unknown>) => string;
   targetHosts: Host[];
   onEditTargets: () => void;
+  targetGroups?: string[];
+  onEditGroups?: () => void;
   hint?: string;
   variant?: 'card' | 'embedded';
   targetsAllHosts?: boolean;
@@ -25,6 +28,8 @@ const TargetsBody: React.FC<{
   t: SnippetTargetsSectionProps['t'];
   targetHosts: Host[];
   onEditTargets: () => void;
+  targetGroups?: string[];
+  onEditGroups?: () => void;
   hint?: string;
   embedded?: boolean;
   targetsAllHosts?: boolean;
@@ -33,6 +38,8 @@ const TargetsBody: React.FC<{
   t,
   targetHosts,
   onEditTargets,
+  targetGroups = [],
+  onEditGroups,
   hint,
   embedded = false,
   targetsAllHosts = false,
@@ -50,14 +57,28 @@ const TargetsBody: React.FC<{
 
       <div className="flex items-center gap-1 min-w-0">
         {!targetsAllHosts ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            className={cn(actionButtonClass(embedded), 'text-primary')}
-            onClick={onEditTargets}
-          >
-            {targetHosts.length > 0 ? t('action.edit') : t('snippets.targets.add')}
-          </Button>
+          <>
+            <Button
+              variant="ghost"
+              size="sm"
+              className={cn(actionButtonClass(embedded), 'text-primary gap-1')}
+              onClick={onEditTargets}
+            >
+              <Server size={12} />
+              {t('snippets.targets.selectHosts')}
+            </Button>
+            {onEditGroups ? (
+              <Button
+                variant="ghost"
+                size="sm"
+                className={cn(actionButtonClass(embedded), 'text-primary gap-1')}
+                onClick={onEditGroups}
+              >
+                <FolderTree size={12} />
+                {t('snippets.targets.selectGroups')}
+              </Button>
+            ) : null}
+          </>
         ) : null}
 
         {onTargetsAllHostsChange ? (
@@ -91,7 +112,7 @@ const TargetsBody: React.FC<{
       >
         {t('snippets.targets.allHostsActive')}
       </p>
-    ) : targetHosts.length === 0 ? (
+    ) : targetHosts.length === 0 && targetGroups.length === 0 ? (
       embedded ? null : (
         <Button
           variant="secondary"
@@ -103,6 +124,18 @@ const TargetsBody: React.FC<{
       )
     ) : (
       <div className={cn('gap-2', embedded ? 'flex flex-wrap' : 'space-y-2')}>
+        {targetGroups.map((groupPath) => (
+          <div
+            key={`group:${groupPath}`}
+            className={cn(
+              'flex items-center gap-2 rounded-lg border border-border/60 bg-primary/5 max-w-full',
+              embedded ? 'px-2 py-1.5 text-xs' : 'px-3 py-2 text-sm',
+            )}
+          >
+            <FolderTree size={14} className="text-primary shrink-0" />
+            <span className="truncate font-medium">{groupPath}</span>
+          </div>
+        ))}
         {targetHosts.map((host) => (
           embedded ? (
             <div
@@ -133,6 +166,8 @@ export const SnippetTargetsSection: React.FC<SnippetTargetsSectionProps> = ({
   t,
   targetHosts,
   onEditTargets,
+  targetGroups,
+  onEditGroups,
   hint,
   variant = 'card',
   targetsAllHosts,
@@ -143,6 +178,8 @@ export const SnippetTargetsSection: React.FC<SnippetTargetsSectionProps> = ({
       t={t}
       targetHosts={targetHosts}
       onEditTargets={onEditTargets}
+      targetGroups={targetGroups}
+      onEditGroups={onEditGroups}
       hint={hint}
       embedded={variant === 'embedded'}
       targetsAllHosts={targetsAllHosts}

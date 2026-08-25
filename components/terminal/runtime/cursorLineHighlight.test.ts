@@ -260,7 +260,7 @@ test('CursorLineHighlighter refreshes after hidden writes become visible', () =>
   highlighter.dispose();
 });
 
-test('CursorLineHighlighter keeps a continuous background under keyword decorations', () => {
+test('CursorLineHighlighter keeps a continuous background under colored keyword text', () => {
   const term = createFakeTerm(10);
   const keywordMarker = term.registerMarker(0);
   term.registerDecoration({
@@ -352,7 +352,7 @@ test('CursorLineHighlighter fills a wrap-pending final cell', () => {
   highlighter.dispose();
 });
 
-test('CursorLineHighlighter leaves colored and inverse cells untouched', () => {
+test('CursorLineHighlighter keeps foreground colors and leaves inverse cells untouched', () => {
   const term = createFakeTerm(10);
   term.setColoredForegrounds([2, 3]);
   term.setInverseCells([7]);
@@ -363,8 +363,7 @@ test('CursorLineHighlighter leaves colored and inverse cells untouched', () => {
   assert.deepEqual(
     term.decorations.map(({ options }) => ({ x: options.x, width: options.width })),
     [
-      { x: 0, width: 2 },
-      { x: 4, width: 3 },
+      { x: 0, width: 7 },
       { x: 8, width: 2 },
     ],
   );

@@ -211,6 +211,68 @@ test('visual Provider host preserves semantics when command completion wins the 
   host.dispose();
 });
 
+test('visual Provider host restores annotations after terminal history is rebuilt', async () => {
+  const markers: Array<{ line: number; isDisposed: boolean; dispose(): void }> = [];
+  const renderedText: string[] = [];
+  const term = {
+    element: null,
+    buffer: { active: { type: 'normal', baseY: 4, cursorY: 2, cursorX: 0, getLine() { return undefined; } } },
+    onWriteParsed() { return { dispose() {} }; },
+    registerMarker(offset: number) {
+      const marker = {
+        line: 6 + offset,
+        isDisposed: false,
+        dispose() { this.isDisposed = true; this.line = -1; },
+      };
+      markers.push(marker);
+      return marker;
+    },
+    registerDecoration() {
+      return {
+        dispose() {},
+        onRender(listener: (element: Record<string, unknown>) => void) {
+          const element = {
+            className: '',
+            textContent: '',
+            title: '',
+            style: {},
+            setAttribute() {},
+          };
+          listener(element);
+          renderedText.push(String(element.textContent));
+          return { dispose() {} };
+        },
+      };
+    },
+  };
+  const host = new PluginTerminalVisualProviderHost({
+    term: term as never,
+    isProviderAvailable: (kind) => kind === 'terminal.semantic',
+    async request() {
+      return {
+        stale: false,
+        results: [{ providerId: 'semantic', status: 'ok', result: {
+          classification: 'success',
+          annotations: [{ text: 'retained annotation' }],
+        } }],
+      };
+    },
+  });
+
+  await host.commandSubmitted('true');
+  await host.commandCompleted();
+  assert.deepEqual(renderedText, ['success | retained annotation']);
+  markers[0].dispose();
+
+  host.terminalRebuilt();
+  assert.deepEqual(renderedText, [
+    'success | retained annotation',
+    'success | retained annotation',
+  ]);
+  assert.equal(markers[1].line, 6);
+  host.dispose();
+});
+
 test('visual Provider host preserves semantic queue order at its bounded capacity', async () => {
   let requests = 0;
   const renderedText: string[] = [];

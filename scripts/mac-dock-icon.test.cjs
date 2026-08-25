@@ -161,6 +161,12 @@ test("macOS packages a native ICNS and sizes runtime Dock icons separately", () 
   assert.ok(readIcnsEntry(packagedIcon, "ic05").length > 0);
   assertSmallIcnsRepresentation(packagedIcon, "ic11", 32);
   assertSmallIcnsRepresentation(packagedIcon, "ic12", 64);
+  const generator = fs.readFileSync(
+    path.join(projectRoot, "scripts/generate-mac-icon.sh"),
+    "utf8",
+  );
+  assert.match(generator, /SMALL_VECTOR/);
+  assert.match(generator, /x="104\\\.0" y="104\\\.0"/);
   assert.deepEqual(
     readRgbaPngAlphaBounds(path.join(projectRoot, "public/icon.png")),
     { minX: 61, minY: 61, maxX: 962, maxY: 962 },

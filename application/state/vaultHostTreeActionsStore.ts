@@ -12,7 +12,7 @@ export interface VaultHostTreeActions {
   onNewGroup: (parentPath?: string) => void;
   onRenameGroup: (groupPath: string) => void;
   onDeleteGroup: (groupPath: string) => void;
-  commitInlineGroupRename: (name: string) => void;
+  commitInlineGroupRename: (name: string) => boolean | void | Promise<boolean | void>;
   cancelInlineGroupEdit: () => void;
   commitInlineHostRename: (name: string) => void;
   cancelInlineHostEdit: () => void;

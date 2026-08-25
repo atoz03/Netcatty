@@ -10,6 +10,7 @@ import {
   resetTerminalOutputPressure,
   setTerminalOutputPressureVisibility,
   shouldDegradeTerminalSideWork,
+  shouldDegradeTerminalKeywordHighlight,
   shouldSkipTerminalLineTimestamps,
 } from "./terminalOutputPressure.ts";
 import { TERMINAL_LONG_LINE_PRESSURE_BYTES } from "./terminalFlowConstants.ts";
@@ -172,6 +173,21 @@ test("arms large-output early on multi-line writes when scrollback is saturated"
   }
 });
 
+test("a one-line prompt does not degrade keyword coloring on saturated scrollback", () => {
+  const term = createFakeTerm({
+    rows: 24,
+    options: { scrollback: 1000 },
+    buffer: { active: { length: 1020, baseY: 996 } },
+  });
+  const prompt = "\r\nplain prompt # ";
+
+  noteTerminalOutputPressureData(term, prompt);
+
+  assert.equal(shouldDegradeTerminalSideWork(term), true);
+  assert.equal(shouldDegradeTerminalKeywordHighlight(term, prompt), false);
+  resetTerminalOutputPressure(term);
+});
+
 test("does not treat an empty buffer as scrollback-saturated", () => {
   const term = createFakeTerm({
     rows: 24,
@@ -196,6 +212,10 @@ test("saturated multi-line degrades side work but keeps line timestamps", () => 
   // but per-line gutter timestamps must still stamp.
   noteTerminalOutputPressureData(term, "CONTAINER ID   IMAGE\n".repeat(20));
   assert.equal(shouldDegradeTerminalSideWork(term), true);
+  assert.equal(
+    shouldDegradeTerminalKeywordHighlight(term, "CONTAINER ID   IMAGE\n".repeat(20)),
+    false,
+  );
   assert.equal(shouldSkipTerminalLineTimestamps(term), false);
 
   resetTerminalOutputPressure(term);

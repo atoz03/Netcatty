@@ -6,6 +6,7 @@ import {
   canReuseTerminalConnection,
   createCopiedTerminalSessionClone,
   createSplitTerminalSessionClone,
+  isTerminalSessionEligibleForSftpReuse,
 } from "./terminalConnectionReuse";
 
 const session = (overrides: Partial<TerminalSession> = {}): TerminalSession => ({
@@ -22,6 +23,14 @@ const session = (overrides: Partial<TerminalSession> = {}): TerminalSession => (
 test("connected SSH sessions can reuse their authenticated connection", () => {
   assert.equal(canReuseTerminalConnection(session()), true);
   assert.equal(canReuseTerminalConnection(session({ protocol: undefined })), true);
+});
+
+test("SSH sessions stay SFTP-linkable while reconnecting", () => {
+  assert.equal(isTerminalSessionEligibleForSftpReuse(session({ status: "connecting" })), true);
+  assert.equal(isTerminalSessionEligibleForSftpReuse(session({ status: "disconnected" })), true);
+  assert.equal(isTerminalSessionEligibleForSftpReuse(session({ protocol: "local" })), false);
+  assert.equal(isTerminalSessionEligibleForSftpReuse(session({ moshEnabled: true })), false);
+  assert.equal(isTerminalSessionEligibleForSftpReuse(session({ etEnabled: true })), false);
 });
 
 test("non-SSH or unavailable sessions do not reuse a connection", () => {

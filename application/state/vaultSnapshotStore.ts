@@ -58,6 +58,7 @@ export type VaultSnapshotActions = Pick<
   | 'readPersistedManagedSources'
   | 'commitPluginImporterData'
   | 'commitVaultImportTransaction'
+  | 'commitVaultGroupMutation'
   | 'updateHostDistro'
   | 'updateHostLastConnected'
   | 'addShellHistoryEntry'

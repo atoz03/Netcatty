@@ -23,8 +23,8 @@ type HighlightRange = { x: number; width: number };
 
 /**
  * Highlights the buffer row under the cursor without tinting its glyphs.
- * ANSI-colored cells keep their own background; only default-background cells
- * receive the opaque theme color.
+ * Explicit ANSI backgrounds remain untouched. Foreground-only colors still
+ * receive the opaque theme background so colored text does not leave holes.
  */
 export class CursorLineHighlighter implements IDisposable {
   private enabled = false;
@@ -211,9 +211,7 @@ export class CursorLineHighlighter implements IDisposable {
       }
       const isHighlightable =
         currentCell === undefined ||
-        (currentCell.isBgDefault() &&
-          currentCell.isFgDefault() &&
-          !currentCell.isInverse());
+        (currentCell.isBgDefault() && !currentCell.isInverse());
       if (isHighlightable && rangeStart === null) rangeStart = x;
       if ((!isHighlightable || x === cols - 1) && rangeStart !== null) {
         const end = isHighlightable && x === cols - 1 ? x + 1 : x;

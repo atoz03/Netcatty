@@ -321,3 +321,22 @@ test("serializeTerminalForHibernate preserves plain text context for normal scre
     undefined,
   ]);
 });
+
+test("serializeTerminalForHibernate waits for deferred history preparation", async () => {
+  const term = createFakeTerm("normal", 3, 5);
+  const events: string[] = [];
+  const result = await serializeTerminalForHibernate(term as never, {
+    serialize: () => {
+      events.push("serialize");
+      return "serialized";
+    },
+  } as never, {
+    prepare: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 1));
+      events.push("prepare");
+    },
+  });
+
+  assert.equal(result.snapshot, "serialized");
+  assert.deepEqual(events.slice(0, 2), ["prepare", "serialize"]);
+});

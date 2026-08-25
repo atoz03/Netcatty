@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
-import type { Snippet } from '@/domain/models';
+import type { Host, Snippet } from '@/domain/models';
 import { snippetAppliesToOutputTrigger } from '@/domain/snippetTargets.ts';
 import { isScriptSnippet } from '@/domain/snippetScript.ts';
 import {
@@ -19,7 +19,7 @@ const OUTPUT_TRIGGER_DROPPED_OVERFLOW_SCAN_WINDOW_CHARS = 2048;
 
 type OutputTriggerContext = {
   sessionId: string;
-  hostId?: string;
+  host?: Pick<Host, 'id' | 'group'>;
   snippets: Snippet[];
   onRunScript: (snippet: Snippet, sessionId: string) => void | Promise<void>;
 };
@@ -575,22 +575,31 @@ export function findMatchEndingAfter(text: string, pattern: string, minEndOffset
   return null;
 }
 
-export function hasApplicableOutputTriggerSnippet(snippets: Snippet[], hostId?: string): boolean {
+export function hasApplicableOutputTriggerSnippet(
+  snippets: Snippet[],
+  host?: Pick<Host, 'id' | 'group'> | string,
+): boolean {
   return snippets.some((snippet) => (
     isScriptSnippet(snippet)
     && snippet.trigger === 'onOutput'
     && Boolean(snippet.triggerPattern)
     && Boolean(snippet.id)
-    && snippetAppliesToOutputTrigger(snippet, hostId)
+    && snippetAppliesToOutputTrigger(snippet, host)
   ));
 }
 
 export function useOutputTriggers({
   sessionId,
-  hostId,
+  host,
   snippets,
   onRunScript,
 }: OutputTriggerContext) {
+  const targetHostId = host?.id;
+  const targetHostGroup = host?.group;
+  const targetHost = useMemo(
+    () => targetHostId ? { id: targetHostId, group: targetHostGroup } : undefined,
+    [targetHostGroup, targetHostId],
+  );
   const launchingRef = useRef(false);
   const lastTriggerMatchEndRef = useRef(new Map<string, number>());
   const serverOutputFilterRef = useRef(createTerminalOutputTriggerFilter());
@@ -600,8 +609,8 @@ export function useOutputTriggers({
   const pendingDroppedOverflowFinalActionRef = useRef<'leave' | null>(null);
   const pendingDroppedOverflowScanStateResetRef = useRef(false);
   const hasOutputTriggers = useMemo(
-    () => hasApplicableOutputTriggerSnippet(snippets, hostId),
-    [hostId, snippets],
+    () => hasApplicableOutputTriggerSnippet(snippets, targetHost),
+    [snippets, targetHost],
   );
 
   const scanOutput = useCallback((scannableText: string) => {
@@ -621,7 +630,7 @@ export function useOutputTriggers({
       if (!isScriptSnippet(snippet) || snippet.trigger !== 'onOutput' || !snippet.triggerPattern || !snippet.id) {
         continue;
       }
-      if (!snippetAppliesToOutputTrigger(snippet, hostId)) continue;
+      if (!snippetAppliesToOutputTrigger(snippet, targetHost)) continue;
       try {
         const matched = findMatchEndingAfter(scanWindow.text, snippet.triggerPattern, scanWindow.minEndOffset);
         if (!matched) {
@@ -647,7 +656,7 @@ export function useOutputTriggers({
         // ignore invalid regex
       }
     }
-  }, [hasOutputTriggers, hostId, onRunScript, sessionId, snippets]);
+  }, [hasOutputTriggers, onRunScript, sessionId, snippets, targetHost]);
 
   const scanOutputRef = useRef(scanOutput);
   scanOutputRef.current = scanOutput;
@@ -813,7 +822,7 @@ export function useOutputTriggers({
     outputTriggerScanSuppressedRef.current = false;
     pendingDroppedOverflowFinalActionRef.current = null;
     pendingDroppedOverflowScanStateResetRef.current = false;
-  }, [sessionId, hostId, hasOutputTriggers, outputTriggerEventProcessor]);
+  }, [sessionId, targetHost, hasOutputTriggers, outputTriggerEventProcessor]);
 
   useEffect(() => () => {
     outputTriggerEventProcessor.reset();

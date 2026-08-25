@@ -38,6 +38,7 @@ export function VaultHost() {
       removeShellHistoryEntry: actions?.removeShellHistoryEntry,
       commitPluginImporterData: actions?.commitPluginImporterData,
       commitVaultImportTransaction: actions?.commitVaultImportTransaction,
+      commitVaultGroupMutation: actions?.commitVaultGroupMutation,
       convertKnownHostToHost: actions?.convertKnownHostToHost,
       customGroups: vault.customGroups,
       deepLinkHostDraft: local.deepLinkHostDraft,

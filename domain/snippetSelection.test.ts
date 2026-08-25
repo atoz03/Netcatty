@@ -7,6 +7,7 @@ import {
   pruneHostsStaleSnippetBindings,
   rebaseSnippetVaultWrite,
 } from './snippetSelection.ts';
+import { removeSnippetTargetGroupPaths } from './hostGroupPathMutations.ts';
 
 test('collectSnippetDeleteIds merges id and ids payloads', () => {
   assert.deepEqual(
@@ -225,6 +226,44 @@ test('rebaseSnippetVaultWrite preserves concurrent disk edits of unrelated snipp
   assert.equal(merged[0]?.label, 'A edited');
   assert.equal(merged[1]?.label, 'B edited elsewhere');
   assert.equal(merged[1]?.command, 'echo b2');
+});
+
+test('a deferred group cleanup preserves scripts added or edited while it waits', () => {
+  const base: Snippet[] = [
+    {
+      id: 'watched',
+      label: 'Before',
+      command: 'echo before',
+      targetGroups: ['Production', 'Staging'],
+    },
+  ];
+  const latestPersisted: Snippet[] = [
+    {
+      ...base[0],
+      label: 'Edited while deletion waited',
+      command: 'echo edited',
+    },
+    {
+      id: 'created-while-waiting',
+      label: 'New script',
+      command: 'echo new',
+      targetGroups: ['Production'],
+    },
+  ];
+
+  const latest = rebaseSnippetVaultWrite({
+    base,
+    ours: base,
+    theirs: latestPersisted,
+  });
+  const cleaned = removeSnippetTargetGroupPaths(latest, ['Production']);
+
+  assert.equal(cleaned.length, 2);
+  assert.equal(cleaned[0]?.label, 'Edited while deletion waited');
+  assert.equal(cleaned[0]?.command, 'echo edited');
+  assert.deepEqual(cleaned[0]?.targetGroups, ['Staging']);
+  assert.equal(cleaned[1]?.id, 'created-while-waiting');
+  assert.deepEqual(cleaned[1]?.targetGroups, []);
 });
 
 test('rebaseSnippetVaultWrite prefers local when both sides edited the same snippet', () => {

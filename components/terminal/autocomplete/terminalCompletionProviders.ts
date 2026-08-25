@@ -13,6 +13,7 @@ import type { AutocompleteHistoryScope, Snippet } from '../../../domain/models';
 export interface TerminalCompletionProviderRequest {
   input: string;
   session: NetcattyTerminalSessionSnapshot;
+  hostGroup?: string;
   hostOs: 'linux' | 'windows' | 'macos';
   cwdSource?: AutocompleteCwdSource;
   snippets?: Snippet[];
@@ -63,6 +64,7 @@ export async function provideTerminalCompletions(
 ): Promise<CompletionSuggestion[]> {
   const builtInPromise = getCompletions(request.input, {
     hostId: request.session.hostId,
+    hostGroup: request.hostGroup,
     os: request.hostOs,
     maxResults: request.maximum,
     sessionId: request.session.sessionId,

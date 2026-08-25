@@ -60,6 +60,30 @@ test('resolveConnectScriptsForHost runs globals before host queue and dedupes', 
   assert.deepEqual(resolved.map((item) => item.id), ['global', 'both', 'host-only']);
 });
 
+test('resolveConnectScriptsForHost dynamically inserts matching group scripts', () => {
+  const snippets = [
+    script({ id: 'global', targetsAllHosts: true, order: 1000 }),
+    script({ id: 'group', targetGroups: ['Production'], order: 2000 }),
+    script({ id: 'host-only', targets: ['host-a'], order: 3000 }),
+  ];
+  const groupedHost = { ...host, group: 'Production/Web', connectScriptIds: ['host-only'] };
+  assert.deepEqual(
+    resolveConnectScriptsForHost(groupedHost, snippets).map((item) => item.id),
+    ['global', 'group', 'host-only'],
+  );
+  assert.deepEqual(
+    resolveConnectScriptsForHost({ ...groupedHost, group: 'Staging' }, snippets).map((item) => item.id),
+    ['global', 'host-only'],
+  );
+});
+
+test('group scripts stay dynamic instead of being materialized into a new host queue', () => {
+  const snippets = [script({ id: 'group', targetGroups: ['Production'] })];
+  const groupedHost = { ...host, group: 'Production' };
+  assert.deepEqual(migrateHostConnectScriptIds(groupedHost, snippets), []);
+  assert.deepEqual(resolveConnectScriptsForHost(groupedHost, snippets).map((item) => item.id), ['group']);
+});
+
 test('hasHostConnectAutomation covers host, global, and unresolved connect scripts', () => {
   assert.equal(
     hasHostConnectAutomation(

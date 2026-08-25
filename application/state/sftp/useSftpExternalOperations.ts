@@ -842,6 +842,9 @@ export const useSftpExternalOperations = (
       writeLocalFile: bridge?.writeLocalFile,
       mkdirLocal: bridge?.mkdirLocal,
       statLocal: bridge?.statLocal,
+      // No-follow stats so Replace unlinks a same-named symlink instead of
+      // writing through it (uploadService prefers lstat* over followed stat*).
+      lstatLocal: bridge?.lstatLocal,
       deleteLocalFile: bridge?.deleteLocalFile,
       stageUploadFile: bridge?.stageUploadFile,
       cancelStagedUploadFile: bridge?.cancelStagedUploadFile,
@@ -857,10 +860,18 @@ export const useSftpExternalOperations = (
         if (!b?.statSftp) return null;
         return b.statSftp(sftpId, path);
       },
-      deleteSftp: async (sftpId: string, path: string) => {
+      // Only wire when present so uploadService can fall back via `lstat ?? stat`.
+      lstatSftp: bridge?.lstatSftp
+        ? async (sftpId: string, path: string) => {
+            const b = netcattyBridge.get();
+            if (!b?.lstatSftp) return null;
+            return b.lstatSftp(sftpId, path);
+          }
+        : undefined,
+      deleteSftp: async (sftpId: string, path: string, expectedType) => {
         const b = netcattyBridge.get();
         if (b?.deleteSftp) {
-          await b.deleteSftp(sftpId, path);
+          await b.deleteSftp(sftpId, path, undefined, expectedType);
         }
       },
       // Stream transfer for large files (avoids loading into memory).

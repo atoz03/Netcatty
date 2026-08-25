@@ -652,7 +652,7 @@ const VAULT_CAPABILITIES = [
     id: "vault.scripts.targets.set",
     domain: "vault",
     status: CAPABILITY_STATUS.IMPLEMENTED,
-    description: "Set host targets or targetsAllHosts for an automation script. onConnect scripts sync host connect queues.",
+    description: "Set host IDs, dynamic group paths, or targetsAllHosts for an automation script. onConnect host IDs sync host connect queues.",
     policy: {
       write: true,
       sensitiveRead: false,
@@ -672,7 +672,7 @@ const VAULT_CAPABILITIES = [
     id: "vault.host.connectScripts.list",
     domain: "vault",
     status: CAPABILITY_STATUS.IMPLEMENTED,
-    description: "List resolved onConnect automation scripts for a host (global scripts first, then host queue).",
+    description: "List resolved onConnect automation scripts for a host (global, dynamic group, then host queue).",
     policy: {
       write: false,
       sensitiveRead: false,

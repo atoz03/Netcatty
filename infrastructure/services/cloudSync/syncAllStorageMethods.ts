@@ -14,10 +14,16 @@ import {
   withSyncReliabilityMeta,
 } from '../../../domain/syncReliability';
 import { detectSuspiciousShrink, type ShrinkFinding } from '../../../domain/syncGuards';
-import { resolveCloudSyncConflictAction, type CloudSyncConflictAction } from '../../../domain/syncStrategy';
+import { resolveCloudSyncConflictAction, type CloudSyncConflictAction, type CloudSyncStrategy } from '../../../domain/syncStrategy';
 import { assertConvergentSyncWriteCompatible } from '../../../domain/convergentSync';
 import { getConvergentSyncLocalConfig } from '../convergentSyncConfig';
 import { syncAllProvidersConvergentlyImpl } from './convergentSyncRuntimeMethods';
+import {
+  coalesceStoredSyncPreferences,
+  hasSyncPreferenceFields,
+  resolveSyncPreferencesForPersist,
+  resolveSyncVersionsForPersist,
+} from './syncConfigPersist';
 import type { CloudAdapter } from '../adapters';
 import type {
   CloudProvider,
@@ -667,13 +673,18 @@ export function setDeviceNameImpl(this: any,name: string): void {
 
 export function setAutoSyncImpl(this: any,enabled: boolean, intervalMinutes?: number): void {
     this.state.autoSyncEnabled = enabled;
+    const memoryKeys: Array<'autoSync' | 'interval'> = ['autoSync'];
     if (intervalMinutes) {
       this.state.autoSyncInterval = Math.max(
         SYNC_CONSTANTS.MIN_SYNC_INTERVAL,
         Math.min(SYNC_CONSTANTS.MAX_SYNC_INTERVAL, intervalMinutes)
       );
+      memoryKeys.push('interval');
     }
-    this.saveSyncConfig();
+    // Preference write: only the fields this setter owns — leave syncStrategy
+    // (and interval when unchanged) to whatever is already persisted so another
+    // window's concurrent edit is not overwritten by stale memory.
+    this.saveSyncConfig({ preferencesFromMemory: true, memoryKeys });
     this.notifyStateChange(); // Notify UI of state change
 
     if (enabled && this.state.securityState === 'UNLOCKED') {
@@ -704,16 +715,131 @@ export function stopAutoSyncImpl(this: any): void {
     }
   }
 
-export function saveSyncConfigImpl(this: any): void {
-    this.saveToStorage(SYNC_STORAGE_KEYS.SYNC_CONFIG, {
+export function saveSyncConfigImpl(
+    this: any,
+    opts?: {
+      preferencesFromMemory?: boolean;
+      memoryKeys?: ReadonlyArray<'autoSync' | 'interval' | 'syncStrategy'>;
+    },
+  ): void {
+    const preferencesFromMemory = opts?.preferencesFromMemory === true;
+    const memoryKeys = opts?.memoryKeys;
+    type StoredPrefs = {
+      autoSync?: boolean;
+      interval?: number;
+      syncStrategy?: unknown;
+    };
+    type StoredConfig = StoredPrefs & {
+      localVersion?: number;
+      localUpdatedAt?: number;
+      remoteVersion?: number;
+      remoteUpdatedAt?: number;
+    };
+
+    const adoptPreferences = (nextPrefs: {
+      autoSync: boolean;
+      interval: number;
+      syncStrategy: CloudSyncStrategy;
+    }): boolean => {
+      const autoSyncChanged = this.state.autoSyncEnabled !== nextPrefs.autoSync;
+      const intervalChanged = this.state.autoSyncInterval !== nextPrefs.interval;
+      const strategyChanged = this.state.syncStrategy !== nextPrefs.syncStrategy;
+      this.state.autoSyncEnabled = nextPrefs.autoSync;
+      this.state.autoSyncInterval = nextPrefs.interval;
+      this.state.syncStrategy = nextPrefs.syncStrategy;
+      if (autoSyncChanged) {
+        if (nextPrefs.autoSync && this.state.securityState === 'UNLOCKED') {
+          this.startAutoSync?.();
+        } else {
+          this.stopAutoSync?.();
+        }
+      }
+      return autoSyncChanged || intervalChanged || strategyChanged;
+    };
+
+    const memoryPreferences = {
       autoSync: this.state.autoSyncEnabled,
       interval: this.state.autoSyncInterval,
+      syncStrategy: this.state.syncStrategy,
+    };
+
+    // Preference writers only touch SYNC_PREFERENCES so a concurrent
+    // version bump cannot re-enable auto-sync via a shared RMW blob (#2976).
+    // When memoryKeys is set, merge owned fields onto the stored snapshot so
+    // a strategy-only write cannot revive a stale autoSync from memory.
+    if (preferencesFromMemory) {
+      const storedPreferences = this.loadFromStorage?.(SYNC_STORAGE_KEYS.SYNC_PREFERENCES) as
+        | StoredPrefs
+        | null
+        | undefined;
+      const storedConfig = this.loadFromStorage?.(SYNC_STORAGE_KEYS.SYNC_CONFIG) as
+        | StoredConfig
+        | null
+        | undefined;
+      const nextPreferences = resolveSyncPreferencesForPersist({
+        memory: memoryPreferences,
+        stored: coalesceStoredSyncPreferences(storedPreferences, storedConfig),
+        preferencesFromMemory: true,
+        memoryKeys,
+      });
+      this.saveToStorage(SYNC_STORAGE_KEYS.SYNC_PREFERENCES, nextPreferences);
+      return;
+    }
+
+    const storedPreferences = this.loadFromStorage?.(SYNC_STORAGE_KEYS.SYNC_PREFERENCES) as
+      | StoredPrefs
+      | null
+      | undefined;
+    const storedConfig = this.loadFromStorage?.(SYNC_STORAGE_KEYS.SYNC_CONFIG) as
+      | StoredConfig
+      | null
+      | undefined;
+    const hasSeparatePreferences = Boolean(
+      storedPreferences && typeof storedPreferences === 'object',
+    );
+
+    const nextVersions = resolveSyncVersionsForPersist({
       localVersion: this.state.localVersion,
       localUpdatedAt: this.state.localUpdatedAt,
       remoteVersion: this.state.remoteVersion,
       remoteUpdatedAt: this.state.remoteUpdatedAt,
-      syncStrategy: this.state.syncStrategy,
     });
+
+    // Version-only saves never write SYNC_PREFERENCES. The dedicated key is
+    // created only by preference writers (setAutoSync / setSyncStrategy).
+    // A check-then-write migrate here can overwrite a concurrent
+    // autoSync=false from another window (#2976).
+    if (hasSeparatePreferences || !hasSyncPreferenceFields(storedConfig)) {
+      this.saveToStorage(SYNC_STORAGE_KEYS.SYNC_CONFIG, nextVersions);
+    } else {
+      // Keep legacy preference fields in SYNC_CONFIG until a preference
+      // writer splits them out. Take those fields from storage, never
+      // from this window's possibly stale memory.
+      const preservedPreferences = resolveSyncPreferencesForPersist({
+        memory: memoryPreferences,
+        stored: coalesceStoredSyncPreferences(null, storedConfig),
+        preferencesFromMemory: false,
+      });
+      this.saveToStorage(SYNC_STORAGE_KEYS.SYNC_CONFIG, {
+        ...preservedPreferences,
+        ...nextVersions,
+      });
+    }
+
+    // Re-read preferences after the version write so a toggle that landed
+    // during the version persist window is adopted into this process.
+    const latestPreferences = resolveSyncPreferencesForPersist({
+      memory: memoryPreferences,
+      stored: coalesceStoredSyncPreferences(
+        this.loadFromStorage?.(SYNC_STORAGE_KEYS.SYNC_PREFERENCES) as StoredPrefs | null | undefined,
+        this.loadFromStorage?.(SYNC_STORAGE_KEYS.SYNC_CONFIG) as StoredConfig | null | undefined,
+      ),
+      preferencesFromMemory: false,
+    });
+    const shouldNotifyPreferenceAdopt = adoptPreferences(latestPreferences);
+    if (shouldNotifyPreferenceAdopt) {
+      this.notifyStateChange?.();
+    }
   }
 
 export function syncBaseKeyImpl(this: any,provider?: CloudProvider): string {

@@ -402,7 +402,7 @@ export function VaultViewLayout({ ctx }: { ctx: VaultViewLayoutContext }) {
     [treeViewGroupTree],
   );
   const visibleSelectableGroupPaths = React.useMemo(
-    () => new globalThis.Set(
+    () => new globalThis.Set<string>(
       viewMode === "tree"
         ? visibleTreeGroupPaths
         : displayedGroups.map((group: { path: string }) => group.path),
@@ -1685,11 +1685,16 @@ export function VaultViewLayout({ ctx }: { ctx: VaultViewLayoutContext }) {
               onClick={async () => {
                 if (pendingDeleteGroupPaths.length > 0) {
                   const isBulkDelete = bulkDeleteGroupPaths.length > 0;
-                  await deleteGroupPaths(
-                    pendingDeleteGroupPaths,
-                    deleteGroupWithHosts,
-                    isBulkDelete ? selectedHostIds : new Set(),
-                  );
+                  try {
+                    await deleteGroupPaths(
+                      pendingDeleteGroupPaths,
+                      deleteGroupWithHosts,
+                      isBulkDelete ? selectedHostIds : new Set<string>(),
+                    );
+                  } catch (error) {
+                    toast.error(error instanceof Error ? error.message : t("common.error"));
+                    return;
+                  }
                   if (isBulkDelete) {
                     const deletedItemCount =
                       selectedHostIds.size + selectedGroupPaths.size;

@@ -290,7 +290,7 @@ interface HostTreeViewProps {
   onDeleteGroup: (groupPath: string) => void;
   moveHostToGroup: (hostId: string, groupPath: string | null) => void;
   moveGroup: (sourcePath: string, targetParent: string | null) => void;
-  commitInlineGroupRename?: (name: string) => void;
+  commitInlineGroupRename?: (name: string) => boolean | void | Promise<boolean | void>;
   cancelInlineGroupEdit?: () => void;
   managedGroupPaths?: Set<string>;
   onUnmanageGroup?: (groupPath: string) => void;
@@ -330,7 +330,7 @@ interface TreeNodeProps {
   onDeleteGroup: (groupPath: string) => void;
   moveHostToGroup: (hostId: string, groupPath: string | null) => void;
   moveGroup: (sourcePath: string, targetParent: string | null) => void;
-  commitInlineGroupRename?: (name: string) => void;
+  commitInlineGroupRename?: (name: string) => boolean | void | Promise<boolean | void>;
   cancelInlineGroupEdit?: () => void;
   managedGroupPaths?: Set<string>;
   onUnmanageGroup?: (groupPath: string) => void;

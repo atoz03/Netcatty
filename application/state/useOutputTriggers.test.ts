@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import React from 'react';
+import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import {
   createDeferredOutputTriggerEventProcessor,
   createOutputTriggerScanBuffer,
@@ -7,6 +9,7 @@ import {
   findMatchEndingAfter,
   hasApplicableOutputTriggerSnippet,
   inspectDroppedOutputOverflowAlternateScreenState,
+  useOutputTriggers,
 } from './useOutputTriggers.ts';
 import { createTerminalOutputTriggerFilter } from '@/domain/terminalOutputTriggerFilter.ts';
 import type { Snippet } from '@/domain/models';
@@ -91,6 +94,80 @@ test('hasApplicableOutputTriggerSnippet requires a runnable output trigger for t
   });
 
   assert.equal(hasApplicableOutputTriggerSnippet(snippets, 'host-a'), true);
+});
+
+test('hasApplicableOutputTriggerSnippet follows the host current group', () => {
+  const snippets: Snippet[] = [{
+    id: 'group-trigger',
+    label: 'Group trigger',
+    command: '',
+    kind: 'script',
+    trigger: 'onOutput',
+    triggerPattern: 'READY',
+    targetGroups: ['Production'],
+  }];
+  assert.equal(
+    hasApplicableOutputTriggerSnippet(snippets, { id: 'host-a', group: 'Production/Web' }),
+    true,
+  );
+  assert.equal(
+    hasApplicableOutputTriggerSnippet(snippets, { id: 'host-a', group: 'Staging' }),
+    false,
+  );
+});
+
+test('equivalent host objects do not reset a pending output trigger match', async () => {
+  const actEnvironment = globalThis as typeof globalThis & {
+    IS_REACT_ACT_ENVIRONMENT?: boolean;
+  };
+  const previousActEnvironment = actEnvironment.IS_REACT_ACT_ENVIRONMENT;
+  actEnvironment.IS_REACT_ACT_ENVIRONMENT = true;
+  const snippets: Snippet[] = [{
+    id: 'stable-host-trigger',
+    label: 'Stable host trigger',
+    command: '',
+    kind: 'script',
+    trigger: 'onOutput',
+    triggerPattern: 'READY',
+    targetGroups: ['Production'],
+  }];
+  let appendOutput: ((chunk: string) => void) | undefined;
+  let runCount = 0;
+  let renderer: ReactTestRenderer | null = null;
+  const onRunScript = () => {
+    runCount += 1;
+  };
+
+  const Probe = ({ host }: { host: { id: string; group: string } }) => {
+    appendOutput = useOutputTriggers({
+      sessionId: 'session-1',
+      host,
+      snippets,
+      onRunScript,
+    }).appendOutput;
+    return null;
+  };
+
+  await act(async () => {
+    renderer = create(React.createElement(Probe, {
+      host: { id: 'host-a', group: 'Production/Web' },
+    }));
+  });
+  try {
+    await act(async () => {
+      appendOutput?.('REA');
+      renderer?.update(React.createElement(Probe, {
+        host: { id: 'host-a', group: 'Production/Web' },
+      }));
+      appendOutput?.('DY');
+      await new Promise((resolve) => setTimeout(resolve, 40));
+    });
+  } finally {
+    await act(async () => renderer?.unmount());
+    actEnvironment.IS_REACT_ACT_ENVIRONMENT = previousActEnvironment;
+  }
+
+  assert.equal(runCount, 1);
 });
 
 test('output trigger scan buffer consumes scanned content and only keeps overlap', () => {

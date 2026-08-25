@@ -9,7 +9,8 @@ import {
   getShellHistorySnapshot,
   subscribeShellHistory,
 } from '../application/state/shellHistoryStore';
-import { HotkeyScheme, KeyBinding, keyEventToString, ManagedSource, matchesKeyBinding, parseKeyCombo } from '../domain/models';
+import { findActiveSystemShortcutConflict } from '../domain/activeKeyBindings';
+import { HotkeyScheme, KeyBinding, keyEventToString, keyStringToKeyboardEvent, ManagedSource, matchesKeyBinding } from '../domain/models';
 import {
   buildSnippetExportPayload,
   combineSnippetImportPayloads,
@@ -18,7 +19,11 @@ import {
   type SnippetExportPayload,
   type SnippetImportConflictAction,
 } from '../domain/snippetTransfer';
-import { getRunnableHostsForSnippet, snippetHasRunTargets } from '../domain/snippetTargets.ts';
+import {
+  getRunnableHostsForSnippet,
+  resolveSnippetTargetGroupsForSave,
+  snippetHasRunTargets,
+} from '../domain/snippetTargets.ts';
 import { removeHostConnectScript, syncHostsForSnippetTargetChange } from '../domain/hostConnectScripts.ts';
 import { flattenSnippetCommandPreview } from '../domain/snippetPreview.ts';
 import { deleteSelectedSnippetsFromVault } from '../domain/snippetSelection.ts';
@@ -48,6 +53,7 @@ import {
   vaultPrimaryIconClass,
   vaultSnippetIconClass,
 } from './vault/VaultEntityIcon';
+import { isAppLockOverlayActive } from '../infrastructure/appLockOverlayDom';
 import { VaultDeleteConfirmDialog } from './vault/VaultDeleteConfirmDialog';
 import {
   clearVaultDropIndicator as clearSnippetDropIndicator,
@@ -488,6 +494,7 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
     targets: [],
   });
   const [targetSelection, setTargetSelection] = useState<string[]>([]);
+  const [targetGroupSelection, setTargetGroupSelection] = useState<string[]>([]);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [selectedPackage, setSelectedPackage] = useState<string | null>(null);
   const [newPackageName, setNewPackageName] = useState('');
@@ -573,95 +580,21 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
     hotkeyScheme === 'mac' || (hotkeyScheme === 'disabled' && isMacPlatform())
   ), [hotkeyScheme]);
 
-  const activeSystemBindings = useMemo(() => {
-    return keyBindings.flatMap((binding) => {
-      const entries: { binding: string; isMac: boolean }[] = [];
-      const macBinding = binding.mac;
-      const pcBinding = binding.pc;
-
-      if (hotkeyScheme === 'mac') {
-        if (macBinding && macBinding !== 'Disabled') {
-          entries.push({ binding: macBinding, isMac: true });
-        }
-        return entries;
-      }
-
-      if (hotkeyScheme === 'pc') {
-        if (pcBinding && pcBinding !== 'Disabled') {
-          entries.push({ binding: pcBinding, isMac: false });
-        }
-        return entries;
-      }
-
-      if (macBinding && macBinding !== 'Disabled') {
-        entries.push({ binding: macBinding, isMac: true });
-      }
-      if (pcBinding && pcBinding !== 'Disabled') {
-        entries.push({ binding: pcBinding, isMac: false });
-      }
-      return entries;
-    });
-  }, [hotkeyScheme, keyBindings]);
-
-  const buildKeyEventFromString = useCallback((keyString: string) => {
-    const parsed = parseKeyCombo(keyString);
-    if (!parsed) return null;
-
-    const modifiers = new Set(parsed.modifiers);
-    const key = parsed.key;
-    const normalizedKey = (() => {
-      switch (key) {
-        case 'Space':
-          return ' ';
-        case '↑':
-          return 'ArrowUp';
-        case '↓':
-          return 'ArrowDown';
-        case '←':
-          return 'ArrowLeft';
-        case '→':
-          return 'ArrowRight';
-        case 'Esc':
-          return 'Escape';
-        case '⌫':
-          return 'Backspace';
-        case 'Del':
-          return 'Delete';
-        case '↵':
-          return 'Enter';
-        case '⇥':
-          return 'Tab';
-        default:
-          return key.length === 1 ? key.toLowerCase() : key;
-      }
-    })();
-
-    return new KeyboardEvent('keydown', {
-      key: normalizedKey,
-      metaKey: modifiers.has('⌘') || modifiers.has('Win'),
-      ctrlKey: modifiers.has('⌃') || modifiers.has('Ctrl'),
-      altKey: modifiers.has('⌥') || modifiers.has('Alt'),
-      shiftKey: modifiers.has('Shift'),
-    });
-  }, []);
-
   const normalizeKeyString = useCallback((value: string) => (
     value.toLowerCase().replace(/\s+/g, '')
   ), []);
 
   const validateShortkey = useCallback((key: string): string | null => {
     if (!key) return null;
-    
-    const syntheticEvent = buildKeyEventFromString(key);
-    if (syntheticEvent) {
-      const conflictsSystem = activeSystemBindings.some(({ binding, isMac: bindingIsMac }) => (
-        matchesKeyBinding(syntheticEvent, binding, bindingIsMac)
-      ));
-      if (conflictsSystem) {
-        return t('snippets.shortkey.error.systemConflict');
-      }
+
+    const systemConflict = findActiveSystemShortcutConflict(key, hotkeyScheme, keyBindings);
+    if (systemConflict) {
+      const nameKey = `settings.shortcuts.binding.${systemConflict.id}`;
+      const name = t(nameKey) !== nameKey ? t(nameKey) : systemConflict.label;
+      return t('snippets.shortkey.error.systemConflict', { name });
     }
-    
+
+    const syntheticEvent = keyStringToKeyboardEvent(key);
     if (syntheticEvent) {
       for (const snippet of existingShortkeys) {
         if (snippet.shortkey && matchesKeyBinding(syntheticEvent, snippet.shortkey, isMac)) {
@@ -677,13 +610,13 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
         return t('snippets.shortkey.error.snippetConflict', { name: conflictingSnippet.label });
       }
     }
-    
+
     return null;
   }, [
-    activeSystemBindings,
-    buildKeyEventFromString,
     existingShortkeys,
+    hotkeyScheme,
     isMac,
+    keyBindings,
     normalizeKeyString,
     t,
   ]);
@@ -692,6 +625,9 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
     if (!isRecordingShortkey) return;
 
     const handleKeyDown = (e: KeyboardEvent) => {
+      // App lock overlay installs later; skip while locked so password keys
+      // never mutate shortkeys (Codex P2).
+      if (isAppLockOverlayActive()) return;
       e.preventDefault();
       e.stopPropagation();
 
@@ -737,6 +673,7 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
     if (snippet) {
       setEditingSnippet(snippet);
       setTargetSelection(snippet.targetsAllHosts ? [] : (snippet.targets || []));
+      setTargetGroupSelection(snippet.targetsAllHosts ? [] : (snippet.targetGroups || []));
     } else {
       setEditingSnippet(asScript ? {
         label: '',
@@ -753,6 +690,7 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
         targets: [],
       });
       setTargetSelection([]);
+      setTargetGroupSelection([]);
     }
     setRightPanelMode('edit-snippet');
   }, [selectedPackage]);
@@ -775,6 +713,10 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
       tags: editingSnippet.tags || [],
       package: editingSnippet.package || '',
       targets: editingSnippet.targetsAllHosts ? [] : targetSelection,
+      targetGroups: resolveSnippetTargetGroupsForSave(
+        editingSnippet,
+        targetGroupSelection,
+      ),
       targetsAllHosts: editingSnippet.targetsAllHosts || undefined,
       shortkey: editingSnippet.shortkey,
       noAutoRun: editingSnippet.noAutoRun,
@@ -786,7 +728,7 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
       trigger: editingSnippet.trigger,
       triggerPattern: editingSnippet.triggerPattern,
     };
-  }, [editingSnippet, targetSelection]);
+  }, [editingSnippet, targetGroupSelection, targetSelection]);
 
   const syncHostsAfterSnippetSave = useCallback((
     savedSnippet: Snippet,
@@ -838,6 +780,7 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
+      if (isAppLockOverlayActive()) return;
       if (rightPanelMode !== 'edit-snippet') return;
       if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== 's') return;
       event.preventDefault();
@@ -857,6 +800,7 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
     setRightPanelMode('none');
     setEditingSnippet({ label: '', command: '', package: '', targets: [] });
     setTargetSelection([]);
+    setTargetGroupSelection([]);
   };
 
   const hostById = useMemo(() => (
@@ -1665,6 +1609,8 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
       customGroups={customGroups}
       targetSelection={targetSelection}
       setTargetSelection={setTargetSelection}
+      targetGroupSelection={targetGroupSelection}
+      setTargetGroupSelection={setTargetGroupSelection}
       handleTargetSelect={handleTargetSelect}
       handleTargetSelectionChange={handleTargetSelectionChange}
       handleTargetPickerBack={handleTargetPickerBack}
@@ -1937,6 +1883,12 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
                           draggingPackagePathRef.current = pkg.path;
                           setDraggingPackagePath(pkg.path);
                           lastPreviewReorderRef.current = null;
+                          const sourceNode = e.currentTarget as HTMLElement;
+                          const handleNativeDragEnd = () => {
+                            sourceNode.removeEventListener('dragend', handleNativeDragEnd);
+                            resetSnippetDragState();
+                          };
+                          sourceNode.addEventListener('dragend', handleNativeDragEnd);
                         }}
                         onDragOver={(e) => e.preventDefault()}
                         onDrop={(e) => {
@@ -2021,6 +1973,12 @@ const SnippetsManager: React.FC<SnippetsManagerProps> = ({
                           draggingSnippetIdRef.current = snippet.id;
                           setDraggingSnippetId(snippet.id);
                           lastPreviewReorderRef.current = null;
+                          const sourceNode = e.currentTarget as HTMLElement;
+                          const handleNativeDragEnd = () => {
+                            sourceNode.removeEventListener('dragend', handleNativeDragEnd);
+                            resetSnippetDragState();
+                          };
+                          sourceNode.addEventListener('dragend', handleNativeDragEnd);
                         }}
                         onClick={() => {
                           if (isMultiSelectMode) {

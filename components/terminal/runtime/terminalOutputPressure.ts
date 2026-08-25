@@ -300,6 +300,19 @@ export const shouldDegradeTerminalSideWork = (term: XTerm): boolean => {
 };
 
 /**
+ * Keyword coloring only examines the current write, so a stale quiet-window
+ * bulk flag must not make a later one-line prompt schedule a history rebuild.
+ */
+export const shouldDegradeTerminalKeywordHighlight = (
+  term: XTerm,
+  data: string,
+): boolean => {
+  const state = getOrCreateState(term);
+  if (state.longLine || data.length >= TERMINAL_LONG_LINE_PRESSURE_BYTES) return true;
+  return state.recentSampleBytes >= LARGE_OUTPUT_RATE_BYTES;
+};
+
+/**
  * Whether line-timestamp registerMarker work should be skipped.
  *
  * Stricter than {@link shouldDegradeTerminalSideWork}: full-scrollback multi-line

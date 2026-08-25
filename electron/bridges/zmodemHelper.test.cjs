@@ -3,7 +3,17 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { createZmodemSentry, buildUploadPlan, buildModeRestores, handleUpload, handleDownload } = require("./zmodemHelper.cjs");
+const {
+  createZmodemSentry,
+  buildUploadPlan,
+  buildModeRestores,
+  handleUpload,
+  handleDownload,
+  waitForWritableDrain,
+  createZmodemUploadDrainWaiter,
+  UPLOAD_CHUNK_SIZE,
+  UPLOAD_DRAIN_TIMEOUT_MS,
+} = require("./zmodemHelper.cjs");
 
 const never = () => { throw new Error("resolver should not be called"); };
 
@@ -266,6 +276,61 @@ test("handleUpload completes when the remote confirms after progress reaches 100
     events.some((event) => event.channel === "netcatty:zmodem:progress" && event.data.finalizing === true),
     true,
   );
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+test("handleUpload does not read the next chunk until transport backpressure clears", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "netcatty-zmodem-drain-"));
+  const filePath = path.join(tempDir, "large-upload.bin");
+  fs.writeFileSync(filePath, Buffer.alloc(UPLOAD_CHUNK_SIZE + 1, 0x5a));
+  const sentChunkSizes = [];
+  const progress = [];
+  let releaseFirstDrain;
+  const firstDrain = new Promise((resolve) => {
+    releaseFirstDrain = resolve;
+  });
+  let drainCalls = 0;
+
+  const zsession = {
+    async send_offer() {
+      return {
+        send(chunk) {
+          sentChunkSizes.push(chunk.byteLength);
+        },
+        async end() {},
+      };
+    },
+    async close() {},
+  };
+
+  const upload = handleUpload(zsession, {
+    sessionId: "session-1",
+    getWebContents: () => ({
+      isDestroyed: () => false,
+      send(channel, data) {
+        if (channel === "netcatty:zmodem:progress") progress.push(data);
+      },
+    }),
+    takeDragDropUpload: () => ({
+      filePaths: [filePath],
+      remoteNames: ["large-upload.bin"],
+    }),
+    async waitForDrain() {
+      drainCalls += 1;
+      if (drainCalls === 1) await firstDrain;
+    },
+  });
+
+  while (drainCalls === 0) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(sentChunkSizes, [UPLOAD_CHUNK_SIZE]);
+  assert.equal(progress.at(-1).transferred, UPLOAD_CHUNK_SIZE);
+
+  releaseFirstDrain();
+  await upload;
+  assert.deepEqual(sentChunkSizes, [UPLOAD_CHUNK_SIZE, 1]);
+  assert.equal(progress.at(-1).finalizing, true);
   fs.rmSync(tempDir, { recursive: true, force: true });
 });
 
@@ -802,4 +867,333 @@ test("mode restore tracks skipped offers by index for duplicate basenames", asyn
   // Filename-based skip filtering would drop this restore; index-based keeps it.
   assert.deepEqual(restored, [{ path: "/home/u/x.txt", mode: "600" }]);
   fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+// Issue #2967: large rz uploads must wait for real transport drain, not one
+// setImmediate tick. Flooding the SSH channel completes UI progress early,
+// drops the session, and leaves a truncated remote file.
+
+test("waitForWritableDrain resolves immediately when the stream does not need drain", async () => {
+  const stream = {
+    writableNeedDrain: false,
+    once() {
+      throw new Error("should not wait for drain");
+    },
+    off() {},
+  };
+  await waitForWritableDrain(stream);
+});
+
+test("waitForWritableDrain waits until the stream emits drain", async () => {
+  const listeners = new Map();
+  const stream = {
+    writableNeedDrain: true,
+    once(event, cb) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event).push(cb);
+    },
+    off(event, cb) {
+      const list = listeners.get(event) || [];
+      listeners.set(event, list.filter((fn) => fn !== cb));
+    },
+  };
+
+  let resolved = false;
+  const pending = waitForWritableDrain(stream).then(() => {
+    resolved = true;
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resolved, false);
+  assert.equal((listeners.get("drain") || []).length, 1);
+
+  stream.writableNeedDrain = false;
+  for (const cb of listeners.get("drain") || []) cb();
+  await pending;
+  assert.equal(resolved, true);
+});
+
+test("waitForWritableDrain rejects when the transport never drains", async () => {
+  const listeners = new Map();
+  const stream = {
+    writableNeedDrain: true,
+    once(event, cb) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event).push(cb);
+    },
+    off(event, cb) {
+      const list = listeners.get(event) || [];
+      listeners.set(event, list.filter((fn) => fn !== cb));
+    },
+  };
+
+  await assert.rejects(
+    () => waitForWritableDrain(stream, { timeoutMs: 20 }),
+    (err) => err && err.code === "NETCATTY_ZMODEM_TIMEOUT",
+  );
+  assert.equal((listeners.get("drain") || []).length, 0);
+});
+
+test("waitForWritableDrain keeps waiting while a slow SSH channel makes progress", async () => {
+  const listeners = new Map();
+  const stream = {
+    writableNeedDrain: true,
+    writableLength: 2 * 1024 * 1024,
+    pendingChunkLength: 8 * 1024,
+    once(event, cb) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event).push(cb);
+    },
+    off(event, cb) {
+      const list = listeners.get(event) || [];
+      listeners.set(event, list.filter((fn) => fn !== cb));
+    },
+  };
+
+  let settled = false;
+  const pending = waitForWritableDrain(stream, {
+    timeoutMs: 20,
+    progressIntervalMs: 5,
+    getProgressValue: () => stream.writableLength + stream.pendingChunkLength,
+  }).then(() => {
+    settled = true;
+  });
+  for (let i = 0; i < 5; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // ssh2 can advance part of its current frame without completing the
+    // corresponding Node write, so writableLength remains unchanged.
+    stream.pendingChunkLength -= 1024;
+  }
+  assert.equal(settled, false);
+
+  stream.writableNeedDrain = false;
+  for (const cb of listeners.get("drain") || []) cb();
+  await pending;
+  assert.equal(settled, true);
+});
+
+test("waitForWritableDrain rejects when an SSH channel stops making progress", async () => {
+  const listeners = new Map();
+  const stream = {
+    writableNeedDrain: true,
+    writableLength: 2 * 1024 * 1024,
+    once(event, cb) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event).push(cb);
+    },
+    off(event, cb) {
+      const list = listeners.get(event) || [];
+      listeners.set(event, list.filter((fn) => fn !== cb));
+    },
+  };
+
+  await assert.rejects(
+    () => waitForWritableDrain(stream, { timeoutMs: 20, progressIntervalMs: 5 }),
+    (err) => err && err.code === "NETCATTY_ZMODEM_TIMEOUT",
+  );
+});
+
+test("waitForWritableDrain rejects when the transport closes before drain", async () => {
+  const listeners = new Map();
+  const stream = {
+    writableNeedDrain: true,
+    once(event, cb) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event).push(cb);
+    },
+    off(event, cb) {
+      const list = listeners.get(event) || [];
+      listeners.set(event, list.filter((fn) => fn !== cb));
+    },
+  };
+
+  const pending = waitForWritableDrain(stream, { timeoutMs: 5_000 });
+  await new Promise((resolve) => setImmediate(resolve));
+  for (const cb of listeners.get("close") || []) cb();
+  await assert.rejects(
+    () => pending,
+    (err) => err && err.code === "NETCATTY_ZMODEM_TRANSPORT_CLOSED",
+  );
+  assert.equal((listeners.get("drain") || []).length, 0);
+});
+
+test("waitForWritableDrain rejects with the transport error event", async () => {
+  const listeners = new Map();
+  const stream = {
+    writableNeedDrain: true,
+    once(event, cb) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event).push(cb);
+    },
+    off(event, cb) {
+      const list = listeners.get(event) || [];
+      listeners.set(event, list.filter((fn) => fn !== cb));
+    },
+  };
+
+  const pending = waitForWritableDrain(stream, { timeoutMs: 5_000 });
+  await new Promise((resolve) => setImmediate(resolve));
+  const boom = new Error("socket hang up");
+  boom.code = "ECONNRESET";
+  for (const cb of listeners.get("error") || []) cb(boom);
+  await assert.rejects(
+    () => pending,
+    (err) => err === boom,
+  );
+});
+
+test("waitForWritableDrain rejects promptly when the transfer AbortSignal aborts", async () => {
+  const listeners = new Map();
+  const stream = {
+    writableNeedDrain: true,
+    once(event, cb) {
+      if (!listeners.has(event)) listeners.set(event, []);
+      listeners.get(event).push(cb);
+    },
+    off(event, cb) {
+      const list = listeners.get(event) || [];
+      listeners.set(event, list.filter((fn) => fn !== cb));
+    },
+  };
+  const controller = new AbortController();
+
+  const pending = waitForWritableDrain(stream, {
+    timeoutMs: 60_000,
+    signal: controller.signal,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal((listeners.get("drain") || []).length, 1);
+
+  controller.abort();
+  await assert.rejects(
+    () => pending,
+    (err) => err && err.code === "NETCATTY_ZMODEM_CANCELLED",
+  );
+  assert.equal((listeners.get("drain") || []).length, 0);
+});
+
+test("createZmodemUploadDrainWaiter waits on transport drain after backpressure", async () => {
+  let needsDrain = true;
+  let transportWaits = 0;
+  let releaseTransport;
+  const transportPending = new Promise((resolve) => {
+    releaseTransport = resolve;
+  });
+
+  const waitForDrain = createZmodemUploadDrainWaiter({
+    getNeedsDrain: () => needsDrain,
+    clearNeedsDrain: () => {
+      needsDrain = false;
+    },
+    waitForTransportDrain: async () => {
+      transportWaits += 1;
+      await transportPending;
+    },
+  });
+
+  let resolved = false;
+  const pending = waitForDrain().then(() => {
+    resolved = true;
+  });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(resolved, false);
+  assert.equal(transportWaits, 1);
+  assert.equal(needsDrain, true);
+
+  releaseTransport();
+  await pending;
+  assert.equal(resolved, true);
+  assert.equal(needsDrain, false);
+});
+
+test("createZmodemUploadDrainWaiter recovers remote rz on transport drain timeout", async () => {
+  let needsDrain = true;
+  let timeoutNotified = false;
+  const writes = [];
+
+  const waitForDrain = createZmodemUploadDrainWaiter({
+    getNeedsDrain: () => needsDrain,
+    clearNeedsDrain: () => {
+      needsDrain = false;
+    },
+    waitForTransportDrain: async () => {
+      const err = new Error("Transport drain timeout");
+      err.code = "NETCATTY_ZMODEM_TIMEOUT";
+      throw err;
+    },
+    onUploadTimeout: () => {
+      timeoutNotified = true;
+    },
+    writeToRemote: (buf) => {
+      writes.push(Buffer.from(buf));
+    },
+  });
+
+  await assert.rejects(
+    () => waitForDrain(),
+    (err) => err && err.code === "NETCATTY_ZMODEM_TIMEOUT",
+  );
+
+  assert.equal(timeoutNotified, true);
+  assert.equal(needsDrain, false);
+  assert.deepEqual([...writes[0]], [0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18]);
+});
+
+test("createZmodemUploadDrainWaiter rejects on transfer cancel without timeout recovery", async () => {
+  let needsDrain = true;
+  let timeoutNotified = false;
+  let releaseTransport;
+  const transportPending = new Promise((resolve) => {
+    releaseTransport = resolve;
+  });
+  const controller = new AbortController();
+
+  const waitForDrain = createZmodemUploadDrainWaiter({
+    getNeedsDrain: () => needsDrain,
+    clearNeedsDrain: () => {
+      needsDrain = false;
+    },
+    signal: controller.signal,
+    waitForTransportDrain: async ({ signal } = {}) => waitForWritableDrain({
+      writableNeedDrain: true,
+      once(event, cb) {
+        if (event === "drain") {
+          transportPending.then(() => cb());
+        }
+      },
+      off() {},
+    }, { timeoutMs: 60_000, signal }),
+    onUploadTimeout: () => {
+      timeoutNotified = true;
+    },
+    writeToRemote: () => {
+      throw new Error("cancel must not abort remote via timeout recovery");
+    },
+  });
+
+  const pending = waitForDrain();
+  await new Promise((resolve) => setImmediate(resolve));
+  controller.abort();
+
+  await assert.rejects(
+    () => pending,
+    (err) => err && err.code === "NETCATTY_ZMODEM_CANCELLED",
+  );
+  assert.equal(timeoutNotified, false);
+  assert.equal(needsDrain, false);
+  releaseTransport();
+});
+
+test("createZmodemUploadDrainWaiter falls back to a single yield without transport drain", async () => {
+  let needsDrain = true;
+  const waitForDrain = createZmodemUploadDrainWaiter({
+    getNeedsDrain: () => needsDrain,
+    clearNeedsDrain: () => {
+      needsDrain = false;
+    },
+  });
+
+  await waitForDrain();
+  assert.equal(needsDrain, false);
 });

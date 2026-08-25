@@ -189,8 +189,9 @@ async function serializeWithOptions(
 export async function serializeTerminalForHibernate(
   term: XTerm,
   serializeAddon: SerializeAddon,
-  options: { preferWasm?: boolean } = {},
+  options: { preferWasm?: boolean; prepare?: () => Promise<void> } = {},
 ): Promise<TerminalHibernateSnapshot> {
+  await options.prepare?.();
   const { excludeAltBuffer, excludeModes, alternateScreen } = resolveHibernateSerializeOptions(term);
   const preferWasm = options.preferWasm === true;
   const rows = Math.max(1, term.rows);

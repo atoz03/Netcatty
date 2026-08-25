@@ -25,6 +25,7 @@ const CLI_FIELD_BINDINGS = Object.freeze({
   trigger: { flag: "--trigger", optKey: "trigger" },
   triggerPattern: { flag: "--trigger-pattern", optKey: "triggerPattern" },
   targets: { flag: "--targets", optKey: "targets" },
+  targetGroups: { flag: "--target-groups", optKey: "targetGroups" },
   targetsAllHosts: { flag: "--targets-all-hosts", optKey: "targetsAllHosts" },
   description: { flag: "--description", optKey: "description" },
   language: { flag: "--language", optKey: "language" },

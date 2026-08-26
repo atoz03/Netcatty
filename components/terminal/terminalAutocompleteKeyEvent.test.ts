@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { handleTerminalAutocompleteKeyEvent } from "./autocomplete/terminalAutocompleteKeyEvent.ts";
+import { DEFAULT_AUTOCOMPLETE_SETTINGS } from "./autocomplete/useTerminalAutocomplete.ts";
 
 const suggestion = (text: string) => ({
   text,
@@ -56,6 +57,7 @@ function createContext(overrides: Record<string, unknown> = {}) {
     context: {
       settingsRef: {
         current: {
+          ...DEFAULT_AUTOCOMPLETE_SETTINGS,
           enabled: true,
           showGhostText: false,
           showPopupMenu: true,

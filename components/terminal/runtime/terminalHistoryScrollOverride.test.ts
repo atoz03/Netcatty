@@ -20,6 +20,15 @@ import {
   shouldKeepHistoryPreviewOnKey,
 } from "./terminalHistoryScrollOverride.ts";
 
+
+/**
+ * The functions under test only compare node identity or probe a couple of
+ * optional members, so these tests stand DOM nodes up as string/object
+ * sentinels. Cast at the call boundary instead of loosening the production
+ * signatures, which are correctly typed against the real DOM.
+ */
+const sentinelNode = <T,>(value: T) => value as unknown as never;
+
 const wheel = (
   over: Partial<Parameters<typeof forcedHistoryScrollLinesForWheel>[0]> = {},
 ) => ({
@@ -132,9 +141,9 @@ test("alternate-screen history preview reads normal-buffer history", () => {
 test("history preview stays up for pointer selection and copy chords", () => {
   const overlay = { contains: (node: unknown) => node === "inside" };
 
-  assert.equal(shouldHideHistoryPreviewOnMouseDown("inside", overlay), false);
-  assert.equal(shouldHideHistoryPreviewOnMouseDown("outside", overlay), true);
-  assert.equal(shouldHideHistoryPreviewOnMouseDown("inside", null), false);
+  assert.equal(shouldHideHistoryPreviewOnMouseDown(sentinelNode("inside"), sentinelNode(overlay)), false);
+  assert.equal(shouldHideHistoryPreviewOnMouseDown(sentinelNode("outside"), sentinelNode(overlay)), true);
+  assert.equal(shouldHideHistoryPreviewOnMouseDown(sentinelNode("inside"), null), false);
 
   assert.equal(shouldKeepHistoryPreviewOnKey(key({ key: "Shift" })), true);
   assert.equal(shouldKeepHistoryPreviewOnKey(key({ key: "Meta" })), true);
@@ -186,8 +195,8 @@ test("history preview copy uses only overlay-owned DOM selection", () => {
   assert.equal(
     getHistoryPreviewSelectionText(overlay, {
       rangeCount: 1,
-      anchorNode: "preview",
-      focusNode: "preview",
+      anchorNode: sentinelNode("preview"),
+      focusNode: sentinelNode("preview"),
       toString: () => "old prompt output",
     }),
     "old prompt output",
@@ -195,8 +204,8 @@ test("history preview copy uses only overlay-owned DOM selection", () => {
   assert.equal(
     getHistoryPreviewSelectionText(overlay, {
       rangeCount: 1,
-      anchorNode: "xterm",
-      focusNode: "xterm",
+      anchorNode: sentinelNode("xterm"),
+      focusNode: sentinelNode("xterm"),
       toString: () => "vim buffer",
     }),
     "",
@@ -205,8 +214,8 @@ test("history preview copy uses only overlay-owned DOM selection", () => {
     getHistoryPreviewSelectionText(overlay, {
       rangeCount: 1,
       isCollapsed: true,
-      anchorNode: "preview",
-      focusNode: "preview",
+      anchorNode: sentinelNode("preview"),
+      focusNode: sentinelNode("preview"),
       toString: () => "old prompt output",
     }),
     "",
@@ -249,10 +258,10 @@ test("select-all overlay ranges still join soft-wrapped preview rows", () => {
       return name === HISTORY_PREVIEW_WRAP_ATTR ? "01" : null;
     },
   };
-  const copied = getHistoryPreviewSelectionText(overlay, {
+  const copied = getHistoryPreviewSelectionText(sentinelNode(overlay), {
     rangeCount: 1,
-    anchorNode: overlay,
-    focusNode: overlay,
+    anchorNode: sentinelNode(overlay),
+    focusNode: sentinelNode(overlay),
     anchorOffset: 0,
     focusOffset: 1,
     toString: () => text,
@@ -333,15 +342,15 @@ test("history preview copy joins soft-wrapped buffer rows", () => {
 
 test("history preview right-click is recognized as an app-menu target", () => {
   assert.equal(
-    isHistoryPreviewContextMenuTarget({
+    isHistoryPreviewContextMenuTarget(sentinelNode({
       closest: (selector: string) => selector === `[${HISTORY_PREVIEW_OVERLAY_ATTR}]` ? {} as Element : null,
-    }),
+    })),
     true,
   );
   assert.equal(
-    isHistoryPreviewContextMenuTarget({
+    isHistoryPreviewContextMenuTarget(sentinelNode({
       closest: () => null,
-    }),
+    })),
     false,
   );
 });

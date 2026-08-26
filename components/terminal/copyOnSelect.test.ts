@@ -142,6 +142,19 @@ const createEventTargetStub = () => {
         listener(event);
       }
     },
+    /**
+     * Present so the stub structurally satisfies `EventTarget`, which is what
+     * the code under test accepts. Tests drive listeners through `dispatch`,
+     * which is phase-aware; this only exists to complete the interface.
+     */
+    dispatchEvent(event: Event): boolean {
+      for (const phase of ["capture", "bubble"] as const) {
+        for (const listener of listeners.get(`${event.type}:${phase}`) ?? []) {
+          listener(event);
+        }
+      }
+      return true;
+    },
   };
 };
 

@@ -89,7 +89,18 @@ declare global {
         /** When true, skip main-process admission (renderer already scheduled). */
         skipAdmission?: boolean;
       }
-    ): Promise<{ transferId: string; totalBytes?: number; error?: string; cancelled?: boolean }>;
+    ): Promise<{
+      transferId: string;
+      totalBytes?: number;
+      error?: string;
+      cancelled?: boolean;
+      /**
+       * Set when a same-id retry took ownership while this attempt was in
+       * flight (transferBridge.cjs returns `{ transferId, superseded: true }`).
+       * Callers wait for terminal events instead of treating it as a failure.
+       */
+      superseded?: boolean;
+    }>;
     pauseTransfer?(transferId: string): Promise<{
       success: boolean;
       checkpointBytes?: number;

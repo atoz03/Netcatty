@@ -31,17 +31,46 @@ type ManualStatusPayload = {
   sessionId: string;
 };
 
-export const useSessionLogBackend = () => {
-  const chooseManualSessionLogPath = useCallback(async (payload: ManualChoosePathPayload) => {
-    const bridge = netcattyBridge.get();
-    return bridge?.chooseManualSessionLogPath?.(payload)
-      ?? { success: false, canceled: false, error: "Session log bridge unavailable" };
-  }, []);
+/**
+ * Declared explicitly so the bridge result and the unavailable-bridge fallback
+ * collapse into one shape. Left to inference they form a union whose fallback
+ * member has no `selectionToken`/`filePath`, and callers cannot read those
+ * without narrowing the compiler cannot do here.
+ */
+type ManualChooseResult = {
+  success: boolean;
+  canceled?: boolean;
+  error?: string;
+  selectionToken?: string;
+  filePath?: string;
+  format?: 'txt' | 'raw' | 'html';
+};
 
-  const startManualSessionLog = useCallback(async (payload: ManualStartPayload) => {
-    const bridge = netcattyBridge.get();
-    return bridge?.startManualSessionLog?.(payload) ?? { success: false, started: false, error: "Session log bridge unavailable" };
-  }, []);
+type ManualStartResult = {
+  success: boolean;
+  started: boolean;
+  canceled?: boolean;
+  error?: string;
+  filePath?: string;
+};
+
+export const useSessionLogBackend = () => {
+  const chooseManualSessionLogPath = useCallback(
+    async (payload: ManualChoosePathPayload): Promise<ManualChooseResult> => {
+      const bridge = netcattyBridge.get();
+      return bridge?.chooseManualSessionLogPath?.(payload)
+        ?? { success: false, canceled: false, error: "Session log bridge unavailable" };
+    },
+    [],
+  );
+
+  const startManualSessionLog = useCallback(
+    async (payload: ManualStartPayload): Promise<ManualStartResult> => {
+      const bridge = netcattyBridge.get();
+      return bridge?.startManualSessionLog?.(payload) ?? { success: false, started: false, error: "Session log bridge unavailable" };
+    },
+    [],
+  );
 
   const stopManualSessionLog = useCallback(async (payload: ManualStopPayload) => {
     const bridge = netcattyBridge.get();

@@ -1,10 +1,15 @@
-import type { TerminalSettings } from "../../domain/models";
+import type { HostProtocol, TerminalSettings } from "../../domain/models";
 import type { TerminalSessionExitEvent } from "./resolveTerminalSessionExitIntent";
 
 export const TERMINAL_AUTO_RECONNECT_DELAY_MS = 5000;
 
 type AutoReconnectHost = {
-  protocol?: "ssh" | "telnet" | "local" | "serial" | "mosh" | "et";
+  /**
+   * Full `HostProtocol`, not just the built-in names — plugin hosts
+   * (`plugin:${string}`) reach this check too, and are simply not
+   * auto-reconnectable SSH.
+   */
+  protocol?: HostProtocol;
   hostname?: string;
   moshEnabled?: boolean;
   etEnabled?: boolean;

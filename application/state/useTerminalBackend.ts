@@ -635,7 +635,10 @@ export const useTerminalBackend = () => {
           return onMoshSessionReady;
         },
       });
-      return api;
+      // Defined above with defineProperty, so it is absent from `api`'s inferred
+      // shape. Declare it optional to match the getter, which returns undefined
+      // on bridges that do not implement the event.
+      return api as typeof api & { onMoshSessionReady?: typeof onMoshSessionReady };
     },
     [
       backendAvailable,

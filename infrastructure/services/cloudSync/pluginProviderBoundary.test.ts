@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
-import type { CloudProvider, ProviderConnection, SyncedFile } from '../../../domain/sync';
+import type { CloudProvider, ProviderConnection, SyncedFile, WebDAVConfig } from '../../../domain/sync';
 import { SYNC_STORAGE_KEYS } from '../../../domain/sync';
 import type { EncryptedObjectStorage } from '../../../domain/encryptedObjectStorage';
 import { DEFAULT_ENCRYPTED_SYNC_OBJECT_KEY } from '../../../domain/encryptedObjectStorage';
@@ -107,7 +107,7 @@ describe('plugin provider manager boundary', () => {
     storage.set('netcatty_provider_plugin_v1:com.example.backup.sync', {
       provider: 'com.example.backup.sync',
       status: 'connected',
-      config: { endpoint: 'https://example.test' },
+      config: { endpoint: 'https://example.test' } as WebDAVConfig,
     });
 
     const state = loadInitialStateImpl.call(manager);
@@ -132,7 +132,7 @@ describe('plugin provider manager boundary', () => {
         'com.example.backup.sync': {
           provider: 'com.example.backup.sync',
           status: 'connected',
-          config: { endpoint: 'https://example.test' },
+          config: { endpoint: 'https://example.test' } as WebDAVConfig,
         },
       },
     };
@@ -157,7 +157,7 @@ describe('plugin provider manager boundary', () => {
         [pluginId]: {
           provider: pluginId,
           status: 'connected',
-          config: { endpoint: 'https://example.test' },
+          config: { endpoint: 'https://example.test' } as WebDAVConfig,
         },
       },
     };
@@ -192,7 +192,7 @@ describe('plugin provider manager boundary', () => {
         [pluginId]: {
           provider: pluginId,
           status: 'disconnected',
-          config: { endpoint: 'https://example.test' },
+          config: { endpoint: 'https://example.test' } as WebDAVConfig,
           error: 'Plugin sync provider is no longer installed or enabled',
         },
       },
@@ -265,7 +265,7 @@ describe('plugin provider manager boundary', () => {
         [pluginId]: {
           provider: pluginId,
           status: 'connected',
-          config: { endpoint: 'https://example.test' },
+          config: { endpoint: 'https://example.test' } as WebDAVConfig,
         },
       },
     };
@@ -280,7 +280,7 @@ describe('plugin provider manager boundary', () => {
         },
         async disconnect() {},
         async getAccount() {
-          return { account: { id: 'plugin-acct' } };
+          return { id: 'plugin-acct' };
         },
         async getCapabilities() {
           return {
@@ -428,7 +428,7 @@ describe('createAdapter WebDAV production path', () => {
       'com.example.backup.sync': {
         provider: 'com.example.backup.sync',
         status: 'connected',
-        config: { endpoint: 'https://example.test' },
+        config: { endpoint: 'https://example.test' } as WebDAVConfig,
       },
     };
     enforceLegacySingleProviderConnected(providers);

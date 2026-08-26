@@ -3,8 +3,13 @@ import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from '
 import { useI18n } from '../../application/i18n/I18nProvider';
 import type { useSystemManagerBackend } from '../../application/state/useSystemManagerBackend';
 import type { Snippet, TerminalSession } from '../../types';
-import type { ZellijSessionInfo } from '../../domain/systemManager/types';
+import type {
+  ZellijClientInfo,
+  ZellijSessionInfo,
+  ZellijTabInfo,
+} from '../../domain/systemManager/types';
 import { zellijSessionInfoEqual } from '../../domain/systemManager/pollEquals';
+import { useAsyncRecordCache } from '../../application/state/systemManager/useAsyncRecordCache';
 import {
   SystemPanelEmpty,
   SystemPanelError,
@@ -23,6 +28,11 @@ import { ZellijSessionCard } from './ZellijSessionCard';
 import { mergePollListByKey, useStableListOrder } from './listStable';
 
 type Backend = ReturnType<typeof useSystemManagerBackend>;
+
+export interface ZellijSessionDetails {
+  tabs: ZellijTabInfo[];
+  clients: ZellijClientInfo[];
+}
 
 interface ZellijManagerTabProps {
   sessionId: string;
@@ -104,6 +114,39 @@ export const ZellijManagerTab = memo(function ZellijManagerTab({
     compareSessions,
   );
 
+  // Only running sessions can answer `zellij action`; an exited one just
+  // reports "not found", so it is left out of the cache entirely rather than
+  // fetched and discarded on every poll.
+  const detailCandidates = useMemo(
+    () => (sessions ?? []).filter((s) => !s.exited),
+    [sessions],
+  );
+  const getDetailsKey = useCallback(
+    (session: ZellijSessionInfo) => `${sessionId}:${session.name}`,
+    [sessionId],
+  );
+  const fetchDetails = useCallback(async (session: ZellijSessionInfo): Promise<ZellijSessionDetails> => {
+    const result = await backend.listZellijSessionDetails({ sessionId, sessionName: session.name });
+    if (!result.success) {
+      throw new Error(result.error || stableT('systemManager.errors.loadZellijDetails'));
+    }
+    return { tabs: result.tabs ?? [], clients: result.clients ?? [] };
+  }, [backend, sessionId, stableT]);
+
+  const {
+    records: detailsByName,
+    loadRecord: loadDetails,
+    refreshRecord: refreshDetails,
+  } = useAsyncRecordCache<ZellijSessionInfo, ZellijSessionDetails>({
+    items: detailCandidates,
+    enabled: isVisible && detailCandidates.length > 0,
+    getKey: getDetailsKey,
+    fetchRecord: fetchDetails,
+    prefetchLimit: 16,
+    prefetchDelayMs: 40,
+    staleTimeMs: 20_000,
+  });
+
   const handleCreate = useCallback(async (name: string) => {
     setCreating(true);
     setModalError(null);
@@ -170,10 +213,13 @@ export const ZellijManagerTab = memo(function ZellijManagerTab({
             session={session}
             sessionId={sessionId}
             parentSession={parentSession}
-                backend={backend}
-                onSessionsChanged={refresh}
-                onOpenManagedTerminal={onOpenManagedTerminal}
-              />
+            backend={backend}
+            detailsRecord={detailsByName[getDetailsKey(session)]}
+            onLoadDetails={loadDetails}
+            onRefreshDetails={refreshDetails}
+            onSessionsChanged={refresh}
+            onOpenManagedTerminal={onOpenManagedTerminal}
+          />
         ))}
       </SystemPanelList>
 

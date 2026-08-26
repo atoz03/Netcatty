@@ -439,6 +439,10 @@ function createSystemManagerBridge(deps) {
     return zellijOps.listSessions(event, sessionId);
   }
 
+  async function listZellijSessionDetails(event, payload) {
+    return zellijOps.listSessionDetails(event, payload);
+  }
+
   async function createZellijSession(event, payload) {
     return zellijOps.createSession(event, payload);
   }
@@ -534,6 +538,7 @@ function createSystemManagerBridge(deps) {
         "netcatty:system:listTmuxClients",
         "netcatty:system:tmuxAction",
         "netcatty:system:listZellijSessions",
+        "netcatty:system:listZellijSessionDetails",
         "netcatty:system:createZellijSession",
         "netcatty:system:zellijAction",
         "netcatty:system:listDockerContainers",
@@ -561,6 +566,7 @@ function createSystemManagerBridge(deps) {
     ipcMain.handle("netcatty:system:listTmuxClients", listTmuxClients);
     ipcMain.handle("netcatty:system:tmuxAction", tmuxAction);
     ipcMain.handle("netcatty:system:listZellijSessions", listZellijSessions);
+    ipcMain.handle("netcatty:system:listZellijSessionDetails", listZellijSessionDetails);
     ipcMain.handle("netcatty:system:createZellijSession", createZellijSession);
     ipcMain.handle("netcatty:system:zellijAction", zellijAction);
     ipcMain.handle("netcatty:system:listDockerContainers", listDockerContainers);

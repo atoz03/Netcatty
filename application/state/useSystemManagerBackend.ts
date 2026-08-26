@@ -103,6 +103,17 @@ export function useSystemManagerBackend() {
     return bridge.listZellijSessions(sessionId);
   }, []);
 
+  const listZellijSessionDetails = useCallback(async (options: {
+    sessionId: string;
+    sessionName: string;
+  }) => {
+    const bridge = netcattyBridge.get();
+    if (!bridge?.listZellijSessionDetails) {
+      return { success: false as const, error: 'listZellijSessionDetails unavailable' };
+    }
+    return bridge.listZellijSessionDetails(options);
+  }, []);
+
   const createZellijSession = useCallback(async (options: {
     sessionId: string;
     name: string;
@@ -241,6 +252,7 @@ export function useSystemManagerBackend() {
     listTmuxClients,
     tmuxAction,
     listZellijSessions,
+    listZellijSessionDetails,
     createZellijSession,
     zellijAction,
     listDockerContainers,
@@ -266,6 +278,7 @@ export function useSystemManagerBackend() {
     listTmuxClients,
     tmuxAction,
     listZellijSessions,
+    listZellijSessionDetails,
     createZellijSession,
     zellijAction,
     listDockerContainers,

@@ -191,9 +191,24 @@ function parseOsc99Metadata(metadata: string): {
   return fields;
 }
 
-type OscScanResult =
-  | { incomplete: true }
-  | { incomplete: false; notification: boolean; aborted?: boolean; id: number; payload: string; end: number };
+type OscScanIncomplete = { incomplete: true };
+type OscScanComplete = {
+  incomplete: false;
+  notification: boolean;
+  aborted?: boolean;
+  id: number;
+  payload: string;
+  end: number;
+};
+type OscScanResult = OscScanIncomplete | OscScanComplete;
+
+/**
+ * The project compiles without `strictNullChecks`, and in that mode a boolean
+ * discriminant does not narrow a union — `incomplete: true | false` widens to
+ * `boolean` on both members. An explicit predicate narrows regardless of the
+ * flag, matching how the rest of the codebase discriminates result unions.
+ */
+const isCompleteOscScan = (result: OscScanResult): result is OscScanComplete => !result.incomplete;
 
 const isNotificationOscId = (id: number): boolean => id === 9 || id === 777 || id === 99;
 
@@ -300,7 +315,7 @@ export class OscNotificationStreamScanner {
       }
       remainder += input.slice(index, esc);
       const scanned = readOscAt(input, esc);
-      if (scanned.incomplete) {
+      if (!isCompleteOscScan(scanned)) {
         const leftover = input.slice(esc);
         if (leftover.length > OSC_NOTIFICATION_CARRY_MAX) {
           remainder += leftover;

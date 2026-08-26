@@ -204,7 +204,10 @@ export type TransferEndpointKind = {
 
 /** Classify transfer endpoints for dedicated resume (local↔remote and SFTP↔SFTP). */
 export function classifyDedicatedResumeEndpoints(
-  task: Pick<TransferTask, "direction" | "sourceHostId" | "targetHostId" | "sourceConnectionId" | "targetConnectionId">,
+  // Only `direction` is always needed; every endpoint field below is probed for
+  // presence, so callers may pass the subset they know about.
+  task: Pick<TransferTask, "direction">
+    & Partial<Pick<TransferTask, "sourceHostId" | "targetHostId" | "sourceConnectionId" | "targetConnectionId">>,
 ): TransferEndpointKind {
   const isRemoteToRemote = task.direction === "remote-to-remote"
     || (!!task.sourceHostId && !!task.targetHostId
@@ -371,7 +374,10 @@ type PersistedResumeChild = Pick<
   "id" | "status" | "sourcePath" | "targetPath" | "checkpointBytes" | "transferredBytes"
     | "resumeStage" | "downloadCheckpointBytes" | "uploadCheckpointBytes" | "sourceFingerprint"
     | "totalBytes" | "sourceLastModified"
->;
+>
+  // Persisted snapshots predating start-time tracking omit this, and the read
+  // site falls back to `Date.now()`, so it stays optional here.
+  & Partial<Pick<TransferTask, "startTime">>;
 
 /** Build once per directory resume; every planned-file match is then O(1). */
 export function createPersistedResumeChildLookup(
@@ -728,9 +734,9 @@ async function resumeSingleFileWithDedicatedSession(
       },
     );
 
-    if (result?.error) {
-      throw new Error(result.error);
-    }
+    // The scheduled work resolves only with `{ transferId }` and throws on every
+    // failure path, so there is no error field left to inspect here.
+    void result;
     return { success: true };
   } catch (error) {
     const err = error as Error & { dedicatedAttention?: boolean; resetCheckpoint?: boolean };
@@ -1320,7 +1326,8 @@ async function resumeDirectoryWithDedicatedSession(
       },
     );
 
-    if (result?.error) throw new Error(result.error);
+    // As above: the scheduled work only resolves with `{ transferId }`.
+    void result;
 
     if (attentionCount > 0 && failedCount === 0 && completedCount + attentionCount >= totalFiles) {
       return {

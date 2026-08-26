@@ -415,6 +415,9 @@ function createPreloadApi(ctx) {
   listZellijSessions: async (sessionId) => {
     return ipcRenderer.invoke("netcatty:system:listZellijSessions", { sessionId });
   },
+  listZellijSessionDetails: async (options) => {
+    return ipcRenderer.invoke("netcatty:system:listZellijSessionDetails", options);
+  },
   createZellijSession: async (options) => {
     return ipcRenderer.invoke("netcatty:system:createZellijSession", options);
   },

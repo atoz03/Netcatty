@@ -76,6 +76,12 @@ declare global {
       zellijVersion?: string;
       sessions?: import("../../domain/systemManager/types").ZellijSessionInfo[];
     }>;
+    listZellijSessionDetails?(options: { sessionId: string; sessionName: string }): Promise<{
+      success: boolean;
+      error?: string;
+      tabs?: import("../../domain/systemManager/types").ZellijTabInfo[];
+      clients?: import("../../domain/systemManager/types").ZellijClientInfo[];
+    }>;
     createZellijSession?(options: { sessionId: string; name: string }): Promise<{
       success: boolean;
       error?: string;

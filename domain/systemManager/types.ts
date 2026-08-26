@@ -153,8 +153,31 @@ export interface ZellijSessionInfo {
   exited: boolean;
 }
 
+/**
+ * `zellij action query-tab-names` reports names only, so the index is the
+ * position in that list — zellij exposes no other identifier for a tab.
+ */
+export interface ZellijTabInfo {
+  index: number;
+  name: string;
+}
+
+export interface ZellijClientInfo {
+  clientId: string;
+  paneId: string;
+  command: string;
+}
+
+/**
+ * `killSession` stops a session but leaves it resurrectable; `deleteSession`
+ * discards it permanently. They are separate actions because zellij treats
+ * them as separate commands with different, irreversible consequences.
+ */
 export type ZellijManageAction =
-  | { action: 'killSession'; sessionName: string };
+  | { action: 'killSession'; sessionName: string }
+  | { action: 'deleteSession'; sessionName: string }
+  | { action: 'renameSession'; sessionName: string; newName: string }
+  | { action: 'createTab'; sessionName: string; tabName?: string };
 
 export interface DockerContainerInfo {
   id: string;

@@ -173,6 +173,7 @@ export const esSystemManagerMessages: Messages = {
   'systemManager.zellij.session': 'Sesión de zellij',
   'systemManager.zellij.current': 'Actual',
   'systemManager.zellij.exited': 'Terminada',
+  'systemManager.zellij.running': 'En ejecución',
   'systemManager.zellij.attach': 'Conectar',
   'systemManager.zellij.attachSplit': 'Conectar en panel dividido',
   'systemManager.zellij.resurrect': 'Restaurar',
@@ -180,6 +181,7 @@ export const esSystemManagerMessages: Messages = {
   'systemManager.zellij.renameSessionPrompt': 'Renombrar sesión',
   'systemManager.zellij.killSession': 'Terminar sesión',
   'systemManager.zellij.deleteSession': 'Eliminar sesión',
+  'systemManager.zellij.moreActions': 'Más acciones',
   'systemManager.zellij.confirmKillSession': '¿Terminar la sesión de zellij "{{name}}"? Seguirá en la lista y se podrá restaurar.',
   'systemManager.zellij.confirmDeleteSession': '¿Eliminar permanentemente la sesión de zellij "{{name}}"? Después no se podrá restaurar.',
   'systemManager.zellij.tabs': '{{count}} pestaña(s)',
@@ -189,6 +191,7 @@ export const esSystemManagerMessages: Messages = {
   'systemManager.zellij.newTabPlaceholder': 'Nombre de la pestaña (opcional)',
   'systemManager.zellij.noTabs': 'No hay pestañas',
   'systemManager.zellij.clients': 'Clientes conectados',
+  'systemManager.zellij.clientCount': '{{count}} cliente(s)',
   'systemManager.zellij.loadingDetails': 'Cargando detalles…',
 
   'systemManager.docker.title': 'Contenedores',

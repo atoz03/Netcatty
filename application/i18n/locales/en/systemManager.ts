@@ -175,6 +175,7 @@ export const enSystemManagerMessages: Messages = {
   'systemManager.zellij.session': 'zellij session',
   'systemManager.zellij.current': 'Current',
   'systemManager.zellij.exited': 'Exited',
+  'systemManager.zellij.running': 'Running',
   'systemManager.zellij.attach': 'Attach',
   'systemManager.zellij.attachSplit': 'Attach in split',
   'systemManager.zellij.resurrect': 'Resurrect',
@@ -182,6 +183,7 @@ export const enSystemManagerMessages: Messages = {
   'systemManager.zellij.renameSessionPrompt': 'Rename session',
   'systemManager.zellij.killSession': 'Kill session',
   'systemManager.zellij.deleteSession': 'Delete session',
+  'systemManager.zellij.moreActions': 'More actions',
   'systemManager.zellij.confirmKillSession': 'Kill zellij session "{{name}}"? It stays in the list and can be resurrected.',
   'systemManager.zellij.confirmDeleteSession': 'Delete zellij session "{{name}}" permanently? It cannot be resurrected afterwards.',
   'systemManager.zellij.tabs': '{{count}} tab(s)',
@@ -191,6 +193,7 @@ export const enSystemManagerMessages: Messages = {
   'systemManager.zellij.newTabPlaceholder': 'Tab name (optional)',
   'systemManager.zellij.noTabs': 'No tabs',
   'systemManager.zellij.clients': 'Attached clients',
+  'systemManager.zellij.clientCount': '{{count}} client(s)',
   'systemManager.zellij.loadingDetails': 'Loading details…',
 
   'systemManager.docker.title': 'Containers',

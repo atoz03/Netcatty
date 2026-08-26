@@ -595,22 +595,28 @@ export function openManagedTerminalWithCurrentShellImpl(
   title: string,
   startupCommand: string,
   options?: { mode?: 'tab' | 'verticalSplit' },
-) {
-  const { classifyLocalShellType, copySession, discoveredShells, resolveShellSetting, splitSession, terminalSettings } = getCtx();
-{
-    const resolved = resolveShellSetting(terminalSettings.localShell, discoveredShells);
-    const cloneOptions = {
-      localShellType: classifyLocalShellType(resolved?.command || terminalSettings.localShell, navigator.userAgent),
-      startupCommand,
-      customName: title,
-    };
-    if (options?.mode === 'verticalSplit') {
-      splitSession(sessionId, 'vertical', cloneOptions);
-      return true;
-    }
-    copySession(sessionId, cloneOptions);
+): boolean {
+  const { classifyLocalShellType, copySession, discoveredShells, resolveShellSetting, sessions, splitSession, terminalSettings } = getCtx();
+  // Both clone actions silently no-op when the source tab is already gone, so
+  // reporting success unconditionally would leave the caller showing a tab that
+  // was never opened. Answer honestly instead.
+  const sourceExists = Array.isArray(sessions)
+    && sessions.some((session: { id: string }) => session.id === sessionId);
+  if (!sourceExists) return false;
+
+  const resolved = resolveShellSetting(terminalSettings.localShell, discoveredShells);
+  const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : '';
+  const cloneOptions = {
+    localShellType: classifyLocalShellType(resolved?.command || terminalSettings.localShell, userAgent),
+    startupCommand,
+    customName: title,
+  };
+  if (options?.mode === 'verticalSplit') {
+    splitSession(sessionId, 'vertical', cloneOptions);
     return true;
   }
+  copySession(sessionId, cloneOptions);
+  return true;
 }
 
 export async function copySessionToNewWindowWithCurrentShellImpl(getCtx: AppContextGetter, sessionId: string) {

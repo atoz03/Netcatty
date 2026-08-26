@@ -1,4 +1,4 @@
-import { Plus, TerminalSquare } from 'lucide-react';
+import { Grid2x2, Plus } from 'lucide-react';
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import type { useSystemManagerBackend } from '../../application/state/useSystemManagerBackend';
@@ -47,7 +47,7 @@ interface ZellijManagerTabProps {
     title: string,
     startupCommand: string,
     options?: { mode?: 'tab' | 'verticalSplit' },
-  ) => boolean | void;
+  ) => boolean;
 }
 
 export const ZellijManagerTab = memo(function ZellijManagerTab({
@@ -202,7 +202,7 @@ export const ZellijManagerTab = memo(function ZellijManagerTab({
           <SystemPanelLoading message={t('systemManager.common.loading')} />
         )}
         {!error && displaySessions.length === 0 && !loading && (
-          <SystemPanelEmpty icon={TerminalSquare} message={t('systemManager.zellij.empty')} />
+          <SystemPanelEmpty icon={Grid2x2} message={t('systemManager.zellij.empty')} />
         )}
         {error && (
           <SystemPanelError message={error} onRetry={() => void refresh()} retryLabel={t('history.action.retry')} loading={loading} />

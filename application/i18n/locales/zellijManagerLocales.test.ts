@@ -45,6 +45,9 @@ const zellijKeys = [
   "systemManager.zellij.newTabPlaceholder",
   "systemManager.zellij.noTabs",
   "systemManager.zellij.clients",
+  "systemManager.zellij.clientCount",
+  "systemManager.zellij.running",
+  "systemManager.zellij.moreActions",
   "systemManager.zellij.loadingDetails",
 ] as const;
 

@@ -175,6 +175,7 @@ export const ruSystemManagerMessages: Messages = {
   'systemManager.zellij.session': 'Сессия zellij',
   'systemManager.zellij.current': 'Текущая',
   'systemManager.zellij.exited': 'Завершена',
+  'systemManager.zellij.running': 'Работает',
   'systemManager.zellij.attach': 'Подключить',
   'systemManager.zellij.attachSplit': 'Подключить в новой панели',
   'systemManager.zellij.resurrect': 'Восстановить',
@@ -182,6 +183,7 @@ export const ruSystemManagerMessages: Messages = {
   'systemManager.zellij.renameSessionPrompt': 'Переименовать сессию',
   'systemManager.zellij.killSession': 'Завершить сессию',
   'systemManager.zellij.deleteSession': 'Удалить сессию',
+  'systemManager.zellij.moreActions': 'Ещё действия',
   'systemManager.zellij.confirmKillSession': 'Завершить сессию zellij «{{name}}»? Она останется в списке, её можно будет восстановить.',
   'systemManager.zellij.confirmDeleteSession': 'Удалить сессию zellij «{{name}}» навсегда? Восстановить её будет нельзя.',
   'systemManager.zellij.tabs': 'Вкладок: {{count}}',
@@ -191,6 +193,7 @@ export const ruSystemManagerMessages: Messages = {
   'systemManager.zellij.newTabPlaceholder': 'Имя вкладки (необязательно)',
   'systemManager.zellij.noTabs': 'Нет вкладок',
   'systemManager.zellij.clients': 'Подключённые клиенты',
+  'systemManager.zellij.clientCount': 'Клиентов: {{count}}',
   'systemManager.zellij.loadingDetails': 'Загрузка деталей…',
 
   'systemManager.docker.title': 'Контейнеры',

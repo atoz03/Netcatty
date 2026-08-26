@@ -5,7 +5,6 @@ import React, { memo, useEffect, useRef, useState } from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import type { useSystemManagerBackend } from '../../application/state/useSystemManagerBackend';
 import type { AsyncRecordState } from '../../application/state/systemManager/useAsyncRecordCache';
-import { requestManagedTerminalOpen } from '../../application/app/managedTerminalOpenEvent';
 import { buildZellijAttachCommand } from '../../domain/systemManager/tmuxShell';
 import type { ZellijManageAction, ZellijSessionInfo } from '../../domain/systemManager/types';
 import type { TerminalSession } from '../../types';
@@ -14,11 +13,18 @@ import {
   SystemPanelCollapsible,
   SystemPanelDetailStrip,
   SystemPanelInlineError,
-  SystemPanelRoundButton,
   SystemPanelRow,
   SystemPanelSectionHeader,
-  SystemPanelStatusBadge,
 } from './SystemPanelUi';
+import {
+  ZellijActionMenu,
+  ZellijPrimaryAction,
+  ZellijSessionTile,
+  ZellijStateDot,
+  ZellijTabChip,
+  type ZellijMenuAction,
+  type ZellijTileTone,
+} from './ZellijPanelUi';
 import { SystemPanelConfirmDialog } from './SystemPanelConfirmDialog';
 import { SystemPanelPromptDialog } from './SystemPanelPromptDialog';
 import { showSystemManagerError } from './systemManagerToast';
@@ -40,7 +46,7 @@ interface ZellijSessionCardProps {
     title: string,
     startupCommand: string,
     options?: { mode?: OpenMode },
-  ) => boolean | void;
+  ) => boolean;
 }
 
 export const ZellijSessionCard = memo(function ZellijSessionCard({
@@ -118,24 +124,86 @@ export const ZellijSessionCard = memo(function ZellijSessionCard({
   const handleAttach = (mode: OpenMode) => {
     const title = `zellij: ${session.name}`;
     const startupCommand = buildZellijAttachCommand(session.name);
-    const opened = onOpenManagedTerminal
-      ? onOpenManagedTerminal(parentSession.id, title, startupCommand, { mode })
-      : requestManagedTerminalOpen({
-        sessionId: parentSession.id,
-        title,
-        startupCommand,
-        options: { mode },
-      });
-    if (opened === false) {
+    // There is deliberately no fallback here. This panel only ever renders
+    // inside the terminal layer, which supplies the handler; anything else is a
+    // wiring bug, and a silent no-op is exactly what hid one before.
+    const opened = onOpenManagedTerminal?.(parentSession.id, title, startupCommand, { mode }) ?? false;
+    if (!opened) {
       const message = t('systemManager.errors.openManagedTerminalUnavailable');
       setActionError(message);
       showSystemManagerError(message, t('common.error'));
+      return;
     }
+    setActionError(null);
   };
 
-  const subtitle = !isExited && detailsRecord?.data
-    ? t('systemManager.zellij.tabs', { count: tabs.length })
-    : t('systemManager.zellij.session');
+  const tone: ZellijTileTone = isExited ? 'exited' : (session.current ? 'attached' : 'idle');
+  const stateLabel = isExited
+    ? t('systemManager.zellij.exited')
+    : (session.current ? t('systemManager.zellij.current') : t('systemManager.zellij.running'));
+
+  // Facts first: how many tabs and clients this session actually has, with the
+  // state as the last segment. `session` alone is the fallback while the
+  // details fetch is still in flight.
+  const subtitle = (
+    <span className="inline-flex items-center gap-1.5">
+      {!isExited && detailsRecord?.data ? (
+        <>
+          <span>{t('systemManager.zellij.tabs', { count: tabs.length })}</span>
+          {clients.length > 0 && (
+            <>
+              <span className="opacity-40">·</span>
+              <span>{t('systemManager.zellij.clientCount', { count: clients.length })}</span>
+            </>
+          )}
+        </>
+      ) : (
+        <span>{t('systemManager.zellij.session')}</span>
+      )}
+      <span className="opacity-40">·</span>
+      <ZellijStateDot tone={tone} label={stateLabel} />
+    </span>
+  );
+
+  const menuActions: ZellijMenuAction[] = [
+    {
+      id: 'attachSplit',
+      label: t('systemManager.zellij.attachSplit'),
+      icon: <Columns2 size={12} />,
+      onSelect: () => handleAttach('verticalSplit'),
+    },
+    ...(isExited ? [] : [
+      {
+        id: 'newTab',
+        label: t('systemManager.zellij.newTab'),
+        icon: <Plus size={12} />,
+        busy,
+        onSelect: () => setNewTabOpen(true),
+      },
+      {
+        id: 'rename',
+        label: t('systemManager.zellij.rename'),
+        icon: <Pencil size={12} />,
+        busy,
+        onSelect: () => setRenameOpen(true),
+      },
+      {
+        id: 'killSession',
+        label: t('systemManager.zellij.killSession'),
+        icon: <Power size={12} />,
+        busy: busy || pending === 'killSession',
+        onSelect: () => setKillConfirmOpen(true),
+      },
+    ]),
+    {
+      id: 'deleteSession',
+      label: t('systemManager.zellij.deleteSession'),
+      icon: <Trash2 size={12} />,
+      destructive: true,
+      busy: busy || pending === 'deleteSession',
+      onSelect: () => setDeleteConfirmOpen(true),
+    },
+  ];
 
   return (
     <>
@@ -148,60 +216,21 @@ export const ZellijSessionCard = memo(function ZellijSessionCard({
             void onLoadDetails(session, { force: true, urgent: true });
           }
         }}
-        title={session.name}
+        leading={<ZellijSessionTile tone={tone} />}
+        title={<span className="font-mono">{session.name}</span>}
         subtitle={subtitle}
-        trailing={(
+        actions={(
           <div className="flex shrink-0 items-center gap-1">
-            {session.current && (
-              <SystemPanelStatusBadge tone="success">
-                {t('systemManager.zellij.current')}
-              </SystemPanelStatusBadge>
-            )}
-            {isExited && (
-              <SystemPanelStatusBadge tone="muted">
-                {t('systemManager.zellij.exited')}
-              </SystemPanelStatusBadge>
-            )}
-            <SystemPanelRoundButton
-              title={isExited ? t('systemManager.zellij.resurrect') : t('systemManager.zellij.attach')}
+            <ZellijPrimaryAction
+              label={isExited ? t('systemManager.zellij.resurrect') : t('systemManager.zellij.attach')}
+              icon={isExited ? <RotateCcw size={11} /> : <MonitorPlay size={11} />}
               onClick={() => handleAttach('tab')}
-            >
-              {isExited ? <RotateCcw size={12} /> : <MonitorPlay size={12} />}
-            </SystemPanelRoundButton>
-            <SystemPanelRoundButton
-              title={t('systemManager.zellij.attachSplit')}
-              onClick={() => handleAttach('verticalSplit')}
-            >
-              <Columns2 size={12} />
-            </SystemPanelRoundButton>
-            {!isExited && (
-              <SystemPanelRoundButton
-                title={t('systemManager.zellij.rename')}
-                disabled={busy}
-                onClick={() => setRenameOpen(true)}
-              >
-                <Pencil size={12} />
-              </SystemPanelRoundButton>
-            )}
-            {!isExited && (
-              <SystemPanelRoundButton
-                title={t('systemManager.zellij.killSession')}
-                disabled={busy}
-                loading={pending === 'killSession'}
-                onClick={() => setKillConfirmOpen(true)}
-              >
-                <Power size={12} />
-              </SystemPanelRoundButton>
-            )}
-            <SystemPanelRoundButton
-              title={t('systemManager.zellij.deleteSession')}
-              destructive
-              disabled={busy}
-              loading={pending === 'deleteSession'}
-              onClick={() => setDeleteConfirmOpen(true)}
-            >
-              <Trash2 size={12} />
-            </SystemPanelRoundButton>
+            />
+            <ZellijActionMenu
+              label={t('systemManager.zellij.moreActions')}
+              actions={menuActions}
+              busy={busy}
+            />
           </div>
         )}
       />
@@ -217,10 +246,19 @@ export const ZellijSessionCard = memo(function ZellijSessionCard({
 
         {clients.length > 0 && (
           <SystemPanelDetailStrip>
-            <div className="text-[10px] text-muted-foreground break-all">
-              {t('systemManager.zellij.clients')}: {clients
-                .map((client) => (client.command ? `#${client.clientId} ${client.command}` : `#${client.clientId}`))
-                .join(', ')}
+            <div className="mb-1.5 text-[10px] uppercase tracking-wider text-muted-foreground/70">
+              {t('systemManager.zellij.clients')}
+            </div>
+            <div className="flex flex-wrap gap-1">
+              {clients.map((client) => (
+                <span
+                  key={client.clientId}
+                  className="inline-flex max-w-full items-center gap-1 rounded-full bg-background/70 px-2 py-0.5 text-[10px] text-muted-foreground ring-1 ring-border/50"
+                >
+                  <span className="font-medium tabular-nums text-foreground/70">#{client.clientId}</span>
+                  {client.command && <span className="truncate font-mono">{client.command}</span>}
+                </span>
+              ))}
             </div>
           </SystemPanelDetailStrip>
         )}
@@ -231,7 +269,7 @@ export const ZellijSessionCard = memo(function ZellijSessionCard({
               type="button"
               disabled={busy}
               onClick={() => setNewTabOpen(true)}
-              className="shrink-0 h-5 px-1.5 rounded text-[10px] text-muted-foreground hover:text-foreground hover:bg-muted/60 inline-flex items-center gap-1 disabled:opacity-40"
+              className="shrink-0 h-5 px-1.5 rounded-full text-[10px] text-muted-foreground ring-1 ring-border/50 hover:text-foreground hover:bg-muted/60 inline-flex items-center gap-1 transition-colors disabled:opacity-40"
             >
               <Plus size={10} />
               {t('systemManager.zellij.newTab')}
@@ -245,7 +283,8 @@ export const ZellijSessionCard = memo(function ZellijSessionCard({
           <SystemPanelRow
             key={`${tab.index}:${tab.name}`}
             depth={1}
-            title={`#${tab.index} ${tab.name}`}
+            leading={<ZellijTabChip index={tab.index} />}
+            title={<span className="font-mono">{tab.name}</span>}
           />
         ))}
 

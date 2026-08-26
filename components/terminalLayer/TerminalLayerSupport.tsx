@@ -699,7 +699,7 @@ export interface TerminalLayerProps {
     title: string,
     startupCommand: string,
     options?: { mode?: 'tab' | 'verticalSplit' },
-  ) => boolean | void;
+  ) => boolean;
   onCopySessionToNewWindow?: (sessionId: string) => void;
   onRemoveSessionFromWorkspace?: (
     sessionId: string,

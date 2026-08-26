@@ -173,6 +173,7 @@ export const zhTwSystemManagerMessages: Messages = {
   'systemManager.zellij.session': 'zellij 工作階段',
   'systemManager.zellij.current': '目前',
   'systemManager.zellij.exited': '已結束',
+  'systemManager.zellij.running': '執行中',
   'systemManager.zellij.attach': '附加',
   'systemManager.zellij.attachSplit': '在分割窗格中附加',
   'systemManager.zellij.resurrect': '復原工作階段',
@@ -180,6 +181,7 @@ export const zhTwSystemManagerMessages: Messages = {
   'systemManager.zellij.renameSessionPrompt': '重新命名工作階段',
   'systemManager.zellij.killSession': '結束工作階段',
   'systemManager.zellij.deleteSession': '刪除工作階段',
+  'systemManager.zellij.moreActions': '更多操作',
   'systemManager.zellij.confirmKillSession': '確定結束 zellij 工作階段「{{name}}」？它仍會保留在清單中，之後可以復原。',
   'systemManager.zellij.confirmDeleteSession': '確定永久刪除 zellij 工作階段「{{name}}」？刪除後無法復原。',
   'systemManager.zellij.tabs': '{{count}} 個分頁',
@@ -189,6 +191,7 @@ export const zhTwSystemManagerMessages: Messages = {
   'systemManager.zellij.newTabPlaceholder': '分頁名稱（選填）',
   'systemManager.zellij.noTabs': '沒有分頁',
   'systemManager.zellij.clients': '已連線的用戶端',
+  'systemManager.zellij.clientCount': '{{count}} 個用戶端',
   'systemManager.zellij.loadingDetails': '正在載入詳細資訊…',
 
   'systemManager.docker.title': '容器',

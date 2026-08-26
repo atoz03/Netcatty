@@ -1,4 +1,4 @@
-import { Activity, Box, CircuitBoard, Cog, Gauge, LayoutList, Loader2, Network, TerminalSquare } from 'lucide-react';
+import { Activity, Box, CircuitBoard, Cog, Gauge, Grid2x2, LayoutList, Loader2, Network, TerminalSquare } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import React, { memo, useCallback, useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { useI18n } from '../../application/i18n/I18nProvider';
@@ -70,7 +70,7 @@ interface SystemManagerSidePanelProps {
     title: string,
     startupCommand: string,
     options?: { mode?: 'tab' | 'verticalSplit' },
-  ) => boolean | void;
+  ) => boolean;
   onRequestTerminalFocus?: () => void;
 }
 
@@ -119,7 +119,9 @@ export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
       { id: 'ports', icon: Network, label: t('systemManager.tabs.ports') },
       { id: 'services', icon: Cog, label: t('systemManager.tabs.services') },
       { id: 'tmux', icon: TerminalSquare, label: t('systemManager.tabs.tmux') },
-      { id: 'zellij', icon: TerminalSquare, label: t('systemManager.tabs.zellij') },
+      // Not tmux's terminal glyph: zellij is named after zellige mosaic tiling,
+      // and two identical icons in the same tab strip read as a duplicate tab.
+      { id: 'zellij', icon: Grid2x2, label: t('systemManager.tabs.zellij') },
       { id: 'docker', icon: Box, label: t('systemManager.tabs.docker') },
       { id: 'gpu', icon: CircuitBoard, label: t('systemManager.tabs.gpu') },
     ],
@@ -588,7 +590,7 @@ export const SystemManagerSidePanel = memo(function SystemManagerSidePanel({
         ) : null}
         {zellijPanelState === 'unavailable' ? (
           <div className="flex-1 min-h-0">
-            <SystemPanelEmpty icon={TerminalSquare} message={t('systemManager.zellij.unavailable')} />
+            <SystemPanelEmpty icon={Grid2x2} message={t('systemManager.zellij.unavailable')} />
           </div>
         ) : zellijPanelState === 'checking' ? (
           <div className="flex-1 min-h-0">

@@ -175,6 +175,7 @@ export const zhCnSystemManagerMessages: Messages = {
   'systemManager.zellij.session': 'zellij 会话',
   'systemManager.zellij.current': '当前',
   'systemManager.zellij.exited': '已退出',
+  'systemManager.zellij.running': '运行中',
   'systemManager.zellij.attach': '附加',
   'systemManager.zellij.attachSplit': '在分屏中附加',
   'systemManager.zellij.resurrect': '恢复会话',
@@ -182,6 +183,7 @@ export const zhCnSystemManagerMessages: Messages = {
   'systemManager.zellij.renameSessionPrompt': '重命名会话',
   'systemManager.zellij.killSession': '结束会话',
   'systemManager.zellij.deleteSession': '删除会话',
+  'systemManager.zellij.moreActions': '更多操作',
   'systemManager.zellij.confirmKillSession': '确定结束 zellij 会话「{{name}}」？会话仍会保留在列表中，可以恢复。',
   'systemManager.zellij.confirmDeleteSession': '确定永久删除 zellij 会话「{{name}}」？删除后无法恢复。',
   'systemManager.zellij.tabs': '{{count}} 个标签页',
@@ -191,6 +193,7 @@ export const zhCnSystemManagerMessages: Messages = {
   'systemManager.zellij.newTabPlaceholder': '标签页名称（可选）',
   'systemManager.zellij.noTabs': '没有标签页',
   'systemManager.zellij.clients': '已连接的客户端',
+  'systemManager.zellij.clientCount': '{{count}} 个客户端',
   'systemManager.zellij.loadingDetails': '正在加载详情…',
 
   'systemManager.docker.title': '容器',

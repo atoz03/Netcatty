@@ -170,10 +170,10 @@ export const ZellijManagerTab = memo(function ZellijManagerTab({
             session={session}
             sessionId={sessionId}
             parentSession={parentSession}
-                backend={backend}
-                onSessionsChanged={refresh}
-                onOpenManagedTerminal={onOpenManagedTerminal}
-              />
+            backend={backend}
+            onSessionsChanged={refresh}
+            onOpenManagedTerminal={onOpenManagedTerminal}
+          />
         ))}
       </SystemPanelList>
 

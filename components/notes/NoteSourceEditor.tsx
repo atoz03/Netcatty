@@ -70,10 +70,12 @@ export interface NoteSourceEditorProps {
   className?: string;
   noteFontFamily?: string;
   noteFontSize?: number;
+  /** Blocks edits (used when the rich editor cannot render the markdown). */
+  readOnly?: boolean;
 }
 
 export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSourceEditorProps>(
-  ({ noteId, value, placeholder = "", onChange, className = "", noteFontFamily, noteFontSize }, ref) => {
+  ({ noteId, value, placeholder = "", onChange, className = "", noteFontFamily, noteFontSize, readOnly = false }, ref) => {
     const textareaRef = useRef<HTMLTextAreaElement>(null);
     const lineNumbersRef = useRef<HTMLDivElement>(null);
     const [localValue, setLocalValue] = useState(value);
@@ -147,6 +149,7 @@ export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSou
     };
 
     const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+      if (readOnly) return;
       const nextValue = e.target.value;
       if (nextValue === localValue) return;
       const nativeInputType = (e.nativeEvent as InputEvent | undefined)?.inputType;
@@ -227,6 +230,10 @@ export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSou
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
       const textarea = textareaRef.current;
       if (!textarea) return;
+      // Read-only fallback (preview mode): the DOM readOnly attribute blocks
+      // typing but not our custom Tab/undo handling, which would still mutate
+      // and persist the note.
+      if (readOnly) return;
 
       const key = e.key.toLowerCase();
       const commandModifier = e.metaKey || e.ctrlKey;
@@ -269,7 +276,7 @@ export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSou
     useImperativeHandle(ref, () => ({
       insertAction: (action: MarkdownActionType) => {
         const textarea = textareaRef.current;
-        if (!textarea) return;
+        if (!textarea || readOnly) return;
 
         if (action === "undo" || action === "redo") {
           applyHistoryAction(action);
@@ -359,6 +366,8 @@ export const NoteSourceEditor = React.forwardRef<NoteSourceEditorHandle, NoteSou
             }}
             placeholder={placeholder}
             spellCheck={false}
+            readOnly={readOnly || undefined}
+            aria-readonly={readOnly || undefined}
             style={{
               fontFamily: noteFontFamily || undefined,
               fontSize: noteFontSize ? `${noteFontSize}px` : undefined,

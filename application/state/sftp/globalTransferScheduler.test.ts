@@ -84,3 +84,49 @@ test("queued work stays paused until resumed and can be cancelled", async () => 
   await paused;
   assert.deepEqual(order, ["b1"]);
 });
+
+test("enqueuing a large blocked batch does not repeatedly inspect the existing queue", async () => {
+  const scheduler = createGlobalSftpTransferScheduler();
+  let release: (() => void) | undefined;
+  let limitReads = 0;
+  const readLimit = () => { limitReads += 1; return 1; };
+  const blocker = scheduler.run("panel", "active", ["host"], readLimit, () => (
+    new Promise<void>((resolve) => { release = resolve; })
+  ));
+  const count = 2_000;
+  const completed: number[] = [];
+  const jobs = Array.from({ length: count }, (_, index) => scheduler.run(
+    "panel", `queued-${index}`, ["host"], readLimit,
+    async () => { completed.push(index); },
+  ));
+  await new Promise((resolve) => setImmediate(resolve));
+  const readsWhileBlocked = limitReads;
+  release?.();
+  await Promise.all([blocker, ...jobs]);
+
+  assert.deepEqual(completed, Array.from({ length: count }, (_, index) => index));
+  assert.ok(readsWhileBlocked <= count * 3,
+    `a blocked batch should be inspected linearly, got ${readsWhileBlocked} limit reads for ${count} files`);
+});
+
+test("large batches of immediately completed files yield to user input", async () => {
+  const scheduler = createGlobalSftpTransferScheduler();
+  let completed = 0;
+  const count = 1_000;
+  const inputTurn = new Promise<number>((resolve) => setTimeout(() => resolve(completed), 0));
+  const jobs = Array.from({ length: count }, (_, index) => scheduler.run(
+    "panel", `tiny-${index}`, ["host"], () => 2, async () => { completed += 1; },
+  ));
+  const completedAtInput = await inputTurn;
+  await Promise.all(jobs);
+  assert.ok(completedAtInput < count, "input must run before the entire batch drains");
+  assert.equal(completed, count);
+});
+
+test("a synchronous job failure releases its slot for queued work", async () => {
+  const scheduler = createGlobalSftpTransferScheduler();
+  const failed = scheduler.run("panel", "failed", ["host"], () => 1, () => { throw new Error("read failed"); });
+  const next = scheduler.run("panel", "next", ["host"], () => 1, async () => "completed");
+  await assert.rejects(failed, /read failed/);
+  assert.equal(await next, "completed");
+});

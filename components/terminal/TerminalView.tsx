@@ -1145,6 +1145,7 @@ function TerminalViewInner({ ctx, isPaneMagnified = false }: { ctx: TerminalView
             )}
             sensitiveInputActiveRef={passwordPromptActiveRef}
             allowHostStyleGreaterThanPrompt={isNetworkDevice}
+            isNetworkDevice={isNetworkDevice}
           />
 
           <PasswordCredentialPicker

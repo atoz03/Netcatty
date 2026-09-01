@@ -146,7 +146,7 @@ test("runtime routes Shift+Enter text through the shared input handler", () => {
 
   assert.match(
     source,
-    /const handleTerminalInputData = \(\s+data: string,\s+options\?: \{\s+source\?: "terminal" \| "shift-enter" \| "kitty";\s+[\s\S]*?skipBroadcast\?: boolean;\s+\},\s+\) => \{/s,
+    /const handleTerminalInputData = \(\s+data: string,\s+options\?: \{\s+source\?: "terminal" \| "shift-enter" \| "kitty";\s+[\s\S]*?skipBroadcast\?: boolean;\s+[\s\S]*?perCharacterWrites\?: boolean;\s+\},\s+\) => \{/s,
   );
   // Remap when Kitty encoding does not preserve Shift+Enter (not merely flags===0).
   assert.match(
@@ -173,11 +173,11 @@ test("runtime routes Shift+Enter text through the shared input handler", () => {
   );
   assert.match(
     source,
-    /term\.onData\(\(data\) => \{[\s\S]*handleTerminalInputData\(data\);\s+\}\);/,
+    /term\.onData\(\(data\) => \{[\s\S]*const sanitizedRawData = sanitizeTerminalInput\(data\);[\s\S]*handleTerminalInputData\(sanitizedRawData, \{\s*perCharacterWrites: shouldSplitRawPasteInputForWire\(sanitizedRawData\),?\s*\}\);\s+\}\);/,
   );
   assert.match(
     source,
-    /const encoded = encodeKittyCompositionText\(kittyKeyboardMode, data\);[\s\S]*if \(encoded\) \{[\s\S]*handleTerminalInputData\(encoded, \{ source: "kitty" \}\);[\s\S]*\} else \{[\s\S]*handleTerminalInputData\(data\);[\s\S]*broadcastKittyInput\(\{ kind: "text", text: data \}\);/,
+    /const sanitizedData = sanitizeTerminalInput\(data\);[\s\S]*const encoded = encodeKittyCompositionText\(kittyKeyboardMode, sanitizedData\);[\s\S]*if \(encoded\) \{[\s\S]*handleTerminalInputData\(encoded, \{ source: "kitty" \}\);[\s\S]*\} else \{[\s\S]*handleTerminalInputData\(sanitizedData, \{\s*perCharacterWrites: shouldSplitImeTextInputForWire\(sanitizedData\),?\s*\}\);[\s\S]*broadcastKittyInput\(\{ kind: "text", text: sanitizedData \}\);/,
   );
   assert.match(source, /ctx\.container\.addEventListener\("input", markKittyTextInput, true\);/);
   assert.match(

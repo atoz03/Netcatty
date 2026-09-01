@@ -150,6 +150,10 @@ export type TerminalSessionStartersContext = {
   // One-shot source session intent for Copy/Split. Consumed by the first SSH
   // attempt so later reconnects do not skip the initial login sequence.
   reuseConnectionFromSessionIdRef?: MutableRefObject<string | undefined>;
+  // Duplicate Session clones carry this marker for their whole lifetime: every
+  // SSH attempt must send `reuseTransport: false` so the bridge never borrows
+  // the source's live or any other pooled transport.
+  requireFreshConnection?: boolean;
   // Persists across renderer auth retries after the one-shot source intent is
   // consumed. Cleared only after a backend session starts successfully.
   reuseConnectionSourceAttemptedRef?: MutableRefObject<boolean>;

@@ -110,9 +110,19 @@ import {
   shouldBlockKeyPressForImeTextInput,
   shouldCommitDeferredImeTextInput,
   shouldDeferKeyDownForImeTextInput,
+  resolveDeferredKeyupRelease,
+  shouldDiscardStaleDeferredImeTextInput,
+  shouldFlushDeferredImeTextInputOnKeyUp,
+  shouldFlushStaleDeferredImeTextInput,
 } from "./terminalImeTextInput";
 import { formatSerialLocalEcho } from "./serialLocalEcho";
 import { mapTerminalBackspaceInput } from "./terminalBackspaceInput";
+import {
+  getTextInputWireChunks,
+  shouldSplitImeTextInputForWire,
+  shouldSplitRawPasteInputForWire,
+} from "./terminalPerCharacterInput";
+import { sanitizeTerminalInput } from "./terminalInputSanitize";
 import { formatTelnetLocalEcho } from "./telnetLocalEcho";
 import {
   isTerminalFontSizeAction,
@@ -125,7 +135,9 @@ import {
   HISTORY_PREVIEW_HIDE_EVENT,
   HISTORY_PREVIEW_OVERLAY_ATTR,
   HISTORY_PREVIEW_WRAP_ATTR,
+  bufferHasPreviewScrollback,
   encodeHistoryPreviewWrapFlags,
+  type HistoryPreviewRow,
   getHistoryPreviewRows,
   getHistoryPreviewSelectionFromRoot,
   forcedHistoryScrollLinesForWheel,
@@ -139,6 +151,10 @@ import {
   shouldHideHistoryPreviewOnMouseDown,
   shouldKeepHistoryPreviewOnKey,
 } from "./terminalHistoryScrollOverride";
+import {
+  nextOutputHistoryPreviewTop,
+  type TerminalOutputHistoryPreview,
+} from "./terminalOutputHistory";
 import { shouldPassThroughCopyShortcut } from "./terminalCopyShortcut";
 import { shouldUseUrgentTerminalInterrupt } from "./terminalInterruptShortcut";
 import {
@@ -349,6 +365,11 @@ export type CreateXTermRuntimeContext = {
   serialLineBufferRef?: RefObject<string>;
   telnetLocalEchoRef?: RefObject<boolean>;
   onTerminalLogData?: (data: string) => void;
+  /**
+   * Captured session output used as the history preview source while an app
+   * owns the alternate buffer and the normal buffer has no scrollback (#2516).
+   */
+  terminalOutputHistory?: TerminalOutputHistoryPreview;
 
   // Callback when shell reports CWD change via OSC 7
   onCwdChange?: (cwd: string) => void;
@@ -369,6 +390,8 @@ export type CreateXTermRuntimeContext = {
   onAutocompleteKeyEvent?: (e: KeyboardEvent) => boolean;
   // Autocomplete input handler — called on every character input
   onAutocompleteInput?: (data: string) => void;
+  // Recompute the popup after wrap/scroll so it follows the command start (#3061)
+  onAutocompleteReposition?: () => void;
 
   terminalContextActionsRef?: RefObject<{
     onPaste?: () => void | Promise<void>;
@@ -997,20 +1020,43 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
   const showAlternateScreenHistoryPreview = (lines: number) => {
     if (term.buffer.active.type !== "alternate") return false;
     const normalBuffer = term.buffer.normal;
-    historyPreviewTop = nextHistoryPreviewTop({
-      buffer: normalBuffer,
-      currentTop: historyPreviewTop,
-      lines,
-    });
+    // Inside screen/vim/codex the app owns the alternate buffer, so the normal
+    // buffer has no rows above the viewport and there is nothing to preview.
+    // Fall back to the captured session output (#2516). Apps that request mouse
+    // reporting never get here — xterm hands those wheel events to the app.
+    const outputHistory = ctx.terminalOutputHistory;
+    const outputRowCount = outputHistory && !bufferHasPreviewScrollback(normalBuffer)
+      ? outputHistory.getPreviewRowCount(term.cols)
+      : 0;
+    let previewRows: HistoryPreviewRow[];
+    if (outputHistory && outputRowCount > 0) {
+      historyPreviewTop = nextOutputHistoryPreviewTop({
+        currentTop: historyPreviewTop,
+        lines,
+        rows: term.rows,
+        totalRows: outputRowCount,
+      });
+      previewRows = outputHistory.getPreviewRows({
+        cols: term.cols,
+        rows: term.rows,
+        top: historyPreviewTop,
+      }).rows;
+    } else {
+      historyPreviewTop = nextHistoryPreviewTop({
+        buffer: normalBuffer,
+        currentTop: historyPreviewTop,
+        lines,
+      });
+      previewRows = getHistoryPreviewRows({
+        buffer: normalBuffer,
+        rows: term.rows,
+        top: historyPreviewTop,
+      });
+    }
     const overlay = ensureHistoryPreviewOverlay();
     overlay.style.fontSize = `${currentTerminalFontSize()}px`;
     overlay.style.fontFamily = String(term.options.fontFamily ?? fontFamily);
     overlay.style.lineHeight = String(term.options.lineHeight ?? lineHeight);
-    const previewRows = getHistoryPreviewRows({
-      buffer: normalBuffer,
-      rows: term.rows,
-      top: historyPreviewTop,
-    });
     overlay.textContent = previewRows.map((row) => row.text).join("\n");
     overlay.setAttribute(HISTORY_PREVIEW_WRAP_ATTR, encodeHistoryPreviewWrapFlags(previewRows));
     return true;
@@ -1055,8 +1101,23 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
       source?: "terminal" | "shift-enter" | "kitty";
       /** Skip string broadcast when peers will re-resolve from a key chord. */
       skipBroadcast?: boolean;
+      /**
+       * Send plain text as one write per character. Strict bastion prompts
+       * (QAX) treat one channel write as a keystroke and drop multi-character
+       * chunks, so IME commits and short raw pastes must go out per
+       * character (#3077). Bookkeeping still sees the whole payload once.
+       */
+      perCharacterWrites?: boolean;
     },
   ) => {
+    // Strip zero-width / invisible formatting characters that CJK IMEs
+    // (notably Microsoft Pinyin / Sogou on Windows) emit when switching
+    // composition modes. With the 15-graphemes Unicode version these render
+    // at width 0, so they become hidden characters in the command line and
+    // cause the executed command to fail (#3138).
+    data = sanitizeTerminalInput(data);
+    if (!data) return;
+
     // Clipboard paste / typed password while assist is open must dismiss the
     // hint first. Otherwise Enter is still hijacked for confirmFill and can
     // append the host session password after the user's pasted secret (#2198).
@@ -1170,7 +1231,9 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
         // When backspaceBehavior is configured, remap the Backspace key output
         const outData = mapTerminalBackspaceInput(dataToWrite, ctx.host.backspaceBehavior);
         ctx.onOutputTriggerUserInputRef?.current?.(outData);
-        ctx.terminalBackend.writeToSession(id, outData, { sensitive });
+        for (const chunk of getTextInputWireChunks(outData, options?.perCharacterWrites === true)) {
+          ctx.terminalBackend.writeToSession(id, chunk, { sensitive });
+        }
 
         // Local echo for serial connections only when explicitly enabled
         if (inputSource !== "kitty" && ctx.host.protocol === "serial" && ctx.serialLocalEcho) {
@@ -1334,7 +1397,7 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
       if (ctx.isBroadcastEnabledRef.current && ctx.onBroadcastInputRef.current) {
         suppressNextTerminalDataBroadcast = true;
       }
-      handleTerminalInputData(text);
+      handleTerminalInputData(text, { perCharacterWrites: shouldSplitImeTextInputForWire(text) });
       if (deferredKittyEvent) {
         const pressEvent: KittyKeyboardEvent = {
           ...deferredKittyEvent,
@@ -1376,16 +1439,22 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
 
     // Actual IME remap — Kitty associated-text composition when negotiated;
     // otherwise send the committed glyph (report-all alone cannot carry it).
-    const encoded = encodeKittyCompositionText(kittyKeyboardMode, text);
+    // Sanitize before encoding so zero-width IME artifacts do not become
+    // Kitty escape sequences that bypass the handleTerminalInputData guard (#3138).
+    const sanitizedText = sanitizeTerminalInput(text);
+    if (!sanitizedText) return;
+    const encoded = encodeKittyCompositionText(kittyKeyboardMode, sanitizedText);
     if (encoded) {
       handleTerminalInputData(encoded, { source: "kitty" });
     } else {
       if (ctx.isBroadcastEnabledRef.current && ctx.onBroadcastInputRef.current) {
         suppressNextTerminalDataBroadcast = true;
       }
-      handleTerminalInputData(text);
+      handleTerminalInputData(sanitizedText, {
+        perCharacterWrites: shouldSplitImeTextInputForWire(sanitizedText),
+      });
     }
-    broadcastKittyInput({ kind: "text", text });
+    broadcastKittyInput({ kind: "text", text: sanitizedText });
   };
   const flushImeTextInputDeferral = () => {
     const fallback = imeTextInputDeferredKey;
@@ -1401,6 +1470,35 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
     // Keep the physical key even when the source is not in Kitty mode so
     // broadcast targets can still receive paired key events.
     imeTextInputDeferredKittyEvent = toKittyKeyboardEvent(event);
+  };
+  /**
+   * Emit the paired release for a forwarded press, locally and to broadcast
+   * peers. Used by the keyup handler and by the stale-deferral recovery, where
+   * the IME dropped the release and one must be synthesized from the deferred
+   * physical key so the TUI does not see the key held until focus loss.
+   */
+  const releaseForwardedKittyPress = (
+    event: Pick<KittyKeyboardEvent, "code" | "key"> & KittyKeyboardEvent,
+  ): boolean => {
+    const identity = event.code || event.key;
+    const forwardedPress = broadcastForwardedKeys.get(identity);
+    if (forwardedPress) {
+      broadcastForwardedKeys.delete(identity);
+      broadcastKittyInput(
+        { kind: "key", event },
+        true,
+        forwardedPress.targetSessionIds,
+      );
+    }
+    if (!kittyForwardedKeys.delete(identity)) return false;
+    const sequence = kittyKeyboardProtocolEnabled
+      ? encodeKittyKeyEvent(kittyKeyboardMode, event)
+      : null;
+    if (sequence) {
+      handleTerminalInputData(sequence, { source: "kitty" });
+      return true;
+    }
+    return false;
   };
 
   term.attachCustomKeyEventHandler((e: KeyboardEvent) => {
@@ -1448,38 +1546,57 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
 
     if (e.type === "keyup") {
       // insertText for this keystroke has already run when present; flush the
-      // deferred ASCII key only when the IME did not remap it.
-      if (imeTextInputDeferredKey !== null && e.key === imeTextInputDeferredKey) {
-        flushImeTextInputDeferral();
-      }
-      const identity = kittyKeyIdentity(e);
-      if (broadcastLegacyDataPending === identity) clearBroadcastLegacyDataPending();
-      const forwardedPress = broadcastForwardedKeys.get(identity);
-      if (forwardedPress) {
-        broadcastForwardedKeys.delete(identity);
-        broadcastKittyInput(
-          { kind: "key", event: toKittyKeyboardEvent(e) },
-          true,
-          forwardedPress.targetSessionIds,
+      // deferred ASCII key when the IME did not remap it. Any real key release
+      // ends the deferral: Windows IMEs report Process/229 as the release of a
+      // key they consumed (or drop the keyup), and an exact key match left the
+      // deferral armed so every later keypress was swallowed (#3103).
+      let releaseEvent: KeyboardEvent = e;
+      if (
+        imeTextInputDeferredKey !== null &&
+        shouldFlushDeferredImeTextInputOnKeyUp(imeTextInputDeferredKey, e)
+      ) {
+        const deferredKittyEvent = imeTextInputDeferredKittyEvent;
+        const releaseMode = resolveDeferredKeyupRelease(
+          imeTextInputDeferredKey,
+          deferredKittyEvent?.code ?? null,
+          e,
         );
+        flushImeTextInputDeferral();
+        if (deferredKittyEvent && releaseMode === "deferred") {
+          // The release reported an IME sentinel (Process/229); pair the
+          // flushed press from the deferred physical key so the kitty
+          // sequence keeps its key identity.
+          releaseEvent = {
+            ...deferredKittyEvent,
+            type: "keyup",
+          } as unknown as KeyboardEvent;
+        } else if (deferredKittyEvent && releaseMode === "unrelated") {
+          // Another held key was released first: this keyup only ends the
+          // stale deferral, so the flushed press needs its own synthesized
+          // release while the real keyup keeps its identity.
+          releaseForwardedKittyPress({ ...deferredKittyEvent, type: "keyup" });
+        }
       }
-      if (!kittyForwardedKeys.delete(identity)) return true;
-      const kittyEvent = toKittyKeyboardEvent(e);
-      const sequence = kittyKeyboardProtocolEnabled
-        ? encodeKittyKeyEvent(kittyKeyboardMode, kittyEvent)
-        : null;
-      if (sequence) {
+      const identity = kittyKeyIdentity(releaseEvent);
+      if (broadcastLegacyDataPending === identity) clearBroadcastLegacyDataPending();
+      if (releaseForwardedKittyPress(toKittyKeyboardEvent(releaseEvent))) {
         e.preventDefault();
         e.stopPropagation();
-        handleTerminalInputData(sequence, { source: "kitty" });
         return false;
       }
       return true;
     }
 
     // Block keypress so xterm cannot re-emit the half-width ASCII char after we
-    // deferred the matching keydown for IME insertText (#2833).
-    if (shouldBlockKeyPressForImeTextInput(imeTextInputDeferredKey, e)) {
+    // deferred the matching keydown for IME insertText (#2833). Scoped to the
+    // deferred key so a stale deferral cannot swallow unrelated keystrokes.
+    if (
+      shouldBlockKeyPressForImeTextInput(
+        imeTextInputDeferredKey,
+        e,
+        imeTextInputDeferredKittyEvent?.keyCode ?? null,
+      )
+    ) {
       return false;
     }
 
@@ -1488,6 +1605,29 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
     }
 
     if (handlingKittyBroadcast) return true;
+
+    // A deferred punctuation keystroke that outlived its own release means the
+    // IME swallowed the keyup (Windows reports Process/229). Flush it before
+    // the next keystroke so the pending ASCII key still reaches the PTY
+    // instead of wedging the deferral (#3103). A modified keydown is a command
+    // rather than a continuation, so the lost keystroke is dropped there
+    // instead of being injected in front of the interrupt or shortcut.
+    if (imeTextInputDeferredKey !== null) {
+      if (shouldFlushStaleDeferredImeTextInput(imeTextInputDeferredKey, e)) {
+        const deferredKittyEvent = imeTextInputDeferredKittyEvent;
+        flushImeTextInputDeferral();
+        if (deferredKittyEvent) {
+          // The flush emitted the deferred press, but the release it waits for
+          // is the one the IME dropped — synthesize it so the TUI does not see
+          // the key held until focus loss.
+          releaseForwardedKittyPress({ ...deferredKittyEvent, type: "keyup" });
+        }
+      } else if (
+        shouldDiscardStaleDeferredImeTextInput(imeTextInputDeferredKey, e)
+      ) {
+        clearImeTextInputDeferral();
+      }
+    }
 
     if (e.keyCode === 229) {
       markKittyCompositionPending(true);
@@ -2129,16 +2269,23 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
         window.clearTimeout(kittyCompositionClearTimer);
         kittyCompositionClearTimer = undefined;
       }
-      const encoded = encodeKittyCompositionText(kittyKeyboardMode, data);
+      // Sanitize before encoding so zero-width IME artifacts do not become
+      // Kitty escape sequences that bypass the handleTerminalInputData guard (#3138).
+      const sanitizedData = sanitizeTerminalInput(data);
+      if (!sanitizedData) return;
+      const encoded = encodeKittyCompositionText(kittyKeyboardMode, sanitizedData);
       if (encoded) {
         handleTerminalInputData(encoded, { source: "kitty" });
       } else {
         if (ctx.isBroadcastEnabledRef.current && ctx.onBroadcastInputRef.current) {
           suppressNextTerminalDataBroadcast = true;
         }
-        handleTerminalInputData(data);
+        // Committed composition text, not a negotiated Kitty sequence.
+        handleTerminalInputData(sanitizedData, {
+          perCharacterWrites: shouldSplitImeTextInputForWire(sanitizedData),
+        });
       }
-      broadcastKittyInput({ kind: "text", text: data });
+      broadcastKittyInput({ kind: "text", text: sanitizedData });
       return;
     }
     if (broadcastLegacyDataPending) {
@@ -2154,7 +2301,14 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
       });
       broadcastLegacyDataPending = null;
     }
-    handleTerminalInputData(data);
+    // Raw multi-character onData is an unbracketed paste (or a committed
+    // composition): short plain text must reach strict bastions per character.
+    // Decide on the sanitized payload so removed zero-width characters cannot
+    // keep a qualifying paste above the split cap (#3138).
+    const sanitizedRawData = sanitizeTerminalInput(data);
+    handleTerminalInputData(sanitizedRawData, {
+      perCharacterWrites: shouldSplitRawPasteInputForWire(sanitizedRawData),
+    });
   });
 
   const handleKittyKeyboardBroadcast = createKittyKeyboardBroadcastHandler({
@@ -2419,6 +2573,31 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
     resizeScheduler.schedule({ sessionId: id, cols, rows });
   });
 
+  let autocompleteRepositionFrame = 0;
+  const scheduleAutocompleteReposition = () => {
+    const run = () => ctx.onAutocompleteReposition?.();
+    if (typeof requestAnimationFrame !== "function") {
+      run();
+      return;
+    }
+    // onLineFeed fires per newline. Coalesce to one rAF so a burst cannot
+    // enqueue thousands of React updates (#3204).
+    if (autocompleteRepositionFrame) return;
+    autocompleteRepositionFrame = requestAnimationFrame(() => {
+      autocompleteRepositionFrame = 0;
+      run();
+    });
+  };
+  const cancelAutocompleteReposition = () => {
+    if (!autocompleteRepositionFrame) return;
+    cancelAnimationFrame(autocompleteRepositionFrame);
+    autocompleteRepositionFrame = 0;
+  };
+  // Soft-wrap at the bottom scrolls the buffer without a fit/resize. Keep the
+  // popup glued to the command start instead of a stale viewport cell (#3061).
+  const autocompleteScrollDisposable = term.onScroll(scheduleAutocompleteReposition);
+  const autocompleteLineFeedDisposable = term.onLineFeed?.(scheduleAutocompleteReposition);
+
   const keywordHighlighter = new KeywordHighlighter(term, {
     serializeAddon,
   });
@@ -2500,6 +2679,9 @@ export const createXTermRuntime = (ctx: CreateXTermRuntimeContext): XTermRuntime
       osc99Disposable.dispose();
       osc52Disposable.dispose();
       titleChangeDisposable.dispose();
+      cancelAutocompleteReposition();
+      autocompleteScrollDisposable.dispose();
+      autocompleteLineFeedDisposable?.dispose();
       bellDisposable.dispose();
       cursorPreferenceDisposable?.dispose();
       // Release decoded bitmaps and the image canvas layers before xterm tears the

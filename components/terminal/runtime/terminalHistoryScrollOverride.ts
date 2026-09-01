@@ -69,6 +69,14 @@ export const clampHistoryPreviewTop = (top: number, buffer: Pick<BufferLike, "ba
   return Math.max(0, Math.min(maxTop, top));
 };
 
+/**
+ * True when the buffer still has rows above the viewport, i.e. something to
+ * preview. In the alternate screen there is none (screen/vim/codex own that
+ * buffer), so the preview falls back to the captured session output.
+ */
+export const bufferHasPreviewScrollback = (buffer: Pick<BufferLike, "baseY">): boolean =>
+  buffer.baseY > 0;
+
 export const nextHistoryPreviewTop = ({
   buffer,
   currentTop,

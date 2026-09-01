@@ -253,6 +253,12 @@ export const ruAiMessages: Messages = {
   'ai.toolAccess.description': 'Выберите, как внешние агенты получают доступ к сессиям Netcatty. MCP предоставляет встроенный сервер, а Skills + CLI указывает агентам на локальный skill Netcatty и команды CLI.',
   'ai.toolAccess.mode.mcp': 'MCP',
   'ai.toolAccess.mode.skills': 'Skills + CLI',
+  'ai.toolAccess.mcpPrompt.title': 'Промпт для вашего ИИ-клиента',
+  'ai.toolAccess.mcpPrompt.description': 'Вставьте этот промпт в ИИ-клиент (Codex, Claude Code и т. д.), и он сам зарегистрирует MCP Netcatty.',
+  'ai.toolAccess.mcpPrompt.enableHint': 'Включите внешний MCP ниже, чтобы в промпт попал путь к лаунчеру.',
+  'ai.toolAccess.skills.file': 'Файл skill',
+  'ai.toolAccess.skills.description': 'В режиме Skills + CLI агенты автоматически получают путь к этому локальному skill-файлу. Путь к лаунчеру Netcatty CLI передаётся агенту в каждой сессии.',
+  'ai.toolAccess.skills.unavailable': 'Путь к skill-файлу недоступен',
 
   'ai.externalMcp.title': 'Внешний MCP',
   'ai.externalMcp.description': 'Откройте Netcatty как MCP-сервер для Codex, Claude Code, Cursor и Grok. Набор инструментов тот же, что у встроенных агентов. Держите Netcatty запущенным, пока клиенты подключены.',

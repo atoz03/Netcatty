@@ -90,7 +90,7 @@ import { isScriptSnippet } from '../../domain/snippetScript.ts';
 import { collectSnippetDeleteIds } from '../../domain/snippetSelection.ts';
 import { shouldOpenLocalTerminalOnStartup, resolveStartupLandingSetting } from '../../domain/startupLanding';
 import { useAppStartupEffects } from './useAppStartupEffects';
-import { handleTrayJumpToSessionImpl, handleTrayTogglePortForwardImpl, handleTrayPanelConnectImpl, handleTrayPanelConnectRequestImpl, flushQueuedTrayPanelConnectHostsImpl, handleGlobalHotkeyKeyDownImpl, handleEscapeKeyDownImpl, handleKeyboardInteractiveSubmitImpl, handleKeyboardInteractiveCancelImpl, handlePassphraseSubmitImpl, handlePassphraseCancelImpl, handlePassphraseSkipImpl, createLocalTerminalWithCurrentShellImpl, splitSessionWithCurrentShellImpl, copySessionWithCurrentShellImpl, copyWorkspaceWithCurrentShellImpl, copySessionToNewWindowWithCurrentShellImpl, openManagedTerminalWithCurrentShellImpl, confirmIfBusyLocalTerminalImpl, closeTabsBatchImpl, executeHotkeyActionImpl, handleCreateLocalTerminalImpl, handleConnectToHostImpl, handleTerminalDataCaptureImpl, hasMultipleProtocolsImpl, handleHostConnectWithProtocolCheckImpl, handleProtocolSelectImpl, handleRootContextMenuImpl, markForwardedNativeShortcutEvent } from './AppHandlers';
+import { handleTrayJumpToSessionImpl, handleTrayTogglePortForwardImpl, handleTrayPanelConnectImpl, handleTrayPanelConnectRequestImpl, flushQueuedTrayPanelConnectHostsImpl, handleGlobalHotkeyKeyDownImpl, handleEscapeKeyDownImpl, handleKeyboardInteractiveSubmitImpl, handleKeyboardInteractiveCancelImpl, handlePassphraseSubmitImpl, handlePassphraseCancelImpl, handlePassphraseSkipImpl, createLocalTerminalWithCurrentShellImpl, splitSessionWithCurrentShellImpl, copySessionWithCurrentShellImpl, duplicateSessionWithCurrentShellImpl, copyWorkspaceWithCurrentShellImpl, copySessionToNewWindowWithCurrentShellImpl, openManagedTerminalWithCurrentShellImpl, confirmIfBusyLocalTerminalImpl, closeTabsBatchImpl, executeHotkeyActionImpl, handleCreateLocalTerminalImpl, handleConnectToHostImpl, handleTerminalDataCaptureImpl, hasMultipleProtocolsImpl, handleHostConnectWithProtocolCheckImpl, handleProtocolSelectImpl, handleRootContextMenuImpl, markForwardedNativeShortcutEvent } from './AppHandlers';
 
 type OpenSessionInNewWindowPayload = {
   title?: string;
@@ -503,12 +503,13 @@ export function AppSideEffects() {
             importVaultData: importDataFromString,
             importPortForwardingRules,
             onSettingsApplied: settings.rehydrateAllFromStorage,
-          }),
+          }, { currentHosts: hosts }),
         translateProtectiveBackupFailure: (message) =>
           t('cloudSync.localBackups.protectiveBackupFailed', { message }),
       }),
     [
       buildCurrentSyncPayload,
+      hosts,
       importDataFromString,
       importPortForwardingRules,
       settings.rehydrateAllFromStorage,
@@ -526,7 +527,7 @@ export function AppSideEffects() {
             importVaultData: importDataFromString,
             importPortForwardingRules,
             onSettingsApplied: settings.rehydrateAllFromStorage,
-          });
+          }, { currentHosts: hosts });
           await commitReplica();
         },
         translateProtectiveBackupFailure: (message) =>
@@ -534,6 +535,7 @@ export function AppSideEffects() {
       }),
     [
       buildCurrentSyncPayload,
+      hosts,
       importDataFromString,
       importPortForwardingRules,
       settings.rehydrateAllFromStorage,
@@ -966,6 +968,8 @@ export function AppSideEffects() {
     startupCommand: string,
     options?: { mode?: 'tab' | 'verticalSplit' },
   ) => { return openManagedTerminalWithCurrentShellImpl(() => ({ classifyLocalShellType, copySession, discoveredShells, resolveShellSetting, sessions, splitSession, terminalSettings }), sessionId, title, startupCommand, options); }, [copySession, splitSession, terminalSettings, discoveredShells, sessions]);
+
+  const duplicateSessionWithCurrentShell = useCallback((sessionId: string) => { return duplicateSessionWithCurrentShellImpl(() => ({ classifyLocalShellType, copySession, discoveredShells, getSessionRestoreCwd, hostById, terminalHosts, netcattyBridge, resolveShellSetting, sessionId, sessions, terminalSettings }), sessionId); }, [copySession, terminalSettings, discoveredShells, sessions, getSessionRestoreCwd, hostById, terminalHosts]);
 
   const copyWorkspaceWithCurrentShell = useCallback((workspaceId: string) => { return copyWorkspaceWithCurrentShellImpl(() => ({ classifyLocalShellType, collectSessionIds, copyWorkspace, discoveredShells, getSessionRestoreCwd, hostById, terminalHosts, netcattyBridge, resolveShellSetting, sessions, terminalSettings, workspaces }), workspaceId); }, [copyWorkspace, terminalSettings, discoveredShells, sessions, workspaces, getSessionRestoreCwd, hostById, terminalHosts]);
 
@@ -1879,6 +1883,7 @@ export function AppSideEffects() {
       // Terminal glue
       closeTabsBatch,
       copySessionWithCurrentShell,
+      duplicateSessionWithCurrentShell,
       copyWorkspaceWithCurrentShell,
       copySessionToNewWindowWithCurrentShell,
       openManagedTerminalWithCurrentShell,
@@ -1955,6 +1960,7 @@ export function AppSideEffects() {
     unmanageSource,
     closeTabsBatch,
     copySessionWithCurrentShell,
+    duplicateSessionWithCurrentShell,
     copyWorkspaceWithCurrentShell,
     copySessionToNewWindowWithCurrentShell,
     openManagedTerminalWithCurrentShell,

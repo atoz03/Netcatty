@@ -1,5 +1,6 @@
 import type { AutocompleteSettings } from "./useTerminalAutocomplete";
 import type { AutocompleteHistoryScope } from "../../../domain/models";
+import { shouldWriteAutocompleteLivePreview } from "./livePreviewSequence";
 
 type TerminalAutocompleteSettingFields = {
   autocompleteEnabled?: boolean;
@@ -15,8 +16,10 @@ type TerminalAutocompleteSettingFields = {
 export function resolveTerminalAutocompleteSettings(input: {
   protocol?: string;
   terminalSettings?: TerminalAutocompleteSettingFields;
+  /** Vendor CLI / network-device session: skip live-preview PTY rewrites (#1193). */
+  isNetworkDevice?: boolean;
 }): Partial<AutocompleteSettings> | undefined {
-  const { protocol, terminalSettings } = input;
+  const { protocol, terminalSettings, isNetworkDevice } = input;
 
   if (protocol === "serial") {
     return {
@@ -33,13 +36,15 @@ export function resolveTerminalAutocompleteSettings(input: {
     };
   }
 
-  if (!terminalSettings) return undefined;
+  if (!terminalSettings) {
+    return isNetworkDevice ? { livePreview: false } : undefined;
+  }
 
   return {
     enabled: terminalSettings.autocompleteEnabled ?? true,
     showGhostText: terminalSettings.autocompleteGhostText ?? true,
     showPopupMenu: terminalSettings.autocompletePopupMenu ?? true,
-    livePreview: true,
+    livePreview: shouldWriteAutocompleteLivePreview(true, isNetworkDevice),
     allowLineReplacement: true,
     debounceMs: terminalSettings.autocompleteDebounceMs ?? 100,
     minChars: terminalSettings.autocompleteMinChars ?? 1,

@@ -51,6 +51,7 @@ import { CopilotCliCard } from "./ai/CopilotCliCard";
 import { CodebuddyCard } from "./ai/CodebuddyCard";
 import { SafetySettings } from "./ai/SafetySettings";
 import { ExternalMcpCard } from "./ai/ExternalMcpCard";
+import { ToolAccessGuidance } from "./ai/ToolAccessGuidance";
 import { PermissionGrantsSettings } from "./ai/PermissionGrantsSettings";
 import { useAIPermissionGrantsState } from "../../../application/state/useAIPermissionGrantsState";
 import { WebSearchSettings } from "./ai/WebSearchSettings";
@@ -1252,6 +1253,9 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
                   className="w-48"
                 />
               </SettingRow>
+              <div className="pb-4">
+                <ToolAccessGuidance mode={toolIntegrationMode} />
+              </div>
             </SettingCard>
           </SettingsSection>
 

@@ -45,6 +45,8 @@ const {
   buildCloudSyncPayload,
   withPluginSyncSidecars,
   buildSyncPayload,
+  sanitizeHostsForSync,
+  retainLocalHostLastConnectedAt,
   hasCloudSyncEntityData,
   hasMeaningfulCloudSyncData,
   hasMeaningfulSyncData,
@@ -93,6 +95,136 @@ test("buildSyncPayload treats known hosts as local-only data", () => {
   assert.equal("knownHosts" in payload, false);
 });
 
+test("buildSyncPayload strips lastConnectedAt so connecting a host does not dirty cloud sync", () => {
+  const host = {
+    id: "host-1",
+    label: "prod",
+    hostname: "prod.example.com",
+    username: "root",
+    tags: [],
+    os: "linux" as const,
+    protocol: "ssh" as const,
+    lastConnectedAt: 1_700_000_000_000,
+    pinned: true,
+  };
+
+  const payload = buildSyncPayload({ ...vault([]), hosts: [host] });
+
+  assert.equal(payload.hosts[0]?.lastConnectedAt, undefined);
+  assert.equal(payload.hosts[0]?.pinned, true);
+  assert.equal(payload.hosts[0]?.hostname, "prod.example.com");
+});
+
+test("buildCloudSyncPayload strips lastConnectedAt like port-forward lastUsedAt", async () => {
+  const host = {
+    id: "host-2",
+    label: "db",
+    hostname: "db.example.com",
+    username: "ubuntu",
+    tags: [],
+    os: "linux" as const,
+    protocol: "ssh" as const,
+    lastConnectedAt: 42,
+  };
+
+  const payload = await buildCloudSyncPayload({ ...vault([]), hosts: [host] });
+  const serializedHosts = JSON.parse(JSON.stringify(payload.hosts ?? []));
+
+  assert.equal(payload.hosts[0]?.lastConnectedAt, undefined);
+  assert.equal("lastConnectedAt" in (serializedHosts[0] ?? {}), false);
+});
+
+test("sanitizeHostsForSync hashes equal when hosts differ only by lastConnectedAt", () => {
+  const base = {
+    id: "host-hash",
+    label: "edge",
+    hostname: "edge.example.com",
+    username: "ops",
+    tags: [],
+    os: "linux" as const,
+    protocol: "ssh" as const,
+    pinned: true,
+  };
+
+  const sanitizedA = sanitizeHostsForSync([{ ...base, lastConnectedAt: 11 }]);
+  const sanitizedB = sanitizeHostsForSync([{ ...base, lastConnectedAt: 99 }]);
+  const payloadA = buildSyncPayload({ ...vault([]), hosts: [{ ...base, lastConnectedAt: 11 }] });
+  const payloadB = buildSyncPayload({ ...vault([]), hosts: [{ ...base, lastConnectedAt: 99 }] });
+
+  assert.equal(JSON.stringify(sanitizedA), JSON.stringify(sanitizedB));
+  assert.equal(JSON.stringify(payloadA.hosts), JSON.stringify(payloadB.hosts));
+});
+
+test("buildLocalVaultPayload keeps lastConnectedAt for local backups", () => {
+  const host = {
+    id: "host-3",
+    label: "lab",
+    hostname: "lab.example.com",
+    username: "lab",
+    tags: [],
+    os: "linux" as const,
+    protocol: "ssh" as const,
+    lastConnectedAt: 99,
+  };
+
+  const payload = buildLocalVaultPayload({ ...vault([]), hosts: [host] });
+
+  assert.equal(payload.hosts[0]?.lastConnectedAt, 99);
+});
+
+test("applySyncPayload keeps local lastConnectedAt when the cloud host omits it", async () => {
+  const localHost = {
+    id: "host-apply",
+    label: "prod",
+    hostname: "prod.example.com",
+    username: "root",
+    tags: [],
+    os: "linux" as const,
+    protocol: "ssh" as const,
+    lastConnectedAt: 77,
+  };
+  const remoteHost = {
+    ...localHost,
+    label: "prod-renamed",
+    lastConnectedAt: undefined,
+  };
+
+  const payload = buildSyncPayload({ ...vault([]), hosts: [remoteHost] });
+  let imported: { hosts?: Array<{ lastConnectedAt?: number; label?: string }> } | null = null;
+  await applySyncPayload(
+    payload,
+    { importVaultData: (json) => { imported = JSON.parse(json); } },
+    { currentHosts: [localHost] },
+  );
+
+  assert.equal(imported?.hosts?.[0]?.lastConnectedAt, 77);
+  assert.equal(imported?.hosts?.[0]?.label, "prod-renamed");
+});
+
+test("retainLocalHostLastConnectedAt does not invent timestamps for unknown hosts", () => {
+  const incoming = [{
+    id: "new-host",
+    label: "new",
+    hostname: "new.example.com",
+    username: "root",
+    tags: [],
+    os: "linux" as const,
+    protocol: "ssh" as const,
+  }];
+  const retained = retainLocalHostLastConnectedAt(incoming, [{
+    id: "other",
+    label: "other",
+    hostname: "other.example.com",
+    username: "root",
+    tags: [],
+    os: "linux" as const,
+    protocol: "ssh" as const,
+    lastConnectedAt: 5,
+  }]);
+
+  assert.equal(retained?.[0]?.lastConnectedAt, undefined);
+});
+
 test("buildSyncPayload includes reusable proxy profiles", () => {
   const proxyProfiles = [
     {
@@ -130,7 +262,7 @@ test("sync payloads preserve opaque plugin hosts without requiring the plugin to
     },
   };
   const payload = buildSyncPayload({ ...vault([]), hosts: [pluginHost] });
-  assert.deepEqual(payload.hosts, [pluginHost]);
+  assert.deepEqual(JSON.parse(JSON.stringify(payload.hosts)), [pluginHost]);
 
   let imported: Record<string, unknown> | null = null;
   await applySyncPayload(payload, {

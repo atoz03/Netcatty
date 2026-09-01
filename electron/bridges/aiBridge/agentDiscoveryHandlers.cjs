@@ -1,6 +1,15 @@
 /* eslint-disable no-undef */
 const { detectCursorSdkInstalled: detectCursorSdkInstalledFromDisk } = require("./cursorSdkProbe.cjs");
 
+// Bundled @cursor/sdk is importable in every Netcatty build. "installed" is the
+// user's Cursor Agent CLI, not that bundled package.
+function computeCursorInstallState({ sdkInstalled, cliBinPath, cliLoginOk } = {}) {
+  return {
+    sdkInstalled: Boolean(sdkInstalled),
+    installed: Boolean(cliBinPath) || Boolean(cliLoginOk),
+  };
+}
+
 async function probeCursorSdkAvailability(shellEnv, options = {}) {
   const detectSdk = typeof options?.detectCursorSdkInstalled === "function"
     ? options.detectCursorSdkInstalled
@@ -37,9 +46,15 @@ async function probeCursorSdkAvailability(shellEnv, options = {}) {
   else if (hasEnvApiKey) authSource = "CURSOR_API_KEY";
   else if (cliLoginOk) authSource = "cli-login";
 
+  const installState = computeCursorInstallState({
+    sdkInstalled,
+    cliBinPath: cliAuth.binPath,
+    cliLoginOk,
+  });
+  sdkInstalled = installState.sdkInstalled;
   // Available if either mode can run a turn (API key + SDK, or CLI login).
   const available = (apiKeyOk && sdkInstalled) || cliLoginOk;
-  const installed = sdkInstalled || Boolean(cliAuth.binPath) || cliLoginOk;
+  const installed = installState.installed;
   return {
     installed,
     sdkInstalled,
@@ -141,7 +156,7 @@ function registerAgentDiscoveryHandlers(ctx) {
         path: resolvedPath,
         binPath: resolvedPath,
         version: probe.version,
-        installed: true,
+        installed: agent.command === "cursor" ? Boolean(cursorSdkStatus.installed) : true,
         available: true,
         authenticated: auth.authenticated,
         authSource: auth.authSource,
@@ -200,9 +215,14 @@ function registerAgentDiscoveryHandlers(ctx) {
       const cursorPath = cursorSdkStatus.cliLoginOk
         ? (cursorSdkStatus.cliBinPath || resolvedSdkPath || "cursor")
         : (resolvedSdkPath || "cursor");
+      // Keep the SDK sentinel path when the bundled SDK is importable so
+      // API-key mode still has an identity without Cursor.app / Agent CLI.
+      const hasCursorPath = cursorSdkStatus.sdkInstalled
+        || cursorSdkStatus.installed
+        || cursorSdkStatus.available;
       return {
-        path: cursorSdkStatus.installed || cursorSdkStatus.available ? cursorPath : null,
-        binPath: cursorSdkStatus.installed || cursorSdkStatus.available ? cursorPath : null,
+        path: hasCursorPath ? cursorPath : null,
+        binPath: hasCursorPath ? cursorPath : null,
         version: cursorSdkStatus.version,
         available: cursorSdkStatus.available,
         installed: cursorSdkStatus.installed,
@@ -459,4 +479,4 @@ function registerAgentDiscoveryHandlers(ctx) {
   }
 }
 
-module.exports = { registerAgentDiscoveryHandlers };
+module.exports = { registerAgentDiscoveryHandlers, computeCursorInstallState };

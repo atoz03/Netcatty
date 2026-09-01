@@ -627,6 +627,11 @@ export interface TerminalSession {
   // falls back to a fresh connection — so this also applies on reconnect: a
   // reconnect reuses the source again if still connected, else dials fresh.
   reuseConnectionFromSessionId?: string;
+  // Marker for "Duplicate Session" clones: never multiplex onto any live,
+  // parked, or in-flight pooled transport (including the source's own
+  // connection) — always dial a brand-new connection with fresh auth. The
+  // starter turns this into `reuseTransport: false` on every attempt.
+  requireFreshConnection?: boolean;
   // Per-pane font size override (workspace splits only; not persisted to vault hosts).
   fontSize?: number;
   fontSizeOverride?: boolean;

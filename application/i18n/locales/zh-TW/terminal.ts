@@ -718,6 +718,7 @@ export const zhTWTerminalMessages: Messages = {
   'tabs.logPrefix': '日誌：',
   'tabs.logLocal': '本機',
   'tabs.copyTab': '複製分頁',
+  'tabs.duplicateSession': '複製工作階段',
   'tabs.copyTabToNewWindow': '複製分頁到新視窗',
   'tabs.copyTabToNewWindowFailed': '無法在新視窗開啟分頁',
   'tabs.closeOthers': '關閉其他分頁',

@@ -708,6 +708,7 @@ interface SessionTopTabProps {
   onCloseSession: (sessionId: string, e?: React.MouseEvent) => void;
   onRenameSession: (sessionId: string) => void;
   onCopySession: (sessionId: string) => void;
+  onDuplicateSession?: (sessionId: string) => void;
   onCopySessionToNewWindow: (sessionId: string) => void;
   onEditHost?: (host: Host) => void;
   renderBulkCloseItems: RenderBulkCloseItems;
@@ -733,6 +734,7 @@ export const SessionTopTab: React.FC<SessionTopTabProps> = memo(({
   onCloseSession,
   onRenameSession,
   onCopySession,
+  onDuplicateSession,
   onCopySessionToNewWindow,
   onEditHost,
   renderBulkCloseItems,
@@ -868,6 +870,7 @@ export const SessionTopTab: React.FC<SessionTopTabProps> = memo(({
         sessionId={session.id}
         onCloseSession={onCloseSession}
         onCopySession={onCopySession}
+        onDuplicateSession={onDuplicateSession}
         onCopySessionToNewWindow={onCopySessionToNewWindow}
         onReconnectSession={terminalReconnectRegistry.request}
         sessionStatus={session.status}

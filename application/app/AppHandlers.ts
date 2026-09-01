@@ -551,15 +551,35 @@ export async function splitSessionWithCurrentShellImpl(getCtx: AppContextGetter,
   });
 }
 
-export async function copySessionWithCurrentShellImpl(getCtx: AppContextGetter, sessionId: string) {
-  const { classifyLocalShellType, copySession, discoveredShells, resolveShellSetting, terminalSettings } = getCtx();
+export async function copySessionWithCurrentShellImpl(
+  getCtx: AppContextGetter,
+  sessionId: string,
+  options?: { reuseConnection?: boolean },
+) {
+  const { classifyLocalShellType, copySession, discoveredShells, resolveShellSetting, sessions, terminalSettings } = getCtx();
   const resolved = resolveShellSetting(terminalSettings.localShell, discoveredShells);
-  const inheritedCwd = await captureCtxInheritedCwd(getCtx, sessionId);
+  // A fresh remote login may stop at a bastion's host-selection prompt. Do
+  // not probe the old target or send its directory command to the new login.
+  // Local duplicates still open in the source terminal's current directory.
+  const inheritCwd = options?.reuseConnection !== false
+    || sessions?.find((session: { id: string }) => session.id === sessionId)?.protocol === "local";
+  const inheritedCwd = inheritCwd ? await captureCtxInheritedCwd(getCtx, sessionId) : undefined;
   const userAgent = typeof navigator !== 'undefined' ? navigator.userAgent : '';
   return copySession(sessionId, {
     localShellType: classifyLocalShellType(resolved?.command || terminalSettings.localShell, userAgent),
     inheritedCwd,
+    reuseConnection: options?.reuseConnection,
   });
+}
+
+/**
+ * "Duplicate session": clone the tab but open a brand-new connection instead of
+ * multiplexing over the source's established SSH channel (fresh auth; with a
+ * bastion/jump host this restarts the bastion login so the user can pick a new
+ * target host).
+ */
+export async function duplicateSessionWithCurrentShellImpl(getCtx: AppContextGetter, sessionId: string) {
+  return copySessionWithCurrentShellImpl(getCtx, sessionId, { reuseConnection: false });
 }
 
 export async function copyWorkspaceWithCurrentShellImpl(getCtx: AppContextGetter, workspaceId: string) {

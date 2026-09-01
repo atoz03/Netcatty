@@ -718,6 +718,7 @@ export const zhCNTerminalMessages: Messages = {
   'tabs.logPrefix': '日志：',
   'tabs.logLocal': '本地',
   'tabs.copyTab': '复制标签页',
+  'tabs.duplicateSession': '复制会话',
   'tabs.copyTabToNewWindow': '复制标签页到新窗口',
   'tabs.copyTabToNewWindowFailed': '无法在新窗口打开标签页',
   'tabs.closeOthers': '关闭其他标签',

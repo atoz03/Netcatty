@@ -17,6 +17,7 @@ import {
   X,
 } from "lucide-react";
 import React, { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 
 import { useI18n } from "../application/i18n/I18nProvider";
 import {
@@ -341,12 +342,17 @@ function formatTransferPathLine(task: Pick<TransferTask, "sourcePath" | "targetP
 function TransferRow({
   task,
   childTasks = [],
+  expanded,
+  onToggleExpanded,
+  isLast,
 }: {
   task: TransferTask;
   childTasks?: readonly TransferTask[];
+  expanded: boolean;
+  onToggleExpanded: () => void;
+  isLast: boolean;
 }) {
   const { t } = useI18n();
-  const [expanded, setExpanded] = useState(false);
   const folderReplaceWarningId = React.useId();
   // Optimistic spinner from click until store status moves off paused/interrupted.
   const [resumeClicked, setResumeClicked] = useState(false);
@@ -478,7 +484,7 @@ function TransferRow({
 
   return (
     <div
-      className="border-b border-border/40 px-3 py-2.5 last:border-b-0 hover:bg-muted/30"
+      className={cn("border-border/40 px-3 py-2.5 hover:bg-muted/30", isLast ? "border-b-0" : "border-b")}
       data-section="global-sftp-transfer-row"
       data-transfer-status={task.status}
       data-directory-parent={isDirParent ? "true" : undefined}
@@ -506,7 +512,7 @@ function TransferRow({
           {canToggleChildren && (
             <TransferAction
               label={expanded ? t("sftp.transfers.collapseChildren") : t("sftp.transfers.expandChildren")}
-              onClick={() => setExpanded((value) => !value)}
+              onClick={onToggleExpanded}
             >
               {expanded ? <ChevronUp size={13} /> : <ChevronDown size={13} />}
             </TransferAction>
@@ -755,6 +761,59 @@ function TransferRow({
   );
 }
 
+function TransferList({ tasks, childrenByParent, empty }: {
+  tasks: readonly TransferTask[];
+  childrenByParent: ReadonlyMap<string, TransferTask[]>;
+  empty: React.ReactNode;
+}) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  // Keep folder expansion when a row scrolls out of the mounted viewport.
+  const [expandedIds, setExpandedIds] = useState<ReadonlySet<string>>(() => new Set());
+  const virtual = tasks.length > 20;
+  const virtualizer = useVirtualizer({
+    count: tasks.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 112,
+    getItemKey: (index) => tasks[index].id,
+    overscan: 4,
+    enabled: virtual,
+  });
+  const renderRow = (task: TransferTask, index: number) => (
+    <TransferRow
+      key={task.id}
+      task={task}
+      childTasks={childrenByParent.get(task.id) ?? []}
+      expanded={expandedIds.has(task.id)}
+      isLast={index === tasks.length - 1}
+      onToggleExpanded={() => setExpandedIds((previous) => {
+        const next = new Set(previous);
+        if (next.has(task.id)) next.delete(task.id);
+        else next.add(task.id);
+        return next;
+      })}
+    />
+  );
+  return (
+    <div ref={scrollRef} className="max-h-[460px] overflow-auto" data-section="global-sftp-transfer-list">
+      {tasks.length === 0 ? empty : !virtual ? tasks.map(renderRow) : (
+        <div className="relative w-full" style={{ height: virtualizer.getTotalSize() }}>
+          {virtualizer.getVirtualItems().map((row) => (
+            <div
+              key={row.key}
+              ref={virtualizer.measureElement}
+              data-index={row.index}
+              className="absolute left-0 top-0 w-full"
+              style={{ transform: `translateY(${row.start}px)` }}
+            >
+              {renderRow(tasks[row.index], row.index)}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function GlobalSftpTransferCenter() {
   const { t } = useI18n();
   // Badge is a stable store snapshot (identity unchanged on pure progress).
@@ -866,20 +925,17 @@ export function GlobalSftpTransferCenter() {
           ))}
         </div>
 
-        <div className="max-h-[460px] overflow-auto">
-          {displayed.length === 0 ? (
+        <TransferList
+          key={`${bucket}-${showBackground}`}
+          tasks={displayed}
+          childrenByParent={childrenByParent}
+          empty={(
             <div className="flex h-40 flex-col items-center justify-center text-muted-foreground">
               {badge.hasAttention && bucket !== "attention" && bucket !== "all" ? <AlertCircle size={22} /> : <ArrowDownUp size={22} />}
               <span className="mt-2 text-xs">{t("sftp.transferCenter.empty")}</span>
             </div>
-          ) : displayed.map((task) => (
-            <TransferRow
-              key={task.id}
-              task={task}
-              childTasks={childrenByParent.get(task.id) ?? []}
-            />
-          ))}
-        </div>
+          )}
+        />
 
         {(() => {
           const showBackgroundToggle = collapsed.length > 0;

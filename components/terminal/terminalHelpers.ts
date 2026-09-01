@@ -152,6 +152,9 @@ export interface TerminalProps {
   // source session whose authenticated connection should be reused for a new
   // shell channel — skipping a second MFA prompt (issue #1204).
   reuseConnectionFromSessionId?: string;
+  // Duplicate Session marker: never borrow a live/parked pooled transport —
+  // always dial a fresh connection (fresh auth).
+  requireFreshConnection?: boolean;
   /**
    * Attach to an already-running backend session (same PTY) instead of starting
    * a new one. Used by the AI silent-session observe popup. Must not close the

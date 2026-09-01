@@ -487,6 +487,47 @@ test("startSSH requests a fresh transport for ordinary opens with connection aut
   assert.deepEqual(reuseAttempts, ["source-session", undefined, undefined]);
 });
 
+test("startSSH requests a fresh transport for Duplicate Session clones", async () => {
+  const captured: Record<string, unknown>[] = [];
+  const terminalBackend = {
+    backendAvailable: () => true,
+    startSSHSession: async (options: Record<string, unknown>) => {
+      captured.push(options);
+      return `ssh-session-${captured.length}`;
+    },
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+
+  // Without the marker an ordinary open stays eligible for general endpoint
+  // reuse; with it, every attempt (including reconnects) dials fresh instead
+  // of borrowing the source's live authenticated transport.
+  await createTerminalSessionStarters(createStarterContext({
+    shouldUseFreshSshConnection: () => false,
+    terminalBackend,
+  }) as never).startSSH(createTermStub() as never);
+  await createTerminalSessionStarters(createStarterContext({
+    shouldUseFreshSshConnection: () => false,
+    requireFreshConnection: true,
+    terminalBackend,
+  }) as never).startSSH(createTermStub() as never);
+  const duplicateStarters = createTerminalSessionStarters(createStarterContext({
+    shouldUseFreshSshConnection: () => false,
+    requireFreshConnection: true,
+    terminalBackend,
+  }) as never);
+  await duplicateStarters.startSSH(createTermStub() as never);
+  await duplicateStarters.startSSH(createTermStub() as never);
+
+  assert.equal(captured[0].reuseTransport, undefined);
+  assert.equal(captured[0].sourceSessionId, undefined);
+  assert.equal(captured[1].reuseTransport, false);
+  assert.equal(captured[2].reuseTransport, false);
+});
+
 test("startSSH commits an empty automation snapshot only after the backend session succeeds", async () => {
   let resolveStart: ((sessionId: string) => void) | undefined;
   let commitCount = 0;
@@ -1137,6 +1178,178 @@ test("startSSH uses the system agent when a synced vault key cannot be decrypted
   assert.equal(capturedOptions?.useSshAgent, true);
   assert.deepEqual(capturedOptions?.agentPublicKeys, ["ssh-ed25519 AAAASELECTED"]);
   assert.equal(capturedOptions?.privateKey, undefined);
+});
+
+test("startSSH waits for stored-key decrypt before sending private key material", async (t) => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  let decryptAttempts = 0;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      netcatty: {
+        credentialsDecrypt: async (value: string) => {
+          decryptAttempts += 1;
+          if (decryptAttempts < 3) return value;
+          return "-----BEGIN OPENSSH PRIVATE KEY-----\nhydrated\n-----END OPENSSH PRIVATE KEY-----";
+        },
+      },
+    },
+  });
+  t.after(() => {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else delete (globalThis as { window?: unknown }).window;
+  });
+
+  let capturedOptions: Record<string, unknown> | null = null;
+  const terminalBackend = {
+    backendAvailable: () => true,
+    startSSHSession: async (options: Record<string, unknown>) => {
+      capturedOptions = options;
+      return "ssh-session";
+    },
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+  const ctx = createStarterContext({
+    host: {
+      id: "host-1",
+      label: "Stored key host",
+      hostname: "key.example.test",
+      username: "alice",
+      authMethod: "key",
+      identityFileId: "key-1",
+    },
+    keys: [{
+      id: "key-1",
+      label: "Imported key",
+      type: "ED25519",
+      privateKey: ENCRYPTED_CREDENTIAL_PLACEHOLDER,
+      source: "imported",
+      category: "key",
+      created: 1,
+    }],
+    terminalBackend,
+  });
+
+  await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
+
+  assert.ok(decryptAttempts >= 3);
+  assert.equal(
+    capturedOptions?.privateKey,
+    "-----BEGIN OPENSSH PRIVATE KEY-----\nhydrated\n-----END OPENSSH PRIVATE KEY-----",
+  );
+  assert.doesNotMatch(String(capturedOptions?.privateKey ?? ""), /^enc:v1:/);
+});
+
+test("startSSH rejects encrypted stored-key material instead of sending ciphertext", async () => {
+  let capturedOptions: Record<string, unknown> | null = null;
+  let needsAuth = false;
+  let authRetryMessage: string | null = null;
+  const terminalBackend = {
+    backendAvailable: () => true,
+    startSSHSession: async (options: Record<string, unknown>) => {
+      capturedOptions = options;
+      return "ssh-session";
+    },
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+  const ctx = createStarterContext({
+    host: {
+      id: "host-1",
+      label: "Stored key host",
+      hostname: "key.example.test",
+      username: "alice",
+      authMethod: "key",
+      identityFileId: "key-1",
+    },
+    keys: [{
+      id: "key-1",
+      label: "Imported key",
+      type: "ED25519",
+      privateKey: ENCRYPTED_CREDENTIAL_PLACEHOLDER,
+      source: "imported",
+      category: "key",
+      created: 1,
+    }],
+    terminalBackend,
+    setNeedsAuth: (value: boolean) => { needsAuth = value; },
+    setAuthRetryMessage: (value: string | null) => { authRetryMessage = value; },
+  });
+
+  await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
+
+  assert.equal(capturedOptions, null);
+  assert.equal(needsAuth, true);
+  assert.match(authRetryMessage ?? "", /cannot be decrypted/);
+});
+
+test("startSSH does not wait to hydrate unrelated encrypted vault keys", async (t) => {
+  const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
+  let decryptAttempts = 0;
+  Object.defineProperty(globalThis, "window", {
+    configurable: true,
+    value: {
+      netcatty: {
+        credentialsDecrypt: async (value: string) => {
+          decryptAttempts += 1;
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          return value;
+        },
+      },
+    },
+  });
+  t.after(() => {
+    if (previousWindow) Object.defineProperty(globalThis, "window", previousWindow);
+    else delete (globalThis as { window?: unknown }).window;
+  });
+
+  let capturedOptions: Record<string, unknown> | null = null;
+  const terminalBackend = {
+    backendAvailable: () => true,
+    startSSHSession: async (options: Record<string, unknown>) => {
+      capturedOptions = options;
+      return "ssh-session";
+    },
+    onSessionData: () => noop,
+    onSessionExit: () => noop,
+    onChainProgress: () => noop,
+    writeToSession: noop,
+    resizeSession: noop,
+  };
+  const started = Date.now();
+  const ctx = createStarterContext({
+    host: {
+      id: "host-1",
+      label: "Password host",
+      hostname: "password.example.test",
+      username: "alice",
+      authMethod: "password",
+      password: "secret",
+    },
+    keys: [{
+      id: "unused-key",
+      label: "Foreign key",
+      type: "ED25519",
+      privateKey: ENCRYPTED_CREDENTIAL_PLACEHOLDER,
+      source: "imported",
+      category: "key",
+      created: 1,
+    }],
+    terminalBackend,
+  });
+
+  await createTerminalSessionStarters(ctx as never).startSSH(createTermStub() as never);
+
+  assert.equal(decryptAttempts, 0);
+  assert.equal(capturedOptions?.password, "secret");
+  assert.ok(Date.now() - started < 200);
 });
 
 for (const protocol of ["Mosh", "ET"] as const) {

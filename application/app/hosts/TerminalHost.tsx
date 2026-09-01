@@ -181,6 +181,7 @@ export function TerminalHost() {
       copyWorkspaceWithCurrentShell: handlers.copyWorkspaceWithCurrentShell,
       copySessionToNewWindowWithCurrentShell: handlers.copySessionToNewWindowWithCurrentShell,
       openManagedTerminalWithCurrentShell: handlers.openManagedTerminalWithCurrentShell,
+      duplicateSessionWithCurrentShell: handlers.duplicateSessionWithCurrentShell,
       closeWorkspace: sessionActions?.closeWorkspace,
       createWorkspaceFromSessions: sessionActions?.createWorkspaceFromSessions,
       createWorkspaceFromTargets: handlers.createWorkspaceFromTargets,

@@ -260,7 +260,7 @@ function AppViewInner({ domains }: AppViewProps) {
 
   const {
     addShellHistoryEntry, removeShellHistoryEntry, addSessionToWorkspace, addToWorkspaceDialog, appendHostToWorkspace, appendLocalTerminalToWorkspace,
-    clearAndRemoveSource, clearAndRemoveSources, closeLogView, closeSession, closeTabsBatch, closeWorkspace, commitPluginImporterData, commitVaultImportTransaction, commitVaultGroupMutation, copySessionToNewWindowWithCurrentShell, copySessionWithCurrentShell, copyWorkspaceWithCurrentShell, openManagedTerminalWithCurrentShell,
+    clearAndRemoveSource, clearAndRemoveSources, closeLogView, closeSession, closeTabsBatch, closeWorkspace, commitPluginImporterData, commitVaultImportTransaction, commitVaultGroupMutation, copySessionToNewWindowWithCurrentShell, copySessionWithCurrentShell, duplicateSessionWithCurrentShell, copyWorkspaceWithCurrentShell, openManagedTerminalWithCurrentShell,
     convertKnownHostToHost, createWorkspaceFromSessions, createWorkspaceFromTargets, createWorkspaceWithHosts,
     customGroups, currentTerminalTheme, deepLinkHostDraft, draggingSessionId, effectiveKnownHosts, editorTabs, editorWordWrap, emptyVaultConflict,
     followAppTerminalTheme,
@@ -503,6 +503,7 @@ function AppViewInner({ domains }: AppViewProps) {
         onCloseSession={closeSession}
         onRenameSession={startSessionRename}
         onCopySession={copySessionWithCurrentShell}
+        onDuplicateSession={duplicateSessionWithCurrentShell}
         onCopySessionToNewWindow={copySessionToNewWindowWithCurrentShell}
         onEditHost={handleEditHostFromOverlay}
         onRenameWorkspace={startWorkspaceRename}
@@ -725,6 +726,7 @@ function AppViewInner({ domains }: AppViewProps) {
           onReorderTabs={reorderWorkTabs}
           onCopySession={copySessionWithCurrentShell}
           onOpenManagedTerminal={openManagedTerminalWithCurrentShell}
+          onDuplicateSession={duplicateSessionWithCurrentShell}
           onCopySessionToNewWindow={copySessionToNewWindowWithCurrentShell}
           onSplitSession={splitSessionWithCurrentShell}
           onConnectToHost={handleConnectToHost}

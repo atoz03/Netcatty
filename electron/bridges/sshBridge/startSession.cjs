@@ -217,6 +217,38 @@ function createStartSessionApi(ctx) {
       return last;
     };
 
+    const ensureConcurrentJoinShellIdentity = async (connRef, options) => {
+      if (!connRef || options.skipShellPidDiscovery) return true;
+
+      const current = [...sessions.entries()].filter(([, candidate]) => (
+        candidate?.connRef === connRef
+        && candidate?.stream
+      ));
+      if (current.length === 0) return false;
+      if (current.every(([, candidate]) => candidate.shellPid)) return true;
+      if (current.length !== 1) return false;
+
+      const [[sessionId, candidate]] = current;
+      const discovery = await listInteractiveShellPids(connRef.conn);
+      const live = sessions.get(sessionId);
+      if (
+        discovery.available
+        && discovery.pids.length === 1
+        && live === candidate
+        && live.connRef === connRef
+        && live.stream === candidate.stream
+        && !live.shellPid
+      ) {
+        live.shellPid = String(discovery.pids[0]);
+      }
+      return Boolean(
+        live === candidate
+        && live.connRef === connRef
+        && live.stream === candidate.stream
+        && live.shellPid
+      );
+    };
+
     const waitForNewInteractiveShellPid = async (conn, previousPids, opts = {}) => {
       const previous = new Set(previousPids);
       const initialDelayMs = Math.max(0, Number(opts.initialDelayMs) || 0);
@@ -442,26 +474,43 @@ function createStartSessionApi(ctx) {
         interruptRemote() {
           try { stream.signal?.("INT"); } catch { /* ignore */ }
         },
-        probeReceiveConflicts(names) {
-          return probeReceiveConflicts(sessions.get(sessionId), names);
+        probeReceiveConflicts(names, { signal } = {}) {
+          return probeReceiveConflicts(sessions.get(sessionId), names, { signal });
         },
-        removeRemoteFiles(paths) {
-          return removeRemoteFiles(sessions.get(sessionId), paths);
+        removeRemoteFiles(paths, { signal } = {}) {
+          return removeRemoteFiles(sessions.get(sessionId), paths, { signal });
         },
-        restoreRemoteModes(entries) {
-          return restoreRemoteModes(sessions.get(sessionId), entries);
+        restoreRemoteModes(entries, { signal } = {}) {
+          return restoreRemoteModes(sessions.get(sessionId), entries, { signal });
         },
-        requestOverwriteDecision(filename) {
+        requestOverwriteDecision(filename, { signal } = {}) {
           return new Promise((resolve) => {
             const requestId = randomUUID();
-            const timer = setTimeout(() => {
-              zmodemOverwritePending.delete(requestId);
-              resolve({ action: "skip", applyToRest: false });
-            }, 120000);
-            zmodemOverwritePending.set(requestId, (payload) => {
+            let settled = false;
+            const cleanup = () => {
               clearTimeout(timer);
-              resolve({ action: payload.action, applyToRest: !!payload.applyToRest });
-            });
+              try { signal?.removeEventListener("abort", onAbort); } catch { /* ignore */ }
+              zmodemOverwritePending.delete(requestId);
+            };
+            const finish = (decision) => {
+              if (settled) return;
+              settled = true;
+              cleanup();
+              resolve(decision);
+            };
+            const onAbort = () => finish({ action: "cancel", applyToRest: false });
+            const timer = setTimeout(() => {
+              finish({ action: "skip", applyToRest: false });
+            }, 120000);
+            zmodemOverwritePending.set(requestId, (payload) => finish({
+              action: payload.action,
+              applyToRest: !!payload.applyToRest,
+            }));
+            if (signal?.aborted) {
+              onAbort();
+              return;
+            }
+            signal?.addEventListener("abort", onAbort, { once: true });
             safeSend(getCurrentSessionWebContents(), "netcatty:zmodem:overwrite-request", {
               sessionId, requestId, filename,
             });
@@ -1107,6 +1156,10 @@ function createStartSessionApi(ctx) {
 
     function reuseShellSession(event, options, sourceSession, sessionId, log, reuseOpts = {}) {
       const connRef = sourceSession.connRef;
+      const {
+        ensureConcurrentJoinIdentity = false,
+        ...openReuseOpts
+      } = reuseOpts;
       const refHolder = {};
       // Pin while queued as well as while opening: the source tab may close
       // before this copy reaches the front of the per-connection queue.
@@ -1115,16 +1168,31 @@ function createStartSessionApi(ctx) {
       const previous = connRef.shellOpenQueue || Promise.resolve();
       const operation = previous
         .catch(() => {})
-        .then(() => openReusedShellSerialized(
-          event,
-          options,
-          sourceSession,
-          sessionId,
-          log,
-          connRef,
-          refHolder,
-          reuseOpts,
-        ));
+        .then(async () => {
+          try {
+            if (
+              ensureConcurrentJoinIdentity
+              && !await ensureConcurrentJoinShellIdentity(connRef, options)
+            ) {
+              const error = new Error("Concurrent terminal shell identity is unavailable");
+              error.code = "SSH_CONCURRENT_SHELL_IDENTITY_UNSAFE";
+              throw error;
+            }
+          } catch (error) {
+            releaseConnectionRef(refHolder);
+            throw error;
+          }
+          return openReusedShellSerialized(
+            event,
+            options,
+            sourceSession,
+            sessionId,
+            log,
+            connRef,
+            refHolder,
+            openReuseOpts,
+          );
+        });
       const tail = operation.then(() => undefined, () => undefined);
       connRef.shellOpenQueue = tail;
 
@@ -1284,22 +1352,33 @@ function createStartSessionApi(ctx) {
               { conn: transport.conn, connRef: transport, stream: {} },
               sessionId,
               log,
+              {
+                ensureConcurrentJoinIdentity: coordination.role === "join"
+                  && coordination._record?.kind === "shell",
+              },
             );
           } catch (coordinationErr) {
-            if (options._passphraseSignal?.aborted) {
-              throw options._passphraseSignal.reason instanceof Error
-                ? options._passphraseSignal.reason
-                : coordinationErr;
+            if (coordinationErr?.code === "SSH_CONCURRENT_SHELL_IDENTITY_UNSAFE") {
+              log("concurrent transport shell identity unavailable; connecting fresh", {
+                sessionId,
+                hostname: options.hostname,
+              });
+            } else {
+              if (options._passphraseSignal?.aborted) {
+                throw options._passphraseSignal.reason instanceof Error
+                  ? options._passphraseSignal.reason
+                  : coordinationErr;
+              }
+              // A waiter must observe the leader's real failure instead of
+              // immediately starting a second authentication prompt. Existing
+              // transport reuse keeps its historical fresh-dial fallback.
+              if (coordination.role === "join") throw coordinationErr;
+              log("coordinated transport reuse failed, connecting fresh", {
+                sessionId,
+                hostname: options.hostname,
+                error: coordinationErr?.message,
+              });
             }
-            // A waiter must observe the leader's real failure instead of
-            // immediately starting a second authentication prompt. Existing
-            // transport reuse keeps its historical fresh-dial fallback.
-            if (coordination.role === "join") throw coordinationErr;
-            log("coordinated transport reuse failed, connecting fresh", {
-              sessionId,
-              hostname: options.hostname,
-              error: coordinationErr?.message,
-            });
           }
         } else {
           pendingDialCoordination = coordination;

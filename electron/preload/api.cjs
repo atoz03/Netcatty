@@ -1837,6 +1837,9 @@ function createPreloadApi(ctx) {
   aiUserSkillsBuildContext: async (prompt, selectedSkillSlugs) => {
     return ipcRenderer.invoke("netcatty:ai:user-skills:build-context", { prompt, selectedSkillSlugs });
   },
+  aiSkillsCliGetInvocation: async () => {
+    return ipcRenderer.invoke("netcatty:ai:skills-cli:invocation");
+  },
   // MCP approval gate: renderer receives approval requests from main process
   onMcpApprovalRequest: (cb) => {
     const handler = (_event, payload) => cb(payload);

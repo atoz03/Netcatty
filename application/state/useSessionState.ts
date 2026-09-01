@@ -1083,6 +1083,8 @@ export const useSessionState = ({
     startupCommand?: string;
     customName?: string;
     inheritedCwd?: string;
+    /** When false, open a brand-new connection instead of reusing the source's SSH channel. */
+    reuseConnection?: boolean;
   }) => {
     // Pre-allocate the new id outside the updater so StrictMode's
     // double-invocation of the functional updater doesn't mint two ids.
@@ -1100,6 +1102,7 @@ export const useSessionState = ({
         startupCommand: options?.startupCommand,
         customName: options?.customName,
         inheritedCwd: options?.inheritedCwd,
+        reuseConnection: options?.reuseConnection,
       });
 
       // Schedule the activeTab + tabOrder updates only when creation

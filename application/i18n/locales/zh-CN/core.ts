@@ -804,6 +804,10 @@ export const zhCNCoreMessages: Messages = {
   'vault.import.mobaxterm.utf8Desc': '适用于已保存或转换为 UTF-8 的文件。',
   'vault.import.mobaxterm.gb18030': '中文 Windows',
   'vault.import.mobaxterm.gb18030Desc': '适用于中文 Windows 上导出的旧版文件。',
+  'vault.import.mobaxterm.masterPassword': '主密码（可选）',
+  'vault.import.mobaxterm.masterPasswordPlaceholder': '输入 MobaXterm 主密码',
+  'vault.import.mobaxterm.masterPasswordHint':
+    '导入 .mobaconf 或 MobaXterm.ini 中保存的密码时需要填写。留空则只导入会话。',
   'vault.import.sshConfig.chooseMode': '选择如何导入你的 SSH config 文件。',
   'vault.import.sshConfig.modeQuestion': '你希望如何导入？',
   'vault.import.sshConfig.importOnly': '仅导入',
@@ -1027,6 +1031,7 @@ export const zhCNCoreMessages: Messages = {
   'sftp.encoding.utf8': 'UTF-8',
   'sftp.encoding.gb18030': 'GB18030',
   'sftp.goHome': '返回主目录',
+  'sftp.goRoot': '回到根目录',
   'sftp.folderName': '文件夹名称',
   'sftp.folderName.placeholder': '输入文件夹名称',
   'sftp.fileName': '文件名称',

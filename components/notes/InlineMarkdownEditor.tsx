@@ -18,7 +18,7 @@ import {
 } from "@mdxeditor/editor";
 import { HighlightStyle, syntaxHighlighting } from "@codemirror/language";
 import { tags } from "@lezer/highlight";
-import { ExternalLink } from "lucide-react";
+import { AlertTriangle, ExternalLink } from "lucide-react";
 import {
   $createRangeSelection,
   $getNearestNodeFromDOMNode,
@@ -148,6 +148,14 @@ export interface InlineMarkdownEditorProps {
 }
 
 export const NOTE_EDIT_DECORATION_DEBOUNCE_MS = 160;
+
+export const shouldApplyMdxParseFailure = (input: {
+  currentNoteId?: string;
+  failedNoteId?: string;
+  currentMarkdown: string;
+  failedMarkdown: string;
+}): boolean => input.currentNoteId === input.failedNoteId
+  && input.currentMarkdown.trim() === input.failedMarkdown.trim();
 
 export const getNoteDecorationMutationDelay = (editorMode: NoteEditorMode): number =>
   editorMode === "edit" || editorMode === "live" ? NOTE_EDIT_DECORATION_DEBOUNCE_MS : 0;
@@ -978,6 +986,12 @@ export const InlineMarkdownEditor = React.memo(
             return;
           }
 
+          // Unrenderable-markdown fallback: the raw source editor is mounted.
+          if (mdxFallbackActiveRef.current) {
+            fallbackSourceEditorRef.current?.insertAction(action);
+            return;
+          }
+
           const container = containerRef.current;
           const editable = container?.querySelector("[contenteditable]");
           const lexicalEditor = editable ? getNearestEditorFromDOMNode(editable) : null;
@@ -1056,11 +1070,18 @@ export const InlineMarkdownEditor = React.memo(
           }
         },
         focus: () => {
+          if (mdxFallbackActiveRef.current) {
+            fallbackSourceEditorRef.current?.focus();
+            return;
+          }
           editorRef.current?.focus();
         },
         scrollToHeading: (heading: NoteHeadingItem, headingIndex: number) => {
           if (controlledEditorMode === "source") {
             return sourceEditorRef?.current?.scrollToLine(heading.line) ?? false;
+          }
+          if (mdxFallbackActiveRef.current) {
+            return fallbackSourceEditorRef.current?.scrollToLine(heading.line) ?? false;
           }
           const occurrence = extractNoteHeadings(value)
             .slice(0, headingIndex)
@@ -1083,10 +1104,20 @@ export const InlineMarkdownEditor = React.memo(
   const [linkAction, setLinkAction] = useState<LinkActionState | null>(null);
   const [acceptedSourceMarkdown, setAcceptedSourceMarkdown] = useState(value);
   const [isContentSwapping, setIsContentSwapping] = useState(false);
+  // MDX (the rich editor's parser) rejects some CommonMark — e.g. unbalanced
+  // angle tags like `<host>` in prose. MDXEditor then renders an EMPTY document
+  // and only reports the failure through onError, which made such notes look
+  // like they had lost their content. Track the failure and fall back to the
+  // raw markdown source view so the content always stays visible.
+  const [mdxParseFailure, setMdxParseFailure] = useState<string | null>(null);
   const linkActionRef = useRef<LinkActionState | null>(null);
   linkActionRef.current = linkAction;
   const mouseMoveFrameRef = useRef(0);
   const editorMode = controlledEditorMode ?? "edit";
+  const mdxFallbackActive = mdxParseFailure !== null && editorMode !== "source";
+  const mdxFallbackActiveRef = useRef(false);
+  mdxFallbackActiveRef.current = mdxFallbackActive;
+  const fallbackSourceEditorRef = useRef<NoteSourceEditorHandle | null>(null);
   const hostPickerRangeRef = useRef<Range | null>(null);
   const hostPickerListRef = useRef<FixedSizeVirtualListHandle>(null);
   const hostsRef = useRef(hosts);
@@ -1097,7 +1128,7 @@ export const InlineMarkdownEditor = React.memo(
   // buttons. Listens to Lexical selection/update changes in edit/live modes.
   useEffect(() => {
     if (!onActiveFormatsChange) return;
-    if (editorMode !== "edit" && editorMode !== "live") {
+    if (mdxFallbackActive || (editorMode !== "edit" && editorMode !== "live")) {
       onActiveFormatsChange(EMPTY_ACTIVE_FORMATS);
       return;
     }
@@ -1141,7 +1172,7 @@ export const InlineMarkdownEditor = React.memo(
       unregisterUpdate();
       unregisterSelection();
     };
-  }, [editorMode, onActiveFormatsChange]);
+  }, [editorMode, mdxFallbackActive, onActiveFormatsChange]);
 
   const setLinkActionIfChanged = useCallback((next: LinkActionState | null) => {
     if (linkActionStatesEqual(linkActionRef.current, next)) return;
@@ -1226,6 +1257,10 @@ export const InlineMarkdownEditor = React.memo(
       const scheduledNoteId = noteId;
       noteIdRef.current = noteId;
       pasteRecoveryGenerationRef.current += 1;
+      // The new note's markdown gets a fresh MDX import; clear a previous
+      // note's unrenderable-markdown fallback.
+      setMdxParseFailure(null);
+      setMdxRetry(null);
       // Keep both refs in displayMarkdown space so public-path normalization
       // does not look like a divergent local draft.
       latestMarkdownRef.current = markdown;
@@ -1322,6 +1357,15 @@ export const InlineMarkdownEditor = React.memo(
     latestSourceMarkdownRef.current = value;
     syncedSourceMarkdownRef.current = value;
     setAcceptedSourceMarkdown(value);
+    if (displayChanged && mdxFallbackActiveRef.current) {
+      // A sync/publish update replaced this note's unrenderable markdown while
+      // the source fallback was active. editorRef.setMarkdown below would hit
+      // the unmounted MDXEditor, so clear the failure instead: the rich editor
+      // remounts with the new markdown. If it is still unrenderable, onError
+      // re-arms the fallback.
+      setMdxParseFailure(null);
+      setMdxRetry(null);
+    }
     if (!displayChanged) return;
     try {
       editorRef.current?.setMarkdown(markdown);
@@ -1371,6 +1415,10 @@ export const InlineMarkdownEditor = React.memo(
 
   useEffect(() => {
     setLinkAction(null);
+    // Mode changes remount the rich editor (key={editorMode}); give its MDX
+    // import a fresh chance after an unrenderable-markdown fallback.
+    setMdxParseFailure(null);
+    setMdxRetry(null);
   }, [editorMode]);
 
   const getHostPickerContext = useCallback(() => {
@@ -1545,6 +1593,39 @@ export const InlineMarkdownEditor = React.memo(
     setAcceptedSourceMarkdown(markdown);
     onChange(markdown);
   }, [onChange]);
+
+  // MDXEditor reports markdown it cannot import through onError (the lexical
+  // document is left empty). Switch to the raw source view so the note content
+  // is never silently hidden; the user can retry or edit the raw markdown.
+  // The failure is reported while MDXEditor's realm is still rendering, so a
+  // synchronous setState here would be dropped — defer it to a timer.
+  const handleMdxParseError = useCallback((payload: { error: string; source: string }) => {
+    const failedNoteId = noteIdRef.current;
+    const failedMarkdown = normalizeNotePublicAssetPaths(payload.source);
+    window.setTimeout(() => {
+      if (!shouldApplyMdxParseFailure({
+        currentNoteId: noteIdRef.current,
+        failedNoteId,
+        currentMarkdown: latestMarkdownRef.current,
+        failedMarkdown,
+      })) return;
+      // The same note can receive a newer external value before the deferred
+      // callback runs. Do not show the old import failure over that content.
+      setMdxParseFailure((current) => current ?? payload.error);
+    }, 0);
+  }, []);
+
+  // One-shot markdown for the retry after a fallback: NotesManager debounces
+  // source drafts, so the `value` prop can still hold the pre-fix body when
+  // the user retries right after editing in the fallback. Seed that retry
+  // import from the editor's own latest accepted source instead, but only while
+  // the parent prop is still the stale body that originally failed.
+  const [mdxRetry, setMdxRetry] = useState<{ markdown: string; staleValue: string } | null>(null);
+
+  const retryRichNoteEditor = useCallback(() => {
+    setMdxRetry({ markdown: latestSourceMarkdownRef.current, staleValue: value });
+    setMdxParseFailure(null);
+  }, [value]);
 
   const insertHostLink = useCallback((host: Host) => {
     const link = `[${getHostLinkLabel(host)}](${formatSshDeepLinkForHost(host)})`;
@@ -2093,6 +2174,37 @@ export const InlineMarkdownEditor = React.memo(
           noteFontFamily={noteFontFamily}
           noteFontSize={noteCodeFontSize || noteFontSize}
         />
+      ) : mdxFallbackActive ? (
+        <div
+          data-note-markdown-source-fallback="true"
+          className="flex min-h-[calc(100vh-15rem)] min-w-0 flex-1 flex-col"
+        >
+          <div
+            data-note-markdown-source-notice="true"
+            className="flex items-start gap-2 border-b border-border/60 bg-muted/40 px-4 py-2 text-xs text-muted-foreground"
+          >
+            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+            <span className="min-w-0 flex-1">{t("notes.editor.unrenderableMarkdown")}</span>
+            <button
+              type="button"
+              data-note-markdown-source-retry="true"
+              className="shrink-0 rounded px-1.5 py-0.5 text-xs text-foreground underline decoration-dotted hover:bg-secondary"
+              onClick={retryRichNoteEditor}
+            >
+              {t("notes.editor.retryRichView")}
+            </button>
+          </div>
+          <NoteSourceEditor
+            ref={fallbackSourceEditorRef}
+            noteId={noteId}
+            value={noteId !== undefined && noteId !== noteIdRef.current ? value : acceptedSourceMarkdown}
+            placeholder={placeholder}
+            onChange={commitSourceMarkdown}
+            readOnly={editorMode === "preview"}
+            noteFontFamily={noteFontFamily}
+            noteFontSize={noteCodeFontSize || noteFontSize}
+          />
+        </div>
       ) : editorMode === "preview" && !displayMarkdown.trim() ? (
         <div className="netcatty-note-preview-empty">
           {previewEmptyLabel ?? placeholder}
@@ -2101,7 +2213,11 @@ export const InlineMarkdownEditor = React.memo(
         <MDXEditor
           key={editorMode}
           ref={editorRef}
-          markdown={displayMarkdown}
+          markdown={
+            mdxRetry !== null && value === mdxRetry.staleValue
+              ? normalizeNotePublicAssetPaths(mdxRetry.markdown)
+              : displayMarkdown
+          }
           placeholder={placeholder}
           plugins={plugins}
           readOnly={editorMode === "preview"}
@@ -2110,7 +2226,14 @@ export const InlineMarkdownEditor = React.memo(
             editorMode === "preview" && "netcatty-mdx-editor--preview",
           )}
           contentEditableClassName="netcatty-mdx-content"
-          onChange={commitMarkdown}
+          onChange={(markdown, initialMarkdownNormalize) => {
+            // Importing Markdown may escape literal comparisons on export.
+            // Keep the user's source until they actually edit the rich view.
+            if (!initialMarkdownNormalize && editorMode !== "preview") {
+              commitMarkdown(markdown);
+            }
+          }}
+          onError={handleMdxParseError}
         />
       )}
     </div>

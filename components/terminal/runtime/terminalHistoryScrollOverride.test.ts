@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   HISTORY_PREVIEW_OVERLAY_ATTR,
   HISTORY_PREVIEW_WRAP_ATTR,
+  bufferHasPreviewScrollback,
   encodeHistoryPreviewWrapFlags,
   getHistoryPreviewLines,
   getHistoryPreviewRows,
@@ -136,6 +137,12 @@ test("alternate-screen history preview reads normal-buffer history", () => {
     alternateBuffer.getLine(0)?.translateToString(),
     alternateBuffer.getLine(1)?.translateToString(),
   ]);
+});
+
+test("only a normal buffer with rows above the viewport offers preview scrollback", () => {
+  assert.equal(bufferHasPreviewScrollback({ baseY: 12 }), true);
+  // Alternate-screen hosts leave the normal buffer at a single viewport.
+  assert.equal(bufferHasPreviewScrollback({ baseY: 0 }), false);
 });
 
 test("history preview stays up for pointer selection and copy chords", () => {

@@ -543,6 +543,7 @@ export function TerminalLayerTabBridge({ stableRef }: { stableRef: StableRef }) 
     onReorderTabs: s.onReorderTabs,
     onCopySession: s.onCopySession,
     onOpenManagedTerminal: s.onOpenManagedTerminal,
+    onDuplicateSession: s.onDuplicateSession,
     onCopySessionToNewWindow: s.onCopySessionToNewWindow,
     onUpdateSessionRestoreCwd: s.onUpdateSessionRestoreCwd,
     onUpdateSessionDynamicTitle: s.onUpdateSessionDynamicTitle,

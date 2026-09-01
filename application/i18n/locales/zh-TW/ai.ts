@@ -300,6 +300,12 @@ export const zhTWAiMessages: Messages = {
   'ai.toolAccess.description': '選擇外部 Agent 存取 Netcatty 工作階段的方式。MCP 會公開內建伺服器，Skills + CLI 會引導 Agent 讀取本機 Skill 並呼叫 Netcatty CLI。',
   'ai.toolAccess.mode.mcp': 'MCP',
   'ai.toolAccess.mode.skills': 'Skills + CLI',
+  'ai.toolAccess.mcpPrompt.title': '餵給 AI 的接入提示詞',
+  'ai.toolAccess.mcpPrompt.description': '把這段提示詞貼到你的 AI 用戶端（Codex、Claude Code 等），它就會幫你完成 Netcatty MCP 的註冊。',
+  'ai.toolAccess.mcpPrompt.enableHint': '先在下方開啟對外 MCP 開關，提示詞中才會包含 launcher 路徑。',
+  'ai.toolAccess.skills.file': 'Skill 檔案',
+  'ai.toolAccess.skills.description': 'Skills + CLI 模式下，Agent 會自動被指向這個本機 Skill 檔案。Netcatty CLI 啟動路徑會在每個工作階段提供給 Agent。',
+  'ai.toolAccess.skills.unavailable': '暫時無法取得 Skill 檔案路徑',
 
   'ai.externalMcp.title': '對外 MCP',
   'ai.externalMcp.description': '將 Netcatty 作為 MCP 伺服器暴露給 Codex、Claude Code、Cursor、Grok 等外部用戶端。工具面與應用內 Agent 相同。用戶端連線期間請保持 Netcatty 執行。',

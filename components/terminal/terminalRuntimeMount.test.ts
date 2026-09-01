@@ -180,9 +180,19 @@ test('terminal view derives the network-device prompt policy before autocomplete
     /const isNetworkDevice = host\.deviceType === 'network'[\s\S]*?classifyDistroId\(host\.distro\) === 'network-device';/,
   );
   assert.match(terminalViewSource, /allowHostStyleGreaterThanPrompt=\{isNetworkDevice\}/);
+  assert.match(terminalViewSource, /isNetworkDevice=\{isNetworkDevice\}/);
   assert.match(
     terminalSource,
     /xTermRuntimeContextRef\.current = \{[\s\S]*?allowHostStyleGreaterThanPrompt: isNetworkDevice,/,
+  );
+  assert.match(
+    terminalSource,
+    /resolveTerminalAutocompleteSettings\(\{[\s\S]*?isNetworkDevice: host\.deviceType === 'network'[\s\S]*?classifyDistroId\(host\.distro\) === 'network-device',/,
+  );
+  const autocompleteSource = readFileSync(new URL('./TerminalAutocomplete.tsx', import.meta.url), 'utf8');
+  assert.match(
+    autocompleteSource,
+    /useTerminalAutocomplete\(\{[\s\S]*?isNetworkDevice,/,
   );
 });
 

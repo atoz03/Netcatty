@@ -300,6 +300,12 @@ export const zhCNAiMessages: Messages = {
   'ai.toolAccess.description': '选择外部 Agent 访问 Netcatty 会话的方式。MCP 会暴露内置服务器，Skills + CLI 会引导 Agent 读取本地 Skill 并调用 Netcatty CLI。',
   'ai.toolAccess.mode.mcp': 'MCP',
   'ai.toolAccess.mode.skills': 'Skills + CLI',
+  'ai.toolAccess.mcpPrompt.title': '喂给 AI 的接入提示词',
+  'ai.toolAccess.mcpPrompt.description': '把这段提示词粘贴到你的 AI 客户端（Codex、Claude Code 等），它就会帮你完成 Netcatty MCP 的注册。',
+  'ai.toolAccess.mcpPrompt.enableHint': '先在下方打开对外 MCP 开关，提示词中才会包含 launcher 路径。',
+  'ai.toolAccess.skills.file': 'Skill 文件',
+  'ai.toolAccess.skills.description': 'Skills + CLI 模式下，Agent 会自动被指向这个本地 Skill 文件；Netcatty CLI 启动路径会在每个会话中提供给 Agent。',
+  'ai.toolAccess.skills.unavailable': '暂时无法获取 Skill 文件路径',
 
   // External MCP
   'ai.externalMcp.title': '对外 MCP',

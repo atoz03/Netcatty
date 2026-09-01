@@ -24,6 +24,8 @@ import {
   SYNC_PAYLOAD_ENTITY_KEYS,
   SYNC_STORAGE_KEYS,
   hasSyncPayloadEntityData,
+  retainLocalHostLastConnectedAt,
+  sanitizeHostsForSync,
   type SyncPayload,
 } from '../domain/sync';
 import { migrateHostsFromLegacyLineTimestamps } from '../domain/host';
@@ -211,6 +213,8 @@ export function sanitizePortForwardingRulesForSync(
     lastUsedAt: undefined,
   }));
 }
+
+export { retainLocalHostLastConnectedAt, sanitizeHostsForSync };
 
 export function getEffectivePortForwardingRulesForSync(
   rules: PortForwardingRule[] | undefined,
@@ -951,7 +955,7 @@ export function buildSyncPayload(
   portForwardingRules?: PortForwardingRule[],
 ): SyncPayload {
   return {
-    hosts: vault.hosts,
+    hosts: sanitizeHostsForSync(vault.hosts),
     keys: vault.keys,
     identities: vault.identities,
     proxyProfiles: vault.proxyProfiles,
@@ -1036,7 +1040,7 @@ export async function buildCloudSyncPayload(
   },
 ): Promise<SyncPayload> {
   const base: SyncPayload = {
-    hosts: vault.hosts,
+    hosts: sanitizeHostsForSync(vault.hosts),
     keys: vault.keys,
     identities: vault.identities,
     proxyProfiles: vault.proxyProfiles,
@@ -1062,6 +1066,8 @@ export function buildLocalVaultPayload(
 ): SyncPayload {
   const base: SyncPayload = {
     ...buildSyncPayload(vault, portForwardingRules),
+    // Keep device-local recent-connection timestamps in protective backups.
+    hosts: vault.hosts,
     settings: collectLocalBackupSettings(),
     knownHosts: vault.knownHosts,
   };
@@ -1128,6 +1134,7 @@ function applyPayload(
   options: {
     includeLocalOnlyData: boolean;
     applyPluginSidecars?: PluginSyncSidecarApplier;
+    currentHosts?: Host[];
   },
 ): Promise<void> {
   // Portable payloads must never keep device-bound enc:v1 blobs. Strip them
@@ -1135,10 +1142,14 @@ function applyPayload(
   // shells and let the user re-enter secrets (#2702).
   const sanitizedPayload = stripSyncPayloadEncryptedCredentials(payload);
   const legacyLineTimestampsEnabled = sanitizedPayload.settings?.terminalSettings?.showLineTimestamps === true;
+  let hosts = migrateHostsFromLegacyLineTimestamps(sanitizedPayload.hosts, legacyLineTimestampsEnabled);
+  if (!options.includeLocalOnlyData) {
+    hosts = retainLocalHostLastConnectedAt(hosts, options.currentHosts) ?? hosts;
+  }
   // Build the vault import object. Cloud sync intentionally ignores
   // local-only trust records even if legacy cloud snapshots still carry them.
   const vaultImport: Record<string, unknown> = {
-    hosts: migrateHostsFromLegacyLineTimestamps(sanitizedPayload.hosts, legacyLineTimestampsEnabled),
+    hosts,
     keys: sanitizedPayload.keys,
     identities: sanitizedPayload.identities,
     proxyProfiles: sanitizedPayload.proxyProfiles,
@@ -1192,11 +1203,13 @@ export function applySyncPayload(
   importers: SyncPayloadImporters,
   options?: {
     applyPluginSidecars?: PluginSyncSidecarApplier;
+    currentHosts?: Host[];
   },
 ): Promise<void> {
   return applyPayload(payload, importers, {
     includeLocalOnlyData: false,
     applyPluginSidecars: options?.applyPluginSidecars,
+    currentHosts: options?.currentHosts,
   });
 }
 

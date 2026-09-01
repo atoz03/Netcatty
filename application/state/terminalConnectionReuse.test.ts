@@ -85,6 +85,50 @@ test("copy session clones reuse SSH sources and preserve serial config", () => {
   assert.deepEqual(copied.serialConfig, { path: "/dev/tty.usbserial", baudRate: 115200 });
 });
 
+test("copy session clones open a fresh connection when reuseConnection is false", () => {
+  const fresh = createCopiedTerminalSessionClone(session(), { id: "copy-fresh", reuseConnection: false });
+  assert.equal(fresh.reuseConnectionFromSessionId, undefined);
+  // The explicit fresh flag must survive: without it the bridge treats the
+  // clone as eligible for general endpoint reuse and can still borrow the
+  // source's live authenticated transport.
+  assert.equal(fresh.requireFreshConnection, true);
+  // Local sources never had reuse to drop — behavior is unchanged.
+  assert.equal(
+    createCopiedTerminalSessionClone(session({ protocol: "local" }), { id: "copy-local-fresh", reuseConnection: false }).reuseConnectionFromSessionId,
+    undefined,
+  );
+});
+
+test("copy and split clones default to no fresh-connection requirement", () => {
+  assert.equal(createCopiedTerminalSessionClone(session(), { id: "copy-default" }).requireFreshConnection, undefined);
+  assert.equal(createSplitTerminalSessionClone(session(), { id: "split-default" }).requireFreshConnection, undefined);
+  assert.equal(
+    createCopiedTerminalSessionClone(session(), { id: "copy-reuse", reuseConnection: true }).requireFreshConnection,
+    undefined,
+  );
+});
+
+test("fresh SSH clones discard inherited directories even when a caller supplies one", () => {
+  for (const protocol of ["ssh", undefined] as const) {
+    const clone = createCopiedTerminalSessionClone(session({ protocol }), {
+      id: "fresh-no-cwd", reuseConnection: false, inheritedCwd: "/srv/old-target",
+    });
+    assert.equal(clone.pendingInitialCwd, undefined);
+    assert.equal(clone.requireFreshConnection, true);
+  }
+  const localClone = createCopiedTerminalSessionClone(session({ protocol: "local" }), {
+    id: "local-cwd", reuseConnection: false, inheritedCwd: "/home/alice/project",
+  });
+  assert.equal(localClone.localStartDir, "/home/alice/project");
+});
+
+test("copy session clones default to connection reuse when reuseConnection is unset", () => {
+  assert.equal(
+    createCopiedTerminalSessionClone(session(), { id: "copy-default" }).reuseConnectionFromSessionId,
+    "session-1",
+  );
+});
+
 test("split and copy session clones preserve local start directory", () => {
   const source = session({
     protocol: "local",

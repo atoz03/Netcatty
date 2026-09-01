@@ -20,7 +20,12 @@ const {
 // Load sshBridge with a mocked ssh2 module so we can observe whether a *new*
 // SSH client is constructed (a fresh connection) versus an existing connection
 // being reused for a new shell channel (issue #1204).
-function loadBridgeWithMockedSsh2(t, { connectReady = false, remoteVer = "OpenSSH_9.0" } = {}) {
+function loadBridgeWithMockedSsh2(t, {
+  connectReady = false,
+  remoteVer = "OpenSSH_9.0",
+  trackShellPids = false,
+  beforeShellPidScanResult,
+} = {}) {
   const bridgePath = require.resolve("./sshBridge.cjs");
   const authHelperPath = require.resolve("./sshAuthHelper.cjs");
   const originalLoad = Module._load;
@@ -54,7 +59,24 @@ function loadBridgeWithMockedSsh2(t, { connectReady = false, remoteVer = "OpenSS
     }
     end() { this.ended += 1; }
     destroy() {}
-    exec(_command, callback) { callback?.(new Error("exec unavailable")); }
+    exec(_command, callback) {
+      if (!trackShellPids) {
+        callback?.(new Error("exec unavailable"));
+        return;
+      }
+      const stream = new EventEmitter();
+      stream.stderr = new EventEmitter();
+      stream.close = () => {};
+      const pids = this.openedShells
+        .map((_shell, index) => `${(index + 1) * 111} 1`)
+        .join("\n");
+      setImmediate(() => {
+        beforeShellPidScanResult?.();
+        stream.emit("data", Buffer.from(`${pids}\n__NETCATTY_SHELL_SCAN_COMPLETE__\n`));
+        stream.emit("close", 0);
+      });
+      callback(null, stream);
+    }
     shell(_pty, _options, callback) {
       const stream = makeStream();
       this.openedShells.push(stream);
@@ -114,10 +136,13 @@ function loadBridgeWithMockedSsh2(t, { connectReady = false, remoteVer = "OpenSS
   return { bridge, getClientConstructCount: () => clientConstructCount };
 }
 
-test("simultaneous normal opens of the same host make one physical SSH dial", async (t) => {
+test("simultaneous normal opens identify both shells before sharing one SSH connection", async (t) => {
   resetSshTransportRegistryForTests({ defaultIdleTtlMs: 0 });
   t.after(() => resetSshTransportRegistryForTests({ defaultIdleTtlMs: 0 }));
-  const { bridge, getClientConstructCount } = loadBridgeWithMockedSsh2(t, { connectReady: true });
+  const { bridge, getClientConstructCount } = loadBridgeWithMockedSsh2(t, {
+    connectReady: true,
+    trackShellPids: true,
+  });
   const sessions = new Map();
   const start = registerStartHandler(bridge, sessions);
   const options = {
@@ -140,6 +165,70 @@ test("simultaneous normal opens of the same host make one physical SSH dial", as
   assert.equal(getClientConstructCount(), 1);
   assert.equal(sessions.get("normal-1").conn, sessions.get("normal-2").conn);
   assert.equal(sessions.get("normal-1").connRef.count, 2);
+  assert.equal(sessions.get("normal-1").shellPid, "111");
+  assert.equal(sessions.get("normal-2").shellPid, "222");
+});
+
+test("simultaneous normal opens use separate connections when shell identity is unavailable", async (t) => {
+  resetSshTransportRegistryForTests({ defaultIdleTtlMs: 0 });
+  t.after(() => resetSshTransportRegistryForTests({ defaultIdleTtlMs: 0 }));
+  const { bridge, getClientConstructCount } = loadBridgeWithMockedSsh2(t, {
+    connectReady: true,
+  });
+  const sessions = new Map();
+  const start = registerStartHandler(bridge, sessions);
+  const options = {
+    hostname: "10.0.0.54",
+    username: "alice",
+    port: 22,
+    authMethod: "password",
+    password: "secret",
+    useSshAgent: false,
+    verifyHostKeys: false,
+  };
+
+  await Promise.all([
+    start({ sender: makeSender() }, { ...options, sessionId: "normal-1" }),
+    start({ sender: makeSender() }, { ...options, sessionId: "normal-2" }),
+  ]);
+
+  assert.equal(getClientConstructCount(), 2);
+  assert.notEqual(sessions.get("normal-1").conn, sessions.get("normal-2").conn);
+});
+
+test("simultaneous normal opens do not trust a replacement session after identity discovery", async (t) => {
+  resetSshTransportRegistryForTests({ defaultIdleTtlMs: 0 });
+  t.after(() => resetSshTransportRegistryForTests({ defaultIdleTtlMs: 0 }));
+  const sessions = new Map();
+  let replaced = false;
+  const { bridge, getClientConstructCount } = loadBridgeWithMockedSsh2(t, {
+    connectReady: true,
+    trackShellPids: true,
+    beforeShellPidScanResult: () => {
+      if (replaced) return;
+      replaced = true;
+      const original = sessions.get("normal-1");
+      sessions.set("normal-1", { ...original, shellPid: "999" });
+    },
+  });
+  const start = registerStartHandler(bridge, sessions);
+  const options = {
+    hostname: "10.0.0.55",
+    username: "alice",
+    port: 22,
+    authMethod: "password",
+    password: "secret",
+    useSshAgent: false,
+    verifyHostKeys: false,
+  };
+
+  await Promise.all([
+    start({ sender: makeSender() }, { ...options, sessionId: "normal-1" }),
+    start({ sender: makeSender() }, { ...options, sessionId: "normal-2" }),
+  ]);
+
+  assert.equal(getClientConstructCount(), 2);
+  assert.notEqual(sessions.get("normal-1").conn, sessions.get("normal-2").conn);
 });
 
 test("reuseTransport false makes simultaneous same-host opens dial independently", async (t) => {

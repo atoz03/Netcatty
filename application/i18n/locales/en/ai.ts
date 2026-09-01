@@ -300,6 +300,12 @@ export const enAiMessages: Messages = {
   'ai.toolAccess.description': 'Choose how external agents access Netcatty sessions. MCP exposes the built-in server, while Skills + CLI points agents to the local Netcatty skill and CLI commands.',
   'ai.toolAccess.mode.mcp': 'MCP',
   'ai.toolAccess.mode.skills': 'Skills + CLI',
+  'ai.toolAccess.mcpPrompt.title': 'Prompt for your AI client',
+  'ai.toolAccess.mcpPrompt.description': 'Paste this prompt into your AI client (Codex, Claude Code, …) and it will register Netcatty MCP for you.',
+  'ai.toolAccess.mcpPrompt.enableHint': 'Turn on External MCP below to include the launcher path in this prompt.',
+  'ai.toolAccess.skills.file': 'Skill file',
+  'ai.toolAccess.skills.description': 'In Skills + CLI mode, agents are pointed to this local skill file automatically. The Netcatty CLI launcher path is provided to the agent in each session.',
+  'ai.toolAccess.skills.unavailable': 'Skill file path unavailable',
 
   // External MCP (productized catalog MCP for Codex / Claude Code / Cursor)
   'ai.externalMcp.title': 'External MCP',

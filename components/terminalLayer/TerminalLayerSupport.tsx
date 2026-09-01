@@ -700,6 +700,7 @@ export interface TerminalLayerProps {
     startupCommand: string,
     options?: { mode?: 'tab' | 'verticalSplit' },
   ) => boolean;
+  onDuplicateSession?: (sessionId: string) => void;
   onCopySessionToNewWindow?: (sessionId: string) => void;
   onRemoveSessionFromWorkspace?: (
     sessionId: string,
@@ -1573,6 +1574,7 @@ const TerminalPane: React.FC<TerminalPaneProps> = memo(({
         pendingScriptId={session.pendingScriptId}
         pendingScript={session.pendingScript}
         reuseConnectionFromSessionId={session.reuseConnectionFromSessionId}
+        requireFreshConnection={session.requireFreshConnection}
         serialConfig={session.serialConfig}
         hotkeyScheme={hotkeyScheme}
         disableTerminalFontZoom={disableTerminalFontZoom}

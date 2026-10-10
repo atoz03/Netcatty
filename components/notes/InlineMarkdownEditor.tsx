@@ -1135,43 +1135,64 @@ export const InlineMarkdownEditor = React.memo(
     }
 
     const container = containerRef.current;
-    const editable = container?.querySelector("[contenteditable]");
-    const lexicalEditor = editable ? getNearestEditorFromDOMNode(editable) : null;
-    if (!lexicalEditor) return;
+    if (!container) return;
 
-    const readFormats = (): ActiveTextFormats => {
-      const formats: ActiveTextFormats = { ...EMPTY_ACTIVE_FORMATS };
-      lexicalEditor.getEditorState().read(() => {
-        const selection = $getSelection();
-        if ($isRangeSelection(selection)) {
-          formats.bold = selection.hasFormat("bold");
-          formats.italic = selection.hasFormat("italic");
-          formats.underline = selection.hasFormat("underline");
-          formats.strikethrough = selection.hasFormat("strikethrough");
-          formats.code = selection.hasFormat("code");
-        }
-      });
-      return formats;
+    let unbind: (() => void) | null = null;
+    const bind = (): boolean => {
+      const editable = container.querySelector("[contenteditable]");
+      const lexicalEditor = editable ? getNearestEditorFromDOMNode(editable) : null;
+      if (!lexicalEditor) return false;
+
+      const readFormats = (): ActiveTextFormats => {
+        const formats: ActiveTextFormats = { ...EMPTY_ACTIVE_FORMATS };
+        lexicalEditor.getEditorState().read(() => {
+          const selection = $getSelection();
+          if ($isRangeSelection(selection)) {
+            formats.bold = selection.hasFormat("bold");
+            formats.italic = selection.hasFormat("italic");
+            formats.underline = selection.hasFormat("underline");
+            formats.strikethrough = selection.hasFormat("strikethrough");
+            formats.code = selection.hasFormat("code");
+          }
+        });
+        return formats;
+      };
+
+      const report = () => {
+        onActiveFormatsChange(readFormats());
+      };
+
+      const unregisterUpdate = lexicalEditor.registerUpdateListener(report);
+      const unregisterSelection = lexicalEditor.registerCommand(
+        SELECTION_CHANGE_COMMAND,
+        () => {
+          report();
+          return false;
+        },
+        COMMAND_PRIORITY_LOW,
+      );
+      report();
+      unbind = () => {
+        unregisterUpdate();
+        unregisterSelection();
+      };
+      return true;
     };
 
-    const report = () => {
-      onActiveFormatsChange(readFormats());
-    };
+    if (bind()) return () => unbind?.();
 
-    const unregisterUpdate = lexicalEditor.registerUpdateListener(report);
-    const unregisterSelection = lexicalEditor.registerCommand(
-      SELECTION_CHANGE_COMMAND,
-      () => {
-        report();
-        return false;
-      },
-      COMMAND_PRIORITY_LOW,
-    );
-    report();
+    // The rich editor mounts its editable after this effect runs (first mount,
+    // and again when a retry leaves the source fallback), so wait for it.
+    const Observer = container.ownerDocument.defaultView?.MutationObserver;
+    if (!Observer) return;
+    const observer = new Observer(() => {
+      if (bind()) observer.disconnect();
+    });
+    observer.observe(container, { childList: true, subtree: true });
 
     return () => {
-      unregisterUpdate();
-      unregisterSelection();
+      observer.disconnect();
+      unbind?.();
     };
   }, [editorMode, mdxFallbackActive, onActiveFormatsChange]);
 

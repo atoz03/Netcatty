@@ -17,10 +17,10 @@ import {
   isHistoryPreviewDismissClick,
   joinHistoryPreviewSelectionText,
   nextHistoryPreviewTop,
+  selectHistoryPreviewAll,
   shouldHideHistoryPreviewOnMouseDown,
   shouldKeepHistoryPreviewOnKey,
 } from "./terminalHistoryScrollOverride.ts";
-
 
 /**
  * The functions under test only compare node identity or probe a couple of
@@ -29,6 +29,25 @@ import {
  * signatures, which are correctly typed against the real DOM.
  */
 const sentinelNode = <T,>(value: T) => value as unknown as never;
+
+test("select all includes every preview row and preserves soft-wrap copying", async () => {
+  const { JSDOM } = await import("jsdom");
+  const dom = new JSDOM("<pre><span>中文abc</span>\n<span>def</span>\n<span>last</span></pre>");
+  try {
+    const overlay = dom.window.document.querySelector("pre")!;
+    overlay.setAttribute(HISTORY_PREVIEW_WRAP_ATTR, "010");
+    assert.equal(selectHistoryPreviewAll(overlay), true);
+    assert.equal(dom.window.getSelection()!.toString(), "中文abc\ndef\nlast");
+    assert.equal(getHistoryPreviewSelectionText(overlay, dom.window.getSelection()), "中文abcdef\nlast");
+    overlay.textContent = "plain\ntext";
+    assert.equal(selectHistoryPreviewAll(overlay), true);
+    assert.equal(dom.window.getSelection()!.toString(), "plain\ntext");
+    overlay.textContent = "";
+    assert.equal(selectHistoryPreviewAll(overlay), false);
+  } finally {
+    dom.window.close();
+  }
+});
 
 const wheel = (
   over: Partial<Parameters<typeof forcedHistoryScrollLinesForWheel>[0]> = {},
@@ -360,4 +379,24 @@ test("history preview right-click is recognized as an app-menu target", () => {
     })),
     false,
   );
+});
+
+
+test("nested preview rows retain soft-wrap copy and partial selections", async () => {
+  const { JSDOM } = await import("jsdom");
+  const dom = new JSDOM("<pre><span>中文abc</span>\n<span>def</span></pre>");
+  const overlay = dom.window.document.querySelector("pre")!;
+  overlay.setAttribute(HISTORY_PREVIEW_WRAP_ATTR, "01");
+  const first = overlay.firstChild!.firstChild!;
+  const last = overlay.lastChild!.firstChild!;
+  const selection = {
+    rangeCount: 1, anchorNode: first, focusNode: last,
+    anchorOffset: 1, focusOffset: 2, toString: () => "文abc\ndef",
+  };
+  assert.equal(getHistoryPreviewSelectionText(overlay, selection), "文abcde");
+  assert.equal(getHistoryPreviewSelectionText(overlay, {
+    ...selection, anchorNode: overlay, focusNode: overlay,
+    anchorOffset: 0, focusOffset: overlay.childNodes.length,
+  }), "中文abcdef");
+  dom.window.close();
 });

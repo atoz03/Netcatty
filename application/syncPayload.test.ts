@@ -4,7 +4,9 @@ import assert from "node:assert/strict";
 import type { SyncPayload } from "../domain/sync.ts";
 import type { KnownHost } from "../domain/models.ts";
 import type { SyncableVaultData } from "./syncPayload.ts";
-import { parseTerminalFontSizeRecord } from "./state/terminalFontSizeSync.ts";
+import { clampTerminalFontSizeValue, parseTerminalFontSizeRecord } from "./state/terminalFontSizeSync.ts";
+import { parseCustomAccentRecord } from "./state/customAccentSync.ts";
+import commandBlocklistTable from "../lib/commandBlocklist.json";
 
 type LocalStorageMock = {
   clear(): void;
@@ -56,6 +58,7 @@ const {
 const storageKeys = await import("../infrastructure/config/storageKeys.ts");
 const { SYNC_STORAGE_KEYS } = await import("../domain/sync.ts");
 const { localStorageAdapter } = await import("../infrastructure/persistence/localStorageAdapter.ts");
+const { readCommandBlocklistSetting } = await import("./state/commandBlocklistSettings.ts");
 
 const knownHost = (id = "kh-1"): KnownHost => ({
   id,
@@ -496,6 +499,134 @@ test("applySyncPayload writes a newer terminal font size that old versions can r
   assert.equal(record.origin, "sync-payload");
 });
 
+test("applying identical versioned settings preserves their records, then propagates real changes", async () => {
+  const scenarios: Array<{
+    name: string;
+    storageKey: string;
+    field: keyof NonNullable<SyncPayload["settings"]>;
+    initialValue: string | number | Record<string, unknown>;
+    changedValue: string | number | Record<string, unknown>;
+  }> = [
+    {
+      name: "accent",
+      storageKey: storageKeys.STORAGE_KEY_COLOR,
+      field: "customAccent",
+      initialValue: parseCustomAccentRecord(null).color,
+      changedValue: "0 84% 60%",
+    },
+    {
+      name: "terminal font size",
+      storageKey: storageKeys.STORAGE_KEY_TERM_FONT_SIZE,
+      field: "terminalFontSize",
+      initialValue: parseTerminalFontSizeRecord(null).fontSize,
+      changedValue: 19,
+    },
+    {
+      name: "custom key bindings",
+      storageKey: storageKeys.STORAGE_KEY_CUSTOM_KEY_BINDINGS,
+      field: "customKeyBindings",
+      initialValue: {},
+      changedValue: { open: { mac: "Cmd+K" } },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    localStorage.clear();
+    const writes: string[] = [];
+    const originalSetItem = localStorage.setItem;
+    localStorage.setItem = (key, value) => {
+      writes.push(key);
+      originalSetItem(key, value);
+    };
+    const applySetting = (value: typeof scenario.initialValue) => applySyncPayload({
+      hosts: [], keys: [], identities: [], snippets: [], customGroups: [],
+      settings: { [scenario.field]: value },
+    } as SyncPayload, { importVaultData: () => {} });
+
+    try {
+      await applySetting(scenario.initialValue);
+      const firstRecord = localStorage.getItem(scenario.storageKey);
+      assert.ok(firstRecord, `${scenario.name}: an explicit first value must be saved`);
+      assert.equal(writes.filter((key) => key === scenario.storageKey).length, 1);
+
+      writes.length = 0;
+      await applySetting(scenario.initialValue);
+      assert.equal(localStorage.getItem(scenario.storageKey), firstRecord);
+      assert.equal(writes.filter((key) => key === scenario.storageKey).length, 0,
+        `${scenario.name}: unchanged value must not write or trigger a storage change`);
+
+      writes.length = 0;
+      await applySetting(scenario.changedValue);
+      assert.equal(writes.filter((key) => key === scenario.storageKey).length, 1,
+        `${scenario.name}: a real change must be saved`);
+      assert.notEqual(localStorage.getItem(scenario.storageKey), firstRecord);
+      assert.deepEqual(buildSyncPayload(vault([])).settings?.[scenario.field], scenario.changedValue);
+    } finally {
+      localStorage.setItem = originalSetItem;
+    }
+  }
+});
+
+test("sync replaces malformed setting records and does not repeat normalized writes", async () => {
+  const versionedKeys = [
+    storageKeys.STORAGE_KEY_COLOR,
+    storageKeys.STORAGE_KEY_TERM_FONT_SIZE,
+    storageKeys.STORAGE_KEY_CUSTOM_KEY_BINDINGS,
+  ];
+  for (const key of versionedKeys) localStorage.setItem(key, "bad");
+  const writes: string[] = [];
+  const originalSetItem = localStorage.setItem;
+  localStorage.setItem = (key, value) => {
+    writes.push(key);
+    originalSetItem(key, value);
+  };
+  const settings = {
+    customAccent: parseCustomAccentRecord(null).color,
+    terminalFontSize: parseTerminalFontSizeRecord(null).fontSize,
+    customKeyBindings: {},
+  };
+  const applySettings = (nextSettings: NonNullable<SyncPayload["settings"]>) => applySyncPayload({
+    hosts: [], keys: [], identities: [], snippets: [], customGroups: [],
+    settings: nextSettings,
+  }, { importVaultData: () => {} });
+
+  try {
+    await applySettings(settings);
+    for (const key of versionedKeys) {
+      assert.notEqual(localStorage.getItem(key), "bad", `${key}: malformed record must be repaired`);
+      assert.equal(writes.filter((written) => written === key).length, 1);
+    }
+
+    writes.length = 0;
+    await applySettings(settings);
+    for (const key of versionedKeys) {
+      assert.equal(writes.filter((written) => written === key).length, 0,
+        `${key}: repaired record must not be written again`);
+    }
+
+    const oversizedFontSize = 100;
+    writes.length = 0;
+    await applySettings({ terminalFontSize: oversizedFontSize });
+    assert.equal(parseTerminalFontSizeRecord(localStorage.getItem(storageKeys.STORAGE_KEY_TERM_FONT_SIZE)).fontSize,
+      clampTerminalFontSizeValue(oversizedFontSize));
+    assert.equal(writes.filter((key) => key === storageKeys.STORAGE_KEY_TERM_FONT_SIZE).length, 1);
+
+    writes.length = 0;
+    await applySettings({ terminalFontSize: oversizedFontSize });
+    assert.equal(writes.filter((key) => key === storageKeys.STORAGE_KEY_TERM_FONT_SIZE).length, 0,
+      "a repeated out-of-range incoming size must not bump the stored version again");
+
+    localStorage.setItem(storageKeys.STORAGE_KEY_TERM_FONT_SIZE, "999");
+    writes.length = 0;
+    await applySettings({ terminalFontSize: oversizedFontSize });
+    assert.equal(writes.filter((key) => key === storageKeys.STORAGE_KEY_TERM_FONT_SIZE).length, 1,
+      "an out-of-range legacy record must be replaced with the normalized value");
+    assert.notEqual(localStorage.getItem(storageKeys.STORAGE_KEY_TERM_FONT_SIZE), "999");
+  } finally {
+    localStorage.setItem = originalSetItem;
+  }
+});
+
 test("buildSyncPayload excludes externalAgents (device-local OS-bound config)", () => {
   localStorage.setItem(storageKeys.STORAGE_KEY_AI_EXTERNAL_AGENTS, JSON.stringify([
     { id: "codex", name: "Codex", command: "/opt/homebrew/bin/codex", enabled: true },
@@ -640,6 +771,87 @@ test("applySyncPayload restores AI configuration settings", async () => {
   assert.deepEqual(JSON.parse(localStorage.getItem(storageKeys.STORAGE_KEY_AI_AGENT_PROVIDER_MAP)!), { catty: "anthropic-main" });
   assert.deepEqual(JSON.parse(localStorage.getItem(storageKeys.STORAGE_KEY_AI_WEB_SEARCH)!), webSearch);
   assert.equal(localStorage.getItem(storageKeys.STORAGE_KEY_AI_SHOW_TERMINAL_SELECTION_ACTION), "false");
+});
+
+test("applySyncPayload migrates an untouched legacy command blocklist", async () => {
+  const legacyDefaults = [
+    ...commandBlocklistTable.common,
+    ...commandBlocklistTable.posixNative,
+    ...commandBlocklistTable.posix,
+  ];
+
+  await applySyncPayload({
+    hosts: [],
+    keys: [],
+    identities: [],
+    snippets: [],
+    customGroups: [],
+    settings: {
+      ai: {
+        commandBlocklist: legacyDefaults,
+      },
+    },
+    syncedAt: 1,
+  } as SyncPayload, { importVaultData: () => {} });
+
+  assert.deepEqual(
+    JSON.parse(localStorage.getItem(storageKeys.STORAGE_KEY_AI_COMMAND_BLOCKLIST)!),
+    [...legacyDefaults, ...commandBlocklistTable.powershell],
+  );
+  assert.deepEqual(
+    readCommandBlocklistSetting(),
+    [...legacyDefaults, ...commandBlocklistTable.powershell],
+  );
+});
+
+test("command blocklist read migrates an untouched local legacy list", () => {
+  const legacyDefaults = [
+    ...commandBlocklistTable.common,
+    ...commandBlocklistTable.posixNative,
+    ...commandBlocklistTable.posix,
+  ];
+  const currentDefaults = [...legacyDefaults, ...commandBlocklistTable.powershell];
+
+  assert.deepEqual(readCommandBlocklistSetting(), currentDefaults);
+  assert.deepEqual(
+    JSON.parse(localStorage.getItem(storageKeys.STORAGE_KEY_AI_COMMAND_BLOCKLIST)!),
+    currentDefaults,
+  );
+
+  localStorage.setItem(
+    storageKeys.STORAGE_KEY_AI_COMMAND_BLOCKLIST,
+    JSON.stringify([...legacyDefaults, "old-client-user-rule"]),
+  );
+  assert.deepEqual(readCommandBlocklistSetting(), [
+    ...legacyDefaults,
+    "old-client-user-rule",
+    ...commandBlocklistTable.powershell,
+  ]);
+});
+
+test("applySyncPayload preserves a customized PowerShell blocklist", async () => {
+  const currentCustomized = [
+    ...commandBlocklistTable.common,
+    ...commandBlocklistTable.posixNative,
+    ...commandBlocklistTable.posix,
+    ...commandBlocklistTable.powershell.slice(1),
+  ];
+
+  await applySyncPayload({
+    hosts: [],
+    keys: [],
+    identities: [],
+    snippets: [],
+    customGroups: [],
+    settings: {
+      ai: {
+        commandBlocklist: currentCustomized,
+      },
+    },
+    syncedAt: 1,
+  } as SyncPayload, { importVaultData: () => {} });
+
+  assert.deepEqual(readCommandBlocklistSetting(), currentCustomized);
 });
 
 test("applySyncPayload encrypts synced plaintext AI API keys before saving locally", async () => {
@@ -1502,6 +1714,26 @@ test("applySyncPayload restores the terminal host information bar preference", a
   assert.equal(parsed.scrollback, 5000);
 });
 
+test("bar cursor width survives terminal settings sync round-trip", async () => {
+  localStorage.setItem(
+    storageKeys.STORAGE_KEY_TERM_SETTINGS,
+    JSON.stringify({ cursorBarWidth: 3 }),
+  );
+
+  const payload = buildSyncPayload(vault());
+  const termSettings = (payload.settings?.terminalSettings ?? {}) as Record<string, unknown>;
+  assert.equal(termSettings.cursorBarWidth, 3);
+
+  localStorage.setItem(
+    storageKeys.STORAGE_KEY_TERM_SETTINGS,
+    JSON.stringify({ cursorBarWidth: 1 }),
+  );
+  await applySyncPayload(payload, { importVaultData: () => {} });
+
+  const restored = JSON.parse(localStorage.getItem(storageKeys.STORAGE_KEY_TERM_SETTINGS)!);
+  assert.equal(restored.cursorBarWidth, 3);
+});
+
 test("buildSyncPayload omits fallbackFont when TERM_SETTINGS does not set it", () => {
   localStorage.setItem(
     storageKeys.STORAGE_KEY_TERM_SETTINGS,
@@ -1879,4 +2111,140 @@ test("applySyncPayload applies pluginSidecars through the production applier hoo
   });
 
   assert.equal((applied as SyncPayload["pluginSidecars"])?.entries[0].value.clock, 3);
+});
+
+test("local shell side panel settings round-trip independently and trigger auto-sync", async () => {
+  for (const key of [storageKeys.STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN, storageKeys.STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN_TAB]) {
+    assert.ok((SYNCABLE_SETTING_STORAGE_KEYS as readonly string[]).includes(key));
+  }
+  for (const enabled of [true, false]) {
+    localStorage.clear();
+    localStorage.setItem(storageKeys.STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN, String(enabled));
+    localStorage.setItem(storageKeys.STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN_TAB, "notes");
+    localStorage.setItem(storageKeys.STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN, String(!enabled));
+    localStorage.setItem(storageKeys.STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN_TAB, "scripts");
+    const payload = await buildSyncPayload(vault());
+    assert.equal(payload.settings?.localShellSidePanelAutoOpen, enabled);
+    assert.equal(payload.settings?.localShellSidePanelAutoOpenTab, "notes");
+    localStorage.clear();
+    await applySyncPayload(payload, { importVaultData: () => {} });
+    assert.equal(localStorage.getItem(storageKeys.STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN), String(enabled));
+    assert.equal(localStorage.getItem(storageKeys.STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN_TAB), "notes");
+    assert.equal(localStorage.getItem(storageKeys.STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN), String(!enabled));
+    assert.equal(localStorage.getItem(storageKeys.STORAGE_KEY_TERMINAL_SIDE_PANEL_AUTO_OPEN_TAB), "scripts");
+  }
+});
+
+test("missing local shell settings and invalid tabs preserve existing settings", async () => {
+  const payload = await buildSyncPayload(vault());
+  assert.equal(payload.settings?.localShellSidePanelAutoOpen, undefined);
+  assert.equal(payload.settings?.localShellSidePanelAutoOpenTab, undefined);
+  localStorage.setItem(storageKeys.STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN, "true");
+  localStorage.setItem(storageKeys.STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN_TAB, "notes");
+  await applySyncPayload(payload, { importVaultData: () => {} });
+  assert.equal(localStorage.getItem(storageKeys.STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN), "true");
+  assert.equal(localStorage.getItem(storageKeys.STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN_TAB), "notes");
+  await applySyncPayload({ ...payload, settings: { localShellSidePanelAutoOpenTab: "invalid" } } as unknown as SyncPayload, { importVaultData: () => {} });
+  assert.equal(localStorage.getItem(storageKeys.STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN_TAB), "notes");
+  localStorage.setItem(storageKeys.STORAGE_KEY_LOCAL_SHELL_SIDE_PANEL_AUTO_OPEN_TAB, "invalid");
+  assert.equal((await buildSyncPayload(vault())).settings?.localShellSidePanelAutoOpenTab, undefined);
+});
+
+test("old bottom tab preference is ignored by settings export and import", async () => {
+  localStorage.clear();
+  const legacyKey = "netcatty_tab_bar_position_v1";
+  localStorage.setItem(legacyKey, "bottom");
+  const payload = buildSyncPayload(vault([]));
+  assert.equal(Object.hasOwn(payload.settings ?? {}, "tabBarPosition"), false);
+  await applySyncPayload({ ...payload, settings: { tabBarPosition: "bottom" } } as unknown as SyncPayload, { importVaultData: () => {} });
+  assert.equal(localStorage.getItem(legacyKey), "bottom");
+  localStorage.removeItem(legacyKey);
+  await applySyncPayload({ ...payload, settings: { tabBarPosition: "bottom" } } as unknown as SyncPayload, { importVaultData: () => {} });
+  assert.equal(localStorage.getItem(legacyKey), null);
+});
+for (const enabled of [true, false]) {
+  test(`right-click long press preference survives sync (${enabled})`, async () => {
+    localStorage.setItem(storageKeys.STORAGE_KEY_TERM_SETTINGS,
+      JSON.stringify({ rightClickLongPressMenu: enabled }));
+    const payload = buildSyncPayload(vault());
+    assert.equal(payload.settings?.terminalSettings?.rightClickLongPressMenu, enabled);
+    localStorage.setItem(storageKeys.STORAGE_KEY_TERM_SETTINGS,
+      JSON.stringify({ rightClickLongPressMenu: !enabled }));
+    await applySyncPayload(payload, { importVaultData: () => {} });
+    const restored = JSON.parse(localStorage.getItem(storageKeys.STORAGE_KEY_TERM_SETTINGS)!);
+    assert.equal(restored.rightClickLongPressMenu, enabled);
+  });
+}
+test('custom provider headers use portable cloud secrets and local encryption with legacy preservation', async () => {
+  localStorage.clear();
+  const sealed = `enc:v1:${Buffer.concat([Buffer.from('v10'), Buffer.alloc(32, 2)]).toString('base64')}`;
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    netcatty: {
+      credentialsEncrypt: async () => sealed,
+      credentialsDecrypt: async (value: string) => value === sealed ? 'tenant-secret' : value,
+    },
+    dispatchEvent: () => true,
+  } });
+  localStorage.setItem(storageKeys.STORAGE_KEY_AI_PROVIDERS, JSON.stringify([{
+    id: 'custom-headers', providerId: 'custom', enabled: true, customHeaders: { 'X-Tenant': sealed },
+  }]));
+  const plainSettings = buildSyncPayload(vault([]));
+  assert.equal(plainSettings.settings?.ai?.providers?.[0]?.customHeaders, undefined);
+  const cloud = await buildCloudSyncPayload(vault([]));
+  assert.deepEqual(cloud.settings?.ai?.providers?.[0]?.customHeaders, { 'X-Tenant': 'tenant-secret' });
+  await applySyncPayload(cloud, { importVaultData: () => {} });
+  const read = () => JSON.parse(localStorage.getItem(storageKeys.STORAGE_KEY_AI_PROVIDERS)!)[0];
+  assert.deepEqual(read().customHeaders, { 'X-Tenant': sealed });
+  await applySyncPayload(plainSettings, { importVaultData: () => {} });
+  assert.deepEqual(read().customHeaders, { 'X-Tenant': sealed });
+  cloud.settings!.ai!.providers![0].customHeaders = {};
+  await applySyncPayload(cloud, { importVaultData: () => {} });
+  assert.deepEqual(read().customHeaders, {});
+});
+
+for (const localRestore of [false, true]) {
+  test(`header encryption failure leaves vault and settings untouched (${localRestore ? 'restore' : 'sync'})`, async () => {
+    localStorage.clear();
+    localStorage.setItem(storageKeys.STORAGE_KEY_THEME, 'light');
+    localStorage.setItem(storageKeys.STORAGE_KEY_AI_PROVIDERS, '[]');
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+      netcatty: { credentialsEncrypt: async () => { throw new Error('keychain locked'); } },
+      dispatchEvent: () => true,
+    } });
+    const payload: SyncPayload = { ...vault([]), syncedAt: 1, settings: {
+      theme: 'dark', ai: { providers: [{ id: 'custom', customHeaders: { Authorization: 'secret' } }] },
+    } };
+    const original = JSON.stringify(payload);
+    let imports = 0;
+    let completed = 0;
+    let commits = 0;
+    const importers = { importVaultData: () => { imports++; }, onSettingsApplied: () => { completed++; } };
+    await assert.rejects(localRestore
+      ? applyLocalVaultPayload(payload, importers, { prepareConvergentRestore: async () => async () => { commits++; } })
+      : applySyncPayload(payload, importers));
+    assert.equal(imports, 0);
+    assert.equal(completed, 0);
+    assert.equal(commits, 0);
+    assert.equal(localStorage.getItem(storageKeys.STORAGE_KEY_THEME), 'light');
+    assert.equal(localStorage.getItem(storageKeys.STORAGE_KEY_AI_PROVIDERS), '[]');
+    assert.equal(JSON.stringify(payload), original);
+  });
+}
+
+test('sync prepares header encryption once before importing and leaves input unchanged', async () => {
+  localStorage.clear();
+  const sealed = `enc:v1:${Buffer.concat([Buffer.from('v10'), Buffer.alloc(32, 4)]).toString('base64')}`;
+  const events: string[] = [];
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: {
+    netcatty: { credentialsEncrypt: async () => { events.push('encrypt'); return sealed; } },
+    dispatchEvent: () => true,
+  } });
+  const payload: SyncPayload = { ...vault([]), syncedAt: 1, settings: {
+    theme: 'dark', ai: { providers: [{ id: 'custom', customHeaders: { 'X-Tenant': 'secret' } }] },
+  } };
+  const original = JSON.stringify(payload);
+  await applySyncPayload(payload, { importVaultData: () => { events.push('import'); } });
+  assert.deepEqual(events, ['encrypt', 'import']);
+  assert.equal(JSON.stringify(payload), original);
+  assert.deepEqual(JSON.parse(localStorage.getItem(storageKeys.STORAGE_KEY_AI_PROVIDERS)!)[0].customHeaders, { 'X-Tenant': sealed });
 });

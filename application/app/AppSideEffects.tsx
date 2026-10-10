@@ -21,11 +21,12 @@ import { getNotesSnapshot } from '../state/notesStore';
 import { useVaultAgentBridge } from '../state/useVaultAgentBridge';
 import { useWindowControls } from '../state/useWindowControls';
 import { useTerminalKeyboardFocus } from '../state/useTerminalKeyboardFocus';
-import { useEditorTabChromeList } from '../state/editorTabStore';
+import { editorTabStore, useEditorTabChromeList } from '../state/editorTabStore';
+import { installEditorWindowSourceListeners } from '../state/editorWindowClient';
+import { findEditorSftpOwnerTabId } from '../state/editorSftpOwnerRegistry';
 import {
   isPluginViewTabId,
   pluginViewTabStore,
-  resolveBatchTabCloseFocus,
   usePluginViewTabs,
 } from '../state/pluginViewTabStore';
 import {
@@ -43,7 +44,7 @@ import { materializeHostProxyProfile } from '../../domain/proxyProfiles';
 import { buildSshDeepLinkConnectionHost, buildSshDeepLinkEphemeralHost, buildSshDeepLinkEphemeralHostFromSaved, buildSshDeepLinkHostDraft, findSshDeepLinkHost, parseSshDeepLink } from '../../domain/sshDeepLink';
 import { buildTelnetDeepLinkConnectionHost, buildTelnetDeepLinkEphemeralHostFromSaved, buildTelnetDeepLinkOpenHost, findTelnetDeepLinkHost, materializeTelnetDeepLinkMatchHost, parseTelnetDeepLink } from '../../domain/telnetDeepLink';
 import { buildJmsDeepLinkEphemeralHost, isSupportedJmsProtocol, parseJmsDeepLink } from '../../domain/jmsDeepLink';
-import { applyEphemeralHostsUpdate, splitHostsUpdateByEphemeral } from '../../domain/ephemeralHosts';
+import { applyEphemeralHostDistroUpdate, applyEphemeralHostsUpdate, splitHostsUpdateByEphemeral } from '../../domain/ephemeralHosts';
 import { resolveHostAuth } from '../../domain/sshAuth';
 import { isEncryptedCredentialPlaceholder, stripSyncPayloadEncryptedCredentials } from '../../domain/credentials';
 import {
@@ -57,7 +58,7 @@ import { resolveCloseIntent } from '../state/resolveCloseIntent';
 import { resolveSnippetsShortcutIntent } from '../state/resolveSnippetsShortcutIntent';
 import { isPrimaryModifierWBinding, resolveWindowCommandCloseIntent } from '../state/windowCommandClose';
 import type { SyncPayload } from '../../domain/sync';
-import { applySyncPayload, buildLocalVaultPayloadAsync, hasMeaningfulSyncData } from '../syncPayload';
+import { prepareSyncPayloadApply, buildLocalVaultPayloadAsync, hasMeaningfulSyncData } from '../syncPayload';
 import {
   applyProtectedSyncPayload,
   ensureVersionChangeBackup,
@@ -96,6 +97,11 @@ type OpenSessionInNewWindowPayload = {
   title?: string;
   sourceSession?: TerminalSession;
   localShellType?: TerminalSession['shellType'];
+};
+
+type DeepLinkPayload = {
+  url?: string;
+  tabName?: string;
 };
 
 const IS_DEV = import.meta.env.DEV;
@@ -139,14 +145,17 @@ export function AppSideEffects() {
     terminalSettings,
     hotkeyScheme,
     keyBindings,
-    disableTerminalFontZoom,
     isHotkeyRecording,
     showSftpTab,
     shellOnlyTabNumberShortcuts,
     workspaceFocusStyle,
   } = settings;
 
-  useTerminalKeyboardFocus(hotkeyScheme !== 'disabled' && !disableTerminalFontZoom);
+  // Always publish terminal keyboard focus to the main process. When font zoom
+  // is disabled (or hotkeys are off) the renderer ignores the font chords, so
+  // the main process must keep handing them to the page instead of falling
+  // back to window zoom while the user is typing in a terminal (#3327).
+  useTerminalKeyboardFocus();
 
   const discoveredShells = useDiscoveredShells();
 
@@ -202,6 +211,7 @@ export function AppSideEffects() {
     addConnectionLog,
     updateConnectionLog,
     updateHostLastConnected,
+    updateHostDistro,
     importDataFromString,
     readPersistedHosts,
     groupConfigs,
@@ -248,12 +258,15 @@ export function AppSideEffects() {
     runSnippet,
     getOrderedWorkTabs,
     toggleBroadcast,
+    toggleGlobalBroadcast,
+    canUseGlobalBroadcast,
     logViews,
     closeLogView,
     copySession,
     copyWorkspace,
     createSessionFromCloneSource,
     getSessionRestoreCwd,
+    renameSessionInline,
   } = sessionState;
 
   // Presentation-field thrash stays off Host bags (Hosts use retainStable);
@@ -498,8 +511,8 @@ export function AppSideEffects() {
     (payload: SyncPayload) =>
       applyProtectedSyncPayload({
         buildPreApplyPayload: () => buildCurrentSyncPayload(),
-        applyPayload: () =>
-          applySyncPayload(payload, {
+        prepareApply: () =>
+          prepareSyncPayloadApply(payload, {
             importVaultData: importDataFromString,
             importPortForwardingRules,
             onSettingsApplied: settings.rehydrateAllFromStorage,
@@ -521,14 +534,17 @@ export function AppSideEffects() {
     (payload: SyncPayload, commitReplica: () => Promise<void>) =>
       applyProtectedSyncPayload({
         buildPreApplyPayload: () => buildCurrentSyncPayload(),
-        applyPayload: async () => {
+        prepareApply: async () => {
           const portable = stripSyncPayloadEncryptedCredentials(payload);
-          await applySyncPayload(portable, {
+          const applyPreparedPayload = await prepareSyncPayloadApply(portable, {
             importVaultData: importDataFromString,
             importPortForwardingRules,
             onSettingsApplied: settings.rehydrateAllFromStorage,
           }, { currentHosts: hosts });
-          await commitReplica();
+          return async () => {
+            await applyPreparedPayload();
+            await commitReplica();
+          };
         },
         translateProtectiveBackupFailure: (message) =>
           t('cloudSync.localBackups.protectiveBackupFailed', { message }),
@@ -625,6 +641,8 @@ export function AppSideEffects() {
     updateState,
     workspaces,
   });
+
+  useEffect(() => installEditorWindowSourceListeners(), []);
 
   const pendingTrayPortForwardsWhileLockedRef = useRef<Array<{ ruleId: string; start: boolean }>>([]);
 
@@ -899,6 +917,8 @@ export function AppSideEffects() {
   // array thrash does not rebuild appTerminalDomain (see domain isolation).
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
+  const canUseGlobalBroadcastRef = useRef(canUseGlobalBroadcast);
+  canUseGlobalBroadcastRef.current = canUseGlobalBroadcast;
   // Logs live in connectionLogsStore — keep a ref fresh without re-rendering App.
   const connectionLogsRef = useRef(getConnectionLogsSnapshot().connectionLogs);
   useEffect(() => {
@@ -1019,27 +1039,18 @@ export function AppSideEffects() {
   }, [orderedTabsWithEditors]);
 
   // Close many tabs at once with a single batched busy-shell confirmation.
-  // Used by the "Close all / Close others / Close to the right" context-menu
-  // actions on tabs (#748).
+  // Used by the "Close all / Close others / Close to the left / Close to the
+  // right" context-menu actions on tabs (#748).
   const closeTabsBatch = useCallback(
-    async (targetIds: string[]) => {
-      const closingTabIds = new Set(targetIds);
-      const activeBeforeClose = activeTabStore.getActiveTabId();
-      const focusAfterClose = resolveBatchTabCloseFocus({
-        orderedTabIds: orderedTabsWithEditors,
-        closingTabIds,
-        activeTabId: activeBeforeClose,
-      });
-      const pluginIds = targetIds.filter((id) => pluginViewTabStore.getTab(id));
-      const regularIds = targetIds.filter((id) => !pluginViewTabStore.getTab(id));
-      const canClose = !regularIds.length || await closeTabsBatchImpl(
-        () => ({ closeLogView, closeSessions, closeTabsInFlightRef, closeWorkspace, confirmIfBusyLocalTerminal, logViews, sessions, targetIds: regularIds, workspaces }),
-        regularIds,
-      );
-      if (!canClose) return;
-      for (const id of pluginIds) pluginViewTabStore.close(id);
-      if (closingTabIds.has(activeBeforeClose)) activeTabStore.setActiveTabId(focusAfterClose);
-    },
+    (targetIds: string[]) => closeTabsBatchImpl(
+      () => ({
+        closeLogView, closeSessions, closeTabsInFlightRef, closeWorkspace,
+        confirmIfBusyLocalTerminal, logViews, sessions, workspaces,
+        activeTabStore, editorTabStore, pluginViewTabStore,
+        handleRequestCloseEditorTabRef, findEditorSftpOwnerTabId, orderedTabsWithEditors,
+      }),
+      targetIds,
+    ),
     [workspaces, sessions, logViews, confirmIfBusyLocalTerminal, closeWorkspace, closeSessions, closeLogView, orderedTabsWithEditors],
   );
 
@@ -1088,6 +1099,8 @@ export function AppSideEffects() {
       terminalPaneMagnificationRef,
       toEditorTabId,
       toggleBroadcast,
+      toggleGlobalBroadcast,
+      canUseGlobalBroadcast: canUseGlobalBroadcastRef.current,
       toggleScriptsSidePanelRef,
       toggleSidePanelRef,
       toggleWorkspaceViewMode,
@@ -1102,6 +1115,7 @@ export function AppSideEffects() {
     splitSessionWithCurrentShell,
     moveFocusInWorkspace,
     toggleBroadcast,
+    toggleGlobalBroadcast,
     toggleWorkspaceViewMode,
     confirmIfBusyLocalTerminal,
   ]);
@@ -1403,6 +1417,14 @@ export function AppSideEffects() {
     }), host, hidden);
   }, [addConnectionLog, connectToHost, resolveEffectiveHost, identities, keys]);
 
+  const handleConnectToHostWithTabName = useCallback((host: Host, tabName?: string) => {
+    const sessionId = handleConnectToHost(host);
+    if (sessionId && tabName) {
+      renameSessionInline(sessionId, tabName);
+    }
+    return sessionId;
+  }, [handleConnectToHost, renameSessionInline]);
+
   const openHostForVaultAgent = useCallback((host: Host, isExternalMcpCall: boolean) => {
     // Silent sessions only apply to actual external MCP clients (chatSessionId
     // equals the reserved external-MCP scope). The in-app Catty AI chat's
@@ -1470,15 +1492,16 @@ export function AppSideEffects() {
   // deep links until unlock so saved-credential connects cannot start behind
   // the lock screen.
   const pendingDeepLinksWhileLockedRef = useRef<Array<
-    | { kind: 'ssh'; payload: { url?: string } }
-    | { kind: 'telnet'; payload: { url?: string } }
+    | { kind: 'ssh'; payload: DeepLinkPayload }
+    | { kind: 'telnet'; payload: DeepLinkPayload }
     | { kind: 'jms'; payload: { url?: string } }
     | { kind: 'open-terminal-path'; payload: { path?: string } }
   >>([]);
 
-  const _processSshDeepLink = useEffectEvent((payload: { url?: string }) => {
+  const _processSshDeepLink = useEffectEvent((payload: DeepLinkPayload) => {
     startupLaunchIntentReceivedRef.current = true;
     const rawUrl = payload?.url || '';
+    const tabName = payload?.tabName?.trim();
     const target = parseSshDeepLink(rawUrl);
     if (!target) {
       toast.warning(t('deepLink.ssh.invalid'));
@@ -1507,25 +1530,26 @@ export function AppSideEffects() {
         ? buildSshDeepLinkEphemeralHostFromSaved(matchedEffectiveHost, target, draftOptions)
         : buildSshDeepLinkEphemeralHost(target, draftOptions);
       setEphemeralHosts((prev) => [...prev, ephemeralHost]);
-      handleConnectToHost(ephemeralHost);
+      handleConnectToHostWithTabName(ephemeralHost, tabName);
       return;
     }
 
     if (matchedEffectiveHost) {
       const originalHost = hosts.find((host) => host.id === matchedEffectiveHost.id) ?? matchedEffectiveHost;
-      handleConnectToHost(buildSshDeepLinkConnectionHost(originalHost));
+      handleConnectToHostWithTabName(buildSshDeepLinkConnectionHost(originalHost), tabName);
       return;
     }
 
-    setDeepLinkHostDraft(buildSshDeepLinkHostDraft(target, {
+    const hostDraft = buildSshDeepLinkHostDraft(target, {
       id: crypto.randomUUID(),
       now: Date.now(),
-    }));
+    });
+    setDeepLinkHostDraft(tabName ? { ...hostDraft, label: tabName } : hostDraft);
     setNavigateToSection('hosts');
     setActiveTabId('vault');
   });
 
-  const _handleSshDeepLink = useEffectEvent((payload: { url?: string }) => {
+  const _handleSshDeepLink = useEffectEvent((payload: DeepLinkPayload) => {
     if (shouldDeferExternalActionWhileAppLocked({ locked: appLockLocked })) {
       pendingDeepLinksWhileLockedRef.current.push({ kind: 'ssh', payload: payload || {} });
       return;
@@ -1542,9 +1566,10 @@ export function AppSideEffects() {
     });
   }, [isPeerSessionWindow]);
 
-  const _processTelnetDeepLink = useEffectEvent((payload: { url?: string }) => {
+  const _processTelnetDeepLink = useEffectEvent((payload: DeepLinkPayload) => {
     startupLaunchIntentReceivedRef.current = true;
     const rawUrl = payload?.url || '';
+    const tabName = payload?.tabName?.trim();
     const target = parseTelnetDeepLink(rawUrl);
     if (!target) {
       toast.warning(t('deepLink.telnet.invalid'));
@@ -1565,10 +1590,10 @@ export function AppSideEffects() {
           now: Date.now(),
         });
         setEphemeralHosts((prev) => [...prev, ephemeralHost]);
-        handleConnectToHost(ephemeralHost);
+        handleConnectToHostWithTabName(ephemeralHost, tabName);
         return;
       }
-      handleConnectToHost(buildTelnetDeepLinkConnectionHost(matchedEffectiveHost));
+      handleConnectToHostWithTabName(buildTelnetDeepLinkConnectionHost(matchedEffectiveHost), tabName);
       return;
     }
 
@@ -1577,10 +1602,10 @@ export function AppSideEffects() {
       now: Date.now(),
     });
     setEphemeralHosts((prev) => [...prev, ephemeralHost]);
-    handleConnectToHost(ephemeralHost);
+    handleConnectToHostWithTabName(ephemeralHost, tabName);
   });
 
-  const _handleTelnetDeepLink = useEffectEvent((payload: { url?: string }) => {
+  const _handleTelnetDeepLink = useEffectEvent((payload: DeepLinkPayload) => {
     if (shouldDeferExternalActionWhileAppLocked({ locked: appLockLocked })) {
       pendingDeepLinksWhileLockedRef.current.push({ kind: 'telnet', payload: payload || {} });
       return;
@@ -1761,6 +1786,14 @@ export function AppSideEffects() {
     updateHosts(vaultHosts);
   }, [ephemeralHostIds, updateHosts]);
 
+  const updateTerminalHostDistro = useCallback((hostId: string, distro: string) => {
+    if (ephemeralHostIds.has(hostId)) {
+      setEphemeralHosts((previous) => applyEphemeralHostDistroUpdate(previous, hostId, distro));
+      return;
+    }
+    updateHostDistro(hostId, distro);
+  }, [ephemeralHostIds, updateHostDistro]);
+
   // Wrapper to create serial session with logging
   const handleConnectSerial = useCallback((config: SerialConfig, options?: { charset?: string }) => {
     const { username, hostname } = systemInfoRef.current;
@@ -1897,6 +1930,7 @@ export function AppSideEffects() {
       handleTerminalDataCapture,
       handleUpdateHostFromTerminal,
       updateTerminalHosts,
+      updateTerminalHostDistro,
       runSnippet: handleRunSnippet,
       splitSessionWithCurrentShell,
       toggleScriptsSidePanelRef,
@@ -1974,6 +2008,7 @@ export function AppSideEffects() {
     handleTerminalDataCapture,
     handleUpdateHostFromTerminal,
     updateTerminalHosts,
+    updateTerminalHostDistro,
     handleRunSnippet,
     splitSessionWithCurrentShell,
     handleEndSessionDrag,

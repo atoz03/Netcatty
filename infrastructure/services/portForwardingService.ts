@@ -12,6 +12,7 @@ import {
   selectStoppablePortForwardingRules,
 } from '../../domain/portForwardingBulkActions';
 import { isEncryptedCredentialPlaceholder, sanitizeCredentialValue } from '../../domain/credentials';
+import { isPortForwardingAutoReconnectEnabled } from '../../domain/portForwardingReconnect';
 import { resolveBridgeKeyAuth, resolveBridgeSshAgentAuth, resolveHostAuth } from '../../domain/sshAuth';
 import { resolveHostKeepalive } from '../../domain/host';
 import { resolveHostSshConnectionTimeouts } from '../../domain/sshConnectionTimeouts';
@@ -82,14 +83,17 @@ let reconnectCallback: ((
   ruleId: string,
   onStatusChange: (status: PortForwardingRule['status'], error?: string) => void
 ) => Promise<{ success: boolean; error?: string }>) | null = null;
+let shouldReconnectRule: ((ruleId: string) => boolean) | undefined;
 
 /**
  * Set the reconnect callback (called by state hook to enable auto-reconnect)
  */
 export const setReconnectCallback = (
-  callback: typeof reconnectCallback
+  callback: typeof reconnectCallback,
+  shouldReconnect?: (ruleId: string) => boolean,
 ): void => {
   reconnectCallback = callback;
+  shouldReconnectRule = callback ? shouldReconnect : undefined;
 };
 
 /**
@@ -212,16 +216,31 @@ const scheduleReconnectIfNeeded = (
   enableReconnect: boolean,
   onStatusChange: (status: PortForwardingRule['status'], error?: string) => void,
 ): boolean => {
-  if (!enableReconnect || !reconnectCallback) {
+  // The rule's autoReconnect setting may change while the tunnel is running
+  // (e.g. toggled in the edit panel).  The start-time flag alone would keep
+  // rejecting reconnects after such a change, so also consult the dynamic
+  // rule gate, which reads fresh rule state.
+  const effectiveEnableReconnect =
+    enableReconnect || shouldReconnectRule?.(ruleId) === true;
+  if (
+    !effectiveEnableReconnect ||
+    !reconnectCallback ||
+    shouldReconnectRule?.(ruleId) === false
+  ) {
     return false;
   }
   if (rulesPendingCleanup.has(ruleId)) {
-    deferredReconnects.set(ruleId, { enableReconnect, onStatusChange });
+    deferredReconnects.set(ruleId, { enableReconnect: effectiveEnableReconnect, onStatusChange });
     return true;
   }
 
   const currentConn = activeConnections.get(ruleId);
   if (currentConn?.reconnectSuppressed) return false;
+  if (currentConn?.reconnectTimerCallback) {
+    currentConn.status = 'connecting';
+    currentConn.error = `Reconnecting (${currentConn.reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
+    return true;
+  }
   const attempts = (currentConn?.reconnectAttempts ?? 0) + 1;
 
   if (attempts <= MAX_RECONNECT_ATTEMPTS) {
@@ -242,6 +261,13 @@ const scheduleReconnectIfNeeded = (
       currentConn.reconnectTimeoutId = undefined;
       currentConn.reconnectDueAt = undefined;
       currentConn.reconnectTimerCallback = undefined;
+      if (activeConnections.get(ruleId) !== currentConn) return;
+      if (shouldReconnectRule?.(ruleId) === false) {
+        currentConn.unsubscribe?.();
+        activeConnections.delete(ruleId);
+        onStatusChange('inactive');
+        return;
+      }
       if (reconnectCallback) {
         currentConn.reconnectStartAuthorized = true;
         reconnectCallback(ruleId, onStatusChange);
@@ -1018,6 +1044,22 @@ export const startPortForward = async (
           conn.locallyInitiated = false;
           return;
         }
+        if (
+          !manualStopsInProgress.has(rule.id)
+          && !rulesPendingCleanup.has(rule.id)
+          && !exhaustedReconnectRules.has(rule.id)
+        ) {
+          const reconnectScheduled = scheduleReconnectIfNeeded(
+            rule.id,
+            enableReconnect,
+            onStatusChange,
+          );
+          if (reconnectScheduled) {
+            conn?.unsubscribe?.();
+            if (conn) conn.unsubscribe = undefined;
+            return;
+          }
+        }
         conn?.unsubscribe?.();
         clearReconnectTimer(rule.id);
         activeConnections.delete(rule.id);
@@ -1361,7 +1403,7 @@ export const startAllPortForwards = async (
       keys,
       identities,
       (status, error) => onStatusChange(rule.id, status, error),
-      Boolean(rule.autoStart),
+      isPortForwardingAutoReconnectEnabled(rule),
       terminalSettings,
       knownHosts,
     );

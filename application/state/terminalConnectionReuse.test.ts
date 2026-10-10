@@ -7,6 +7,7 @@ import {
   createCopiedTerminalSessionClone,
   createSplitTerminalSessionClone,
   isTerminalSessionEligibleForSftpReuse,
+  resolveSftpReuseSourceSessionId,
 } from "./terminalConnectionReuse";
 
 const session = (overrides: Partial<TerminalSession> = {}): TerminalSession => ({
@@ -31,6 +32,18 @@ test("SSH sessions stay SFTP-linkable while reconnecting", () => {
   assert.equal(isTerminalSessionEligibleForSftpReuse(session({ protocol: "local" })), false);
   assert.equal(isTerminalSessionEligibleForSftpReuse(session({ moshEnabled: true })), false);
   assert.equal(isTerminalSessionEligibleForSftpReuse(session({ etEnabled: true })), false);
+});
+
+test("Mosh and ET drops keep their origin but do not request SSH session reuse", () => {
+  assert.equal(resolveSftpReuseSourceSessionId(session(), "session-1"), "session-1");
+  assert.equal(
+    resolveSftpReuseSourceSessionId(session({ moshEnabled: true }), "session-1"),
+    undefined,
+  );
+  assert.equal(
+    resolveSftpReuseSourceSessionId(session({ etEnabled: true }), "session-1"),
+    undefined,
+  );
 });
 
 test("non-SSH or unavailable sessions do not reuse a connection", () => {

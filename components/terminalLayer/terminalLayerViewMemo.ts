@@ -213,6 +213,7 @@ const SIDE_PANEL_LIVE_CTX_KEYS = [
   'sftpActiveHost',
   'activeTerminalSessionIdForSftp',
   'activeTerminalCwd',
+  'activeTerminalCwdTrusted',
   'activeWorkspace',
   'focusedFontFamilyId',
   'focusedFontFamilyOverridden',
@@ -238,7 +239,9 @@ const SIDE_PANEL_STABLE_CTX_KEYS = [
   'HistorySidePanel',
   'History',
   'sidePanelWidth',
+  'sidePanelHeight',
   'sidePanelPosition',
+  'isComposeBarOpen',
   'sidePanelOpenTabs',
   'sidePanelLayouts',
   'sftpHostForTab',
@@ -303,6 +306,8 @@ const SIDE_PANEL_STABLE_CTX_KEYS = [
   'handlePendingTerminalSelectionConsumed',
   'setSidePanelWidth',
   'persistSidePanelWidth',
+  'setSidePanelHeight',
+  'persistSidePanelHeight',
   'handleToggleSftpFromBar',
   'handleOpenScripts',
   'handleOpenTheme',
@@ -430,6 +435,9 @@ const WORKSPACE_CTX_KEYS = [
   'onOpenManagedTerminal',
   'onStartSessionDrag',
   'onEndSessionDrag',
+  'isGlobalBroadcastEnabled',
+  'canUseGlobalBroadcast',
+  'onToggleGlobalBroadcast',
 ] as const;
 
 export function terminalLayerSidePanelStableCtxEqual(prev: Ctx, next: Ctx): boolean {

@@ -1,12 +1,12 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { memo, useCallback, useSyncExternalStore } from 'react';
+import React, { memo, useCallback, useRef, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
 
 import { activeTabStore } from '../../application/state/activeTabStore';
 import { getSftpCurrentPathMemoryKey } from '../../application/state/sftp/sftpReopenLocation';
 import {
   getSidePanelLiveSnapshot,
-  getSidePanelLiveSnapshotForTab,
+  SIDE_PANEL_INACTIVE_LIVE_SNAPSHOT,
   subscribeSidePanelLiveSnapshot,
 } from '../../application/state/sidePanelLiveStore';
 import {
@@ -27,7 +27,7 @@ import { shouldKeepTerminalBackgroundWorkActive } from '../../domain/terminalHib
 import { resolveTerminalFontFamilyId } from '../../infrastructure/config/fonts';
 import type { Host, TerminalSession, Workspace } from '../../types';
 import { SystemManagerSidePanel } from '../systemManager/SystemManagerSidePanel';
-import { resolveSftpFollowTerminalCwdTargetHost } from '../sftp/sftpFollowTerminalCwd';
+import { resolveSftpFollowTerminalCwdTargetHost } from '../../domain/sftpFollowTerminalCwd';
 import { AI_PANEL_FORCE_HIDE_SHELL } from '../ai/aiPanelDiagnostics';
 import type { SidePanelTab } from './TerminalLayerSupport';
 import {
@@ -50,18 +50,23 @@ const subscribeShellHistoryNoop = () => () => {};
 const getEmptyShellHistorySnapshot = () => EMPTY_SHELL_HISTORY;
 
 function useSidePanelLiveSnapshotForTab(tabId: string, subscribe: boolean) {
-  // Scoped to `tabId`: the store is written from a layout effect, so between the
-  // active-tab change and that write a slot that has already flipped to visible
-  // would otherwise read the tab it replaced.
-  const getSnapshot = useCallback(
-    () => getSidePanelLiveSnapshotForTab(subscribe, tabId),
-    [subscribe, tabId],
+  const retainedSnapshot = useRef({ tabId, snapshot: SIDE_PANEL_INACTIVE_LIVE_SNAPSHOT });
+  const getSnapshot = useCallback(() => {
+    if (!subscribe) return SIDE_PANEL_INACTIVE_LIVE_SNAPSHOT;
+    const snapshot = getSidePanelLiveSnapshot(true);
+    const snapshotTabId = snapshot.activeWorkspace?.id ?? snapshot.focusedSessionId;
+    // Tab visibility changes before the live publisher commits its next snapshot.
+    // Keep this panel's last context until its own terminal/workspace catches up.
+    if (snapshotTabId === tabId) retainedSnapshot.current = { tabId, snapshot };
+    return retainedSnapshot.current.tabId === tabId
+      ? retainedSnapshot.current.snapshot
+      : SIDE_PANEL_INACTIVE_LIVE_SNAPSHOT;
+  }, [subscribe, tabId]);
+  return useSyncExternalStore(
+    (listener) => subscribeSidePanelLiveSnapshot(subscribe, listener),
+    getSnapshot,
+    getSnapshot,
   );
-  const subscribeToStore = useCallback(
-    (listener: () => void) => subscribeSidePanelLiveSnapshot(subscribe, listener),
-    [subscribe],
-  );
-  return useSyncExternalStore(subscribeToStore, getSnapshot, getSnapshot);
 }
 
 function SidePanelSftpSlotInner({
@@ -122,6 +127,11 @@ function SidePanelSftpSlotInner({
   const panelActiveHost = liveBound
     ? (live.sftpActiveHost ?? storedSftpHost)
     : storedSftpHost;
+  const panelActiveSessionId = liveBound ? live.activeTerminalSessionIdForSftp : null;
+  const panelFocusedSessionId = liveBound ? live.focusedSessionId : null;
+  // Only the head of the per-tab pending upload queue is surfaced at a time;
+  // the panel advances the queue by reporting each request as handled.
+  const pendingUpload = sftpPendingUploadsForTab.get(tabId)?.[0] ?? null;
 
   const handleFollowTerminalCwdChange = useCallback((enabled: boolean, visibleHost?: Host | null) => {
     const isActive = activeTabStore.getActiveTabId() === tabId;
@@ -165,13 +175,13 @@ function SidePanelSftpSlotInner({
       handleSftpCurrentPathChange(
         getSftpCurrentPathMemoryKey({
           tabId,
-          activeTerminalSessionIdForSftp: live.activeTerminalSessionIdForSftp,
-          focusedSessionId: live.focusedSessionId,
+          activeTerminalSessionIdForSftp: panelActiveSessionId,
+          focusedSessionId: panelFocusedSessionId,
         }),
         location,
       );
     },
-    [handleSftpCurrentPathChange, live.activeTerminalSessionIdForSftp, live.focusedSessionId, tabId],
+    [handleSftpCurrentPathChange, panelActiveSessionId, panelFocusedSessionId, tabId],
   );
 
   const handleActiveTransfersChange = useCallback(
@@ -192,6 +202,7 @@ function SidePanelSftpSlotInner({
     <div className={sidePanelHiddenPanelClassName(!isVisible)}>
       <SftpSidePanel
         transferOwnerId={`terminal:${tabId}`}
+        ownerTabId={tabId}
         hosts={effectiveHosts}
         writableHosts={hosts}
         sessions={sessions}
@@ -202,8 +213,8 @@ function SidePanelSftpSlotInner({
         onAddKnownHost={handleAddKnownHost}
         sftpDefaultViewMode={sftpDefaultViewMode}
         activeHost={panelActiveHost}
-        activeSessionId={liveBound ? live.activeTerminalSessionIdForSftp : null}
-        focusedSessionId={liveBound ? live.focusedSessionId : null}
+        activeSessionId={panelActiveSessionId}
+        focusedSessionId={panelFocusedSessionId}
         initialLocation={liveBound ? (sftpInitialLocationForTab.get(tabId) ?? null) : null}
         onInitialLocationApplied={handleInitialLocationApplied}
         onCurrentPathChange={handleCurrentPathChange}
@@ -216,7 +227,7 @@ function SidePanelSftpSlotInner({
         isVisible={liveBound}
         ownerPanelOpen={ownerPanelOpen}
         renderOverlays={isVisible}
-        pendingUpload={sftpPendingUploadsForTab.get(tabId) ?? null}
+        pendingUpload={pendingUpload}
         onPendingUploadHandled={handlePendingUploadHandledForTab}
         sftpDoubleClickBehavior={sftpDoubleClickBehavior}
         sftpAutoSync={isVisible ? sftpAutoSync : false}
@@ -228,6 +239,7 @@ function SidePanelSftpSlotInner({
         setEditorWordWrap={setEditorWordWrap}
         onGetTerminalCwd={getTerminalCwd}
         activeTerminalCwd={isVisible ? live.activeTerminalCwd : null}
+        activeTerminalCwdTrusted={isVisible ? live.activeTerminalCwdTrusted : false}
         sftpFollowTerminalCwd={sftpFollowTerminalCwd}
         onSftpFollowTerminalCwdChange={handleFollowTerminalCwdChange}
         onRequestTerminalFocus={refocusActiveTerminalSession}

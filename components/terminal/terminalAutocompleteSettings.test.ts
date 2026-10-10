@@ -69,6 +69,25 @@ test("keeps network-device autocomplete popup but disables live preview (#1193)"
   );
 });
 
+test("single-channel bastions disable live preview and line replacement", () => {
+  const settings = resolveTerminalAutocompleteSettings({
+    protocol: "ssh",
+    restrictPtyRewrites: true,
+    terminalSettings: {
+      autocompleteEnabled: true,
+    },
+  });
+  assert.equal(settings?.livePreview, false);
+  assert.equal(settings?.allowLineReplacement, false);
+  assert.deepEqual(
+    resolveTerminalAutocompleteSettings({
+      protocol: "ssh",
+      restrictPtyRewrites: true,
+    }),
+    { livePreview: false, allowLineReplacement: false },
+  );
+});
+
 test("keeps serial autocomplete available but disables input-line preview and replacement", () => {
   assert.deepEqual(
     resolveTerminalAutocompleteSettings({
@@ -125,4 +144,13 @@ test("falls back to raised maxSuggestions default when unset", () => {
     })?.maxSuggestions,
     50,
   );
+});
+
+test('unknown systems do not rewrite the command line while retaining suggestions', () => {
+  for (const terminalSettings of [undefined, { autocompleteEnabled: true }]) {
+    const settings = resolveTerminalAutocompleteSettings({protocol:'ssh', systemUnknown:true, terminalSettings});
+    assert.equal(settings?.enabled, true);
+    assert.equal(settings?.livePreview, false);
+    assert.equal(settings?.allowLineReplacement, false);
+  }
 });

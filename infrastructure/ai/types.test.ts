@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   CLAUDE_MODEL_PRESETS,
   CODEBUDDY_MODEL_PRESETS,
+  CODEBUDDY_PERSIST_SESSION_MIN_CLI_VERSION,
   CODEX_GPT_5_6_MIN_CLI_VERSION,
   CODEX_MODEL_PRESETS,
   CURSOR_MODEL_PRESETS,
@@ -14,6 +15,7 @@ import {
   resolveAgentCliVersion,
   resolveAgentModelSelection,
   resolveDiscoveredAgentCliVersion,
+  isCodebuddySessionPersistenceSupported,
 } from './types';
 
 test('Claude presets advertise effort levels separately from the model id', () => {
@@ -44,8 +46,16 @@ test('getAgentModelPresets returns Cursor presets for cursor-agent paths and sdk
   );
   assert.deepEqual(
     getAgentModelPresets(undefined, 'codebuddy')[0]?.thinkingLevels,
-    ['low', 'medium', 'high', 'xhigh'],
+    ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
   );
+});
+
+test('CodeBuddy session persistence is gated by CLI version', () => {
+  assert.equal(CODEBUDDY_PERSIST_SESSION_MIN_CLI_VERSION, '2.125.1');
+  assert.equal(isCodebuddySessionPersistenceSupported('CodeBuddy 2.125.0'), false);
+  assert.equal(isCodebuddySessionPersistenceSupported('CodeBuddy 2.125.1'), true);
+  assert.equal(isCodebuddySessionPersistenceSupported('2.126.0'), true);
+  assert.equal(isCodebuddySessionPersistenceSupported(undefined), false);
 });
 
 test('getAgentModelPresets keeps Codex presets separate from CodeBuddy presets', () => {
@@ -58,16 +68,17 @@ test('getAgentModelPresets returns curated Grok fallback when runtime catalog is
   assert.deepEqual(getAgentModelPresets(undefined, 'grok'), GROK_MODEL_PRESETS);
   assert.deepEqual(getAgentModelPresets('/usr/local/bin/grok'), GROK_MODEL_PRESETS);
   assert.deepEqual(getAgentModelPresets('C:\\\\Tools\\\\grok.exe', 'grok'), GROK_MODEL_PRESETS);
-  assert.equal(getAgentModelPresets(undefined, 'grok')[0]?.id, 'grok-4.5');
+  assert.equal(getAgentModelPresets(undefined, 'grok')[0]?.id, 'grok-4.7');
   assert.deepEqual(getAgentModelPresets(undefined, 'grok')[0]?.thinkingLevels, [
+    'xhigh',
     'high',
     'medium',
     'low',
   ]);
   assert.equal(getAgentModelPresets(undefined, 'grok')[0]?.defaultThinkingLevel, 'high');
   assert.deepEqual(getAgentModelPresets(undefined, 'grok')[1], {
-    id: 'grok-4.6',
-    name: 'Grok 4.6',
+    id: 'grok-4.7-build-fast',
+    name: 'Grok 4.7 Build Fast',
     thinkingLevels: ['xhigh', 'high', 'medium', 'low'],
     defaultThinkingLevel: 'high',
   });

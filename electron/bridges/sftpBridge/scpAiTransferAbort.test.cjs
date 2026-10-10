@@ -35,9 +35,10 @@ function createMockStream() {
 }
 
 /**
- * Hook the fixed step sequence promoteLocalTransfer publishes through:
+ * Hook the fixed step sequence promoteLocalTransfer stages through:
  *   1. staged -> .ready    2. target -> .backup
- *   3. .ready -> target    4. .backup -> target (rollback)
+ * Publication and rollback after that are hard links (fs.promises.link), which
+ * tests hook separately by path.
  *
  * Step 1 is a rename, but falls back to copyFile when the staging directory
  * and the download target sit on different mounts (EXDEV). Hooking only
@@ -768,14 +769,11 @@ describe("AI/MCP SCP transfer abort on shipped download/upload entry points", ()
     const original = Buffer.from("existing-local-content");
     fs.writeFileSync(localPath, original);
 
-    const originalRename = fs.promises.rename;
-    let renameCalls = 0;
-    fs.promises.rename = async (...args) => {
-      await originalRename(...args);
-      renameCalls += 1;
-      if (renameCalls === 2) controller.abort();
-    };
-    t.after(() => { fs.promises.rename = originalRename; });
+    hookPromotionSteps(t, {
+      after(step) {
+        if (step === 2) controller.abort();
+      },
+    });
 
     await assert.rejects(
       () => sftpBridge.downloadSftpToLocal(null, {
@@ -786,11 +784,10 @@ describe("AI/MCP SCP transfer abort on shipped download/upload entry points", ()
       }),
       /cancel|abort/i,
     );
-    assert.equal(renameCalls >= 3, true, "the backup should be restored after cancellation");
     assert.deepEqual(fs.readFileSync(localPath), original);
   });
 
-  it("downloadSftpToLocal rolls back a published file when cancellation wins the final rename", async (t) => {
+  it("downloadSftpToLocal keeps the committed download when cancellation arrives after publication", async (t) => {
     const controller = new AbortController();
     const downloaded = Buffer.from("new-downloaded-content");
     const backend = {
@@ -809,23 +806,27 @@ describe("AI/MCP SCP transfer abort on shipped download/upload entry points", ()
     const original = Buffer.from("existing-local-content");
     fs.writeFileSync(localPath, original);
 
-    const promotion = hookPromotionSteps(t, {
-      after(step) {
-        if (step === 3) controller.abort();
-      },
-    });
+    const originalLink = fs.promises.link;
+    let published = false;
+    fs.promises.link = async (...args) => {
+      await originalLink(...args);
+      if (path.basename(args[1]) === path.basename(localPath) && String(args[0]).endsWith(".ready")) {
+        published = true;
+        controller.abort();
+      }
+    };
+    t.after(() => { fs.promises.link = originalLink; });
 
-    await assert.rejects(
+    await assert.doesNotReject(
       () => sftpBridge.downloadSftpToLocal(null, {
         sftpId: "scp-final-rename-abort",
         remotePath: "/remote/file.bin",
         localPath,
         abortSignal: controller.signal,
       }),
-      /cancel|abort/i,
     );
-    assert.equal(promotion.step >= 4, true, "the published file should be rolled back to the backup");
-    assert.deepEqual(fs.readFileSync(localPath), original);
+    assert.equal(published, true);
+    assert.deepEqual(fs.readFileSync(localPath), downloaded);
   });
 
   it("downloadSftpToLocal reports and preserves the backup when cancellation rollback fails", async (t) => {
@@ -848,20 +849,20 @@ describe("AI/MCP SCP transfer abort on shipped download/upload entry points", ()
     fs.writeFileSync(localPath, original);
 
     const originalRename = fs.promises.rename;
-    let renameCalls = 0;
+    const originalLink = fs.promises.link;
     let backupPath = null;
     fs.promises.rename = async (...args) => {
-      renameCalls += 1;
-      if (renameCalls === 4) {
-        const error = new Error("injected backup restore failure");
-        error.code = "EIO";
-        throw error;
-      }
       await originalRename(...args);
-      if (renameCalls === 2) backupPath = args[1];
-      if (renameCalls === 3) controller.abort();
+      if (path.basename(args[0]) === path.basename(localPath) && String(args[1]).endsWith(".backup")) {
+        backupPath = args[1];
+        controller.abort();
+      }
     };
-    t.after(() => { fs.promises.rename = originalRename; });
+    fs.promises.link = async (...args) => {
+      if (String(args[0]).endsWith(".backup")) throw Object.assign(new Error("injected restore failure"), { code: "EIO" });
+      return originalLink(...args);
+    };
+    t.after(() => { fs.promises.rename = originalRename; fs.promises.link = originalLink; });
 
     await assert.rejects(
       () => sftpBridge.downloadSftpToLocal(null, {
@@ -871,7 +872,7 @@ describe("AI/MCP SCP transfer abort on shipped download/upload entry points", ()
         abortSignal: controller.signal,
       }),
       (error) => {
-        assert.match(error.message, /Could not restore the original file/);
+        assert.match(error.message, /Recovery files preserved/);
         assert.match(error.message, /Backup:/);
         assert.doesNotMatch(error.message, /^Transfer cancelled$/);
         return true;
@@ -902,12 +903,6 @@ describe("AI/MCP SCP transfer abort on shipped download/upload entry points", ()
     let readyPath = null;
     let backupPath = null;
     hookPromotionSteps(t, {
-      before(step) {
-        if (step !== 3) return;
-        const error = new Error("injected backup restore failure");
-        error.code = "EIO";
-        throw error;
-      },
       after(step, args) {
         if (step === 1) readyPath = args[1];
         if (step === 2) {
@@ -916,6 +911,12 @@ describe("AI/MCP SCP transfer abort on shipped download/upload entry points", ()
         }
       },
     });
+    const originalLink = fs.promises.link;
+    fs.promises.link = async (...args) => {
+      if (String(args[0]).endsWith(".backup")) throw Object.assign(new Error("injected restore failure"), { code: "EIO" });
+      return originalLink(...args);
+    };
+    t.after(() => { fs.promises.link = originalLink; });
 
     await assert.rejects(
       () => sftpBridge.downloadSftpToLocal(null, {
@@ -925,7 +926,7 @@ describe("AI/MCP SCP transfer abort on shipped download/upload entry points", ()
         abortSignal: controller.signal,
       }),
       (error) => {
-        assert.match(error.message, /Could not restore the original file/);
+        assert.match(error.message, /Recovery files preserved/);
         assert.match(error.message, new RegExp(readyPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
         assert.match(error.message, new RegExp(backupPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
         return true;

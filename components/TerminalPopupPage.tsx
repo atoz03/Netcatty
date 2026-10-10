@@ -1,6 +1,8 @@
+import { setupVaultAgentBridge } from "../infrastructure/ai/vaultAgentBridgeClient";
 import { Copy, Minus, Square, Unplug, X } from 'lucide-react';
 import React, { lazy, Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 import { I18nProvider, useI18n } from '../application/i18n/I18nProvider';
+import { MultilinePasteConfirmHost } from './terminal/MultilinePasteConfirmDialog';
 import { useTerminalPopupWindow } from '../application/state/useTerminalPopupWindow';
 import { useVaultState } from '../application/state/useVaultState';
 import { useWindowControls } from '../application/state/useWindowControls';
@@ -537,6 +539,8 @@ export default function TerminalPopupPage({
   settings: SettingsState;
   allowTerminalStart?: boolean;
 }) {
+  useEffect(() => setupVaultAgentBridge(), []);
+
   return (
     <I18nProvider locale={settings.uiLanguage}>
       <TerminalPopupPageInner
@@ -544,6 +548,7 @@ export default function TerminalPopupPage({
         allowTerminalStart={allowTerminalStart}
       />
       <PluginAuthenticationHost />
+      <MultilinePasteConfirmHost />
     </I18nProvider>
   );
 }

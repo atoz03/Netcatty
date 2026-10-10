@@ -11,7 +11,7 @@ import {
   appendHostFromWorkspaceDrop,
   resolveFocusSidebarDragKind,
 } from '../domain/focusSidebarHostDrop';
-import type { DynamicTabTitleMode, KeyBinding } from '../domain/models';
+import type { DynamicTabTitleMode, KeyBinding, TerminalTabDoubleClickBehavior } from '../domain/models';
 
 import { getTopTabInsertionTarget, getWorkspaceSessionDragId, hasWorkspaceSessionDrag } from '../application/state/terminalDragData';
 import {
@@ -168,10 +168,13 @@ interface TopTabsProps {
   showHostTreeSidebar: boolean;
   switchTabKeyBinding: Pick<KeyBinding, 'mac' | 'pc'> | null;
   dynamicTabTitleMode?: DynamicTabTitleMode;
+  tabDoubleClickBehavior: TerminalTabDoubleClickBehavior;
   editorTabs: readonly EditorTabChrome[];
   pluginViewTabs: readonly PluginViewTab[];
   onClosePluginViewTab: (tabId: string) => void;
   onRequestCloseEditorTab: (editorTabId: string) => void;
+  onPopOutEditorTab?: (editorTabId: string) => void;
+  onFocusEditorWindowTab?: (editorTabId: string) => void;
   hostById: Map<string, Host>;
 }
 
@@ -217,10 +220,13 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
   showHostTreeSidebar,
   switchTabKeyBinding,
   dynamicTabTitleMode,
+  tabDoubleClickBehavior,
   editorTabs,
   pluginViewTabs,
   onClosePluginViewTab,
   onRequestCloseEditorTab,
+  onPopOutEditorTab,
+  onFocusEditorWindowTab,
   hostById,
 }) => {
   const { t } = useI18n();
@@ -769,6 +775,7 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
     const anchorIdx = orderedTabs.indexOf(anchorId);
     const othersIds = orderedTabs.filter((id) => id !== anchorId);
     const rightIds = anchorIdx >= 0 ? orderedTabs.slice(anchorIdx + 1) : [];
+    const leftIds = anchorIdx > 0 ? orderedTabs.slice(0, anchorIdx) : [];
     return (
       <>
         <ContextMenuSeparator />
@@ -777,6 +784,12 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
           onClick={() => onCloseTabsBatch(othersIds)}
         >
           {t('tabs.closeOthers')}
+        </ContextMenuItem>
+        <ContextMenuItem
+          disabled={leftIds.length === 0}
+          onClick={() => onCloseTabsBatch(leftIds)}
+        >
+          {t('tabs.closeToLeft')}
         </ContextMenuItem>
         <ContextMenuItem
           disabled={rightIds.length === 0}
@@ -821,6 +834,8 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
             host={host}
             suffix={suffix}
             onRequestCloseEditorTab={onRequestCloseEditorTab}
+            onPopOutEditorTab={onPopOutEditorTab}
+            onFocusEditorWindowTab={onFocusEditorWindowTab}
             isBeingDragged={isBeingDragged}
             isDraggingForReorder={isDraggingForReorder}
             shiftStyle={shiftStyle}
@@ -892,6 +907,7 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
             onEditHost={onEditHost}
             renderBulkCloseItems={renderBulkCloseItems}
             dynamicTabTitleMode={dynamicTabTitleMode}
+            tabDoubleClickBehavior={tabDoubleClickBehavior}
             t={t}
             tabAnimationClass={getTabAnimationClass(session.id)}
             shortcutNumber={tabShortcutNumbers?.get(session.id)}
@@ -1178,9 +1194,9 @@ const TopTabsInner: React.FC<TopTabsProps> = ({
           </div>
         )}
 
-        {/* Fixed right controls — utility icons + window controls share one h-7 row */}
+        {/* Right controls share the tab row. */}
         <div
-          className="flex-shrink-0 flex items-center gap-0.5 app-drag self-end h-7 overflow-visible"
+          className="flex-shrink-0 flex items-center gap-0.5 app-drag h-7 overflow-visible self-end"
           style={dragRegionStyle}
           data-section="top-tabs-toolbar-actions"
         >
@@ -1273,6 +1289,8 @@ export const topTabsAreEqual = (prev: TopTabsProps, next: TopTabsProps): boolean
     // Editor open/close/fileName chrome only (presence list). Dirty dots use store.
     prev.editorTabs === next.editorTabs &&
     prev.onRequestCloseEditorTab === next.onRequestCloseEditorTab &&
+    prev.onPopOutEditorTab === next.onPopOutEditorTab &&
+    prev.onFocusEditorWindowTab === next.onFocusEditorWindowTab &&
     prev.pluginViewTabs === next.pluginViewTabs &&
     prev.onClosePluginViewTab === next.onClosePluginViewTab &&
     prev.draggingSessionId === next.draggingSessionId &&
@@ -1298,6 +1316,7 @@ export const topTabsAreEqual = (prev: TopTabsProps, next: TopTabsProps): boolean
     prev.showHostTreeSidebar === next.showHostTreeSidebar &&
     prev.switchTabKeyBinding === next.switchTabKeyBinding &&
     prev.dynamicTabTitleMode === next.dynamicTabTitleMode &&
+    prev.tabDoubleClickBehavior === next.tabDoubleClickBehavior &&
     prev.hostById === next.hostById
   );
 };

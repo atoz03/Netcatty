@@ -14,6 +14,16 @@ const host = (overrides: Partial<Host> = {}): Host => ({
   ...overrides,
 });
 
+test("applyGroupDefaults ignores a legacy single-channel group flag", () => {
+  const result = applyGroupDefaults(
+    host(),
+    { deviceType: "network", singleChannelSsh: true } as Partial<GroupConfig>,
+  );
+
+  assert.equal(result.deviceType, "network");
+  assert.equal("singleChannelSsh" in result, false);
+});
+
 test("applyGroupDefaults lets a host proxy profile override a group custom proxy", () => {
   const groupDefaults: Partial<GroupConfig> = {
     proxyConfig: { type: "http", host: "group-proxy.example.com", port: 3128 },
@@ -513,6 +523,19 @@ test("sanitizeGroupConfig keeps a still-valid fontFamily untouched", () => {
   assert.equal(after.fontFamilyOverride, true);
 });
 
+test("sanitizeGroupConfig drops a legacy single-channel SSH flag", () => {
+  const source = {
+    path: "team",
+    username: "alice",
+    singleChannelSsh: true,
+  } as Parameters<typeof sanitizeGroupConfig>[0];
+  const after = sanitizeGroupConfig(source);
+
+  assert.equal("singleChannelSsh" in after, false);
+  assert.equal(after.username, "alice");
+  assert.equal("singleChannelSsh" in source, true);
+});
+
 test("sanitizeGroupConfig preserves legacy group passwords as password-only", () => {
   const after = sanitizeGroupConfig({
     path: "team",
@@ -580,4 +603,38 @@ test("applyGroupDefaults keeps host algorithm overrides instead of inheriting", 
     { algorithms: groupOverrides },
   );
   assert.deepEqual(result.algorithms, hostOverrides);
+});
+
+test("group notes survive sanitization but are not connection defaults", () => {
+  const config = { path: "Project", notes: "# VPN\nConnect before SSH.", username: "admin" };
+  assert.equal(sanitizeGroupConfig(config).notes, config.notes);
+  assert.equal(resolveGroupDefaults("Project", [config]).notes, undefined);
+  assert.equal(resolveGroupDefaults("Project/Servers", [config]).notes, undefined);
+});
+
+test("applyGroupDefaults does not inherit group SSH credentials into serial hosts", () => {
+  const groupDefaults: Partial<GroupConfig> = {
+    username: "group-ssh-user",
+    password: "group-ssh-password",
+    savePassword: true,
+    authMethod: "password",
+  };
+
+  const result = applyGroupDefaults(
+    host({ protocol: "serial", username: undefined, password: undefined }),
+    groupDefaults,
+  );
+
+  assert.equal(result.username, undefined);
+  assert.equal(result.password, undefined);
+});
+
+test("applyGroupDefaults still inherits non-credential defaults into serial hosts", () => {
+  const result = applyGroupDefaults(
+    host({ protocol: "serial", username: undefined, charset: undefined }),
+    { username: "group-ssh-user", charset: "UTF-8" },
+  );
+
+  assert.equal(result.username, undefined);
+  assert.equal(result.charset, "UTF-8");
 });

@@ -14,6 +14,7 @@ export type SidePanelLiveSnapshot = {
   sftpActiveHost: Host | null;
   activeTerminalSessionIdForSftp: string | null;
   activeTerminalCwd: string | null;
+  activeTerminalCwdTrusted: boolean;
   activeWorkspace: Workspace | undefined;
   activeTerminalSessionForSystem: TerminalSession | null;
   activeSystemSessionHost: Host | null;
@@ -36,6 +37,7 @@ const EMPTY_SNAPSHOT: SidePanelLiveSnapshot = {
   sftpActiveHost: null,
   activeTerminalSessionIdForSftp: null,
   activeTerminalCwd: null,
+  activeTerminalCwdTrusted: false,
   activeWorkspace: undefined,
   activeTerminalSessionForSystem: null,
   activeSystemSessionHost: null,
@@ -62,6 +64,7 @@ function liveSnapshotEqual(a: SidePanelLiveSnapshot, b: SidePanelLiveSnapshot): 
     && a.sftpActiveHost === b.sftpActiveHost
     && a.activeTerminalSessionIdForSftp === b.activeTerminalSessionIdForSftp
     && a.activeTerminalCwd === b.activeTerminalCwd
+    && a.activeTerminalCwdTrusted === b.activeTerminalCwdTrusted
     && a.activeWorkspace === b.activeWorkspace
     && a.activeTerminalSessionForSystem === b.activeTerminalSessionForSystem
     && a.activeSystemSessionHost === b.activeSystemSessionHost

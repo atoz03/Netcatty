@@ -124,6 +124,11 @@ const sanitizeSerialConfig = (value: unknown): SerialConfig | undefined => {
     ...(isOneOf(value.backspaceBehavior, ["default", "ctrl-h"] as const)
       ? { backspaceBehavior: value.backspaceBehavior }
       : {}),
+    // Missing value = legacy session saved before byte-oriented backspace
+    // existed; the runtime defaults to enabled (byte-oriented deletion).
+    ...(readBoolean(value, "byteOrientedBackspace") !== undefined
+      ? { byteOrientedBackspace: readBoolean(value, "byteOrientedBackspace") }
+      : {}),
   };
 };
 
@@ -392,6 +397,7 @@ const restoreWorkspace = (workspace: Workspace, root: WorkspaceNode, sessionIds:
     // Preserve explicit-title state across restore; the boolean guard keeps a
     // deliberate `autoTitle: false` (a user-named workspace) from being dropped.
     ...(typeof workspace.autoTitle === "boolean" ? { autoTitle: workspace.autoTitle } : {}),
+    ...(workspace.generatedTitle === true ? { generatedTitle: true } : {}),
   };
 };
 

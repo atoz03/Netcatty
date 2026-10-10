@@ -1,12 +1,26 @@
 import type { TerminalSession } from "../../domain/models";
 
+type SftpReuseCandidate = Pick<
+  TerminalSession,
+  "protocol" | "moshEnabled" | "etEnabled"
+>;
+
 /** SSH (non-mosh/et) sessions that can back SFTP once the transport is up. */
-export function isTerminalSessionEligibleForSftpReuse(session: TerminalSession): boolean {
+export function isTerminalSessionEligibleForSftpReuse(session: SftpReuseCandidate): boolean {
   return (
     (session.protocol === "ssh" || session.protocol === undefined)
     && !session.moshEnabled
     && !session.etEnabled
   );
+}
+
+export function resolveSftpReuseSourceSessionId(
+  session: SftpReuseCandidate,
+  sessionId: string,
+): string | undefined {
+  return isTerminalSessionEligibleForSftpReuse(session)
+    ? sessionId
+    : undefined;
 }
 
 export function canReuseTerminalConnection(session: TerminalSession): boolean {

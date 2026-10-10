@@ -284,6 +284,21 @@ export const matchesVaultNoteSearch = (
   ].some((value) => value.toLowerCase().includes(needle));
 };
 
+/** Build once per note-list snapshot, so typing does not lowercase full bodies. */
+export const createVaultNoteSearchIndex = (notes: readonly VaultNote[]) => {
+  const entries = notes.map((note) => ({
+    note,
+    fields: [note.title, note.content, note.group ?? "", ...(note.tags ?? [])]
+      .map((value) => value.toLowerCase()),
+  }));
+  return (query: string): VaultNote[] => {
+    const needle = query.trim().toLowerCase();
+    return entries
+      .filter((entry) => !needle || entry.fields.some((field) => field.includes(needle)))
+      .map((entry) => entry.note);
+  };
+};
+
 const isSanitizedRenderedLink = (value: string): boolean => {
   try {
     const url = new URL(value);
@@ -429,20 +444,22 @@ export const buildVaultNoteFromMarkdownImport = ({
 };
 
 export const importMarkdownPayloadsToVaultNotes = (
-  payloads: Array<{ fileName: string; content: string }>,
+  payloads: Array<{ fileName: string; content: string; title?: string }>,
   existingNotes: VaultNote[],
   targetGroup: string | null,
 ): { notes: VaultNote[]; importedCount: number } => {
   const imported: VaultNote[] = [];
   let orderBase = existingNotes;
 
-  for (const { fileName, content } of payloads) {
+  for (const { fileName, content, title } of payloads) {
     const note = buildVaultNoteFromMarkdownImport({
       fileName,
       content,
       group: targetGroup,
       order: getNextVaultOrder([...orderBase, ...imported]),
     });
+    const explicitTitle = sanitizeNoteTitle(title);
+    if (explicitTitle) note.title = explicitTitle;
     imported.push(note);
     orderBase = [...orderBase, note];
   }

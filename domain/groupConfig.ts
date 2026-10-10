@@ -15,9 +15,13 @@ export function sanitizeGroupConfig(config: GroupConfig): GroupConfig {
     && !migrated.identityFileId
     && !migrated.identityFilePaths?.length;
 
-  return hasLegacyPasswordOnlyCredentials
-    ? { ...migrated, authMethod: 'password' }
+  const next = hasLegacyPasswordOnlyCredentials
+    ? { ...migrated, authMethod: 'password' as const }
     : migrated;
+  if (!Object.prototype.hasOwnProperty.call(next, 'singleChannelSsh')) return next;
+  const cleaned = { ...next };
+  delete (cleaned as { singleChannelSsh?: unknown }).singleChannelSsh;
+  return cleaned;
 }
 
 export interface ApplyGroupDefaultsOptions {
@@ -116,7 +120,7 @@ export function resolveGroupDefaults(
         ) {
           continue;
         }
-        if (key !== 'path' && value !== undefined) {
+        if (key !== 'path' && key !== 'notes' && value !== undefined) {
           if (key === 'proxyProfileId') {
             delete merged.proxyConfig;
           }
@@ -206,9 +210,16 @@ export function applyGroupDefaults(
     host.telnetPassword !== undefined ||
     primaryTelnetHasManualSharedCredentials
   );
+  // Serial hosts: username/password on a serial host are the auto-login
+  // credentials (#3417) sent to whatever device answers on the port. Group
+  // defaults are SSH credentials — never inherit them into a serial host, or
+  // connecting a serial editor with blank credential fields would transmit the
+  // group's SSH password to anything that prints a login prompt.
+  const isSerialHost = host.protocol === 'serial';
 
   for (const key of INHERITABLE_KEYS) {
     if (shouldSkipGroupSshCredentialBundle && SSH_CREDENTIAL_KEYS.has(key)) continue;
+    if (isSerialHost && SSH_CREDENTIAL_KEYS.has(key)) continue;
     if (key === 'password' && effective.savePassword === false) continue;
     if (key === 'telnetIdentityId' && hostHasManualTelnetCredentials) continue;
     if (key === 'proxyProfileId') {

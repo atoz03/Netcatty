@@ -30,6 +30,7 @@ import {
   isPortForwardingRuleStartable,
   isPortForwardingRuleStoppable,
 } from "../domain/portForwardingBulkActions";
+import { isPortForwardingAutoReconnectEnabled } from "../domain/portForwardingReconnect";
 import { materializeHostProxyProfile } from "../domain/proxyProfiles";
 import { cn } from "../lib/utils";
 import SelectHostPanel from "./SelectHostPanel";
@@ -207,7 +208,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
               );
             }
           },
-          rule.autoStart, // Enable reconnect for auto-start rules
+          isPortForwardingAutoReconnectEnabled(rule), // Enable reconnect for auto-reconnect rules (auto-start implies reconnect)
           terminalSettings,
           knownHosts,
         );
@@ -516,6 +517,8 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
       remoteHost: newFormDraft.remoteHost,
       remotePort: newFormDraft.remotePort,
       hostId: newFormDraft.hostId,
+      autoStart: newFormDraft.autoStart ?? false,
+      autoReconnect: isPortForwardingAutoReconnectEnabled(newFormDraft),
     });
 
     setShowNewForm(false);
@@ -714,6 +717,8 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
         remoteHost: draftRule.remoteHost,
         remotePort: draftRule.remotePort,
         hostId: draftRule.hostId,
+        autoStart: draftRule.autoStart ?? false,
+        autoReconnect: isPortForwardingAutoReconnectEnabled(draftRule),
       });
     }
 
@@ -875,7 +880,7 @@ const PortForwarding: React.FC<PortForwardingProps> = ({
             <SortDropdown
               value={sortMode}
               onChange={(mode) => {
-                if (mode !== "group") setSortMode(mode);
+                if (mode !== "group" && mode !== "ip") setSortMode(mode);
               }}
               modes={["manual", "az", "za", "newest", "oldest"]}
               className={vaultHeaderIconButtonClass}

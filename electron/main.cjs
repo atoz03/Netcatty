@@ -76,6 +76,7 @@ const {
   collectSshDeepLinkQueueItems,
   getSshDeepLinkRendererReadyTimeoutMs,
   redactPuttyCommandLinePasswords,
+  redactSecureCrtCommandLinePasswords,
   isJmsDeepLinkUrl,
   isSshDeepLinkUrl,
   isTelnetDeepLinkUrl,
@@ -108,6 +109,10 @@ const {
   updateExplorerContextMenuEnabledPreference,
   writeExplorerContextMenuEnabledPreference,
 } = require("./explorerContextMenu.cjs");
+const {
+  registerHandlers: registerAutoLaunchHandlers,
+  wasLaunchedHidden,
+} = require("./autoLaunch.cjs");
 
 try {
   protocol?.registerSchemesAsPrivileged?.([
@@ -570,7 +575,7 @@ const registerBridges = createBridgeRegistrar({
 /**
  * Create the main application window
  */
-async function createWindow() {
+async function createWindow({ startHidden = false } = {}) {
   const windowManager = getWindowManager();
   windowManager.setAppContentWindowClosedHandler(createAppContentWindowClosedHandler({
     app,
@@ -584,8 +589,9 @@ async function createWindow() {
     isMac,
     electronDir,
     onRegisterBridge: registerBridges,
+    startHidden,
   });
-  
+
   return win;
 }
 
@@ -649,16 +655,28 @@ async function createAndShowMainWindow() {
     return existingWin;
   }
 
+  const startHidden = consumeColdStartHiddenLaunch();
+
   mainWindowStartupPromise = (async () => {
     processErrorController.beginMainWindowStartup();
     try {
-      const win = await createWindow();
-      await waitForWindowToShow(win);
+      const win = await createWindow({ startHidden });
+      // A hidden cold start never fires "show" — waiting for it would hang
+      // startup forever, so only wait when the window is meant to appear.
+      if (!startHidden) await waitForWindowToShow(win);
       void getWindowManager().waitForRendererReady(win, {
         timeoutMs: isDev ? 30000 : 15000,
       }).catch((err) => {
         console.warn("[Main] Renderer ready signal was late or missing after first show:", err?.message || err);
       });
+      // windowShown latches process-error-guard protection on for the rest
+      // of the app's life (see processErrorGuards.cjs), so a hidden cold
+      // start must still report true here: createWindow() above already
+      // succeeded (window created, page loaded) — a deliberately hidden
+      // window is a completed startup, not a failure. Passing false would
+      // leave the guard permanently "strict", classifying any later
+      // non-network error as fatal and killing an otherwise healthy
+      // tray-only session that never happened to show a window.
       processErrorController.completeMainWindowStartup({ windowShown: true });
       return win;
     } catch (err) {
@@ -688,6 +706,8 @@ const pendingTelnetDeepLinkUrls = [...initialDeepLinkQueueItems.telnet];
 // redacted copy would make warm PuTTY-style launches authenticate with the
 // masked password.
 const rawLaunchArgvForHandoff = [...process.argv];
+// SecureCRT operands may contain PuTTY switch names; scrub them first.
+redactSecureCrtCommandLinePasswords(process.argv);
 redactPuttyCommandLinePasswords(process.argv);
 const pendingOpenTerminalPaths = resolveOpenTerminalPathsFromArgs(process.argv);
 let flushingSshDeepLinks = false;
@@ -703,19 +723,19 @@ let jmsDeepLinkDeliveryGeneration = 0;
 
 let explorerContextMenuEnabled = resolveExplorerContextMenuEnabled({ app }).enabled === true;
 
-function queueSshDeepLink(rawUrl, { viaCommandLine = false } = {}) {
+function queueSshDeepLink(rawUrl, { viaCommandLine = false, tabName } = {}) {
   if (!viaCommandLine && !sshDeepLinkEnabled) return;
   if (!isSshDeepLinkUrl(rawUrl)) return;
-  pendingSshDeepLinkUrls.push({ rawUrl, viaCommandLine });
+  pendingSshDeepLinkUrls.push({ rawUrl, viaCommandLine, ...(tabName ? { tabName } : {}) });
   if (app.isReady?.()) {
     void flushPendingSshDeepLinks();
   }
 }
 
-function queueTelnetDeepLink(rawUrl, { viaCommandLine = false } = {}) {
+function queueTelnetDeepLink(rawUrl, { viaCommandLine = false, tabName } = {}) {
   if (!viaCommandLine && !sshDeepLinkEnabled) return;
   if (!isTelnetDeepLinkUrl(rawUrl)) return;
-  pendingTelnetDeepLinkUrls.push({ rawUrl, viaCommandLine });
+  pendingTelnetDeepLinkUrls.push({ rawUrl, viaCommandLine, ...(tabName ? { tabName } : {}) });
   if (app.isReady?.()) {
     void flushPendingTelnetDeepLinks();
   }
@@ -823,6 +843,27 @@ ipcMain?.handle?.("netcatty:explorerContextMenu:getEnabled", async () => ({
   supported: process.platform === "win32",
 }));
 
+if (ipcMain) registerAutoLaunchHandlers(ipcMain, { app });
+
+// Cold-start only: true when the OS login item launched us hidden (--hidden
+// on Windows, wasOpenedAsHidden on macOS). Consumed exactly once by whichever
+// createAndShowMainWindow() call reaches it first — this is NOT guaranteed to
+// be the default bootstrap call near the bottom of this file: a genuine
+// second instance (or a Dock reopen) can arrive after app.whenReady() but
+// before the bootstrap's own await chain gets there, racing it. Any caller
+// that represents an explicit foreground request (second-instance, activate,
+// deep links, ...) must re-focus after creation regardless of which flag it
+// happened to consume, or a user-triggered relaunch can silently create a
+// hidden window with nothing to show it.
+let consumeColdStartHiddenLaunch = (() => {
+  let pending = wasLaunchedHidden({ argv: process.argv, app });
+  return () => {
+    const value = pending;
+    pending = false;
+    return value;
+  };
+})();
+
 async function deliverJmsDeepLink(rawUrl, expectedGeneration = jmsDeepLinkDeliveryGeneration) {
   if (!shouldDeliverJmsDeepLink({
     enabled: jmsDeepLinkEnabled,
@@ -894,7 +935,7 @@ async function flushPendingJmsDeepLinks() {
   }
 }
 
-async function deliverSshDeepLink(rawUrl, expectedGeneration = sshSchemeDeliveryGeneration, { viaCommandLine = false } = {}) {
+async function deliverSshDeepLink(rawUrl, expectedGeneration = sshSchemeDeliveryGeneration, { viaCommandLine = false, tabName } = {}) {
   // The ssh:// preference can flip while a delivery is waiting for the
   // renderer, so re-check it at every gate instead of reusing the queue-time
   // snapshot. Command-line (PuTTY-style) launches bypass the preference.
@@ -917,7 +958,7 @@ async function deliverSshDeepLink(rawUrl, expectedGeneration = sshSchemeDelivery
   const result = await windowManager.sendWhenRendererReady?.(
     win,
     SSH_DEEP_LINK_CHANNEL,
-    { url: rawUrl },
+    { url: rawUrl, ...(tabName ? { tabName } : {}) },
     {
       timeoutMs: getSshDeepLinkRendererReadyTimeoutMs({ isDev }),
       shouldSend: shouldDeliver,
@@ -930,7 +971,7 @@ async function deliverSshDeepLink(rawUrl, expectedGeneration = sshSchemeDelivery
   return result || { success: true };
 }
 
-async function deliverTelnetDeepLink(rawUrl, expectedGeneration = sshSchemeDeliveryGeneration, { viaCommandLine = false } = {}) {
+async function deliverTelnetDeepLink(rawUrl, expectedGeneration = sshSchemeDeliveryGeneration, { viaCommandLine = false, tabName } = {}) {
   // Mirror deliverSshDeepLink: gate on the live preference so disabling
   // protocol handling cancels in-flight scheme deliveries, while
   // command-line launches stay deliverable.
@@ -947,7 +988,7 @@ async function deliverTelnetDeepLink(rawUrl, expectedGeneration = sshSchemeDeliv
   const result = await windowManager.sendWhenRendererReady?.(
     win,
     TELNET_DEEP_LINK_CHANNEL,
-    { url: rawUrl },
+    { url: rawUrl, ...(tabName ? { tabName } : {}) },
     {
       timeoutMs: 0,
       shouldSend: shouldDeliver,
@@ -974,6 +1015,7 @@ async function flushPendingSshDeepLinks() {
       const expectedGeneration = sshSchemeDeliveryGeneration;
       const result = await deliverSshDeepLink(item.rawUrl, expectedGeneration, {
         viaCommandLine: item.viaCommandLine === true,
+        tabName: item.tabName,
       });
       if (shouldRequeueFailedSshDeepLinkDelivery({
         enabled: item.viaCommandLine === true || sshDeepLinkEnabled,
@@ -1019,6 +1061,7 @@ async function flushPendingTelnetDeepLinks() {
       const expectedGeneration = sshSchemeDeliveryGeneration;
       const result = await deliverTelnetDeepLink(item.rawUrl, expectedGeneration, {
         viaCommandLine: item.viaCommandLine === true,
+        tabName: item.tabName,
       });
       if (shouldRequeueFailedSshDeepLinkDelivery({
         enabled: item.viaCommandLine === true || sshDeepLinkEnabled,
@@ -1205,6 +1248,7 @@ if (!gotLock) {
     const deepLinkQueueItems = collectSshDeepLinkQueueItems(secondInstanceArgv, {
       includeSchemeUrls: sshDeepLinkEnabled,
     });
+    redactSecureCrtCommandLinePasswords(secondInstanceArgv);
     redactPuttyCommandLinePasswords(secondInstanceArgv);
     if (rawLaunchArgv) {
       // Parsing and subsequent routing use the independent ordered copy.
@@ -1221,13 +1265,13 @@ if (!gotLock) {
     }
     if (deepLinkQueueItems.telnet.length > 0) {
       deepLinkQueueItems.telnet.forEach((item) => {
-        queueTelnetDeepLink(item.rawUrl, { viaCommandLine: item.viaCommandLine });
+        queueTelnetDeepLink(item.rawUrl, { viaCommandLine: item.viaCommandLine, tabName: item.tabName });
       });
       return;
     }
     if (deepLinkQueueItems.ssh.length > 0) {
       deepLinkQueueItems.ssh.forEach((item) => {
-        queueSshDeepLink(item.rawUrl, { viaCommandLine: item.viaCommandLine });
+        queueSshDeepLink(item.rawUrl, { viaCommandLine: item.viaCommandLine, tabName: item.tabName });
       });
       return;
     }
@@ -1241,7 +1285,14 @@ if (!gotLock) {
         // failed validation — silent no-op feels like a broken menu item.
         console.warn("[Main] Open-terminal-path args present but no valid path resolved:", secondInstanceArgv);
         if (!focusMainWindow()) {
-          void createAndShowMainWindow().catch((err) => {
+          // Explicit foreground request (a second instance launch): if a
+          // still-pending hidden auto-launch cold start races ahead of the
+          // normal bootstrap and consumes the --hidden flag here, the window
+          // would otherwise get created hidden with nothing to show it —
+          // focus again to guarantee visibility either way.
+          void createAndShowMainWindow().then(() => {
+            focusMainWindow();
+          }).catch((err) => {
             console.error("[Main] Failed to recreate window on open-terminal-path:", err);
           });
         }
@@ -1249,8 +1300,13 @@ if (!gotLock) {
       return;
     }
     if (!focusMainWindow()) {
-      // Window is missing or crashed — try to recreate it
-      void createAndShowMainWindow().catch((err) => {
+      // Window is missing or crashed — try to recreate it. Same
+      // hidden-launch race guard as above: this is an explicit foreground
+      // request, so re-focus after creation regardless of which flag this
+      // particular call happened to consume.
+      void createAndShowMainWindow().then(() => {
+        focusMainWindow();
+      }).catch((err) => {
         console.error("[Main] Failed to recreate window on second-instance:", err);
         showStartupError(err);
         if (!hasUsableWindow()) {
@@ -1507,8 +1563,13 @@ if (!gotLock) {
       } catch {}
 
       if (focusMainWindow()) return;
-      // Main window doesn't exist — create it even if other windows (e.g. settings) are open
-      void createAndShowMainWindow().catch((err) => {
+      // Main window doesn't exist — create it even if other windows (e.g.
+      // settings) are open. Explicit foreground request (Dock reopen/click):
+      // guard against the same hidden-launch race as the second-instance
+      // handler above by re-focusing after creation.
+      void createAndShowMainWindow().then(() => {
+        focusMainWindow();
+      }).catch((err) => {
         console.error("[Main] Failed to create window on activate:", err);
         showStartupError(err);
         if (!hasUsableWindow()) {

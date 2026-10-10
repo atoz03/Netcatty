@@ -1,6 +1,11 @@
+import { readScreenContext } from "../scripts/screenSnapshotRegistry";
+import { normalizeTerminalContextRange } from "../../domain/terminalContextRead";
+import { resolveHostOs } from '../../domain/host';
+import { isSavedVaultHost } from '../../domain/ephemeralHosts';
 import type { GroupConfig, Host, Identity, KnownHost, ManagedSource, PortForwardingRule, ProxyProfile, Snippet, SSHKey, TerminalSettings, VaultNote } from '../../domain/models';
 import type { RememberImportedKeyPassphraseResult } from '../../application/defaultKeyPassphrases';
 import {
+  importMarkdownPayloadsToVaultNotes,
   normalizeVaultNotes,
   sanitizeNoteTitle,
   sanitizeVaultNote,
@@ -24,6 +29,7 @@ import {
 import { isScriptSnippet } from '../../domain/snippetScript.ts';
 import { applySnippetVariables, parseSnippetVariables } from '../../domain/snippetVariables';
 import { getNextVaultOrder } from '../../domain/vaultOrder';
+import { readVaultNote } from '../../domain/vaultNoteRead';
 import {
   runAutomationScript,
   stopScriptRun,
@@ -57,6 +63,7 @@ import {
   updatePortForwardingRule,
   validatePortForwardingHost,
 } from '../../domain/portForwardingAgentOps';
+import { isPortForwardingAutoReconnectEnabled } from '../../domain/portForwardingReconnect';
 import { deleteGroup, upsertGroup } from '../../domain/vaultGroupAgentOps';
 import { isErrorResult, isFailedResult } from '../../lib/resultNarrowing';
 import {
@@ -101,6 +108,7 @@ const VAULT_HOST_UPDATE_FIELDS = [
   'tags',
   'notes',
   'protocol',
+  'os',
   'identityId',
   'jumpHostIds',
   'proxyProfileId',
@@ -126,6 +134,7 @@ export function sanitizeHostForAgent(host: Host): Record<string, unknown> {
     }
     sanitized[key] = value;
   }
+  sanitized.os = resolveHostOs(host);
   return sanitized;
 }
 
@@ -139,7 +148,7 @@ function summarizeHostForList(host: Host) {
     protocol: host.protocol,
     group: host.group,
     tags: host.tags,
-    os: host.os,
+    os: resolveHostOs(host),
     createdAt: host.createdAt,
     connectScriptIds: host.connectScriptIds,
     loginScriptId: host.loginScriptId,
@@ -179,6 +188,7 @@ export function sanitizePortForwardRuleForAgent(rule: PortForwardingRule): Recor
     remotePort: rule.remotePort,
     hostId: rule.hostId,
     autoStart: rule.autoStart,
+    autoReconnect: rule.autoReconnect,
     status: rule.status,
     error: rule.error,
     createdAt: rule.createdAt,
@@ -291,6 +301,70 @@ function parseSnippetVariableValues(
   }
 }
 
+const MAX_NOTE_IMPORT_DOCUMENTS = 20;
+const MAX_NOTE_IMPORT_CHARS = 512_000;
+
+function parseNoteImportDocuments(params: Record<string, unknown>):
+  | Array<{ fileName: string; content: string; title?: string }>
+  | { error: string } {
+  const hasContent = typeof params.content === 'string';
+  const hasDocuments = params.documents !== undefined && params.documents !== null && params.documents !== '';
+  if (hasContent && hasDocuments) {
+    return { error: 'Pass either content or documents, not both.' };
+  }
+
+  let rawDocuments: unknown[] | null = null;
+  if (hasDocuments) {
+    const documents = params.documents;
+    if (typeof documents === 'string') {
+      try {
+        const parsed = JSON.parse(documents) as unknown;
+        if (!Array.isArray(parsed)) return { error: 'documents must be a JSON array.' };
+        rawDocuments = parsed;
+      } catch {
+        return { error: 'documents must be valid JSON.' };
+      }
+    } else if (Array.isArray(documents)) {
+      rawDocuments = documents;
+    } else {
+      return { error: 'documents must be a JSON array.' };
+    }
+  } else if (hasContent) {
+    rawDocuments = [{
+      fileName: params.fileName,
+      content: params.content,
+      title: params.title,
+    }];
+  } else {
+    return { error: 'content or documents is required.' };
+  }
+
+  if (rawDocuments.length === 0) return { error: 'At least one markdown document is required.' };
+  if (rawDocuments.length > MAX_NOTE_IMPORT_DOCUMENTS) {
+    return { error: `Import at most ${MAX_NOTE_IMPORT_DOCUMENTS} documents at a time.` };
+  }
+
+  const payloads: Array<{ fileName: string; content: string; title?: string }> = [];
+  for (const entry of rawDocuments) {
+    if (!entry || typeof entry !== 'object') {
+      return { error: 'Each document must be an object with content.' };
+    }
+    const record = entry as Record<string, unknown>;
+    if (typeof record.content !== 'string') {
+      return { error: 'Each document needs a string content field.' };
+    }
+    if (record.content.length > MAX_NOTE_IMPORT_CHARS) {
+      return { error: `Each document must be at most ${MAX_NOTE_IMPORT_CHARS} characters.` };
+    }
+    const fileName = typeof record.fileName === 'string' && record.fileName.trim()
+      ? record.fileName.trim()
+      : 'imported.md';
+    const title = typeof record.title === 'string' ? record.title : undefined;
+    payloads.push({ fileName, content: record.content, title });
+  }
+  return payloads;
+}
+
 function parseOptionalStringArray(
   value: unknown,
   fieldName: string,
@@ -352,6 +426,7 @@ async function executeSnippetOrScriptRun(
         snippet,
         sessionId,
         sessionMeta,
+        initiatedBy: 'ai',
       });
       if (!wait) {
         return { ok: true, sessionId, snippetId: snippet.id, runId, kind: 'script' };
@@ -525,12 +600,16 @@ async function registerOpenedSessionInMcpScope(
     : host.moshEnabled
       ? 'mosh'
       : (host.protocol || 'ssh');
+  const savedHostId = isSavedVaultHost(host) && protocol !== 'serial' && protocol !== 'local'
+    ? host.id
+    : undefined;
   const sessionInfo = {
     sessionId,
     hostId: host.id,
+    ...(savedHostId ? { savedHostId } : {}),
     hostname: host.hostname || '',
     label: host.label || host.hostname || sessionId,
-    os: host.os || '',
+    os: resolveHostOs(host),
     username: host.username || '',
     protocol,
     deviceType: host.deviceType || '',
@@ -565,6 +644,7 @@ export async function handleVaultAgentOp(
   deps: VaultAgentApiDeps,
 ): Promise<Record<string, unknown>> {
   switch (op) {
+    case 'terminal.readContext': return handleTerminalContextRead(params);
     case 'session.close': {
       const sessionId = String(params.sessionId || '').trim();
       if (!sessionId) return { ok: false, error: 'sessionId is required.' };
@@ -621,6 +701,9 @@ export async function handleVaultAgentOp(
         ok: true,
         sessionId: opened.sessionId,
         hostId: effectiveHost.id,
+        ...(isSavedVaultHost(effectiveHost) && protocol !== 'serial' && protocol !== 'local'
+          ? { savedHostId: effectiveHost.id }
+          : {}),
         status: 'connecting',
         protocol,
         host: summarizeHostForList(effectiveHost),
@@ -805,7 +888,7 @@ export async function handleVaultAgentOp(
         if (!detected) {
           return {
             ok: false,
-            error: 'Could not detect import format. Specify csv, putty, mobaxterm, securecrt, or ssh_config.',
+            error: 'Could not detect import format. Specify csv, putty, mobaxterm, securecrt, finalshell, or ssh_config.',
           };
         }
         resolvedFormat = detected;
@@ -931,7 +1014,7 @@ export async function handleVaultAgentOp(
       const noteId = String(params.noteId || '');
       const note = deps.getNotes().find((entry) => entry.id === noteId);
       if (!note) return { ok: false, error: `Vault note "${noteId}" was not found.` };
-      return { ok: true, note: serializeVaultNoteForAgent(note) };
+      return readVaultNote(note, params);
     }
     case 'note.create': {
       const title = sanitizeNoteTitle(params.title);
@@ -950,7 +1033,7 @@ export async function handleVaultAgentOp(
         order: getNextVaultOrder(deps.getNotes()),
       });
       const nextNotes = normalizeVaultNotes([...deps.getNotes(), note]);
-      deps.updateNotes(nextNotes);
+      if (deps.updateNotes(nextNotes) === false) return { ok: false, error: 'Vault note could not be saved.' };
       return { ok: true, note: serializeVaultNoteForAgent(note) };
     }
     case 'note.update': {
@@ -976,7 +1059,7 @@ export async function handleVaultAgentOp(
       const nextNotes = normalizeVaultNotes(
         deps.getNotes().map((entry) => (entry.id === noteId ? note : entry)),
       );
-      deps.updateNotes(nextNotes);
+      if (deps.updateNotes(nextNotes) === false) return { ok: false, error: 'Vault note could not be saved.' };
       return { ok: true, note: serializeVaultNoteForAgent(note) };
     }
     case 'note.delete': {
@@ -984,8 +1067,27 @@ export async function handleVaultAgentOp(
       if (!deps.getNotes().some((note) => note.id === noteId)) {
         return { ok: false, error: `Vault note "${noteId}" was not found.` };
       }
-      deps.updateNotes(normalizeVaultNotes(deps.getNotes().filter((note) => note.id !== noteId)));
+      if (deps.updateNotes(normalizeVaultNotes(deps.getNotes().filter((note) => note.id !== noteId))) === false) {
+        return { ok: false, error: 'Vault note deletion could not be saved.' };
+      }
       return { ok: true, noteId };
+    }
+    case 'note.import': {
+      const payloads = parseNoteImportDocuments(params);
+      if ('error' in payloads) return { ok: false, error: payloads.error };
+      const group = typeof params.group === 'string' && params.group.trim() ? params.group.trim() : null;
+      const existingIds = new Set(deps.getNotes().map((note) => note.id));
+      const imported = importMarkdownPayloadsToVaultNotes(payloads, deps.getNotes(), group);
+      if (deps.updateNotes(imported.notes) === false) return { ok: false, error: 'Imported notes could not be saved.' };
+      return {
+        ok: true,
+        importedCount: imported.importedCount,
+        // The caller already supplied the markdown. Echoing every body back
+        // would resend the whole batch over IPC; read a note with note.get.
+        notes: imported.notes
+          .filter((note) => !existingIds.has(note.id))
+          .map(summarizeVaultNoteForList),
+      };
     }
     case 'identity.list': {
       return {
@@ -1390,7 +1492,7 @@ export async function handleVaultAgentOp(
         deps.keys,
         deps.identities,
         undefined,
-        false,
+        isPortForwardingAutoReconnectEnabled(rule),
         deps.terminalSettings,
         deps.knownHosts,
       );
@@ -1443,6 +1545,17 @@ export function registerVaultAgentHandler(handler: VaultAgentHandler | null): vo
   activeHandler = handler;
 }
 
+async function handleTerminalContextRead(params: Record<string, unknown>): Promise<Record<string, unknown>> {
+  const sessionId = typeof params.sessionId === 'string' ? params.sessionId : '';
+  if (!sessionId) return { ok: false, error: 'sessionId is required.' };
+  return { ...await readScreenContext({
+    sessionId,
+    range: normalizeTerminalContextRange(params.range),
+    startLine: typeof params.startLine === 'number' ? params.startLine : undefined,
+    maxLines: typeof params.maxLines === 'number' ? params.maxLines : undefined,
+  }) };
+}
+
 export function setupVaultAgentBridge(): () => void {
   const bridge = netcattyBridge.get();
   if (!bridge?.onVaultAgentRequest || !bridge.respondVaultAgent) {
@@ -1454,8 +1567,9 @@ export function setupVaultAgentBridge(): () => void {
     const safeParams = params || {};
     const runHandler = async () => {
       try {
-        const result = activeHandler
-          ? await activeHandler(op, safeParams)
+        const result = op === 'terminal.readContext'
+          ? await handleTerminalContextRead(safeParams)
+          : activeHandler ? await activeHandler(op, safeParams)
           : { ok: false, error: 'Vault agent bridge is not ready.' };
         await bridge.respondVaultAgent?.(requestId, result);
       } catch (err) {

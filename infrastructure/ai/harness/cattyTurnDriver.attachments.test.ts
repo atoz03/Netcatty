@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 import { CattyTurnDriver } from './turnDrivers/cattyTurnDriver';
 import type { TurnDriverContext, TurnInput } from './turnDrivers/types';
@@ -12,6 +15,11 @@ type AttachmentInput = {
 };
 
 type McpServerBridgeTestApi = {
+  init(deps: {
+    sessions: Map<string, unknown>;
+    sftpClients: Map<string, unknown>;
+    cliDiscoveryFilePath?: string;
+  }): void;
   cleanup(): void;
   updateAttachmentMetadata(attachments: AttachmentInput[], chatSessionId?: string): void;
   handleListAttachments(input: { chatSessionId: string }): {
@@ -37,6 +45,28 @@ const requireCjs = createRequire(import.meta.url);
 const mcpServerBridge = requireCjs(
   '../../../electron/bridges/mcpServerBridge.cjs',
 ) as McpServerBridgeTestApi;
+
+/**
+ * cleanup() deletes the CLI discovery file. Point it at a temp path so a test
+ * run cannot remove the live Netcatty user's discovery.json (#3501).
+ */
+function useTempCliDiscovery(t: test.TestContext): string {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'netcatty-catty-attach-'));
+  const filePath = path.join(dir, 'discovery.json');
+  mcpServerBridge.init({
+    sessions: new Map(),
+    sftpClients: new Map(),
+    cliDiscoveryFilePath: filePath,
+  });
+  t.after(() => {
+    try {
+      mcpServerBridge.cleanup();
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  return filePath;
+}
 
 function createTurnContext(): TurnDriverContext {
   return {
@@ -70,6 +100,7 @@ function createTurnContext(): TurnDriverContext {
 }
 
 test('Catty turn registers current message file attachments for attachment tools', async (t) => {
+  useTempCliDiscovery(t);
   mcpServerBridge.cleanup();
   const csvText = 'label,hostname,username\nprod,prod.example.com,root\n';
   const bridge = {
@@ -86,6 +117,7 @@ test('Catty turn registers current message file attachments for attachment tools
   t.after(() => mcpServerBridge.cleanup());
 
   const controller = new AbortController();
+  const attachPath = path.resolve('/tmp/hosts_export_2026-06-25.csv');
   const input: TurnInput = {
     backend: 'catty',
     chatSessionId: 'chat-1',
@@ -106,7 +138,7 @@ test('Catty turn registers current message file attachments for attachment tools
       filename: 'hosts_export_2026-06-25.csv',
       mediaType: 'text/csv',
       base64Data: Buffer.from(csvText).toString('base64'),
-      filePath: '/tmp/hosts_export_2026-06-25.csv',
+      filePath: attachPath,
     }],
     maxIterations: 5,
     bridge,
@@ -126,7 +158,7 @@ test('Catty turn registers current message file attachments for attachment tools
   assert.deepEqual(listed.attachments, [{
     filename: 'hosts_export_2026-06-25.csv',
     mediaType: 'text/csv',
-    filePath: '/tmp/hosts_export_2026-06-25.csv',
+    filePath: attachPath,
     sizeBytes: Buffer.byteLength(csvText),
   }]);
 

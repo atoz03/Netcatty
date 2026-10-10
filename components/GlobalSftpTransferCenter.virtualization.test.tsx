@@ -64,4 +64,6 @@ test("large transfer histories mount only visible rows and can scroll to the las
   const lastRow = env.document.querySelector('[role=progressbar][aria-label="file-0.bin"]')?.closest('[data-transfer-status]');
   assert.ok(lastRow?.classList.contains("border-b-0"), "only the actual final row omits its divider");
   assert.equal(store.getSnapshot().tasks.length, 1_000, "offscreen files must remain queued");
+  await dispatchDomEvent(toggle, new env.window.MouseEvent("click", { bubbles: true }));
+  await flushEffects();
 });

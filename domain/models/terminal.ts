@@ -536,7 +536,10 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   middleClickPaste: true,
   wordSeparators: DEFAULT_TERMINAL_WORD_SEPARATORS,
   linkModifier: 'none',
-  autoCloseOnExit: true,
+  // Off by default: remote graceful channel closes can be reported as a clean
+  // exit (code 0), which would auto-close tabs on network drops. Users who
+  // want close-on-exit can enable it in Settings -> Terminal -> Behavior.
+  autoCloseOnExit: false,
   // Issue #3087: keep terminal history visible after an established session disconnects.
   disconnectedNoticeMode: 'terminal',
   keywordHighlightEnabled: true,
@@ -552,7 +555,11 @@ const DEFAULT_TERMINAL_SETTINGS: TerminalSettings = {
   verifyHostKeys: true,
   keepaliveInterval: 30,
   keepaliveCountMax: 10,
-  sshAutoReconnectEnabled: false,
+  // On by default: unexpected transport drops (VPN / Wi-Fi blips) schedule an
+  // in-place reconnect every 5s with the same session id. Clean shell exits
+  // still close the tab, and administrative idle/timeout exits stay
+  // disconnected. Users on always-stable links can turn it off.
+  sshAutoReconnectEnabled: true,
   x11Display: '', // Empty = use DISPLAY/default local X server
   moshClientPath: '', // Legacy mosh-client override; normal UI uses bundled mosh-client
   showHostInfoBar: true, // Preserve the existing host information bar by default

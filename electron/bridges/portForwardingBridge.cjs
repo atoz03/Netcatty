@@ -4,6 +4,7 @@
  */
 
 const net = require("node:net");
+const { createSocks5RequestParser } = require("./socks5Request.cjs");
 require("./boringSslDhCompat.cjs").installBoringSslDhCompat();
 const { Client: SSHClient } = require("ssh2");
 const { NetcattyAgent } = require("./netcattyAgent.cjs");
@@ -46,6 +47,12 @@ const {
 
 // Active port forwarding tunnels
 const portForwardingTunnels = new Map();
+const tunnelStatusListeners = new Set();
+
+function onTunnelStatus(listener) {
+  tunnelStatusListeners.add(listener);
+  return () => tunnelStatusListeners.delete(listener);
+}
 
 // Process-scoped authority metadata for renderer projections (#2288).
 // Epoch changes whenever this module (main or terminal worker) boots.
@@ -791,44 +798,17 @@ function bindPortForwardChannels({
     if (type === "dynamic") {
       const server = net.createServer((socket) => {
         const pipeEntry = trackTunnelPipe(tunnelState, socket);
-        socket.once("data", (data) => {
-          if (data[0] !== 0x05) {
-            destroyTunnelPipeEntry(tunnelState, pipeEntry, { abortOpen: false });
+        let greetingSent = false;
+        const parser = createSocks5RequestParser({
+          onFailure: (code) => {
+            if (!greetingSent && code === 0xff) socket.write(Buffer.from([0x05, 0xff]));
+            else if (greetingSent) socket.write(Buffer.from([0x05, code, 0, 1, 0, 0, 0, 0, 0, 0]));
             socket.end();
-            return;
-          }
-          socket.write(Buffer.from([0x05, 0x00]));
-          socket.once("data", (request) => {
-            if (request[0] !== 0x05 || request[1] !== 0x01) {
-              socket.write(Buffer.from([0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
-              socket.end();
-              destroyTunnelPipeEntry(tunnelState, pipeEntry, { abortOpen: false });
-              return;
-            }
-
-            let targetHost;
-            let targetPort;
-            const addressType = request[3];
-
-            if (addressType === 0x01) {
-              targetHost = `${request[4]}.${request[5]}.${request[6]}.${request[7]}`;
-              targetPort = request.readUInt16BE(8);
-            } else if (addressType === 0x03) {
-              const domainLength = request[4];
-              targetHost = request.slice(5, 5 + domainLength).toString();
-              targetPort = request.readUInt16BE(5 + domainLength);
-            } else if (addressType === 0x04) {
-              socket.write(Buffer.from([0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
-              socket.end();
-              destroyTunnelPipeEntry(tunnelState, pipeEntry, { abortOpen: false });
-              return;
-            } else {
-              socket.write(Buffer.from([0x05, 0x08, 0x00, 0x01, 0, 0, 0, 0, 0, 0]));
-              socket.end();
-              destroyTunnelPipeEntry(tunnelState, pipeEntry, { abortOpen: false });
-              return;
-            }
-
+            destroyTunnelPipeEntry(tunnelState, pipeEntry, { abortOpen: false });
+          },
+          onConnect: (targetHost, targetPort, remaining) => {
+            socket.pause();
+            socket.setTimeout(0);
             pipeEntry.openStarted = true;
             openBoundedForwardOutCallback(
               conn,
@@ -851,14 +831,23 @@ function bindPortForwardChannels({
                 reply[3] = 0x01;
                 reply.writeUInt16BE(0, 8);
                 socket.write(reply);
+                if (remaining.length) stream.write(remaining);
                 socket.pipe(stream).pipe(socket);
+                socket.resume();
                 socket.on("error", () => stream.end());
                 stream.on("error", () => socket.end());
               },
               { signal: pipeEntry?.openAbortController?.signal },
             );
-          });
+          },
         });
+        parser.onGreeting = () => {
+          greetingSent = true;
+          socket.write(Buffer.from([0x05, 0x00]));
+        };
+        socket.setTimeout(15_000, () => socket.destroy());
+        socket.on("data", (data) => parser.push(data));
+        socket.on("error", () => destroyTunnelPipeEntry(tunnelState, pipeEntry, { abortOpen: false }));
       });
 
       server.on("error", (err) => {
@@ -867,7 +856,8 @@ function bindPortForwardChannels({
       });
 
       server.listen(localPort, bindAddress, () => {
-        console.log(`[PortForward] Dynamic SOCKS5 proxy active on ${bindAddress}:${localPort}`);
+        const assignedPort = server.address()?.port;
+        console.log(`[PortForward] Dynamic SOCKS5 proxy active on ${bindAddress}:${assignedPort}`);
         try {
           if (isTunnelCancelled(tunnelState)) {
             try { server.close(); } catch { /* ignore */ }
@@ -890,7 +880,7 @@ function bindPortForwardChannels({
           portForwardingTunnels.set(tunnelId, tunnelState);
           sendStatus?.("active");
           settled = true;
-          resolve({ tunnelId, success: true });
+          resolve({ tunnelId, success: true, localPort: assignedPort });
         } catch (regErr) {
           try { server.close(); } catch { /* ignore */ }
           fail(regErr);
@@ -922,6 +912,11 @@ function publishTunnelStatus(tunnelId, tunnel, status, error = null) {
   if (!tunnel) return;
   tunnel.status = status;
   tunnel.error = error || undefined;
+  for (const listener of tunnelStatusListeners) {
+    try { listener({ tunnelId, status, error }); } catch (listenerError) {
+      console.warn("[PortForward] Tunnel status listener failed:", listenerError);
+    }
+  }
   tunnel.updatedAt = Date.now();
   const runtimeEvent = publishRuntimeUpsert(tunnelId, tunnel);
   const subscribers = tunnel.subscribers instanceof Map
@@ -1410,13 +1405,19 @@ async function startPortForward(event, payload) {
   let defaultKeys = [];
   let portForwardAuthPhase = { hadPartialSuccess: false, passwordAlreadySucceeded: false };
   let authBanner = "";
+  /** @type {(() => void)|null} */
+  let releasePreparedFidoAgent = null;
   try {
     const fallbackAgentSocket = useSshAgent === false
       ? null
       : useSshAgent === true
         ? undefined
         : await getAvailableAgentSocket(identityAgent, { hostname, port, username });
-    const systemAuthAgent = hasCertificate ? null : await prepareSystemSshAgentForAuth({
+    const {
+      enhanceAuthOptionsForFido,
+      looksLikeSkOpenSshMaterial,
+    } = require("./sshAuthHelper.cjs");
+    const prep = await enhanceAuthOptionsForFido({
       useSshAgent,
       agentPublicKeys,
       identityAgent,
@@ -1424,10 +1425,24 @@ async function startPortForward(event, payload) {
       identitiesOnly,
       addKeysToAgent,
       useKeychain,
+      privateKey,
+      certificate,
       hostname,
       port,
       username,
-    }, "[PortForward]");
+    }, sender);
+    const isFido = prep.useFidoAgent === true;
+    const systemAuthAgent = (hasCertificate && !isFido) ? null : await prepareSystemSshAgentForAuth(
+      prep,
+      "[PortForward]",
+    );
+    // Attach immediately so cancelTunnel ending `conn` during/after prepare
+    // still drops the owned FIDO agent + askpass lease. Also keep a direct
+    // handle for cancel-before-connect returns (close may have fired before
+    // this listener existed).
+    releasePreparedFidoAgent = systemAuthAgent
+      ? require("./attachFidoAgentRelease.cjs").attachFidoAgentRelease(conn, systemAuthAgent)
+      : null;
     const identityFile = !privateKey && !systemAuthAgent
       ? await loadFirstIdentityFileForAuth({
         sender,
@@ -1441,7 +1456,9 @@ async function startPortForward(event, payload) {
         },
       })
       : null;
-    const inlineKey = privateKey && !systemAuthAgent
+    const inlineKey = privateKey
+      && !systemAuthAgent
+      && !looksLikeSkOpenSshMaterial(privateKey)
       ? await preparePrivateKeyForAuth({
         sender,
         privateKey,
@@ -1457,6 +1474,7 @@ async function startPortForward(event, payload) {
     const effectivePassphrase = inlineKey?.passphrase || identityFile?.passphrase;
 
     if (isTunnelCancelled(tunnelState)) {
+      try { releasePreparedFidoAgent?.(); } catch { /* ignore */ }
       portForwardingTunnels.delete(tunnelId);
       abandonPendingDial("Port forward connection cancelled");
       return { tunnelId, success: false, cancelled: true };
@@ -1465,7 +1483,7 @@ async function startPortForward(event, payload) {
     if (systemAuthAgent) {
       connectOpts.agent = systemAuthAgent;
     }
-    if (hasCertificate) {
+    if (hasCertificate && !isFido) {
       connectOpts.agent = new NetcattyAgent({
         mode: "certificate",
         webContents: sender,
@@ -1476,7 +1494,7 @@ async function startPortForward(event, payload) {
           passphrase: effectivePassphrase,
         },
       });
-    } else if (effectivePrivateKey) {
+    } else if (effectivePrivateKey && !isFido) {
       connectOpts.privateKey = effectivePrivateKey;
       if (effectivePassphrase) {
         connectOpts.passphrase = effectivePassphrase;
@@ -1493,6 +1511,7 @@ async function startPortForward(event, payload) {
       ? []
       : discoveredDefaultKeys;
     if (isTunnelCancelled(tunnelState)) {
+      try { releasePreparedFidoAgent?.(); } catch { /* ignore */ }
       portForwardingTunnels.delete(tunnelId);
       abandonPendingDial("Port forward connection cancelled");
       return { tunnelId, success: false, cancelled: true };
@@ -1515,6 +1534,7 @@ async function startPortForward(event, payload) {
     applyAuthToConnOpts(connectOpts, authConfig);
     portForwardAuthPhase = authConfig.authPhase || portForwardAuthPhase;
     if (isTunnelCancelled(tunnelState)) {
+      try { releasePreparedFidoAgent?.(); } catch { /* ignore */ }
       portForwardingTunnels.delete(tunnelId);
       abandonPendingDial("Port forward connection cancelled");
       return { tunnelId, success: false, cancelled: true };
@@ -1561,6 +1581,7 @@ async function startPortForward(event, payload) {
       chainConnections = chainResult.connections;
       tunnelState.chainConnections = chainConnections;
       if (isTunnelCancelled(tunnelState)) {
+        try { releasePreparedFidoAgent?.(); } catch { /* ignore */ }
         cleanupChainConnections(chainConnections);
         if (!tunnelState.cleanupFailed) {
           portForwardingTunnels.delete(tunnelId);
@@ -1579,6 +1600,7 @@ async function startPortForward(event, payload) {
         },
       });
       if (isTunnelCancelled(tunnelState)) {
+        try { releasePreparedFidoAgent?.(); } catch { /* ignore */ }
         try { connectionSocket?.end?.(); } catch { /* ignore */ }
         try { connectionSocket?.destroy?.(); } catch { /* ignore */ }
         if (!tunnelState.cleanupFailed) {
@@ -1594,6 +1616,7 @@ async function startPortForward(event, payload) {
     }
   } catch (err) {
     if (isTunnelCancelled(tunnelState)) {
+      try { releasePreparedFidoAgent?.(); } catch { /* ignore */ }
       if (!tunnelState.cleanupFailed) {
         portForwardingTunnels.delete(tunnelId);
       }
@@ -1606,10 +1629,12 @@ async function startPortForward(event, payload) {
       } catch {
         /* best-effort cancel on passphrase cancel */
       }
+      try { releasePreparedFidoAgent?.(); } catch { /* ignore */ }
       abandonPendingDial(err);
       return { tunnelId, success: false, cancelled: true };
     }
     tunnelState.cancelled = true;
+    try { releasePreparedFidoAgent?.(); } catch { /* ignore */ }
     if (tunnelState.pendingConn) {
       try { tunnelState.pendingConn.end(); } catch { /* ignore */ }
     }
@@ -2119,6 +2144,7 @@ function registerHandlers(ipcMain, options = {}) {
 }
 
 module.exports = {
+  onTunnelStatus,
   registerHandlers,
   startPortForward,
   stopPortForward,

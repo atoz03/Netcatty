@@ -38,9 +38,11 @@ import {
 import { isTerminalBootEpochCurrent } from '../../domain/terminalBootEpoch';
 import { useI18n } from '../i18n/I18nProvider';
 import { matchesKeyBinding } from '../../domain/models';
+import { resolveHostDefaultLocalShell } from '../../domain/localShellHost';
 import { resolveGroupDefaults, applyGroupDefaults } from '../../domain/groupConfig';
 import { upsertKnownHost } from '../../domain/knownHosts';
 import { materializeHostProxyProfile } from '../../domain/proxyProfiles';
+import { useVaultHostDeletion } from '../state/useVaultHostDeletion';
 import { buildSshDeepLinkConnectionHost, buildSshDeepLinkEphemeralHost, buildSshDeepLinkEphemeralHostFromSaved, buildSshDeepLinkHostDraft, findSshDeepLinkHost, parseSshDeepLink } from '../../domain/sshDeepLink';
 import { buildTelnetDeepLinkConnectionHost, buildTelnetDeepLinkEphemeralHostFromSaved, buildTelnetDeepLinkOpenHost, findTelnetDeepLinkHost, materializeTelnetDeepLinkMatchHost, parseTelnetDeepLink } from '../../domain/telnetDeepLink';
 import { buildJmsDeepLinkEphemeralHost, isSupportedJmsProtocol, parseJmsDeepLink } from '../../domain/jmsDeepLink';
@@ -53,6 +55,7 @@ import {
 } from '../../domain/terminalAppearance';
 import { selectConnectionLogForTerminalDataCapture } from '../../domain/connectionLog';
 import { collectSessionIds } from '../../domain/workspace';
+import { useHostOpenSessionReuse } from '../state/useHostOpenSessionReuse';
 import type { PaneMagnificationController } from '../../domain/paneMagnification';
 import { resolveCloseIntent } from '../state/resolveCloseIntent';
 import { resolveSnippetsShortcutIntent } from '../state/resolveSnippetsShortcutIntent';
@@ -83,6 +86,7 @@ import { toast } from '../../components/ui/toast';
 import { VaultSection } from '../../components/VaultView';
 import { KeyboardInteractiveRequest } from '../../components/KeyboardInteractiveModal';
 import { PassphraseRequest } from '../../components/PassphraseModal';
+import type { FidoPromptRequest } from '../../components/FidoPromptModal';
 import { classifyLocalShellType } from '../../lib/localShell';
 import { useDiscoveredShells, resolveShellSetting, ensureDiscoveredShells } from '../../lib/useDiscoveredShells';
 import { Host, HostProtocol, KnownHost, SerialConfig, Snippet, SSHKey, TerminalSession } from '../../types';
@@ -91,7 +95,7 @@ import { isScriptSnippet } from '../../domain/snippetScript.ts';
 import { collectSnippetDeleteIds } from '../../domain/snippetSelection.ts';
 import { shouldOpenLocalTerminalOnStartup, resolveStartupLandingSetting } from '../../domain/startupLanding';
 import { useAppStartupEffects } from './useAppStartupEffects';
-import { handleTrayJumpToSessionImpl, handleTrayTogglePortForwardImpl, handleTrayPanelConnectImpl, handleTrayPanelConnectRequestImpl, flushQueuedTrayPanelConnectHostsImpl, handleGlobalHotkeyKeyDownImpl, handleEscapeKeyDownImpl, handleKeyboardInteractiveSubmitImpl, handleKeyboardInteractiveCancelImpl, handlePassphraseSubmitImpl, handlePassphraseCancelImpl, handlePassphraseSkipImpl, createLocalTerminalWithCurrentShellImpl, splitSessionWithCurrentShellImpl, copySessionWithCurrentShellImpl, duplicateSessionWithCurrentShellImpl, copyWorkspaceWithCurrentShellImpl, copySessionToNewWindowWithCurrentShellImpl, openManagedTerminalWithCurrentShellImpl, confirmIfBusyLocalTerminalImpl, closeTabsBatchImpl, executeHotkeyActionImpl, handleCreateLocalTerminalImpl, handleConnectToHostImpl, handleTerminalDataCaptureImpl, hasMultipleProtocolsImpl, handleHostConnectWithProtocolCheckImpl, handleProtocolSelectImpl, handleRootContextMenuImpl, markForwardedNativeShortcutEvent } from './AppHandlers';
+import { handleTrayJumpToSessionImpl, handleTrayTogglePortForwardImpl, handleTrayPanelConnectImpl, handleTrayPanelConnectRequestImpl, flushQueuedTrayPanelConnectHostsImpl, handleGlobalHotkeyKeyDownImpl, handleEscapeKeyDownImpl, handleKeyboardInteractiveSubmitImpl, handleKeyboardInteractiveCancelImpl, handlePassphraseSubmitImpl, handlePassphraseCancelImpl, handlePassphraseSkipImpl, handleFidoPromptSubmitImpl, handleFidoPromptCancelImpl, createLocalTerminalWithCurrentShellImpl, splitSessionWithCurrentShellImpl, copySessionWithCurrentShellImpl, duplicateSessionWithCurrentShellImpl, copyWorkspaceWithCurrentShellImpl, copySessionToNewWindowWithCurrentShellImpl, openManagedTerminalWithCurrentShellImpl, confirmIfBusyLocalTerminalImpl, closeTabsBatchImpl, executeHotkeyActionImpl, handleCreateLocalTerminalImpl, handleConnectToHostImpl, handleTerminalDataCaptureImpl, hasMultipleProtocolsImpl, handleHostConnectWithProtocolCheckImpl, handleProtocolSelectImpl, handleRootContextMenuImpl, markForwardedNativeShortcutEvent } from './AppHandlers';
 
 type OpenSessionInNewWindowPayload = {
   title?: string;
@@ -136,6 +140,8 @@ export function AppSideEffects() {
   const [keyboardInteractiveQueue, setKeyboardInteractiveQueue] = useState<KeyboardInteractiveRequest[]>([]);
   // Passphrase request queue for encrypted SSH keys
   const [passphraseQueue, setPassphraseQueue] = useState<PassphraseRequest[]>([]);
+  // FIDO2 PIN / touch prompt queue (OpenSSH sk-*)
+  const [fidoPromptQueue, setFidoPromptQueue] = useState<FidoPromptRequest[]>([]);
   const [deleteHostConfirm, setDeleteHostConfirm] = useState<{ hostId: string; name: string } | null>(null);
   const [pendingNewWindowSession, setPendingNewWindowSession] = useState<OpenSessionInNewWindowPayload | null>(null);
   const [pendingTrayPanelConnectHostIds, setPendingTrayPanelConnectHostIds] = useState<string[]>([]);
@@ -149,6 +155,7 @@ export function AppSideEffects() {
     showSftpTab,
     shellOnlyTabNumberShortcuts,
     workspaceFocusStyle,
+    toggleWindowOpacity,
   } = settings;
 
   // Always publish terminal keyboard focus to the main process. When font zoom
@@ -268,22 +275,6 @@ export function AppSideEffects() {
     getSessionRestoreCwd,
     renameSessionInline,
   } = sessionState;
-
-  // Presentation-field thrash stays off Host bags (Hosts use retainStable);
-  // AppSideEffects only needs host/session maps for glue handlers and effects.
-  const handleRunSnippet = useCallback(
-    async (snippet: Snippet, targetHosts: Host[]) => {
-      if (targetHosts.length === 0) return;
-      if (isScriptSnippet(snippet)) {
-        runSnippet(snippet, targetHosts);
-        return;
-      }
-      const command = await resolveSnippetCommand(snippet);
-      if (command === null) return;
-      runSnippet(snippet, targetHosts, command);
-    },
-    [runSnippet],
-  );
 
   // Presence-only list: keystrokes must not rebuild App domains / TopTabs structure.
   const editorTabs = useEditorTabChromeList();
@@ -848,6 +839,48 @@ export function AppSideEffects() {
   // Handle passphrase skip (skip this key, continue with others)
   const handlePassphraseSkip = useCallback((requestId: string) => { return handlePassphraseSkipImpl(() => ({ netcattyBridge, requestId, setPassphraseQueue }), requestId); }, []);
 
+  // FIDO2 PIN / touch prompts from main-process askpass / sk-helper
+  useEffect(() => {
+    const bridge = netcattyBridge.get();
+    if (!bridge?.onFidoPromptRequest) return;
+    const unsubscribe = bridge.onFidoPromptRequest((request) => {
+      console.log('[App] FIDO prompt request:', request);
+      setFidoPromptQueue((prev) => [...prev, {
+        ...request,
+        kind: request.kind === 'touch' || request.kind === 'confirm' || request.kind === 'recovery' ? request.kind : 'pin',
+      }]);
+    });
+    return () => { unsubscribe?.(); };
+  }, []);
+
+  const handleFidoPromptSubmit = useCallback((requestId: string, response: string) => {
+    if (response === 'fallback') toast.info(t('fido.recovery.passwordFallback'));
+    return handleFidoPromptSubmitImpl(() => ({ netcattyBridge, requestId, setFidoPromptQueue }), requestId, response);
+  }, [t]);
+
+  const handleFidoPromptCancel = useCallback((requestId: string) => {
+    return handleFidoPromptCancelImpl(() => ({ netcattyBridge, requestId, setFidoPromptQueue }), requestId);
+  }, []);
+
+  useEffect(() => {
+    const bridge = netcattyBridge.get();
+    if (!bridge?.onFidoPromptTimeout) return;
+    const unsubscribe = bridge.onFidoPromptTimeout((event) => {
+      setFidoPromptQueue((prev) => prev.filter((r) => r.requestId !== event.requestId));
+      toast.error(t('fido.prompt.timeout'));
+    });
+    return () => { unsubscribe?.(); };
+  }, [t]);
+
+  useEffect(() => {
+    const bridge = netcattyBridge.get();
+    if (!bridge?.onFidoPromptCancelled) return;
+    const unsubscribe = bridge.onFidoPromptCancelled((event) => {
+      setFidoPromptQueue((prev) => prev.filter((r) => r.requestId !== event.requestId));
+    });
+    return () => { unsubscribe?.(); };
+  }, []);
+
   // Handle passphrase timeout (request expired on backend)
   useEffect(() => {
     const bridge = netcattyBridge.get();
@@ -1103,6 +1136,7 @@ export function AppSideEffects() {
       canUseGlobalBroadcast: canUseGlobalBroadcastRef.current,
       toggleScriptsSidePanelRef,
       toggleSidePanelRef,
+      toggleWindowOpacity,
       toggleWorkspaceViewMode,
       workspaces: workspacesRefForHotkeys.current,
     }), action, e);
@@ -1115,6 +1149,7 @@ export function AppSideEffects() {
     splitSessionWithCurrentShell,
     moveFocusInWorkspace,
     toggleBroadcast,
+    toggleWindowOpacity,
     toggleGlobalBroadcast,
     toggleWorkspaceViewMode,
     confirmIfBusyLocalTerminal,
@@ -1220,11 +1255,16 @@ export function AppSideEffects() {
     setDeleteHostConfirm({ hostId, name: target?.label || hostId });
   }, [hosts]);
 
-  const handleConfirmDeleteHost = useCallback(() => {
+  const deleteVaultHosts = useVaultHostDeletion(commitVaultGroupMutation);
+  const handleConfirmDeleteHost = useCallback(async () => {
     if (!deleteHostConfirm) return;
-    updateHosts(hosts.filter(h => h.id !== deleteHostConfirm.hostId));
-    setDeleteHostConfirm(null);
-  }, [deleteHostConfirm, hosts, updateHosts]);
+    try {
+      await deleteVaultHosts([deleteHostConfirm.hostId]);
+      setDeleteHostConfirm(null);
+    } catch {
+      toast.error(t('common.error'));
+    }
+  }, [deleteHostConfirm, deleteVaultHosts, t]);
 
   const handleCancelDeleteHost = useCallback(() => {
     setDeleteHostConfirm(null);
@@ -1376,8 +1416,32 @@ export function AppSideEffects() {
           { validProxyProfileIds: proxyProfileIdSet },
         )
       : applyGroupDefaults(host, {}, { validProxyProfileIds: proxyProfileIdSet });
-    return materializeHostProxyProfile(withGroupDefaults, proxyProfiles);
-  }, [groupConfigs, proxyProfileIdSet, proxyProfiles]);
+    const effectiveHost = materializeHostProxyProfile(withGroupDefaults, proxyProfiles);
+    // Local-shell vault hosts saved with "System default shell" carry no
+    // localShell; resolve the Settings → Terminal shell here at the shared
+    // effective-host boundary so every launch path (connect, tray/dock open,
+    // workspace creation/append, tunnels) uses the configured shell instead
+    // of silently falling back to the backend OS default shell.
+    return resolveHostDefaultLocalShell(effectiveHost, {
+      discoveredShells,
+      resolveShellSetting,
+      terminalSettings,
+    });
+  }, [groupConfigs, proxyProfileIdSet, proxyProfiles, discoveredShells, terminalSettings]);
+
+  const handleRunSnippet = useCallback(
+    async (snippet: Snippet, targetHosts: Host[]) => {
+      if (targetHosts.length === 0) return;
+      if (isScriptSnippet(snippet)) {
+        runSnippet(snippet, targetHosts.map(resolveEffectiveHost));
+        return;
+      }
+      const command = await resolveSnippetCommand(snippet);
+      if (command === null) return;
+      runSnippet(snippet, targetHosts.map(resolveEffectiveHost), command);
+    },
+    [runSnippet, resolveEffectiveHost],
+  );
 
   const createWorkspaceWithEffectiveHosts = useCallback((name: string, selectedHosts: Host[]) => {
     createWorkspaceWithHosts(name, selectedHosts.map(resolveEffectiveHost));
@@ -1408,14 +1472,17 @@ export function AppSideEffects() {
     return handleConnectToHostImpl(() => ({
       addConnectionLog,
       connectToHost,
+      discoveredShells,
       host,
       identities,
       keys,
       resolveEffectiveHost: effectiveHostResolver,
       resolveHostAuth,
+      resolveShellSetting,
       systemInfoRef,
+      terminalSettings,
     }), host, hidden);
-  }, [addConnectionLog, connectToHost, resolveEffectiveHost, identities, keys]);
+  }, [addConnectionLog, connectToHost, resolveEffectiveHost, identities, keys, discoveredShells, terminalSettings]);
 
   const handleConnectToHostWithTabName = useCallback((host: Host, tabName?: string) => {
     const sessionId = handleConnectToHost(host);
@@ -1441,6 +1508,10 @@ export function AppSideEffects() {
     }
     return { ok: true as const, sessionId, host };
   }, [handleConnectToHost]);
+
+  const findExistingSessionForHostForVaultAgent = useHostOpenSessionReuse({
+    sessions, hosts, keys, identities, resolveEffectiveHost,
+  });
 
   const closeSessionForVaultAgent = useCallback((sessionId: string) => {
     if (!sessions.some((session) => session.id === sessionId)) {
@@ -1484,6 +1555,7 @@ export function AppSideEffects() {
     stopTunnel,
     stopRuleTunnels,
     openHost: openHostForVaultAgent,
+    findExistingSessionForHost: findExistingSessionForHostForVaultAgent,
     closeSession: closeSessionForVaultAgent,
     getScriptSessionMeta: (sessionId) => sessions.find((session) => session.id === sessionId),
   });
@@ -1952,6 +2024,8 @@ export function AppSideEffects() {
       handlePassphraseCancel,
       handlePassphraseSkip,
       handlePassphraseSubmit,
+      handleFidoPromptCancel,
+      handleFidoPromptSubmit,
       handleProtocolSelect,
       handleRequestCloseEditorTabRef,
       resolveEmptyVaultConflict,
@@ -1975,6 +2049,7 @@ export function AppSideEffects() {
       portForwardingRules,
       keyboardInteractiveQueue,
       passphraseQueue,
+      fidoPromptQueue,
       deleteHostConfirm,
       vaultFocusRequest,
       openNoteRequest,
@@ -2024,6 +2099,8 @@ export function AppSideEffects() {
     handlePassphraseCancel,
     handlePassphraseSkip,
     handlePassphraseSubmit,
+    handleFidoPromptCancel,
+    handleFidoPromptSubmit,
     handleProtocolSelect,
     resolveEmptyVaultConflict,
     handleCancelDeleteHost,
@@ -2039,6 +2116,7 @@ export function AppSideEffects() {
     portForwardingRules,
     keyboardInteractiveQueue,
     passphraseQueue,
+    fidoPromptQueue,
     deleteHostConfirm,
     vaultFocusRequest,
     openNoteRequest,

@@ -2322,6 +2322,7 @@ function closeSession(event, payload) {
     session.zmodemSentry?.cancel();
     session.discardPendingData?.();
     cleanupSessionExternalAuthArtifacts(session);
+    session.releaseNetcattyFidoAgents?.();
     session.releaseTelnetGeneration?.();
     if (session.stream) {
       // Snapshot multiplexing state *before* closing the channel: closing the
@@ -2767,6 +2768,7 @@ function cleanupAllSessions() {
       session.discardPendingData?.();
       closeTerminalOutputSession(sessionId);
       cleanupSessionExternalAuthArtifacts(session);
+      session.releaseNetcattyFidoAgents?.();
       session.releaseTelnetGeneration?.();
       if (session.stream) {
         session.stream.close();

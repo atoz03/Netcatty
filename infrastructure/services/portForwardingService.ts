@@ -234,6 +234,10 @@ const scheduleReconnectIfNeeded = (
     return true;
   }
 
+  // One failed dial can report both a status event and a rejected start.
+  // Once exhausted, neither notification may begin another retry cycle.
+  if (exhaustedReconnectRules.has(ruleId)) return false;
+
   const currentConn = activeConnections.get(ruleId);
   if (currentConn?.reconnectSuppressed) return false;
   if (currentConn?.reconnectTimerCallback) {
@@ -681,6 +685,10 @@ const subscribeSyncedConnection = async (
     connection.status = resolveBackendStatus(snapshot.status);
     connection.error = snapshot.error;
   }
+  if (connection.status === 'active') {
+    exhaustedReconnectRules.delete(ruleId);
+    connection.reconnectAttempts = 0;
+  }
   return true;
 };
 
@@ -820,6 +828,10 @@ export const reconcileWithBackend = async (): Promise<{
           if (existing.status !== backendStatus || existing.error !== tunnel.error) {
             existing.status = backendStatus;
             existing.error = tunnel.error;
+            if (backendStatus === 'active') {
+              exhaustedReconnectRules.delete(ruleId);
+              existing.reconnectAttempts = 0;
+            }
             result.appeared.push(ruleId);
           }
         }
@@ -871,7 +883,8 @@ export const startPortForward = async (
   enableReconnect = false,
   terminalSettings?: Pick<TerminalSettings, 'verifyHostKeys' | 'keepaliveInterval' | 'keepaliveCountMax'>,
   knownHosts?: KnownHost[],
-): Promise<{ success: boolean; error?: string }> => {
+  options?: { dedicatedTransport?: boolean; prepareOnly?: boolean },
+): Promise<{ success: boolean; error?: string; localPort?: number; tunnelId?: string; connectionOptions?: PortForwardOptions }> => {
   const globalTerminalSettings = { ...FALLBACK_TERMINAL_SETTINGS, ...(terminalSettings ?? {}) };
   const bridge = netcattyBridge.get();
   if (rulesPendingCleanup.has(rule.id)) {
@@ -893,7 +906,9 @@ export const startPortForward = async (
   
   // Clear any existing reconnect timer
   clearReconnectTimer(rule.id);
-  
+  // Explicit starts (including network recovery) authorize a fresh cycle.
+  exhaustedReconnectRules.delete(rule.id);
+
   if (!bridge?.startPortForward) {
     // Fallback for browser/dev mode - simulate the connection
     logger.warn('[PortForwardingService] Backend not available, simulating connection...');
@@ -1103,7 +1118,7 @@ export const startPortForward = async (
     
     // Start the tunnel
     const connectionTimeouts = resolveHostSshConnectionTimeouts(host);
-    const result = await bridge.startPortForward({
+    const connectionOptions: PortForwardOptions = {
       ruleId: rule.id,
       tunnelId,
       type: rule.type,
@@ -1135,7 +1150,15 @@ export const startPortForward = async (
       keepaliveCountMax: resolveHostKeepalive(host, globalTerminalSettings).countMax,
       sshTcpConnectTimeoutMs: connectionTimeouts.tcpConnectTimeoutSeconds * 1000,
       sshAuthReadyTimeoutMs: connectionTimeouts.authReadyTimeoutSeconds * 1000,
-    });
+      reuseTransport: !options?.dedicatedTransport,
+    };
+    if (options?.prepareOnly) {
+      activeConnections.delete(rule.id);
+      unsubscribe?.();
+      onStatusChange('inactive');
+      return { success: true, connectionOptions };
+    }
+    const result = await bridge.startPortForward(connectionOptions);
     
     if (!result.success) {
       // Intentional cancellation (rule deleted/replaced during handshake).
@@ -1222,7 +1245,7 @@ export const startPortForward = async (
     }
     exhaustedReconnectRules.delete(rule.id);
     
-    return { success: true };
+    return { success: true, localPort: result.localPort, tunnelId: result.tunnelId };
     
   } catch (err) {
     const error = err instanceof Error ? err.message : 'Unknown error';

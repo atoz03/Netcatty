@@ -1,6 +1,7 @@
 import type { Messages } from '../types';
 
 export const zhCNAiMessages: Messages = {
+  'ai.chat.attachmentContentUnavailable': '附件内容未保留在此设备',
   // AI Settings
   'ai.agentSettings': 'Agent 设置',
   'ai.chat.preparing': '准备中…',
@@ -513,6 +514,10 @@ export const zhCNAiMessages: Messages = {
   'ai.chat.pinModel': '固定模型',
   'ai.chat.unpinModel': '取消固定',
   'ai.chat.loadingModels': '正在加载模型...',
+  'ai.chat.modelCatalogSourceLive': '实时目录',
+  'ai.chat.modelCatalogSourceCached': '缓存 · 上次成功 {time}',
+  'ai.chat.modelCatalogSourceCachedNoTime': '缓存',
+  'ai.chat.modelCatalogSourcePresets': '内置默认列表',
   'ai.chat.noMatchingModels': '没有匹配的模型',
   'ai.chat.recent': '最近',
   'ai.chat.viewAll': '查看全部',
@@ -522,6 +527,8 @@ export const zhCNAiMessages: Messages = {
   'ai.chat.hoursAgo': '{n}小时前',
   'ai.chat.daysAgo': '{n}天前',
   'ai.chat.newChat': '新对话',
+  'ai.chat.undoLastTurn': '撤销上一轮',
+  'ai.chat.undoLastTurnNotice': "原对话已保留。已执行的命令和文件修改不会撤销；之前保存的完整输出和后台任务，请回原对话查看。",
   'ai.chat.allSessions': '所有会话',
   'ai.chat.loadEarlierMessages': '加载更早的消息（还有 {n} 条）',
   'ai.chat.jumpNav': '跳转到消息',
@@ -531,8 +538,11 @@ export const zhCNAiMessages: Messages = {
   'ai.chat.searchSessions': '搜索标题和近期内容…',
   'ai.chat.clearSessionSearch': '清空会话搜索',
   'ai.chat.searchSessionsHint': '搜索标题，并优先搜索较新的消息和条目；超长消息及工具输出仅搜索开头的有限部分。这不是全文搜索。',
+  'ai.chat.searchingSessions': '搜索中…',
   'ai.chat.noMatchingSessions': '标题和近期保留的内容中没有匹配结果',
   'ai.chat.noSessions': '没有历史会话',
+  'ai.chat.forkFromHere': '从此处分叉',
+  'ai.chat.forkCreated': '已分叉到新对话，原对话保留在历史中。',
   'ai.chat.retryHint': '你可以重新发送消息来重试。',
   'ai.chat.approvalTimeout': '工具审批已超时（5 分钟）。你可以重新发送消息来重试。',
   'ai.chat.menuHosts': '主机',

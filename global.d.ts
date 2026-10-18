@@ -93,6 +93,7 @@ declare global {
   }
 
   interface NetcattySSHOptions {
+    keyLabel?: string;
     sessionId?: string;
     hostId?: string;
     hostLabel?: string;
@@ -244,11 +245,13 @@ declare global {
     keepaliveCountMax?: number;
     sshTcpConnectTimeoutMs?: number;
     sshAuthReadyTimeoutMs?: number;
+    reuseTransport?: boolean;
   }
 
   interface PortForwardResult {
     tunnelId: string;
     success: boolean;
+    localPort?: number;
     cancelled?: boolean;
     blockedByCleanup?: boolean;
     reused?: boolean;

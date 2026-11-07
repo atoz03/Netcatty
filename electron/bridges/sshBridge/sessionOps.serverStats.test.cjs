@@ -634,6 +634,7 @@ test("getServerStats reports null GPU fields when the host has no nvidia-smi dat
   assert.equal(result.stats.gpuName, null);
   assert.equal(result.stats.gpuMemUsed, null);
   assert.equal(result.stats.gpuMemTotal, null);
+  assert.deepEqual(result.stats.gpus, []);
 });
 
 test("getServerStats parses NVIDIA GPU utilization and VRAM from the stats line", async () => {
@@ -653,6 +654,7 @@ test("getServerStats parses NVIDIA GPU utilization and VRAM from the stats line"
   assert.equal(result.stats.gpuName, "NVIDIA GeForce RTX 4090");
   assert.equal(result.stats.gpuMemUsed, 2048);
   assert.equal(result.stats.gpuMemTotal, 24576);
+  assert.deepEqual(result.stats.gpus, []);
 });
 
 test("getServerStats tolerates a malformed GPU section", async () => {
@@ -668,16 +670,40 @@ test("getServerStats tolerates a malformed GPU section", async () => {
   assert.equal(result.success, true);
   assert.equal(result.stats.gpu, null);
   assert.equal(result.stats.gpuName, null);
+  assert.deepEqual(result.stats.gpus, []);
 });
 
 for (const scenario of [
-  { name: "multiple GPUs", script: "printf '%s\\n' '73, 2048, 24576, NVIDIA RTX 4090' '71, 1024, 24576, NVIDIA RTX 4090'", gpu: 72, used: 3072, total: 49152 },
-  { name: "idle GPU", script: "printf '%s\\n' '0, 0, 24576, NVIDIA RTX 4090'", gpu: 0, used: 0, total: 24576 },
-  { name: "mixed utilization availability", script: "printf '%s\\n' '73, 2048, 24576, NVIDIA RTX 4090' '[N/A], 1024, 8192, NVIDIA A100 MIG'", gpu: 73, used: 3072, total: 32768 },
-  { name: "unavailable memory usage", script: "printf '%s\\n' '73, [N/A], 24576, NVIDIA RTX 4090'", gpu: 73, total: 24576 },
-  { name: "partial memory totals", script: "printf '%s\\n' '73, 2048, 24576, NVIDIA RTX 4090' '71, 1024, [N/A], NVIDIA RTX 4090'", gpu: 72, used: 3072 },
-  { name: "unsupported utilization", script: "printf '%s\\n' '[N/A], 2048, 24576, NVIDIA RTX 4090'", gpu: null },
-  { name: "failed query with partial output", script: "printf '%s\\n' '73, 2048, 24576, NVIDIA RTX 4090'; exit 1", gpu: null },
+  { name: "multiple GPUs", script: "printf '%s\\n' '0, NVIDIA RTX 4090, 73, 2048, 24576' '1, NVIDIA RTX 4090, 71, 1024, 24576'", gpu: 72, used: 3072, total: 49152, gpus: [
+    { index: 0, name: "NVIDIA RTX 4090", utilization: 73, memoryUsed: 2048, memoryTotal: 24576 },
+    { index: 1, name: "NVIDIA RTX 4090", utilization: 71, memoryUsed: 1024, memoryTotal: 24576 },
+  ] },
+  { name: "idle GPU", script: "printf '%s\\n' '0, NVIDIA RTX 4090, 0, 0, 24576'", gpu: 0, used: 0, total: 24576, gpus: [
+    { index: 0, name: "NVIDIA RTX 4090", utilization: 0, memoryUsed: 0, memoryTotal: 24576 },
+  ] },
+  { name: "mixed utilization availability", script: "printf '%s\\n' '0, NVIDIA RTX 4090, 73, 2048, 24576' '1, NVIDIA A100 MIG, [N/A], 1024, 8192'", gpu: 73, used: 3072, total: 32768, gpus: [
+    { index: 0, name: "NVIDIA RTX 4090", utilization: 73, memoryUsed: 2048, memoryTotal: 24576 },
+    { index: 1, name: "NVIDIA A100 MIG", utilization: null, memoryUsed: 1024, memoryTotal: 8192 },
+  ] },
+  { name: "unavailable memory usage", script: "printf '%s\\n' '0, NVIDIA RTX 4090, 73, [N/A], 24576'", gpu: 73, total: 24576, gpus: [
+    { index: 0, name: "NVIDIA RTX 4090", utilization: 73, memoryUsed: null, memoryTotal: 24576 },
+  ] },
+  { name: "partial memory totals", script: "printf '%s\\n' '0, NVIDIA RTX 4090, 73, 2048, 24576' '1, NVIDIA RTX 4090, 71, 1024, [N/A]'", gpu: 72, used: 3072, gpus: [
+    { index: 0, name: "NVIDIA RTX 4090", utilization: 73, memoryUsed: 2048, memoryTotal: 24576 },
+    { index: 1, name: "NVIDIA RTX 4090", utilization: 71, memoryUsed: 1024, memoryTotal: null },
+  ] },
+  { name: "comma in GPU name", script: "printf '%s\\n' '0, NVIDIA Foo, 80GB, 41, 2048, 24576'", gpu: 41, used: 2048, total: 24576, gpus: [
+    { index: 0, name: "NVIDIA Foo, 80GB", utilization: 41, memoryUsed: 2048, memoryTotal: 24576 },
+  ] },
+  { name: "eight GPUs", script: `printf '%s\\n' ${Array.from({ length: 8 }, (_, index) => `'${index}, NVIDIA A100 ${index}, ${10 + index * 2}, ${1024 * (index + 1)}, 81920'`).join(" ")}`, gpu: 17, used: 36864, total: 655360, gpus: Array.from({ length: 8 }, (_, index) => ({
+    index,
+    name: `NVIDIA A100 ${index}`,
+    utilization: 10 + index * 2,
+    memoryUsed: 1024 * (index + 1),
+    memoryTotal: 81920,
+  })) },
+  { name: "unsupported utilization", script: "printf '%s\\n' '0, NVIDIA RTX 4090, [N/A], 2048, 24576'", gpu: null },
+  { name: "failed query with partial output", script: "printf '%s\\n' '0, NVIDIA RTX 4090, 73, 2048, 24576'; exit 1", gpu: null },
   { name: "missing query tool", script: "exit 127", gpu: null },
   { name: "missing timeout tool", script: "exec sleep 20", gpu: null, noTimeout: true },
   { name: "blocked GPU query", script: "trap '' TERM; exec sleep 20", gpu: null },
@@ -741,6 +767,7 @@ for (const scenario of [
     assert.equal(result.stats.gpu, scenario.gpu);
     assert.equal(result.stats.gpuMemUsed, scenario.used ?? null);
     assert.equal(result.stats.gpuMemTotal, scenario.total ?? null);
+    assert.deepEqual(result.stats.gpus, scenario.gpus ?? []);
   });
   }
 }
@@ -919,7 +946,7 @@ test("getServerStats closes a stats stream delivered after timeout", async () =>
   assert.equal(closeCalls, 1);
 });
 
-test("three stats retries on an unresponsive exec open leave no pooled transport or channel callbacks", async () => {
+test("stats open timeout preserves shared transport and fences repeated probes", async () => {
   resetSshTransportRegistryForTests({ defaultIdleTtlMs: 0 });
   const endpoint = { hostId: "stats-host", hostname: "wedged.example", username: "root" };
   const conn = new EventEmitter();
@@ -962,9 +989,16 @@ test("three stats retries on an unresponsive exec open leave no pooled transport
   results.push(await api.getServerStats({ sender: {} }, { sessionId: "sid" }));
 
   assert.ok(results.every((result) => result.success === false));
-  assert.equal(conn.pendingChannelCallbacks.length, 0);
-  assert.equal(getTransportStats().transports, 0);
-  assert.equal(findTransportByEndpoint(endpoint), null);
+  assert.equal(conn.pendingChannelCallbacks.length, 1, "retries must not accumulate opens");
+  assert.equal(getTransportStats().transports, 1);
+  assert.equal(findTransportByEndpoint(endpoint), transport);
+  assert.equal(conn._sock.destroyed, false);
+  const lateStream = fakeStream("");
+  let lateClosed = 0;
+  lateStream.close = () => { lateClosed++; };
+  conn.pendingChannelCallbacks.shift()(null, lateStream);
+  assert.equal(lateClosed, 1);
+  conn.destroy();
 
   const replacement = new EventEmitter();
   replacement._sock = { destroyed: false };
@@ -1495,4 +1529,53 @@ test("monitor CPU samples return while an optional GPU driver is still blocked",
     require("./sharedStats.cjs").cancelSharedStats(c);
     await pending;
   }
+});
+
+test("shared server stats parse Linux disk I/O across samples and leave macOS unavailable", async (t) => {
+  let now = 100000;
+  t.mock.method(Date, "now", () => now);
+  let payload = `${LINUX_STATS}|DISKIO:10.5;sda:100:200,`;
+  const conn = { exec(command, cb) { cb(null, fakeStream(selectServerStatsFixtureOutput(command, payload))); } };
+  const session = { conn, type: "ssh", _monitorStats: true, _monitorIntervalMs: 1000 };
+  const api = makeSessionOps(new Map([["diskio", session]]));
+  const get = () => api.getServerStats({ sender: {} }, { sessionId: "diskio" });
+  let result = await get();
+  assert.equal(result.success, true);
+  assert.equal(result.stats.diskReadSpeed, null);
+  assert.equal(result.stats.diskWriteSpeed, null);
+  now += 1000;
+  payload = `${LINUX_STATS}|DISKIO:11.5;sda:120:240,`;
+  result = await get();
+  assert.equal(result.stats.diskReadSpeed, 10240);
+  assert.equal(result.stats.diskWriteSpeed, 20480);
+  now += 1000;
+  payload = `${LINUX_STATS}|DISKIO:12.5;sda:120:240,`;
+  result = await get();
+  assert.equal(result.stats.diskReadSpeed, 0);
+  assert.equal(result.stats.diskWriteSpeed, 0);
+  now += 1000;
+  payload = MACOS_STATS;
+  result = await get();
+  assert.equal(result.success, true);
+  assert.equal(result.stats.diskReadSpeed, null);
+  assert.equal(result.stats.diskWriteSpeed, null);
+});
+
+test("shared server stats attach independent block rates to mounted partitions", async (t) => {
+  let now = 100000;
+  t.mock.method(Date, "now", () => now);
+  const base = LINUX_STATS.replace("DISKS:", "DISKS:/:1:10:10:/dev/root,/data:2:20:10:/dev/mapper/data");
+  let payload = `${base}|PARTITIONIO:10;8-1:100:200,253-0:10:20,|DISKMOUNTS:/:8-1,/data:253-0,`;
+  const session = { conn: { exec(command, cb) { cb(null, fakeStream(selectServerStatsFixtureOutput(command, payload))); } }, type: "ssh", _monitorStats: true, _monitorIntervalMs: 1000 };
+  const api = makeSessionOps(new Map([["partition-io", session]]));
+  const get = () => api.getServerStats({ sender: {} }, { sessionId: "partition-io" });
+  let result = await get();
+  assert.equal(result.success, true);
+  assert.equal(result.stats.disks[0].diskReadSpeed, undefined);
+  assert.equal(Object.hasOwn(result.stats.disks[0], "diskReadSpeed"), false);
+  now += 1000;
+  payload = `${base}|PARTITIONIO:11;8-1:102:204,253-0:20:40,|DISKMOUNTS:/:8-1,/data:253-0,`;
+  result = await get();
+  assert.equal(result.success, true);
+  assert.deepEqual(result.stats.disks.map(disk => [disk.diskReadSpeed, disk.diskWriteSpeed]), [[1024, 2048], [5120, 10240]]);
 });

@@ -552,9 +552,9 @@ function createStopWait() {
   };
 }
 
-async function runOpenCodeTurn({
+async function runOpenCodeV1Turn({
   prompt, systemPrompt, attachments, cwd, model, injectedMcpServers, toolIntegrationMode,
-  skillsPathAllowlist, resumeSessionId, env, binPath, emitter, abortController, openCodeFactory,
+  skillsPathAllowlist, resumeSessionId, env, binPath, emitter, abortController, openCodeFactory, assertSessionValid,
 }) {
   const config = buildOpenCodeConfig({ model, injectedMcpServers, toolIntegrationMode, skillsPathAllowlist });
   let opencode = null;
@@ -596,6 +596,9 @@ async function runOpenCodeTurn({
     if (!sessionId) throw new Error("OpenCode did not create a session");
     emitter.sessionId(sessionId);
 
+    // No awaits between this guard and promptAsync below. Validate before
+    // starting the background event loop so failure cannot leave it pending.
+    assertSessionValid?.();
     const stopEventLoopWait = createStopWait();
     const eventLoop = (async () => {
       const iterator = events.stream?.[Symbol.asyncIterator]?.();
@@ -937,10 +940,21 @@ function resetOpenCodeListServerPool() {
     disposeOpenCodeListServer(key, entry);
   }
   openCodeListServers.clear();
+  require("./opencodeV2.cjs").resetOpenCodeV2ListServerPool();
 }
 
-async function listOpenCodeModels({ env, binPath, openCodeFactory, abortController, signal } = {}) {
+async function runOpenCodeTurn(args) {
+  const { shouldUseOpenCodeV2, runOpenCodeV2Turn } = require("./opencodeV2.cjs");
+  if (await shouldUseOpenCodeV2(args)) return runOpenCodeV2Turn(args);
+  return runOpenCodeV1Turn(args);
+}
+
+async function listOpenCodeModels({ env, binPath, openCodeFactory, abortController, signal, ...rest } = {}) {
   const effectiveSignal = signal || abortController?.signal;
+  if (effectiveSignal?.aborted) return emptyOpenCodeModelCatalog();
+  const { shouldUseOpenCodeV2, listOpenCodeV2Models } = require("./opencodeV2.cjs");
+  const selection = { env, binPath, openCodeFactory, abortController, signal, ...rest };
+  if (await shouldUseOpenCodeV2(selection)) return listOpenCodeV2Models(selection);
   let acquired = null;
   try {
     if (effectiveSignal?.aborted) return emptyOpenCodeModelCatalog();

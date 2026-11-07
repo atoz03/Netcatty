@@ -10,6 +10,12 @@
 </p>
 
 <p align="center">
+  <a href="https://trendshift.io/repositories/18391?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-18391" target="_blank" rel="noopener noreferrer">
+    <img src="https://trendshift.io/api/badge/trendshift/repositories/18391/daily?language=TypeScript" alt="binaricat/Netcatty | Trendshift" width="250" height="55"/>
+  </a>
+</p>
+
+<p align="center">
   以 Electron、React 與 xterm.js 打造，介面精緻、功能完整的 SSH 工作區。<br/>
   🔥 內建 AI Agent · 分割終端 · Vault 檢視 · SFTP 工作流 · 自訂主題 —— 全部整合在一起。
 </p>
@@ -29,9 +35,9 @@
 </p>
 
 <p align="center">
-  <a href="https://ko-fi.com/binaricat">
-    <img src="https://cdn.ko-fi.com/cdn/kofi3.png?v=2" width="150" alt="Support on Ko-fi">
-  </a>
+  <a href="https://github.com/sponsors/binaricat"><img src="https://img.shields.io/badge/GitHub-Sponsors-ea4aaa?style=for-the-badge&logo=githubsponsors&logoColor=white" height="28" alt="透過 GitHub 贊助我"></a>
+  &nbsp;
+  <a href="https://ko-fi.com/binaricat"><img src="https://img.shields.io/badge/Ko--fi-Support-29abe0?style=for-the-badge&logo=kofi&logoColor=white" height="28" alt="Support on Ko-fi"></a>
 </p>
 
 <p align="center">
@@ -40,7 +46,7 @@
 
 ---
 
-<img width="3142" height="1764" alt="Screenshot 2026-07-02 at 22 51 24" src="https://github.com/user-attachments/assets/3116165d-623a-4d3a-a28a-914befb9b72d" />
+<img width="3358" height="1984" alt="image" src="docs/assets/readme/overview.webp" />
 
 ---
 
@@ -63,13 +69,13 @@
 
 請 Catty Agent 檢查伺服器健康狀況，它會自動執行合適的指令、分析輸出，並在幾秒內給你一份清楚的總結。
 
-<img width="1510" height="870" alt="ai-single" src="https://github.com/user-attachments/assets/d3f34e53-8476-4fab-8634-394b931d1ff1" />
+<img width="3302" height="1978" alt="image" src="docs/assets/readme/catty-single-host.webp" />
 
 #### 🚀 多主機 —— 建立 Docker Swarm 叢集
 
 看 Catty Agent 在一次對話裡，跨兩台伺服器編排出一個 Docker Swarm 叢集。初始化、權杖交換、節點加入都由它處理 —— 你只要說出你想要的結果。
 
-<img width="1515" height="870" alt="ai-muti" src="https://github.com/user-attachments/assets/ca166fc5-65d9-4d7b-951a-962c2ef230d8" />
+<img width="3294" height="1974" alt="image" src="docs/assets/readme/catty-multi-host.webp" />
 
 ---
 
@@ -82,6 +88,7 @@
 - [介面截圖](#介面截圖)
   - [主視窗](#主視窗)
   - [Vault 檢視](#vault-檢視)
+  - [監控檢視](#監控檢視)
   - [分割終端](#分割終端)
 - [支援的發行版](#支援的發行版)
 - [快速開始](#快速開始)
@@ -129,10 +136,12 @@
 - **分割窗格** —— 水平與垂直分割，方便多工
 - **工作階段管理** —— 多條連線並排處理
 - **內嵌圖片** —— 直接顯示遠端程式輸出的 Kitty 圖形、SIXEL 與 iTerm 內嵌圖片
+- **壓縮檔捷徑** —— 在 Linux 工作階段的終端機裡，按住 Ctrl/Cmd 點選輸出中的 `.tar`、`.tar.gz`/`.tgz`、`.tar.bz2`/`.tbz2`、`.tar.xz` 或 `.zip` 檔名，會在游標處填入含絕對路徑的解壓縮命令（保留已輸入的文字）；按 Enter 才會執行。相對於目前目錄的檔名需要目錄追蹤（OSC 7，見工具列「設定目錄追蹤」）；絕對路徑一律可點。Windows、WSL 與 macOS 工作階段不支援。
 
 ### 📁 SFTP + 內建編輯器
 - **檔案工作流** —— 拖放上傳／下載
 - **就地編輯** —— 內建編輯器，快速修改檔案
+- **遠端壓縮** —— 單選或多選檔案、資料夾，按右鍵選擇「壓縮…」，在對話方塊顯示的儲存目錄建立指定名稱的 `.tar.gz` 或 `.zip` 壓縮檔；伺服器需安裝對應的 `tar`/`gzip` 或 `zip`。
 
 ### 🎨 個人化
 - **自訂主題** —— 依你的喜好調整外觀
@@ -148,25 +157,34 @@
 
 主視窗是為了長時間的 SSH 工作流程而設計：工作階段、導覽與常用工具都集中在同一個地方。
 
-<img width="1531" height="875" alt="black-grid" src="https://github.com/user-attachments/assets/004b80f6-5bbb-4f14-b8cd-33a0a5913b8c" />
+<img width="3290" height="1988" alt="image" src="docs/assets/readme/main-window.webp" />
 
-<img width="1550" height="876" alt="light" src="https://github.com/user-attachments/assets/2b59a999-a25e-4217-944c-9aef0a09f272" />
+<img width="3324" height="1992" alt="image" src="docs/assets/readme/main-window-terminal.webp" />
 
 <a name="vault-檢視"></a>
 ## Vault 檢視
 
 用最適合當下情境的方式整理與瀏覽主機：網格看全局、清單快速掃視、樹狀理層級。
 
-<img width="1554" height="882" alt="list" src="https://github.com/user-attachments/assets/03249f15-b5f8-4770-a3c3-d5001636ea00" />
+<img width="3292" height="1984" alt="image" src="docs/assets/readme/vault-grid.webp" />
 
-<img width="1561" height="878" alt="tree" src="https://github.com/user-attachments/assets/739f7b66-3898-43d0-8dd3-b9b97fd8e8de" />
+<img width="3322" height="1998" alt="image" src="docs/assets/readme/vault-list.webp" />
+
+<a name="監控檢視"></a>
+## 監控檢視
+
+查看 CPU、記憶體、磁碟、網路與延遲資料；支援的環境還可顯示 GPU 詳情。你可以選擇顯示的欄位、調整欄寬與重新整理設定，並直接從受監控的主機開啟終端機。
+
+<img width="3364" height="1982" alt="image" src="docs/assets/readme/monitoring.webp" />
+
+<img width="3362" height="1980" alt="image" src="docs/assets/readme/monitoring-columns.webp" />
 
 <a name="分割終端"></a>
 ## 分割終端
 
 分割窗格讓你同時盯著多台伺服器或多個服務（部署 + 日誌 + 監控指標），不用一直切視窗。
 
-<img width="1560" height="871" alt="split" src="https://github.com/user-attachments/assets/c93a8523-6256-4bb3-8b6e-d599831f2f9f" />
+<img width="1560" height="871" alt="split" src="docs/assets/readme/split-terminals.webp" />
 
 ---
 

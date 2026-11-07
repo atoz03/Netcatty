@@ -571,6 +571,104 @@ test("existing destinations stage then restore mode after rename", async (t) => 
   assert.equal(remoteMeta.get("/usr/local/bin/tool")?.mode & 0o777, 0o755);
 });
 
+test("new-file staged upload lstats the destination once before rename", async (t) => {
+  const tempRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "netcatty-new-file-lstat-"));
+  t.after(async () => {
+    await fs.promises.rm(tempRoot, { recursive: true, force: true });
+  });
+  tempDirBridge.init?.({ getPath: () => tempRoot });
+
+  const localPath = path.join(tempRoot, "payload.bin");
+  const payload = Buffer.from("new-file");
+  await fs.promises.writeFile(localPath, payload);
+  const remotePath = "/home/alice/new-file.bin";
+
+  const { channel, remoteFiles, chmodCalls } = createSessionChannel();
+  const originalLstat = channel.lstat.bind(channel);
+  let destinationLstats = 0;
+  channel.lstat = (targetPath, callback) => {
+    if (String(targetPath) === remotePath) destinationLstats += 1;
+    originalLstat(targetPath, callback);
+  };
+
+  const sftpClients = new Map();
+  sftpBridge.init({
+    electronModule: { webContents: { fromId: () => null } },
+    sessions: new Map([["session-new-file-lstat", { conn: { sftp: (cb) => cb(null, channel) } }]]),
+    sftpClients,
+  });
+  const opened = await sftpBridge.openSftpForSession(null, {
+    sessionId: "session-new-file-lstat",
+    fileProtocol: "sftp",
+  });
+
+  const result = await sftpBridge.uploadLocalToSftp(null, {
+    sftpId: opened.sftpId,
+    localPath,
+    remotePath,
+    encoding: "utf-8",
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(remoteFiles.get(remotePath), payload);
+  assert.deepEqual(chmodCalls, []);
+  // Plan lstat plus one pre-rename check. existingMode is null, so the
+  // post-restore lstat would be a no-op round trip.
+  assert.equal(destinationLstats, 2);
+});
+
+test("existing-file staged upload rechecks the destination after mode restore", async (t) => {
+  const tempRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "netcatty-existing-file-lstat-"));
+  t.after(async () => {
+    await fs.promises.rm(tempRoot, { recursive: true, force: true });
+  });
+  tempDirBridge.init?.({ getPath: () => tempRoot });
+
+  const localPath = path.join(tempRoot, "tool.bin");
+  const payload = Buffer.from("replaced-tool");
+  await fs.promises.writeFile(localPath, payload);
+  const remotePath = "/usr/local/bin/tool";
+
+  const { channel, remoteFiles, remoteMeta, chmodCalls } = createSessionChannel();
+  remoteFiles.set(remotePath, Buffer.from("old-tool"));
+  remoteMeta.set(remotePath, { mode: 0o100755, mtime: 1, uid: 1000, gid: 1000 });
+  const originalLstat = channel.lstat.bind(channel);
+  let destinationLstats = 0;
+  channel.lstat = (targetPath, callback) => {
+    if (String(targetPath) === remotePath) destinationLstats += 1;
+    originalLstat(targetPath, callback);
+  };
+
+  const sftpClients = new Map();
+  sftpBridge.init({
+    electronModule: { webContents: { fromId: () => null } },
+    sessions: new Map([["session-existing-file-lstat", { conn: { sftp: (cb) => cb(null, channel) } }]]),
+    sftpClients,
+  });
+  const opened = await sftpBridge.openSftpForSession(null, {
+    sessionId: "session-existing-file-lstat",
+    fileProtocol: "sftp",
+  });
+
+  const result = await sftpBridge.uploadLocalToSftp(null, {
+    sftpId: opened.sftpId,
+    localPath,
+    remotePath,
+    encoding: "utf-8",
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(remoteFiles.get(remotePath), payload);
+  assert.equal(remoteMeta.get(remotePath)?.mode & 0o777, 0o755);
+  assert.ok(
+    chmodCalls.some((call) => String(call.targetPath).includes(".netcatty-upload-")),
+    `expected staged chmod, got ${JSON.stringify(chmodCalls)}`,
+  );
+  // Plan lstat, pre-restore check, and the post-chmod recheck that covers the
+  // mode-restore round trip.
+  assert.equal(destinationLstats, 3);
+});
+
 test("mode restore failure leaves the existing destination untouched", async (t) => {
   const tempRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), "netcatty-stage-mode-fail-"));
   t.after(async () => {
@@ -2776,4 +2874,86 @@ test("pipelinedUploadLocalFile falls back to raw sftp.fastPut when client.fastPu
   assert.equal(sawRawFastPut, true);
 
   await fs.promises.rm(tempRoot, { recursive: true, force: true });
+});
+
+function createPermissionBackupUploadHarness({ cleanupCode = 3, failPromotion = false } = {}) {
+  const { channel, remoteFiles, remoteMeta } = createSessionChannel();
+  const finalPath = "/tmp/permission-final.bin";
+  const backupPath = sftpBridge._buildBackupRemotePathForTests(finalPath);
+  remoteFiles.set(finalPath, Buffer.from("old"));
+  remoteMeta.set(finalPath, { mode: 0o100644 });
+  let uploads = 0;
+  let removed = 0;
+  const client = {
+    __netcattySingleChannelSsh: true,
+    sftp: channel,
+    async stat(p) {
+      return new Promise((resolve, reject) => channel.stat(p, (err, st) => err ? reject(err) : resolve({ ...st, isDirectory: st.isDirectory() })));
+    },
+    async rename(from, to) {
+      if (remoteFiles.has(to)) throw Object.assign(new Error("Overwrite unsupported"), { code: 4 });
+      if (failPromotion && String(from).includes(".netcatty-upload-") && to === finalPath) {
+        throw Object.assign(new Error("Permission denied promoting stage"), { code: 3 });
+      }
+      return new Promise((resolve, reject) => channel.rename(from, to, err => err ? reject(err) : resolve()));
+    },
+    async delete(p) {
+      if (p === backupPath) throw Object.assign(new Error("Permission denied"), { code: cleanupCode });
+      removed++;
+      return new Promise((resolve, reject) => channel.unlink(p, err => err ? reject(err) : resolve()));
+    },
+  };
+  return {
+    client, finalPath, backupPath, remoteFiles,
+    get uploads() { return uploads; },
+    get removed() { return removed; },
+    upload: () => sftpBridge.runRemoteUploadTransaction(client, "/tmp/local.bin", finalPath, {
+      expectedSize: 3,
+      uploadFile: async (p) => { uploads++; remoteFiles.set(p, Buffer.from("new")); },
+    }),
+  };
+}
+
+test("committed SFTP upload returns a visible warning when backup cleanup is permission denied", async () => {
+  const h = createPermissionBackupUploadHarness();
+  const result = await h.upload();
+  assert.equal(result.staged, true);
+  assert.match(result.warning, /Upload completed/);
+  assert.ok(result.warning.includes(h.finalPath));
+  assert.ok(result.warning.includes(h.backupPath));
+  assert.match(result.warning, /retained/);
+  assert.deepEqual(h.remoteFiles.get(h.finalPath), Buffer.from("new"));
+  assert.deepEqual(h.remoteFiles.get(h.backupPath), Buffer.from("old"));
+  assert.equal(h.removed, 0, "successful publication must not enter failure stage cleanup");
+  await assert.rejects(h.upload, /backup could not be removed/);
+  assert.equal(h.uploads, 1, "a retained recovery artifact must not be silently overwritten on retry");
+});
+
+test("permission denied promoting stage remains failure and restores the old final", async () => {
+  const h = createPermissionBackupUploadHarness({ failPromotion: true });
+  await assert.rejects(h.upload, /Permission denied promoting stage/);
+  assert.deepEqual(h.remoteFiles.get(h.finalPath), Buffer.from("old"));
+  assert.equal(h.remoteFiles.has(h.backupPath), false);
+});
+
+test("connection errors during backup cleanup are not downgraded to permission warnings", async () => {
+  const h = createPermissionBackupUploadHarness({ cleanupCode: "ECONNRESET" });
+  await assert.rejects(h.upload, /backup could not be removed/);
+  assert.deepEqual(h.remoteFiles.get(h.finalPath), Buffer.from("new"));
+  assert.deepEqual(h.remoteFiles.get(h.backupPath), Buffer.from("old"));
+});
+
+for (const code of ["3", "EACCES", "EPERM", "SSH_FX_PERMISSION_DENIED"]) {
+  test(`backup permission code ${code} returns warning only after publication`, async () => {
+    const h = createPermissionBackupUploadHarness({ cleanupCode: code });
+    const result = await h.upload();
+    assert.match(result.warning, /backup was retained/);
+    assert.deepEqual(h.remoteFiles.get(h.finalPath), Buffer.from("new"));
+    assert.deepEqual(h.remoteFiles.get(h.backupPath), Buffer.from("old"));
+  });
+}
+
+test("permission-looking message without a permission code remains a failure", async () => {
+  const h = createPermissionBackupUploadHarness({ cleanupCode: "UNKNOWN" });
+  await assert.rejects(h.upload, /Permission denied/);
 });

@@ -101,6 +101,38 @@ describe("externalMcpController", () => {
     return { controller, bridge };
   }
 
+  it("validates privacy config before updating discovery and propagates IPC failures", async () => {
+    const { controller } = createController();
+    await controller.setEnabled(true);
+    const valid = { enabled: true, redactPrivateIps: true, cidrs: ["10.0.0.0/8"], patterns: ["internal-[a-z]+"] };
+    assert.equal(controller.setConfig({ redaction: valid }).ok, true);
+    assert.deepEqual(written.at(-1).options.redaction, valid);
+    const handlers = new Map();
+    controller.registerHandlers({ handle: (name, handler) => handlers.set(name, handler) });
+    const result = await handlers.get("netcatty:external-mcp:set-config")({}, { redaction: { enabled: true, cidrs: ["bad-value"] } });
+    assert.equal(result.ok, false);
+    assert.deepEqual(controller.getStatus().redaction, valid);
+    assert.deepEqual(written.at(-1).options.redaction, valid);
+    assert.ok(!result.error.includes("bad-value"));
+  });
+
+  it("retries discovery persistence after a failed privacy change", async () => {
+    let fail = false;
+    let saved;
+    const { controller } = createController({ writeDiscovery: (_path, options) => {
+      if (fail) throw new Error("disk full");
+      saved = options;
+    } });
+    await controller.setEnabled(true);
+    fail = true;
+    assert.equal(controller.setConfig({ redaction: { enabled: true } }).ok, false);
+    assert.equal(controller.getStatus().redaction.enabled, false);
+    assert.equal(saved.redaction.enabled, false);
+    fail = false;
+    assert.equal(controller.setConfig({ redaction: { enabled: true } }).ok, true);
+    assert.equal(saved.redaction.enabled, true);
+  });
+
   it("enables external mode, writes discovery, and syncs sessions", async () => {
     const { controller, bridge } = createController();
     const status = await controller.setEnabled(true);
@@ -227,5 +259,96 @@ describe("externalMcpController", () => {
     assert.equal(status.enabled, true);
     assert.equal(status.state, "running");
     assert.ok(written.length >= 2);
+  });
+
+  it("does not listen on HTTP until the toggle is on, and stops when External MCP is disabled", async () => {
+    const events = [];
+    let listening = false;
+    const { controller } = createController({
+      createHttpServer: () => ({
+        start: async () => {
+          listening = true;
+          events.push("start");
+        },
+        stop: async () => {
+          listening = false;
+          events.push("stop");
+        },
+        getState: () => ({ listening }),
+      }),
+    });
+
+    await controller.setEnabled(true);
+    await controller.whenHttpSettled();
+    assert.equal(controller.getStatus().http.listening, false);
+    assert.equal(controller.getStatus().http.enabled, false);
+    assert.deepEqual(events, []);
+
+    controller.setConfig({ httpEnabled: true, httpPort: 47391 });
+    await controller.whenHttpSettled();
+    assert.equal(controller.getStatus().http.listening, true);
+    assert.equal(controller.getStatus().http.url, "http://127.0.0.1:47391/mcp");
+    assert.equal(controller.getStatus().http.bearerToken, "tok-1");
+
+    controller.setConfig({ httpAllowCustomBind: true, httpListenAddress: "0.0.0.0" });
+    await controller.whenHttpSettled();
+    assert.equal(controller.getStatus().http.url, null);
+    assert.equal(controller.getStatus().http.errorCode, "client_host_required");
+    controller.setConfig({ httpClientHost: "172.22.0.1" });
+    assert.equal(controller.getStatus().http.url, "http://172.22.0.1:47391/mcp");
+
+    await controller.setEnabled(false);
+    await controller.whenHttpSettled();
+    assert.equal(listening, false);
+    assert.equal(controller.getStatus().http.listening, false);
+    assert.equal(controller.getStatus().http.bearerToken, null);
+    assert.deepEqual(events, ["start", "start", "stop"]);
+  });
+
+  it("routes HTTP dispatch through the bridge handler and rotates the shared external token", async () => {
+    let token = "tok-0";
+    let issued = 0;
+    const calls = [];
+    const bridge = createFakeBridge();
+    bridge.issueExternalMcpAuthToken = () => {
+      issued += 1;
+      token = `tok-${issued}`;
+      return token;
+    };
+    bridge.getExternalMcpAuthToken = () => token;
+    bridge.dispatchBuiltinRpc = async (method, params, context) => {
+      calls.push({ method, params, socket: context?.externalSocket || null });
+      return { ok: true };
+    };
+    let captured = null;
+    const { controller } = createController({
+      mcpServerBridge: bridge,
+      createHttpServer: (deps) => {
+        captured = deps;
+        return {
+          start: async () => {},
+          stop: async () => {},
+          getState: () => ({ listening: true }),
+        };
+      },
+    });
+
+    await controller.setEnabled(true);
+    controller.setConfig({ httpEnabled: true, rotateHttpToken: true });
+    await controller.whenHttpSettled();
+    assert.equal(controller.getStatus().http.bearerToken, "tok-2");
+    assert.equal(written.at(-1).options.token, "tok-2");
+
+    const client = { id: "http-session" };
+    const result = await captured.dispatchRpc("netcatty/exec", {
+      sessionId: "sess-9",
+      command: "pwd",
+      chatSessionId: "attacker",
+    }, { externalClient: client });
+    assert.equal(result.ok, true);
+    assert.equal(calls[0].method, "netcatty/exec");
+    assert.equal(calls[0].params.chatSessionId, EXTERNAL_MCP_CHAT_SESSION_ID);
+    assert.equal(calls[0].params.sessionId, "sess-9");
+    assert.equal(calls[0].socket, client);
   });
 });

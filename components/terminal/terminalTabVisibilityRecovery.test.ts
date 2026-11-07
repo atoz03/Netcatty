@@ -46,21 +46,45 @@ test('visible tab recovery reuses a cached fit when the container size is unchan
 test('short unchanged tab reveals skip the recovery work entirely', () => {
   const recoverIndex = source.indexOf('const recoverTerminalAfterBecomeVisible = () => {');
   const fastPathIndex = source.indexOf('getHiddenDurationMs() < CSS_ONLY_TAB_REVEAL_MAX_HIDDEN_MS', recoverIndex);
-  const webglRecoveryIndex = source.indexOf('xtermRuntimeRef.current?.ensureWebglRenderer();', recoverIndex);
+  const fullRecoveryIndex = source.indexOf('xtermRuntimeRef.current?.clearTextureAtlas();', recoverIndex);
+  const fastPath = source.slice(fastPathIndex, fullRecoveryIndex);
 
   assert.ok(recoverIndex >= 0);
   assert.ok(fastPathIndex > recoverIndex);
-  assert.ok(webglRecoveryIndex > fastPathIndex);
+  assert.ok(fullRecoveryIndex > fastPathIndex);
   assert.match(
-    source.slice(fastPathIndex, webglRecoveryIndex),
+    fastPath,
     /currentContainerSizeAlreadyFit\(\)[\s\S]*lastWebglRecoveryLayoutKeyRef\.current = paneLayoutKey;[\s\S]*commitVisibleLayout\(\);[\s\S]*return;/,
   );
+  assert.doesNotMatch(fastPath, /runImmediateRefit|scheduleLayoutRecoveryRefit/);
+});
+
+// Chromium can reclaim a hidden pane's WebGL context at any time, and the
+// context budget releases renderers of panes hidden for a while. The fast
+// path must still bring a missing renderer back (a no-op when it is live).
+test('short unchanged tab reveals still restore a lost WebGL renderer', () => {
+  const recoverIndex = source.indexOf('const recoverTerminalAfterBecomeVisible = () => {');
+  const fastPathIndex = source.indexOf('getHiddenDurationMs() < CSS_ONLY_TAB_REVEAL_MAX_HIDDEN_MS', recoverIndex);
+  const fullRecoveryIndex = source.indexOf('xtermRuntimeRef.current?.clearTextureAtlas();', recoverIndex);
+
+  assert.match(
+    source.slice(fastPathIndex, fullRecoveryIndex),
+    /xtermRuntimeRef\.current\?\.ensureWebglRenderer\(\);[\s\S]*commitVisibleLayout\(\);\s*return;/,
+  );
+});
+
+test('pane visibility reaches the WebGL context budget before reveal recovery runs', () => {
+  const syncIndex = source.indexOf('xtermRuntimeRef.current?.syncPaneVisibility();');
+  const revealEffectIndex = source.indexOf('const becameVisible = isVisible && !wasVisibleRef.current');
+  assert.ok(syncIndex >= 0);
+  assert.ok(syncIndex < revealEffectIndex);
+  assert.match(source, /isPaneVisibleRef: isVisibleRef,/);
 });
 
 test('short unchanged tab reveals still flush pending hidden-output scroll', () => {
   const recoverIndex = source.indexOf('const recoverTerminalAfterBecomeVisible = () => {');
   const fastPathIndex = source.indexOf('getHiddenDurationMs() < CSS_ONLY_TAB_REVEAL_MAX_HIDDEN_MS', recoverIndex);
-  const webglRecoveryIndex = source.indexOf('xtermRuntimeRef.current?.ensureWebglRenderer();', recoverIndex);
+  const webglRecoveryIndex = source.indexOf('xtermRuntimeRef.current?.clearTextureAtlas();', recoverIndex);
   const delayedSkipIndex = source.indexOf('lastWebglRecoveryLayoutKeyRef.current === paneLayoutKey', webglRecoveryIndex);
   const delayedTimerIndex = source.indexOf('const timer = setTimeout', delayedSkipIndex);
 
@@ -115,6 +139,27 @@ test('immediate tab recovery marks webgl recovery to skip the delayed duplicate 
   );
   assert.match(
     source,
-    /lastWebglRecoveryLayoutKeyRef\.current === paneLayoutKey\s*&& hiddenMs < CSS_ONLY_TAB_REVEAL_MAX_HIDDEN_MS/,
+    /if \(lastWebglRecoveryLayoutKeyRef\.current === paneLayoutKey\) \{/,
   );
+});
+
+test('reveal does not claim recovery before the terminal runtime exists', () => {
+  const start = source.indexOf('const recoverTerminalAfterBecomeVisible = () => {');
+  const end = source.indexOf('// Refit synchronously', start);
+  const recovery = source.slice(start, end);
+  const runtimeGuard = recovery.indexOf('if (!termRef.current || !xtermRuntimeRef.current) return;');
+  const commit = recovery.indexOf('lastWebglRecoveryLayoutKeyRef.current = paneLayoutKey');
+  assert.ok(runtimeGuard >= 0 && runtimeGuard < commit);
+});
+
+test('settling tab-layout probes do not force a fit when bounds are unchanged', () => {
+  const start = source.indexOf('const refitSettledLayout = () => {');
+  const end = source.indexOf('}, [inWorkspace, isVisible]);', start);
+  const settling = source.slice(start, end);
+  assert.ok(start >= 0 && end > start);
+  assert.match(settling, /if \(!isVisibleRef\.current \|\| currentContainerSizeAlreadyFit\(\)\) return;/);
+  assert.match(settling, /safeFit\(\{ requireVisible: true \}\);/);
+  assert.doesNotMatch(settling, /force: true/);
+  assert.match(settling, /setTimeout\(refitSettledLayout, 100\)/);
+  assert.match(settling, /setTimeout\(refitSettledLayout, 350\)/);
 });

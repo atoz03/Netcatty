@@ -8,7 +8,7 @@ const {
   execViaChannel,
   execViaRawPty,
 } = require("../bridges/ai/ptyExec.cjs");
-const { getFreshIdlePrompt, formatSyntheticEcho } = require("../bridges/ai/shellUtils.cjs");
+const { getFreshIdlePrompt, getVisibleIdlePrompt, formatSyntheticEcho } = require("../bridges/ai/shellUtils.cjs");
 const {
   ensureSessionShellKind,
   remoteDisallowsExecChannelProbe, sessionDisallowsExtraSshChannel, ensureSessionShellKindForExec,
@@ -22,6 +22,25 @@ const DEFAULT_BACKGROUND_JOB_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_BACKGROUND_JOB_POLL_INTERVAL_MS = 30 * 1000;
 const BACKGROUND_JOB_RETENTION_MS = 10 * 60 * 1000;
 const MAX_BACKGROUND_JOB_OUTPUT_CHARS = 256 * 1024;
+const EXECUTION_GUARD_ERROR = "AI privacy session is unavailable or its settings changed; start a new chat";
+
+async function checkWorkerExecution(event, activePtyExecs, chatSessionId) {
+  if (typeof event?.beforeExecute !== "function") return null;
+  const marker = `__NCMCP_VALIDATE_${crypto.randomBytes(8).toString("hex")}__`;
+  let cancelled = false;
+  activePtyExecs?.set(marker, {
+    chatSessionId,
+    cancel: () => { cancelled = true; },
+  });
+  try {
+    await event.beforeExecute();
+    return cancelled ? { ok: false, error: "Cancelled" } : null;
+  } catch {
+    return { ok: false, error: EXECUTION_GUARD_ERROR };
+  } finally {
+    activePtyExecs?.delete(marker);
+  }
+}
 
 function cancelPtyExecsForSession(activePtyExecs, chatSessionId) {
   if (!chatSessionId) return;
@@ -187,6 +206,7 @@ function serializeWorkerJob(job, offset = 0) {
     completed: job.status !== "running" && job.status !== "stopping",
     exitCode: job.exitCode,
     error: job.error,
+    ...(job.code ? { code: job.code } : {}),
     startedAt: job.startedAt,
     updatedAt: job.updatedAt,
     output: collapseCarriageReturns(stdout.slice(relativeOffset)),
@@ -260,6 +280,8 @@ function createWorkerAiExecHandler({
     const ptyStream = session.stream || session.pty || session.proc;
 
     if (isNetworkDevice && ptyStream && typeof ptyStream.write === "function") {
+      const blocked = await checkWorkerExecution(event, activePtyExecs, chatSessionId);
+      if (blocked) return blocked;
       return execViaRawPty(ptyStream, command, {
         timeoutMs,
         trackForCancellation: activePtyExecs,
@@ -285,7 +307,13 @@ function createWorkerAiExecHandler({
       if (safety.blocked) {
         return { ok: false, error: `Command blocked by safety policy. Pattern: ${safety.matchedPattern}` };
       }
+      const blocked = await checkWorkerExecution(event, activePtyExecs, chatSessionId);
+      if (blocked) return blocked;
       return execViaPty(ptyStream, command, {
+        beforeInput: async () => {
+          const blocked = await checkWorkerExecution(event, null, chatSessionId);
+          if (blocked) throw new Error(blocked.error);
+        },
         onInterrupt: () => clearSessionFlowState(session),
         stripMarkers: true,
         trackForCancellation: activePtyExecs,
@@ -309,6 +337,8 @@ function createWorkerAiExecHandler({
         },
         chatSessionId,
         expectedPrompt: getFreshIdlePrompt(session),
+        getReadyPrompt: typeof session._promptTrackTail === "string"
+          ? () => getFreshIdlePrompt(session) || getVisibleIdlePrompt(session) : undefined,
         typedInput: true,
         echoCommand: (rawCommand) => {
           event?.sender?.send?.("netcatty:data", {
@@ -340,6 +370,8 @@ function createWorkerAiExecHandler({
       if (safety.blocked) {
         return { ok: false, error: `Command blocked by safety policy. Pattern: ${safety.matchedPattern}` };
       }
+      const blocked = await checkWorkerExecution(event, activePtyExecs, chatSessionId);
+      if (blocked) return blocked;
       return execViaChannel(sshClient, command, {
         timeoutMs,
         trackForCancellation: activePtyExecs,
@@ -351,6 +383,8 @@ function createWorkerAiExecHandler({
       if (session.ymodemActive || session.zmodemSentry?.isActive?.()) {
         return { ok: false, error: "Serial file transfer is already in progress" };
       }
+      const blocked = await checkWorkerExecution(event, activePtyExecs, chatSessionId);
+      if (blocked) return blocked;
       return execViaRawPty(session.serialPort, command, {
         timeoutMs,
         trackForCancellation: activePtyExecs,
@@ -454,6 +488,10 @@ function createWorkerAiJobStartHandler({
     // reserved above so concurrent starts cannot pass the busy check.
     try {
       await ensureSessionShellKind(session);
+      // Main retains the policy snapshot. Revalidate only after the worker's
+      // async probe, not just before main handed this command to the worker.
+      const blocked = await checkWorkerExecution(event, null, chatSessionId);
+      if (blocked) throw new Error(blocked.error);
     } catch (err) {
       job.status = "failed";
       job.error = err?.message || String(err);
@@ -500,6 +538,10 @@ function createWorkerAiJobStartHandler({
     let handle;
     try {
       handle = startPtyJob(ptyStream, command, {
+        beforeInput: async () => {
+          const blocked = await checkWorkerExecution(event, null, chatSessionId);
+          if (blocked) throw new Error(blocked.error);
+        },
         onInterrupt: () => clearSessionFlowState(session),
         timeoutMs,
         sessionId,
@@ -524,6 +566,8 @@ function createWorkerAiJobStartHandler({
         },
         chatSessionId,
         expectedPrompt: getFreshIdlePrompt(session),
+        getReadyPrompt: typeof session._promptTrackTail === "string"
+          ? () => getFreshIdlePrompt(session) || getVisibleIdlePrompt(session) : undefined,
         typedInput: true,
         echoCommand: (rawCommand) => {
           event?.sender?.send?.("netcatty:data", {
@@ -550,6 +594,7 @@ function createWorkerAiJobStartHandler({
     handle.resultPromise.then((result) => {
       job.updatedAt = Date.now();
       job.exitCode = result.exitCode ?? null;
+      job.code = result.code;
       storeCompletedWorkerJobOutput(job, result.stdout || "", result);
       const isForcedCancel = typeof result.error === "string" && result.error.includes("forced");
       if (result.error === "Cancelled" || isForcedCancel) {
@@ -640,6 +685,21 @@ function registerWorkerAiExecHandlers(ipcMain, { sessions }) {
   ipcMain.handle("netcatty:ai:jobPoll", createWorkerAiJobPollHandler({
     backgroundJobs,
   }));
+  ipcMain.handle("netcatty:ai:shellReadiness", (_event, payload = {}) => {
+    // Read-only probe used by session recovery readiness inspection. Sessions
+    // live here in the default worker path, so the main process cannot see
+    // prompt tracking state without this route. Never mutates the session and
+    // never writes to the PTY.
+    const session = sessions.get(payload?.sessionId);
+    if (!session) return { ok: true, found: false };
+    return {
+      ok: true,
+      found: true,
+      trackedShell: typeof session._promptTrackTail === "string",
+      freshIdlePrompt: getFreshIdlePrompt(session) || "",
+      visibleIdlePrompt: getVisibleIdlePrompt(session) || "",
+    };
+  });
   ipcMain.handle("netcatty:ai:jobStop", createWorkerAiJobStopHandler({
     backgroundJobs,
   }));

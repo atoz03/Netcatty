@@ -415,7 +415,10 @@ export const hostsEqualForIdentityReuse = (a: Host, b: Host): boolean => {
 };
 
 export const sanitizeHost = (host: Host, snippets: Snippet[] = []): Host => {
-  const cleanHostname = (host.hostname || '').trim().split(/\s+/)[0];
+  // Serial endpoints are paths, not network hostnames; pipe names may contain spaces.
+  const cleanHostname = host.protocol === 'serial'
+    ? (host.serialConfig?.path || host.hostname || '').trim()
+    : (host.hostname || '').trim().split(/\s+/)[0];
   const cleanDistro = normalizeDistroId(host.distro);
   const cleanManualDistro = normalizeDistroId(host.manualDistro);
   const cleanDistroMode =
@@ -463,6 +466,11 @@ export const sanitizeHost = (host: Host, snippets: Snippet[] = []): Host => {
       ? undefined
       : migrated.authMethod ?? inferredLegacyAuthMethod,
     authPolicyVersion: 1,
+    // Legacy SSH records used per-character IME/short-paste writes globally.
+    // Persist the choice on normalization; explicit false survives every reload.
+    sshInputCompatibility: host.protocol === undefined || host.protocol === 'ssh'
+      ? host.sshInputCompatibility ?? true
+      : host.sshInputCompatibility,
     hostname: cleanHostname,
     osOverride: osSelection,
     os: osSelection === 'linux' || osSelection === 'windows' || osSelection === 'macos' ? osSelection : host.os,
@@ -486,5 +494,6 @@ export const sanitizeHost = (host: Host, snippets: Snippet[] = []): Host => {
     pluginConnection,
   };
   delete (sanitized as { singleChannelSsh?: unknown }).singleChannelSsh;
+  delete (sanitized as { backedBySavedHost?: boolean }).backedBySavedHost;
   return stripBuiltInConnectionFieldsForPluginHost(sanitized);
 };

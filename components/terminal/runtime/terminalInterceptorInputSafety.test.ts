@@ -3,6 +3,10 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const runtimeSource = readFileSync(new URL("./createXTermRuntime.ts", import.meta.url), "utf8");
+const autocompleteHookSource = readFileSync(
+  new URL("../autocomplete/useTerminalAutocomplete.ts", import.meta.url),
+  "utf8",
+);
 const attachmentSource = readFileSync(new URL("./terminalSessionAttachment.ts", import.meta.url), "utf8");
 const terminalSource = readFileSync(new URL("../../Terminal.tsx", import.meta.url), "utf8");
 const terminalLayerSource = readFileSync(new URL("../../TerminalLayer.tsx", import.meta.url), "utf8");
@@ -30,15 +34,15 @@ test("password-prompt input is classified before prompt state reset and cannot b
   );
   assert.match(
     terminalSource,
-    /typeof meta\?\.pluginPipelineSensitiveInput === "boolean"[\s\S]*?passwordPromptActiveRef\.current = meta\.pluginPipelineSensitiveInput[\s\S]*?sensitivePromptOutputTailRef\.current = "";[\s\S]*?return;[\s\S]*?else if \(isUntrustedTerminalInputPrompt/u,
+    /typeof meta\?\.pluginPipelineSensitiveInput === "boolean"[\s\S]*?passwordPromptActiveRef\.current = meta\.pluginPipelineSensitiveInput[\s\S]*?sensitivePromptOutputTailRef\.current = "";[\s\S]*?return;[\s\S]*?isUntrustedTerminalInputPrompt/u,
   );
   assert.match(
     runtimeSource,
-    /const sensitive = ctx\.passwordPromptActiveRef\?\.current === true[\s\S]*?const canBroadcastInput = \(!sensitive\s*\|\|\s*\(ctx\.broadcastPasswordBypassRef\?\.current === true && options\?\.sensitive !== true\)\) &&[\s\S]*?const willBroadcastInput = canBroadcastInput && options\?\.skipBroadcast !== true;/u,
+    /const sensitive = ctx\.passwordPromptActiveRef\?\.current === true[\s\S]*?const canBroadcastInput = shouldBroadcastDuringSensitivePrompt\(\{\s*sensitivePromptActive: sensitive,[\s\S]*?broadcastPasswordBypass: ctx\.broadcastPasswordBypassRef\?\.current === true && options\?\.sensitive !== true,[\s\S]*?\}\) &&[\s\S]*?const willBroadcastInput = canBroadcastInput && options\?\.skipBroadcast !== true;/u,
   );
   assert.match(
     runtimeSource,
-    /for \(const chunk of getTextInputWireChunks\(outData, options\?\.perCharacterWrites === true\)\) \{\s*ctx\.terminalBackend\.writeToSession\(id, chunk, \{\s*sensitive,\s*serialEraseChar,[\s\S]*?\}\);\s*\}/u,
+    /for \(const chunk of getTextInputWireChunks\(outData, usePerCharacterInput && options\?\.perCharacterWrites === true, \(ctx\.host\.protocol === undefined \|\| ctx\.host\.protocol === "ssh"\) && !ctx\.host\.moshEnabled && !ctx\.host\.etEnabled\)\) \{\s*ctx\.terminalBackend\.writeToSession\(id, chunk, \{\s*sensitive,\s*serialEraseChar,[\s\S]*?\}\);\s*\}/u,
   );
   assert.match(
     runtimeSource,
@@ -46,7 +50,7 @@ test("password-prompt input is classified before prompt state reset and cannot b
   );
   assert.match(
     runtimeSource,
-    /const broadcastUserPasteData = \(\s*data: string,\s*options\?: TerminalBroadcastInputOptions,\s*\) => \{[\s\S]*?const dispatchingFromPasswordPrompt = ctx\.passwordPromptActiveRef\?\.current === true;[\s\S]*?const sourceSensitive = dispatchingFromPasswordPrompt \|\| options\?\.sensitive === true;[\s\S]*?\|\| ctx\.broadcastPasswordBypassRef\?\.current === true\)[\s\S]*?onBroadcastInputRef\.current\(\s*data,\s*ctx\.sessionId,\s*sourceSensitive[\s\S]*?sourceSensitive: true/u,
+    /const broadcastUserPasteData = \(\s*data: string,\s*options\?: TerminalBroadcastInputOptions,\s*\) => \{[\s\S]*?const dispatchingFromPasswordPrompt = ctx\.passwordPromptActiveRef\?\.current === true;[\s\S]*?const sourceSensitive = dispatchingFromPasswordPrompt \|\| options\?\.sensitive === true;[\s\S]*?broadcastPasswordBypass: ctx\.broadcastPasswordBypassRef\?\.current === true,[\s\S]*?onBroadcastInputRef\.current\(\s*data,\s*ctx\.sessionId,\s*sourceSensitive[\s\S]*?sourceSensitive: true/u,
   );
   assert.match(
     terminalSource,
@@ -110,10 +114,34 @@ test("renderer flow control acknowledges host ingress rather than transformed di
   );
 });
 
+test("explicit plugin sensitivity is not treated as the heuristic prompt latch", () => {
+  const effectsSource = readFileSync(new URL("../useTerminalEffects.ts", import.meta.url), "utf8");
+  assert.match(
+    terminalSource,
+    /passwordPromptActiveRef\.current = meta\.pluginPipelineSensitiveInput;[\s\S]*?passwordPromptActiveRef\.source = meta\.pluginPipelineSensitiveInput \? "explicit" : "heuristic";/,
+  );
+  assert.match(
+    terminalSource,
+    /passwordPromptActiveRef\.current = payload\.passwordPromptActive;[\s\S]*?if \(payload\.passwordPromptActive\) passwordPromptActiveRef\.source = "explicit";/,
+  );
+  assert.match(
+    effectsSource,
+    /passwordPromptActiveRef\.current = snap\.passwordPromptActive;[\s\S]*?if \(snap\.passwordPromptActive\) passwordPromptActiveRef\.source = "explicit";/,
+  );
+  assert.match(
+    terminalSource,
+    /passwordPromptActiveRef\.current = true;[\s\S]*?passwordPromptActiveRef\.source = "heuristic";/,
+  );
+  assert.match(
+    autocompleteHookSource,
+    /sensitiveSource: sensitiveInputActiveRef\?\.source,/,
+  );
+});
+
 test("active and hibernated output share host-owned sensitive prompt classification", () => {
   assert.match(
     terminalSource,
-    /const observeTerminalInputPrompt = useCallback[\s\S]*?typeof meta\?\.pluginPipelineSensitiveInput === "boolean"[\s\S]*?passwordPromptActiveRef\.current = meta\.pluginPipelineSensitiveInput[\s\S]*?sensitivePromptOutputTailRef\.current = "";[\s\S]*?return;[\s\S]*?isConfirmedTerminalShellPrompt[\s\S]*?passwordPromptActiveRef\.current = false/u,
+    /const observeTerminalInputPrompt = useCallback[\s\S]*?typeof meta\?\.pluginPipelineSensitiveInput === "boolean"[\s\S]*?passwordPromptActiveRef\.current = meta\.pluginPipelineSensitiveInput[\s\S]*?sensitivePromptOutputTailRef\.current = "";[\s\S]*?return;[\s\S]*?isUntrustedTerminalInputPrompt[\s\S]*?passwordPromptActiveRef\.current = false/u,
   );
   assert.match(
     terminalSource,

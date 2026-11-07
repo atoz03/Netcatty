@@ -49,6 +49,11 @@ export interface TerminalBroadcastInputOptions {
    */
   sensitive?: boolean;
   /**
+   * Compose-bar send-to-all for orphan sessions while the toolbar broadcast
+   * switch stays off. Keystroke fan-out never sets this.
+   */
+  composePeerFanOut?: boolean;
+  /**
    * Observer for the sessions that actually received the payload (#3491):
    * the solo compose bar uses it to detect a fan-out delivered into a peer's
    * sensitive prompt (its password/MFA input) and keep that send
@@ -198,7 +203,7 @@ export interface TerminalProps {
   onTerminalFontSizeChange?: (fontSize: number) => void;
   onStatusChange?: (sessionId: string, status: TerminalSession["status"], sftpHost?: Host) => void;
   onSessionExit?: (sessionId: string, evt: TerminalSessionExitEvent) => void;
-  onTerminalDataCapture?: (sessionId: string, data: string) => void;
+  onTerminalDataCapture?: (sessionId: string, data: string) => void | Promise<void>;
   onOsDetected?: (hostId: string, distro: string) => void;
   onCloseSession?: (sessionId: string) => void;
   onUpdateHost?: (host: Host) => void;
@@ -236,6 +241,9 @@ export interface TerminalProps {
   onOpenTheme?: () => void;
   onOpenSystem?: () => void;
   isBroadcastEnabled?: boolean;
+  /** Compose-bar send target for solo sessions. Workspace compose lives on the layer. */
+  composeSendToAll?: boolean;
+  onToggleComposeSendTarget?: () => void;
   onToggleBroadcast?: () => void;
   onToggleComposeBar?: () => void;
   isWorkspaceComposeBarOpen?: boolean;
@@ -252,6 +260,7 @@ export interface TerminalProps {
       options?: {
         broadcast?: boolean;
         multiLineRunMode?: Snippet["multiLineRunMode"];
+        preferBracketedPaste?: boolean;
         focus?: boolean;
       },
     ) => boolean | Promise<boolean>) | null,
@@ -447,6 +456,11 @@ export function shouldClaimDisconnectedDialogFocus({
     }
     // Sink already focused.
     return active !== dialogNode;
+  }
+  // An open compose draft owns Enter: empty reconnects from the bar, and a
+  // non-empty draft must keep send behavior (#3767). Do not park focus here.
+  if (active.closest("[data-section='terminal-compose-bar']")) {
+    return false;
   }
   const terminalRoot = resolveDisconnectedDialogTerminalRoot(dialogNode, sessionRoot);
   if (terminalRoot?.contains(active)) {

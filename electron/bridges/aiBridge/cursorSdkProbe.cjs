@@ -11,13 +11,30 @@ function getCursorPlatformPackageName(platform = process.platform, arch = proces
   return null;
 }
 
+/**
+ * Locate the ESM entry that `import("@cursor/sdk")` loads, without evaluating
+ * the ~4 MB SDK (importing it just to detect it also kept it resident in the
+ * main process for good). The package does not export package.json and its
+ * CommonJS build is stripped from release builds, so walk the resolution paths
+ * for the ESM entry instead of using require.resolve.
+ */
+function isCursorSdkEntryPresent() {
+  const nodePath = require("node:path");
+  const nodeFs = require("node:fs");
+  for (const base of require.resolve.paths("@cursor/sdk") || []) {
+    try {
+      if (nodeFs.existsSync(nodePath.join(base, "@cursor", "sdk", "dist", "esm", "index.js"))) return true;
+    } catch { /* keep looking */ }
+  }
+  return false;
+}
+
 async function detectCursorSdkInstalled() {
   const platformPackageName = getCursorPlatformPackageName();
   if (!platformPackageName) return false;
   try {
-    await import("@cursor/sdk");
     require.resolve(`${platformPackageName}/package.json`);
-    return true;
+    return isCursorSdkEntryPresent();
   } catch {
     return false;
   }

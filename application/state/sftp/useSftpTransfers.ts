@@ -24,7 +24,7 @@ import { netcattyBridge } from "../../../infrastructure/services/netcattyBridge"
 import { logger } from "../../../lib/logger";
 import { sftpTransferCenterStore } from "../sftpTransferCenterStore";
 import { SftpPane } from "./types";
-import { isMissingStatError } from "./errors";
+import { isMissingStatError, unwrapSftpIpcError } from "./errors";
 import { useSftpDirectoryTransferOps } from "./transferDirectoryOps";
 import { useSftpTransferConflictOps } from "./transferConflictOps";
 import { useSftpTransferTaskOps } from "./transferTaskOps";
@@ -34,6 +34,7 @@ import {
   resolveDirectDirectoryDownloadFinalStatus,
 } from "./downloadTransferTask";
 import {
+  isTransferOrRootPauseLatched,
   releaseTransferPauseTree,
   waitUntilTransferPauseReleased,
 } from "./transferPauseLatch";
@@ -158,6 +159,89 @@ export function finishTransferTask(
   return status;
 }
 
+const STICKY_CONTROL_STATUSES = new Set<TransferStatus>([
+  "paused",
+  "pausing",
+  "cancelled",
+  "completed",
+  "failed",
+  "interrupted",
+  "attention",
+]);
+
+const LIVE_QUEUE_STATUSES = new Set<TransferStatus>([
+  "transferring",
+  "pending",
+  "queued",
+]);
+
+/**
+ * Pause, resume, and cancel paint on the same turn. Per-file complete/queue
+ * churn stays on the animation frame so a folder upload does not commit once
+ * per child.
+ */
+export function shouldPaintTransferControlNow(
+  previous: readonly TransferTask[],
+  next: readonly TransferTask[],
+): boolean {
+  const prevById = new Map(previous.map((row) => [row.id, row]));
+  return next.some((row) => {
+    const prevRow = prevById.get(row.id);
+    if (prevRow?.status === row.status) return false;
+    if (row.status === "paused" || row.status === "pausing" || row.status === "cancelled") return true;
+    if (prevRow && (prevRow.status === "paused" || prevRow.status === "pausing" || prevRow.status === "cancelled")) {
+      return true;
+    }
+    if (
+      !row.parentTaskId
+      && prevRow
+      && (STICKY_CONTROL_STATUSES.has(row.status) || STICKY_CONTROL_STATUSES.has(prevRow.status))
+    ) {
+      return true;
+    }
+    return false;
+  });
+}
+
+/**
+ * Child lifecycle updates clone the ref they saw. If that clone still says the
+ * folder is transferring after the store already paused it, publishing the
+ * clone reopens the parent. An explicit status edit (resume, retry) is kept.
+ */
+export function reconcilePanelRowsWithStore(
+  previous: readonly TransferTask[],
+  next: readonly TransferTask[],
+  storeRows: readonly TransferTask[],
+): TransferTask[] {
+  const prevById = new Map(previous.map((row) => [row.id, row]));
+  const storeById = new Map(storeRows.map((row) => [row.id, row]));
+  let changed = false;
+  const reconciled = next.map((row) => {
+    const storeRow = storeById.get(row.id);
+    const prevRow = prevById.get(row.id);
+    if (!storeRow || !STICKY_CONTROL_STATUSES.has(storeRow.status) || !LIVE_QUEUE_STATUSES.has(row.status)) {
+      return row;
+    }
+    // A full-list write can disagree with the ref only because the ref already
+    // moved to the store's pause. That is a stale snapshot, not Resume.
+    // Resume releases the latch before it republishes transferring.
+    const rootId = row.parentTaskId ?? row.id;
+    const latchedReopen = isTransferOrRootPauseLatched(rootId, row.id);
+    if (prevRow && prevRow.status !== row.status && !latchedReopen) return row;
+    if (row.status === storeRow.status) return row;
+    changed = true;
+    return {
+      ...row,
+      status: storeRow.status,
+      speed: 0,
+      error: storeRow.error,
+      endTime: storeRow.endTime,
+      pauseUnavailableReason: storeRow.pauseUnavailableReason,
+    };
+  });
+  return changed ? reconciled : next as TransferTask[];
+}
+
 /** User-facing path exclusivity notice (toast + logs). */
 function notifyPathConflict(
   existing: Pick<TransferTask, "fileName" | "status">,
@@ -191,6 +275,21 @@ export const useSftpTransfers = ({
   const { t } = useI18n();
   const tRef = useRef(t);
   tRef.current = t;
+  // startTransfer keeps the processTransfer closure from its first render.
+  // Read the latest acquire fn so a host key trusted after that render is
+  // included in the transfer open, instead of the empty list from mount.
+  const acquireTransferSessionRef = useRef(acquireTransferSession);
+  acquireTransferSessionRef.current = acquireTransferSession;
+  const acquireTransferSessionLive = useCallback<NonNullable<UseSftpTransfersParams["acquireTransferSession"]>>(
+    (hostId, transferId, connectHost) => {
+      const acquire = acquireTransferSessionRef.current;
+      if (!acquire) {
+        return Promise.reject(new Error("SFTP transfer session acquisition is unavailable"));
+      }
+      return acquire(hostId, transferId, connectHost);
+    },
+    [],
+  );
   // Ref so progress flushes always see the latest visibility without rebinding.
   const surfaceVisibleRef = useRef(surfaceVisible);
   surfaceVisibleRef.current = surfaceVisible;
@@ -222,29 +321,85 @@ export const useSftpTransfers = ({
   const transfersRef = useRef(transfers);
   const conflictsRef = useRef(conflicts);
   conflictsRef.current = conflicts;
-  // When the retained panel is re-opened, catch up React state from the ref that
-  // kept receiving progress while the surface was hidden.
-  useEffect(() => {
-    if (!surfaceVisible) return;
-    setTransfersState(transfersRef.current);
-  }, [surfaceVisible]);
-
   // Keep owner lifecycle changes in the global transfer store. Byte progress
   // arrives independently through the unified process-wide event stream.
   //
   // Do not pre-assign transfersRef before publishing the same array reference —
   // identity equality skips the store merge (avoids store↔listener loops).
+  // Lifecycle writers (child add/start/complete) fire several times per file.
+  // Repainting the whole SFTP view synchronously on each one saturates the
+  // renderer on folders with many small files, which then throttles the
+  // transfer itself. transfersRef/store stay authoritative; React state
+  // catches up once per frame, except pause/resume/cancel and folder terminal
+  // rows, which paint immediately.
+  //
+  // A frame queued for child churn must not commit a pre-pause ref after the
+  // store has already paused the parent. The flush re-reads the store, and a
+  // synchronous control paint bumps paintEpoch so that queued frame no-ops.
+  const stateFlushHandleRef = useRef<{ cancel: () => void } | null>(null);
+  const paintEpochRef = useRef(0);
+  const cancelScheduledTransferPaint = useCallback(() => {
+    stateFlushHandleRef.current?.cancel();
+    stateFlushHandleRef.current = null;
+  }, []);
+  const paintTransfersNow = useCallback((rows: TransferTask[]) => {
+    cancelScheduledTransferPaint();
+    paintEpochRef.current += 1;
+    transfersRef.current = rows;
+    setTransfersState(rows);
+  }, [cancelScheduledTransferPaint]);
+  const scheduleTransfersStateFlush = useCallback(() => {
+    if (stateFlushHandleRef.current) return;
+    const epochAtSchedule = paintEpochRef.current;
+    const flush = () => {
+      stateFlushHandleRef.current = null;
+      // A pause/resume/cancel/terminal paint landed after this frame was queued.
+      if (paintEpochRef.current !== epochAtSchedule) return;
+      const storeRows = sftpTransferCenterStore.getOwnerTasks(ownerId);
+      const painted = reconcilePanelRowsWithStore(transfersRef.current, transfersRef.current, storeRows);
+      paintEpochRef.current += 1;
+      transfersRef.current = painted;
+      setTransfersState(painted);
+    };
+    if (typeof window !== "undefined" && typeof window.requestAnimationFrame === "function") {
+      const id = window.requestAnimationFrame(flush);
+      stateFlushHandleRef.current = { cancel: () => window.cancelAnimationFrame(id) };
+    } else {
+      const id = setTimeout(flush, 16);
+      stateFlushHandleRef.current = { cancel: () => clearTimeout(id) };
+    }
+  }, [ownerId]);
+  useEffect(() => () => {
+    cancelScheduledTransferPaint();
+  }, [cancelScheduledTransferPaint]);
+  // When the retained panel is re-opened, catch up React state from the ref that
+  // kept receiving progress while the surface was hidden. Cancel any frame that
+  // was queued against the hidden snapshot so it cannot paint over this catch-up.
+  useEffect(() => {
+    if (!surfaceVisible) return;
+    paintTransfersNow(transfersRef.current);
+  }, [paintTransfersNow, surfaceVisible]);
   const setTransfers = useCallback((update: SetStateAction<TransferTask[]>) => {
     const prev = transfersRef.current;
     const next = typeof update === "function"
       ? (update as (value: TransferTask[]) => TransferTask[])(prev)
       : update;
     if (next === prev) return;
-    sftpTransferCenterStore.publishOwner(ownerId, next);
+    const reconciled = reconcilePanelRowsWithStore(
+      prev,
+      next,
+      sftpTransferCenterStore.getOwnerTasks(ownerId),
+    );
+    if (reconciled === prev) return;
+    sftpTransferCenterStore.publishOwner(ownerId, reconciled);
     const canonical = sftpTransferCenterStore.getOwnerTasks(ownerId);
+    if (shouldPaintTransferControlNow(prev, canonical)) {
+      paintTransfersNow(canonical);
+      return;
+    }
     transfersRef.current = canonical;
-    setTransfersState(canonical);
-  }, [ownerId]);
+    scheduleTransfersStateFlush();
+  }, [ownerId, paintTransfersNow, scheduleTransfersStateFlush]);
 
   // Coalesce progress-only patches to one paint per animation frame. Without
   // this, each stream tick maps the full transfer list + publishOwner + store
@@ -276,9 +431,19 @@ export const useSftpTransfers = ({
     const prevPending = pendingProgressByIdRef.current.get(taskId) || {};
     pendingProgressByIdRef.current.set(taskId, { ...prevPending, ...updates });
     // Keep ref hot for cancel/pause checks without waiting for paint.
-    transfersRef.current = transfersRef.current.map((row) => (
-      row.id === taskId ? { ...row, ...updates } : row
-    ));
+    // A byte tick that still says "transferring" must not reopen a latched pause.
+    transfersRef.current = transfersRef.current.map((row) => {
+      if (row.id !== taskId) return row;
+      const merged = { ...row, ...updates };
+      const latched = isTransferOrRootPauseLatched(row.parentTaskId ?? row.id, row.id);
+      if (
+        (latched || row.status === "paused" || row.status === "pausing")
+        && (updates.status === "transferring" || updates.status === "pending" || updates.status === "queued")
+      ) {
+        return { ...merged, status: row.status, speed: 0 };
+      }
+      return merged;
+    });
     scheduleProgressFlush();
   }, [scheduleProgressFlush]);
   useEffect(() => () => {
@@ -468,7 +633,7 @@ export const useSftpTransfers = ({
     setTransfers,
     listLocalFiles,
     listRemoteFiles,
-    acquireTransferSession,
+    acquireTransferSession: acquireTransferSession ? acquireTransferSessionLive : undefined,
   });
 
   const processTransfer = async (
@@ -602,8 +767,9 @@ export const useSftpTransfers = ({
     // survive browse park and tab hide (pool holders, not panel map ids).
     if (!sourcePane.connection?.isLocal) {
       const sourceHostId = task.sourceHostId || sourcePane.connection?.hostId;
-      if (acquireTransferSession && sourceHostId) {
-        sourceWorkLease = await acquireTransferSession(sourceHostId, `${task.id}:work-source`);
+      const acquireSourceSession = acquireTransferSessionRef.current;
+      if (acquireSourceSession && sourceHostId) {
+        sourceWorkLease = await acquireSourceSession(sourceHostId, `${task.id}:work-source`);
         sourceSftpId = sourceWorkLease.sftpId;
       }
       if (!sourceSftpId) {
@@ -615,8 +781,9 @@ export const useSftpTransfers = ({
 
     if (!targetPane.connection?.isLocal) {
       const targetHostId = task.targetHostId || targetPane.connection?.hostId;
-      if (acquireTransferSession && targetHostId) {
-        targetWorkLease = await acquireTransferSession(targetHostId, `${task.id}:work-target`);
+      const acquireTargetSession = acquireTransferSessionRef.current;
+      if (acquireTargetSession && targetHostId) {
+        targetWorkLease = await acquireTargetSession(targetHostId, `${task.id}:work-target`);
         targetSftpId = targetWorkLease.sftpId;
       }
       if (!targetSftpId) {
@@ -811,8 +978,8 @@ export const useSftpTransfers = ({
       })();
 
       // For single files: start size discovery without blocking the conflict
-      // check, but keep the promise so an actual conflict can await fresh
-      // size metadata before the dialog is shown.
+      // check, but always settle the promise before any dialog or transfer
+      // launch (bounded per-task; the task is already visible/cancellable).
       const sizeDiscoveryPromise = task.isDirectory ? null : discoverTransferSize();
 
       // Only await conflict check (fast single stat call)
@@ -823,19 +990,23 @@ export const useSftpTransfers = ({
       // null means the plan size is still unknown. A verified 0-byte stat is 0,
       // not null, so an empty file does not pick up a stale listing size.
       let verifiedPlanBytes: number | null = task.totalBytes > 0 ? task.totalBytes : null;
-      if (conflict && sizeDiscoveryPromise) {
+      if (sizeDiscoveryPromise) {
         // The task's totalBytes may still be 0 here because discovery ran
         // deferred and updateTask never mutates the local task copy. Await
-        // discovery (bounded per-task; the task is already visible/cancellable)
-        // so the overwrite dialog shows the real source size, not 0 (#3559).
+        // discovery even without a conflict so its statLocal updateTask cannot
+        // resolve after the transfer finished and overwrite the bridge's
+        // authoritative total with a stale late size (the conflict dialog also
+        // needs it: #3559).
         const discovered = await sizeDiscoveryPromise;
         // Cancel during this stat must win before an apply-to-all Replace
         // deletes an existing symlink.
         if (cancelledTasksRef.current.has(task.id)) return "cancelled";
         if (discovered && discovered.size >= 0) {
-          conflict.newSize = discovered.size;
-          if (discovered.lastModified) conflict.newModified = discovered.lastModified;
-          if (discovered.plan) verifiedPlanBytes = discovered.size;
+          if (conflict) {
+            conflict.newSize = discovered.size;
+            if (discovered.lastModified) conflict.newModified = discovered.lastModified;
+            if (discovered.plan) verifiedPlanBytes = discovered.size;
+          }
         }
       }
 
@@ -1051,8 +1222,9 @@ export const useSftpTransfers = ({
           const next = transfersRef.current.map((candidate) => (
             candidate.id === task.id ? canonicalTask : candidate
           ));
-          transfersRef.current = next;
-          setTransfersState(next);
+          // Terminal rows used to setState directly and leave a child frame
+          // queued. That frame later painted the pre-terminal ref.
+          paintTransfersNow(next);
         },
       );
 
@@ -1118,7 +1290,7 @@ export const useSftpTransfers = ({
 
       updateTask({
         status: "failed",
-        error: err instanceof Error ? err.message : "Transfer failed",
+        error: unwrapSftpIpcError(err) || "Transfer failed",
         endTime: Date.now(),
         speed: 0,
       });
@@ -1154,6 +1326,13 @@ export const useSftpTransfers = ({
         sourcePath?: string;
         sourceConnectionId?: string;
         targetPath?: string;
+        /**
+         * Create copies next to the originals instead of prompting for the
+         * same-name conflict. Each source name is resolved to the next free
+         * `name (copy)`, `name (copy 2)`, ... before the transfer starts.
+         * Used by the SFTP context menu's Duplicate action.
+         */
+        duplicate?: boolean;
         onTransferComplete?: (result: TransferResult) => void | Promise<void>;
       },
     ) => {
@@ -1257,6 +1436,10 @@ export const useSftpTransfers = ({
       }
 
       for (const file of sourceFiles) {
+        // "." / ".." are navigation rows, not real entries. Duplicating one
+        // would resolve to an ancestor (e.g. "/") and could walk the copy into
+        // its own output.
+        if (options?.duplicate && (file.name === "." || file.name === "..")) continue;
         const direction: TransferDirection =
           sourcePane.connection!.isLocal && !targetPane.connection!.isLocal
             ? "upload"
@@ -1267,31 +1450,58 @@ export const useSftpTransfers = ({
         // Prefer the fresh re-stat for remote files: a cached listing size can
         // be stale and undersized, which would silently truncate downloads
         // (#3559). Remote files without a live stat use plan 0 so the bridge
-        // measures the live size; local sources keep the pane metadata.
+        // measures the live size. Local files also start unknown so deferred
+        // discovery reads their current size after edits, not the cached listing.
         const fileEntry = fileEntryMap?.get(file.name);
         const freshMetadata = freshRemoteMetadata.get(file.name);
         const fileSize = file.isDirectory
           ? 0
           : freshMetadata
             ? freshMetadata.size
-            : sourcePane.connection!.isLocal
-              ? (fileEntry?.size ?? 0)
-              : 0;
-        // Only keep an mtime that is paired with trusted metadata (live re-stat,
-        // local source size, or directory totals). A remote file whose re-stat
-        // failed must stay fully unknown (size 0 AND mtime 0 in the plan):
+            : 0;
+        // Only keep an mtime paired with a live re-stat or directory totals.
+        // A file without a live stat must stay fully unknown
+        // (size 0 AND mtime 0 in the plan):
         // discoverTransferSize and the conflict check both treat a nonzero
         // sourceLastModified as proof the size is already known, so a stale
         // mtime would suppress the deferred source re-stat. The overwrite
         // dialog still gets the pane listing's cached entry via
         // discoverTransferSize's cachedListingStatForDialog fallback.
-        const sourceLastModified = !file.isDirectory && !sourcePane.connection!.isLocal && !freshMetadata
+        const sourceLastModified = !file.isDirectory && !freshMetadata
           ? 0
           : (freshMetadata?.lastModified ?? fileEntry?.lastModified ?? 0);
 
         const nextSourcePath = joinPath(sourcePath, file.name);
-        const nextTargetPath = joinPath(targetPath, file.name);
         const targetIsLocal = targetPane.connection!.isLocal;
+        // A duplicate targets the folder the item already lives in, so the
+        // same-name conflict is guaranteed. Resolve the "(copy)" name up front
+        // instead of routing through the conflict dialog: the one-click action
+        // must not prompt, and resolving it inside processTransfer would
+        // re-enter the same task while it is still marked in flight.
+        const duplicateTarget = options?.duplicate
+          ? await getDuplicateTarget(
+              { fileName: file.name, isDirectory: file.isDirectory, targetPath: joinPath(targetPath, file.name) },
+              targetPane,
+              targetIsLocal ? null : (sftpSessionsRef.current.get(targetPane.connection!.id) ?? null),
+              targetIsLocal ? "auto" : (targetPane.filenameEncoding || "auto"),
+              // A queued or paused copy has not created its destination on disk
+              // yet, so the next duplicate would pick the same name and surface
+              // a conflict dialog. Reserve active destinations while naming.
+              (candidatePath) => Boolean(findActivePathConflict(
+                [...sftpTransferCenterStore.getSnapshot().tasks, ...transfersRef.current, ...newTasks],
+                {
+                  id: "",
+                  targetPath: candidatePath,
+                  targetConnectionId: targetIsLocal ? "local" : targetPane.connection!.id,
+                  targetHostId: targetIsLocal ? undefined : targetPane.connection!.hostId,
+                  targetHostLabel: targetIsLocal ? "Local" : targetPane.connection!.hostLabel,
+                  isDirectory: file.isDirectory,
+                },
+              )),
+            )
+          : null;
+        const nextFileName = duplicateTarget?.fileName ?? file.name;
+        const nextTargetPath = duplicateTarget?.targetPath ?? joinPath(targetPath, file.name);
         const pathTaken = findActivePathConflict(
           [...sftpTransferCenterStore.getSnapshot().tasks, ...transfersRef.current, ...newTasks],
           {
@@ -1310,7 +1520,7 @@ export const useSftpTransfers = ({
           const attentionTask: TransferTask = {
             id: crypto.randomUUID(),
             batchId,
-            fileName: file.name,
+            fileName: nextFileName,
             originalFileName: file.name,
             sourcePath: nextSourcePath,
             targetPath: nextTargetPath,
@@ -1351,7 +1561,7 @@ export const useSftpTransfers = ({
         newTasks.push({
           id: taskId,
           batchId,
-          fileName: file.name,
+          fileName: nextFileName,
           originalFileName: file.name,
           sourcePath: nextSourcePath,
           targetPath: nextTargetPath,
@@ -1504,8 +1714,8 @@ export const useSftpTransfers = ({
         try {
           const result = await retryExternalDragDropFileUpload(task, {
             getBrowseSftpId: (connectionId) => sftpSessionsRef.current.get(connectionId),
-            acquireTransferSession: acquireTransferSession
-              ? (hostId, id) => acquireTransferSession(hostId, id)
+            acquireTransferSession: acquireTransferSessionRef.current
+              ? (hostId, id) => acquireTransferSessionLive(hostId, id)
               : undefined,
             startStreamTransfer: async (options) => {
               const bridge = netcattyBridge.get();
@@ -1997,8 +2207,9 @@ export const useSftpTransfers = ({
         let sourceWorkLease: TransferConnectionLease | null = null;
         let workingSourceSftpId = params.sftpId;
         try {
-          if (acquireTransferSession && params.sourceHostId) {
-            sourceWorkLease = await acquireTransferSession(
+          const acquireDownloadSession = acquireTransferSessionRef.current;
+          if (acquireDownloadSession && params.sourceHostId) {
+            sourceWorkLease = await acquireDownloadSession(
               params.sourceHostId,
               `${task.id}:work-source`,
             );
@@ -2064,7 +2275,7 @@ export const useSftpTransfers = ({
           const isCancelled = cancelledTasksRef.current.has(task.id);
           // Clean up cancelled task tracking to prevent memory leak
           if (isCancelled) cancelledTasksRef.current.delete(task.id);
-          const errMsg = err instanceof Error ? err.message : String(err);
+          const errMsg = unwrapSftpIpcError(err);
           patchDownload({
             status: isCancelled ? "cancelled" : "failed",
             error: isCancelled ? undefined : errMsg,
@@ -2103,11 +2314,16 @@ export const useSftpTransfers = ({
   // panel list; byte-only ticks update refs without repainting the whole panel.
   useEffect(() => {
     return sftpTransferCenterStore.subscribe(() => {
+      const previous = transfersRef.current;
       const ownerRows = sftpTransferCenterStore.getSnapshot().tasks.filter((task) => task.ownerId === ownerId);
       transfersRef.current = ownerRows;
-      setTransfersState(ownerRows);
+      if (shouldPaintTransferControlNow(previous, ownerRows)) {
+        paintTransfersNow(ownerRows);
+        return;
+      }
+      scheduleTransfersStateFlush();
     });
-  }, [ownerId]);
+  }, [ownerId, paintTransfersNow, scheduleTransfersStateFlush]);
 
   useEffect(() => sftpTransferCenterStore.subscribeProgress(() => {
     const liveById = new Map(sftpTransferCenterStore.getSnapshot().tasks.map((task) => [task.id, task]));

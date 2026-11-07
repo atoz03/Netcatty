@@ -47,6 +47,7 @@ declare global {
     setTheme?(theme: 'light' | 'dark' | 'system'): Promise<boolean>;
     setBackgroundColor?(color: string): Promise<boolean>;
     setWindowOpacity?(opacity: number): Promise<boolean>;
+    setWindowBackgroundBlur?(enabled: boolean): Promise<boolean>;
     setAppIconVariant?(variant: import('../../domain/appIconVariant').AppIconVariant): Promise<boolean>;
     setLanguage?(language: string): Promise<boolean>;
     // Window controls for custom title bar (Windows/Linux)
@@ -131,6 +132,7 @@ declare global {
     // Cross-window settings sync
     notifySettingsChanged?(payload: { key: string; value: unknown }): void;
     onSettingsChanged?(cb: (payload: { key: string; value: unknown }) => void): () => void;
+    onSystemThemeChanged?(cb: (payload: { isDark: boolean }) => void): () => void;
     getAppLockRuntimeState?(): Promise<AppLockRuntimeState>;
     getAppLockSettings?(): Promise<AppLockSettings>;
     setAppLockTimeoutMinutes?(timeoutMinutes: number): Promise<AppLockSettings>;
@@ -295,10 +297,10 @@ declare global {
     onAppLockReopen?(listener: () => void): () => void;
 
     // Quit guard: subscribe to main-process quit requests that query for dirty editors.
-    // Listener is called with no arguments; return value is an unsubscribe function.
-    onCheckDirtyEditors?(listener: () => void): () => void;
+    // Each response must echo the request ID, including pending-transfer acknowledgements.
+    onCheckDirtyEditors?(listener: (request: { requestId: string; deadline: number }) => void): () => void;
     // Report the dirty-check result back to the main process.
-    reportDirtyEditorsResult?(hasDirty: boolean): void;
+    reportDirtyEditorsResult?(hasDirty: boolean, reason?: "editors" | "transfers", options?: { requestId?: string; pending?: boolean }): void;
 
     onLanguageChanged?(cb: (language: string) => void): () => void;
 

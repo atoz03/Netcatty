@@ -1,6 +1,9 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { memo, useEffect, useState, useSyncExternalStore } from 'react';
 import { createPortal } from 'react-dom';
+import { LayoutGrid, Plus } from 'lucide-react';
+import { Button } from '../ui/button';
+import { collectSessionIds } from '../../domain/workspace';
 
 import {
   getSidePanelLiveSnapshot,
@@ -8,6 +11,7 @@ import {
 } from '../../application/state/sidePanelLiveStore';
 import { getPaneMagnificationShortcutLabel } from '../../domain/paneMagnification';
 import { terminalLayerWorkspaceCtxEqual } from './terminalLayerViewMemo';
+import { isSameSplitHint } from './splitHintEquality';
 
 type WorkspaceContext = Record<string, any>;
 
@@ -99,8 +103,11 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
     handleCommandExecuted,
     handleCommandSubmitted,
     onSetWorkspaceFocusedSession,
+    onRequestAddToWorkspace,
     onSplitSession,
     isBroadcastEnabled,
+    isComposeSendToAll,
+    onToggleComposeSendTarget,
     handleBroadcastInput,
     handleBroadcastInterruptPriorityChange,
     handleToggleWorkspaceComposeBar,
@@ -123,9 +130,12 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
     onReorderTabs,
     onStartSessionDrag,
     onEndSessionDrag,
+    onDropWorkspacePane,
     isGlobalBroadcastEnabled,
+    isGlobalComposeSendToAll,
     canUseGlobalBroadcast,
     onToggleGlobalBroadcast,
+    onToggleGlobalComposeSendTarget,
     t,
   } = ctx;
 
@@ -148,6 +158,21 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
   return (
     <div data-section="terminal-workspace-column" className="flex-1 min-h-0 flex flex-col">
     <div ref={workspaceInnerRef} className="flex-1 min-h-0 overflow-hidden relative">
+        {activeWorkspace && collectSessionIds(activeWorkspace.root).length === 0 && (
+          <div className="absolute inset-0 flex items-center justify-center p-6" data-section="empty-workspace">
+            <div className="flex max-w-sm flex-col items-center gap-3 text-center">
+              <LayoutGrid size={32} className="text-muted-foreground/60" aria-hidden="true" />
+              <h2 className="text-sm font-medium">{t('terminal.layer.emptyWorkspace')}</h2>
+              <p className="text-sm text-muted-foreground">{t('terminal.layer.emptyWorkspaceHint')}</p>
+              {onRequestAddToWorkspace && (
+                <Button className="mt-1 gap-2" onClick={() => onRequestAddToWorkspace(activeWorkspace.id)}>
+                  <Plus size={16} aria-hidden="true" />
+                  {t('terminal.layer.addTerminal')}
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
         {draggingSessionId && !isFocusMode && (
           <div
             ref={workspaceOverlayRef}
@@ -158,7 +183,8 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
               e.preventDefault();
               e.stopPropagation();
               const hint = computeSplitHint(e);
-              setDropHint(hint);
+              // Only re-render the workspace when the preview actually moves.
+              setDropHint((prev) => (isSameSplitHint(prev, hint) ? prev : hint));
             }}
             onDragLeave={(e) => {
               if (!e.dataTransfer.types.includes('session-id')) return;
@@ -247,6 +273,9 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
           onSetWorkspaceFocusedSession={onSetWorkspaceFocusedSession}
           onSplitSession={onSplitSession}
           isBroadcastEnabled={isBroadcastEnabled}
+          isComposeSendToAll={isComposeSendToAll}
+          isGlobalComposeSendToAll={isGlobalComposeSendToAll}
+          onToggleGlobalComposeSendTarget={onToggleGlobalComposeSendTarget}
           onBroadcastInput={handleBroadcastInput}
           onBroadcastInterruptPriorityChange={handleBroadcastInterruptPriorityChange}
           onToggleWorkspaceComposeBar={handleToggleWorkspaceComposeBar}
@@ -258,6 +287,7 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
           onReorderTabs={onReorderTabs}
           onStartSessionDrag={onStartSessionDrag}
           onEndSessionDrag={onEndSessionDrag}
+          onDropWorkspacePane={onDropWorkspacePane}
           isGlobalBroadcastEnabled={isGlobalBroadcastEnabled}
           canUseGlobalBroadcast={canUseGlobalBroadcast}
           onToggleGlobalBroadcast={onToggleGlobalBroadcast}
@@ -331,7 +361,7 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
               aria-label={t('terminal.paneMagnification.restore')}
             >
               {t('terminal.paneMagnification.hint')}: {t('terminal.layer.terminal')}
-              {paneMagnificationShortcutLabel ? ` · ${paneMagnificationShortcutLabel} / Esc` : ' · Esc'}
+              {paneMagnificationShortcutLabel ? ` · ${paneMagnificationShortcutLabel}` : ''}
             </button>
           )}
         </>,
@@ -341,6 +371,7 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
       {activeWorkspace && focusedSessionId && isComposeBarOpen && (
         <TerminalComposeBar
           sessionId={focusedSessionId}
+          contextChipsEnabled={terminalSettings?.contextChipsEnabled !== false}
           onSend={handleComposeSend}
           onSnippetClick={(snippet) => void handleSnippetFromPanel(snippet)}
           snippets={snippets}
@@ -349,6 +380,10 @@ function TerminalLayerWorkspaceSectionInner({ ctx }: { ctx: WorkspaceContext }) 
             refocusTerminalSession(focusedSessionId);
           }}
           isBroadcastEnabled={isBroadcastEnabled?.(activeWorkspace.id)}
+          composeSendToAll={isComposeSendToAll?.(activeWorkspace.id) ?? false}
+          onToggleComposeSendTarget={onToggleComposeSendTarget
+            ? () => onToggleComposeSendTarget(activeWorkspace.id)
+            : undefined}
           themeColors={composeBarThemeColors}
         />
       )}

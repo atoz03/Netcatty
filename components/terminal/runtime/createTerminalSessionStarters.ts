@@ -1,3 +1,4 @@
+import { isWindowsNamedPipePath } from '../../../domain/serialEndpoint';
 import type { Terminal as XTerm } from "@xterm/xterm";
 import type { ProviderValidationIssue } from "@netcatty/plugin-contract";
 import { logger } from "../../../lib/logger";
@@ -37,6 +38,7 @@ import {
   sanitizeCredentialValue,
 } from "../../../domain/credentials";
 import { resolveBridgeSshAgentAuth, resolveHostAuth } from "../../../domain/sshAuth";
+import { connectionTotpFields } from "../../../domain/totpConfig";
 import { requiresFidoSshAgentAuth } from "../../../domain/fidoSsh";
 import {
   hostRestrictsExtraSshChannels,
@@ -153,7 +155,7 @@ const formatPluginConnectionExitMessage = (event: TerminalSessionExitEvent): str
   return `\r\n${lines.join("\r\n")}`;
 };
 
-const isAuthFailureMessage = (message: string): boolean => {
+export const isAuthFailureMessage = (message: string): boolean => {
   const normalized = message.toLowerCase();
   return normalized.includes("all configured authentication methods failed") ||
     normalized.includes("authentication failed") ||
@@ -478,6 +480,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
         authMethod: jumpAuth.authMethod,
         requiresMfa: !!jumpHost.requiresMfa,
         password: jumpPassword,
+        ...connectionTotpFields(jumpHost),
         privateKey: resolveBridgePrivateKeyMaterial(jumpKey, {
           forceAgent: jumpAgentAuth.useSshAgent === true && !jumpKey?.certificate,
         }),
@@ -705,6 +708,7 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
           requiresMfa: !!ctx.host.requiresMfa,
           port: ctx.host.port || 22,
           password: attempt.password,
+          ...connectionTotpFields(ctx.host),
           sftpReuseOptions: sftpReuseOptions?.password || sftpReuseOptions?.username !== effectiveUsername
             ? undefined
             : sftpReuseOptions,
@@ -1962,7 +1966,14 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
               sessionId: ctx.sessionId,
               dataLength: terminalData.length,
             });
-            ctx.onTerminalDataCapture(ctx.sessionId, terminalData);
+            const pendingCapture: unknown = ctx.onTerminalDataCapture(ctx.sessionId, terminalData);
+            if (
+              pendingCapture !== undefined
+              && pendingCapture !== null
+              && typeof (pendingCapture as Promise<void>).then === "function"
+            ) {
+              await (pendingCapture as Promise<void>);
+            }
           } catch (err) {
             logger.warn("Failed to serialize terminal data:", err);
           }
@@ -2162,7 +2173,9 @@ export const createTerminalSessionStarters = (ctx: TerminalSessionStartersContex
       autoLoginAttached = true;
       ctx.updateStatus("connected");
       ctx.setProgressValue(100);
-      writeTerminalLine(ctx, term, `[Connected to ${ctx.serialConfig.path} at ${ctx.serialConfig.baudRate} baud]`);
+      writeTerminalLine(ctx, term, isWindowsNamedPipePath(ctx.serialConfig.path)
+        ? `[Connected to ${ctx.serialConfig.path}]`
+        : `[Connected to ${ctx.serialConfig.path} at ${ctx.serialConfig.baudRate} baud]`);
 
       if (waitsForAutoLogin) {
         if (autoLoginCompletedBeforeAttach) {

@@ -10,6 +10,12 @@
 </p>
 
 <p align="center">
+  <a href="https://trendshift.io/repositories/18391?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-18391" target="_blank" rel="noopener noreferrer">
+    <img src="https://trendshift.io/api/badge/trendshift/repositories/18391/daily?language=TypeScript" alt="binaricat/Netcatty | Trendshift" width="250" height="55"/>
+  </a>
+</p>
+
+<p align="center">
   一个基于 Electron、React 和 xterm.js 构建的功能丰富的 SSH 工作空间。<br/>
   🔥 内置 AI Agent · 分屏终端 · Vault 多视图 · SFTP 工作流 · 自定义主题 —— 一应俱全。
 </p>
@@ -29,9 +35,9 @@
 </p>
 
 <p align="center">
-  <a href="https://ko-fi.com/binaricat">
-    <img src="https://cdn.ko-fi.com/cdn/kofi3.png?v=2" width="150" alt="在 Ko-fi 上支持我">
-  </a>
+  <a href="https://github.com/sponsors/binaricat"><img src="https://img.shields.io/badge/GitHub-Sponsors-ea4aaa?style=for-the-badge&logo=githubsponsors&logoColor=white" height="28" alt="通过 GitHub 赞助我"></a>
+  &nbsp;
+  <a href="https://ko-fi.com/binaricat"><img src="https://img.shields.io/badge/Ko--fi-Support-29abe0?style=for-the-badge&logo=kofi&logoColor=white" height="28" alt="在 Ko-fi 上支持我"></a>
 </p>
 
 <p align="center">
@@ -40,7 +46,7 @@
 
 ---
 
-<img width="3142" height="1764" alt="Screenshot 2026-07-02 at 22 51 24" src="https://github.com/user-attachments/assets/3116165d-623a-4d3a-a28a-914befb9b72d" />
+<img width="3358" height="1984" alt="image" src="docs/assets/readme/overview.webp" />
 
 ---
 
@@ -63,13 +69,13 @@
 
 让 Catty Agent 检查服务器健康状态，它会自动运行合适的命令、分析输出并给出清晰总结 —— 几秒内完成。
 
-<img width="1510" height="870" alt="ai-single" src="https://github.com/user-attachments/assets/d3f34e53-8476-4fab-8634-394b931d1ff1" />
+<img width="3302" height="1978" alt="image" src="docs/assets/readme/catty-single-host.webp" />
 
 #### 🚀 多主机 —— Docker Swarm 集群搭建
 
 看 Catty Agent 在一次对话中跨两台服务器编排 Docker Swarm 集群。它负责初始化、令牌交换和节点加入 —— 你只需说出想要的结果。
 
-<img width="1515" height="870" alt="ai-muti" src="https://github.com/user-attachments/assets/ca166fc5-65d9-4d7b-951a-962c2ef230d8" />
+<img width="3294" height="1974" alt="image" src="docs/assets/readme/catty-multi-host.webp" />
 
 ---
 
@@ -82,6 +88,7 @@
 - [界面截图](#界面截图)
   - [主界面](#主界面)
   - [Vault 视图](#vault-视图)
+  - [监控视图](#监控视图)
   - [分屏终端](#分屏终端)
 - [支持的发行版](#支持的发行版)
 - [快速开始](#快速开始)
@@ -129,10 +136,12 @@
 - **分屏** —— 水平/垂直分割，多任务并行
 - **多会话管理** —— 多连接并排处理
 - **内联图片** —— 直接渲染远端程序输出的 Kitty 图形、SIXEL 与 iTerm 内联图片
+- **压缩包快捷填充** —— 在 Linux 会话里，按住 Ctrl/Cmd 点击输出中的 `.tar`、`.tar.gz`/`.tgz`、`.tar.bz2`/`.tbz2`、`.tar.xz` 或 `.zip` 文件名，会在光标处填入带绝对路径的解压命令（保留已经输入的文字）；按 Enter 才会执行。相对当前目录的文件名需要目录追踪（OSC 7，见工具栏「配置目录追踪」）；绝对路径始终可点。Windows、WSL 与 macOS 会话不在范围内。
 
 ### 📁 SFTP + 内置编辑器
 - **文件工作流** —— 拖拽上传/下载更直观
 - **就地编辑** —— 内置编辑器快速修改文件
+- **远程压缩** —— 单选或多选文件、文件夹，右键选择“压缩…”，在对话框显示的保存目录生成指定名称的 `.tar.gz` 或 `.zip` 压缩包；服务器需安装对应的 `tar`/`gzip` 或 `zip`。
 
 ### 🎨 个性化
 - **自定义主题** —— 按喜好调整应用外观
@@ -148,25 +157,34 @@
 
 主界面围绕长期 SSH 工作流设计：把会话、导航和常用工具集中到同一处，减少切换成本。
 
-<img width="1531" height="875" alt="black-grid" src="https://github.com/user-attachments/assets/004b80f6-5bbb-4f14-b8cd-33a0a5913b8c" />
+<img width="3290" height="1988" alt="image" src="docs/assets/readme/main-window.webp" />
 
-<img width="1550" height="876" alt="light" src="https://github.com/user-attachments/assets/2b59a999-a25e-4217-944c-9aef0a09f272" />
+<img width="3324" height="1992" alt="image" src="docs/assets/readme/main-window-terminal.webp" />
 
 <a name="vault-视图"></a>
 ## Vault 视图
 
 用更适合当前任务的方式管理与浏览主机：网格看全局，列表做筛选，树形做整理与层级导航。
 
-<img width="1554" height="882" alt="list" src="https://github.com/user-attachments/assets/03249f15-b5f8-4770-a3c3-d5001636ea00" />
+<img width="3292" height="1984" alt="image" src="docs/assets/readme/vault-grid.webp" />
 
-<img width="1561" height="878" alt="tree" src="https://github.com/user-attachments/assets/739f7b66-3898-43d0-8dd3-b9b97fd8e8de" />
+<img width="3322" height="1998" alt="image" src="docs/assets/readme/vault-list.webp" />
+
+<a name="监控视图"></a>
+## 监控视图
+
+查看 CPU、内存、磁盘、网络和延迟数据；支持的环境还可显示 GPU 详情。你可以选择显示的列、调整列宽和刷新设置，并直接从受监控的主机打开终端。
+
+<img width="3364" height="1982" alt="image" src="docs/assets/readme/monitoring.webp" />
+
+<img width="3362" height="1980" alt="image" src="docs/assets/readme/monitoring-columns.webp" />
 
 <a name="分屏终端"></a>
 ## 分屏终端
 
 分屏适合同时处理多个任务（例如部署 + 日志 + 排障），不用频繁切换窗口。
 
-<img width="1560" height="871" alt="split" src="https://github.com/user-attachments/assets/c93a8523-6256-4bb3-8b6e-d599831f2f9f" />
+<img width="1560" height="871" alt="split" src="docs/assets/readme/split-terminals.webp" />
 
 ---
 

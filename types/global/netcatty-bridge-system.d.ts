@@ -90,19 +90,32 @@ declare global {
     zellijAction?(options: {
       sessionId: string;
     } & import("../../domain/systemManager/types").ZellijManageAction): Promise<{ success: boolean; error?: string }>;
-    listDockerContainers?(sessionId: string): Promise<{
+    listDockerContainers?(
+      sessionId: string,
+      runtime?: import("../../domain/systemManager/containerRuntime").ContainerRuntimeId,
+    ): Promise<{
       success: boolean;
       error?: string;
+      errorCode?: string;
       containers?: import("../../domain/systemManager/types").DockerContainerInfo[];
     }>;
-    listDockerImages?(sessionId: string): Promise<{
+    listDockerImages?(
+      sessionId: string,
+      runtime?: import("../../domain/systemManager/containerRuntime").ContainerRuntimeId,
+    ): Promise<{
       success: boolean;
       error?: string;
+      errorCode?: string;
       images?: import("../../domain/systemManager/types").DockerImageInfo[];
     }>;
-    getDockerStats?(options: { sessionId: string; ids?: string[] }): Promise<{
+    getDockerStats?(options: {
+      sessionId: string;
+      ids?: string[];
+      runtime?: import("../../domain/systemManager/containerRuntime").ContainerRuntimeId;
+    }): Promise<{
       success: boolean;
       error?: string;
+      errorCode?: string;
       stats?: import("../../domain/systemManager/types").DockerStatInfo[];
     }>;
     listAccelerators?(sessionId: string): Promise<{
@@ -132,14 +145,24 @@ declare global {
       action: import("../../domain/systemManager/types").SystemdUnitAction;
       scope?: import("../../domain/systemManager/types").SystemdUnitInfo['scope'];
     }): Promise<{ success: boolean; pending?: boolean; error?: string }>;
-    dockerInspect?(options: { sessionId: string; containerId: string }): Promise<{
+    dockerInspect?(options: {
+      sessionId: string;
+      containerId: string;
+      runtime?: import("../../domain/systemManager/containerRuntime").ContainerRuntimeId;
+    }): Promise<{
       success: boolean;
       error?: string;
+      errorCode?: string;
       inspect?: Record<string, unknown>;
     }>;
-    dockerImageInspect?(options: { sessionId: string; imageId: string }): Promise<{
+    dockerImageInspect?(options: {
+      sessionId: string;
+      imageId: string;
+      runtime?: import("../../domain/systemManager/containerRuntime").ContainerRuntimeId;
+    }): Promise<{
       success: boolean;
       error?: string;
+      errorCode?: string;
       inspect?: Record<string, unknown>;
     }>;
     dockerAction?(options: {
@@ -147,13 +170,32 @@ declare global {
       containerId: string;
       action: import("../../domain/systemManager/types").DockerContainerAction;
       newName?: string;
-    }): Promise<{ success: boolean; error?: string }>;
+      runtime?: import("../../domain/systemManager/containerRuntime").ContainerRuntimeId;
+    }): Promise<{ success: boolean; error?: string; errorCode?: string }>;
     dockerImageAction?(options: {
       sessionId: string;
+      runtime?: import("../../domain/systemManager/containerRuntime").ContainerRuntimeId;
     } & import("../../domain/systemManager/types").DockerImageManageAction): Promise<{
       success: boolean;
       error?: string;
+      errorCode?: string;
       output?: string;
+    }>;
+    kubectl?(options: {
+      sessionId: string;
+      op: "contexts" | "namespaces" | "pods" | "delete";
+      context?: string;
+      namespace?: string;
+      pod?: string;
+      shell?: string;
+    }): Promise<{
+      success: boolean;
+      error?: string;
+      errorCode?: string;
+      contexts?: import("../../domain/systemManager/containerRuntime").KubeContextInfo[];
+      current?: string;
+      namespaces?: string[];
+      pods?: import("../../domain/systemManager/containerRuntime").KubectlPodInfo[];
     }>;
     openTerminalPopup?(payload: import("../../domain/systemManager/types").TerminalPopupPayload): Promise<{
       success: boolean;

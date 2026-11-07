@@ -1,8 +1,9 @@
 import { streamText, isStepCount, type ModelMessage } from 'ai';
-import { classifyError } from '../../errorClassifier';
-import { isRequestTooLargeError } from '../../errorClassifier';
+import type { LanguageModelV4 } from '@ai-sdk/provider';
+import { classifyError, isInvalidAnthropicThinkingSignatureError, isRequestTooLargeError } from '../../errorClassifier';
 import { isSdkStreamStateError } from '../../shared/streamStateErrors';
 import {
+  createCattyAnthropicSignatureRetryError,
   createCattyRequestTooLargeRetryError,
   hadToolProgressBeforeRequestTooLarge,
 } from '../../cattyRequestTooLargeRetry';
@@ -10,7 +11,7 @@ import { mapCattyStreamChunkToAgentEvents } from '../agentEventAdapter';
 import type { AgentEvent } from '../types';
 import { resolveProviderStyle, type ProviderAdvancedParams } from '../../types';
 import type { CattyReasoningProviderOptions } from '../../cattyReasoning';
-import { createModelFromConfig, resolveProviderEndpoint } from '../../sdk/providers';
+import { resolveProviderEndpoint } from '../../sdk/providers';
 import type { CattyToolsBundle } from '../capabilityTools';
 import { buildCattyToolApproval } from '../cattyToolApproval';
 import type { CattyRuntimeContext } from '../cattyRuntimeContext';
@@ -42,7 +43,7 @@ import {
 } from '../../aiChatStreamingSupport';
 import type { ChatMessage, ProviderConfig } from '../../types';
 
-export type CattyModel = ReturnType<typeof createModelFromConfig>;
+export type CattyModel = LanguageModelV4;
 
 export interface CattyStreamUiSink {
   addMessageToSession: (sessionId: string, message: ChatMessage) => void;
@@ -131,6 +132,9 @@ export async function processCattyStream(input: ProcessCattyStreamInput): Promis
   } = input;
 
   let runtimeContext = initialRuntimeContext;
+  if (!Array.isArray(sdkMessages) || sdkMessages.length === 0) {
+    throw new Error('Invalid prompt: Catty refused an empty messages array (#4102).');
+  }
   const { tools, toolsContext } = toolsBundle;
   const endpoint = input.providerConfig
     ? resolveProviderEndpoint(input.providerConfig, resolveProviderStyle(input.providerConfig), undefined)
@@ -144,7 +148,7 @@ export async function processCattyStream(input: ProcessCattyStreamInput): Promis
     tools,
     toolsContext,
     runtimeContext,
-    toolApproval: buildCattyToolApproval({
+    toolApproval: runtimeContext.delegated ? undefined : buildCattyToolApproval({
       permissionMode: runtimeContext.permissionMode,
       chatSessionId: runtimeContext.chatSessionId,
     }),
@@ -367,6 +371,9 @@ export async function processCattyStream(input: ProcessCattyStreamInput): Promis
         if (isRequestTooLargeError(readErr)) {
           throw createCattyRequestTooLargeRetryError(readErr, hadToolProgress);
         }
+        if (isInvalidAnthropicThinkingSignatureError(readErr)) {
+          throw createCattyAnthropicSignatureRetryError(readErr, hadToolProgress);
+        }
         throw readErr;
       }
       const { done, value } = readResult;
@@ -522,13 +529,24 @@ export async function processCattyStream(input: ProcessCattyStreamInput): Promis
         case 'error': {
           const typedChunk = chunk as ErrorChunk;
           if (isSdkStreamStateError(typedChunk.error)) {
-            console.warn('[Catty] suppressed SDK stream state error:', typedChunk.error);
+            if (runtimeContext.delegated) console.warn('[Plugin Agent] SDK stream state unavailable');
+            else console.warn('[Catty] suppressed SDK stream state error:', typedChunk.error);
             break;
           }
           if (isRequestTooLargeError(typedChunk.error)) {
             cancelPendingFlush();
             flushText();
             throw createCattyRequestTooLargeRetryError(
+              typedChunk.error,
+              hadToolProgress,
+            );
+          }
+          if (isInvalidAnthropicThinkingSignatureError(typedChunk.error)) {
+            // Propagate to turn-driver strip-and-retry (#4074 P1); do not consume
+            // as a terminal error message the way other stream errors are.
+            cancelPendingFlush();
+            flushText();
+            throw createCattyAnthropicSignatureRetryError(
               typedChunk.error,
               hadToolProgress,
             );

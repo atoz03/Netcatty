@@ -28,6 +28,18 @@ declare global {
     chmodSftp?(sftpId: string, path: string, mode: string, encoding?: SftpFilenameEncoding): Promise<void>;
     /** Extract a remote archive into its parent directory via SSH exec. */
     extractSftpArchive?(sftpId: string, path: string, encoding?: SftpFilenameEncoding): Promise<{ success: boolean }>;
+    /** Create an archive in directory; source paths are relative to it. */
+    createSftpArchive?(
+      sftpId: string,
+      options: {
+        directory: string;
+        paths: string[];
+        archiveName: string;
+        format: "tar.gz" | "zip";
+        overwrite?: boolean;
+      },
+      encoding?: SftpFilenameEncoding,
+    ): Promise<{ success: boolean; error?: string; code?: string }>;
     getSftpHomeDir?(sftpId: string, encoding?: SftpFilenameEncoding): Promise<{ success: boolean; homeDir?: string; error?: string }>;
 
     // Transfer with progress
@@ -100,6 +112,7 @@ declare global {
        * Callers wait for terminal events instead of treating it as a failure.
        */
       superseded?: boolean;
+      warning?: string;
     }>;
     pauseTransfer?(transferId: string): Promise<{
       success: boolean;
@@ -134,6 +147,7 @@ declare global {
       startedAt?: number;
       endedAt?: number;
       error?: string;
+      warning?: string;
       transferred?: number;
       totalBytes?: number;
       speed?: number;

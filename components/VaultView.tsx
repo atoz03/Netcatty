@@ -44,6 +44,7 @@ import React, {
   useState,
 } from "react";
 import { useI18n } from "../application/i18n/I18nProvider";
+import { registerQuickConnectOpener } from "../application/quickConnectBridge";
 import { useStoredViewMode } from "../application/state/useStoredViewMode";
 import { useStoredBoolean } from "../application/state/useStoredBoolean";
 import { useStoredNumber } from "../application/state/useStoredNumber";
@@ -160,6 +161,7 @@ import { VaultViewLayout } from "./vault/VaultViewLayout";
 import { useVaultHostCollections } from "./vault/useVaultHostCollections";
 import { useVaultImportHandlers } from "../application/state/useVaultImportHandlers";
 import { useVaultGroupDragHandlers } from "./vault/useVaultGroupDragHandlers";
+import { usePluginVaultPages } from "../application/state/usePluginVaultPages";
 
 const LazyProtocolSelectDialog = lazy(() => import("./ProtocolSelectDialog"));
 const LazyConnectionLogsManager = lazy(() => import("./ConnectionLogsManager"));
@@ -177,7 +179,8 @@ export type VaultSection =
   | "notes"
   | "port"
   | "knownhosts"
-  | "logs";
+  | "logs"
+  | `plugin-vault:${string}`;
 
 const haveSameHostOrderResult = (previous: Host[], next: Host[]) => {
   if (previous.length !== next.length) return false;
@@ -364,11 +367,12 @@ const VaultViewInner: React.FC<VaultViewProps> = ({
   onVaultFocusRequestHandled,
   terminalSettings,
 }) => {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const rootRef = useRef<HTMLDivElement>(null);
   const hostsRef = useRef(hosts);
   hostsRef.current = hosts;
   const [currentSection, setCurrentSection] = useState<VaultSection>("hosts");
+  const pluginVault = usePluginVaultPages({ locale, section: currentSection, select: setCurrentSection });
   const [search, setSearch] = useState("");
   const [selectedGroupPath, setSelectedGroupPath] = useState<string | null>(
     null,
@@ -560,6 +564,12 @@ const VaultViewInner: React.FC<VaultViewProps> = ({
   const [quickConnectWarnings, setQuickConnectWarnings] = useState<string[]>(
     [],
   );
+
+  useEffect(() => registerQuickConnectOpener(({ target, warnings }) => {
+    setQuickConnectTarget(target);
+    setQuickConnectWarnings(warnings);
+    setIsQuickConnectOpen(true);
+  }), []);
 
   // Protocol select state (for hosts with multiple protocols)
   const [protocolSelectHost, setProtocolSelectHost] = useState<Host | null>(
@@ -1515,6 +1525,7 @@ const VaultViewInner: React.FC<VaultViewProps> = ({
           ContextMenuTrigger,
           Copy,
           currentSection,
+          pluginVault,
           customGroups,
           deleteGroupPath,
           deleteGroupPaths,
@@ -1792,7 +1803,8 @@ export const vaultViewAreEqual = (
     // Only these terminal connection settings are forwarded to
     // PortForwarding inside the vault, so compare them directly. Other
     // terminal settings (fonts, themes, etc.) don't affect this subtree
-    // and we don't want to re-render for them.
+    // and we don't want to re-render for them. onConnect is also omitted:
+    // temporary-connection toggles are read from a ref at connect time.
     prev.terminalSettings?.verifyHostKeys ===
       next.terminalSettings?.verifyHostKeys &&
     prev.terminalSettings?.keepaliveInterval ===

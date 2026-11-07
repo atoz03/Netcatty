@@ -12,8 +12,10 @@ import type {
   TurnSteerResult,
 } from './turnDrivers/types';
 import { globalTwoPassCompactionCache } from './twoPassCompaction';
-import { redactSecretsForModel, redactSecretsInValueForModel } from './modelSecretRedaction';
+import { redactSecretsForModel, redactSecretsInValueForModel, setReversibleModelPrivacy } from './modelSecretRedaction';
 import { globalTerminalMonitorGuard } from './terminalMonitorGuard';
+import { netcattyBridge } from '../../services/netcattyBridge';
+import type { AISessionScope } from '../types';
 
 let turnCounter = 0;
 
@@ -35,6 +37,7 @@ interface ActiveTurn {
   turnId: string;
   backend: AgentBackend;
   driver: TurnDriver;
+  scope?: AISessionScope;
 }
 
 export interface AgentRuntimeOptions {
@@ -69,7 +72,14 @@ export class AgentRuntime {
     return this.sessionStateStore;
   }
 
+  getActiveScope(chatSessionId: string): AISessionScope | undefined {
+    const scope = this.activeTurns.get(chatSessionId)?.scope;
+    return scope ? { ...scope } : undefined;
+  }
+
   clearChatSession(chatSessionId: string): void {
+    setReversibleModelPrivacy(chatSessionId, false);
+    void netcattyBridge.get()?.aiPrivacyClearSession?.(chatSessionId).catch(() => {});
     this.toolOutputStore.prune(chatSessionId);
     this.sessionStateStore.clear(chatSessionId);
     this.traceStore.clear(chatSessionId);
@@ -132,6 +142,12 @@ export class AgentRuntime {
       turnId,
       backend: input.backend,
       driver,
+      // History may be resumed in a different panel without changing its
+      // saved binding. Keep the invoking scope stable for this entire turn.
+      scope: input.context.scopeType ? {
+        type: input.context.scopeType,
+        targetId: input.context.scopeTargetId,
+      } : undefined,
     });
 
     const toolCallMeta = new Map<string, { toolName: string; args: Record<string, unknown> }>();
@@ -154,14 +170,14 @@ export class AgentRuntime {
       if (event.type === 'tool_result') {
         event = {
           ...event,
-          result: redactSecretsForModel(event.result),
+          result: redactSecretsForModel(event.result, input.backend === 'catty' ? chatSessionId : undefined),
         };
       }
 
       if (event.type === 'tool_call') {
         event = {
           ...event,
-          args: redactSecretsInValueForModel(event.args),
+          args: redactSecretsInValueForModel(event.args, input.backend === 'catty' ? chatSessionId : undefined),
         };
         toolCallMeta.set(event.toolCallId, {
           toolName: event.toolName,
@@ -173,6 +189,9 @@ export class AgentRuntime {
         const meta = toolCallMeta.get(event.toolCallId);
         const toolName = event.toolName ?? meta?.toolName;
         if (toolName) {
+          // SDKs such as Claude omit names on results. Publish the same
+          // per-turn correlation used below to downstream event consumers.
+          event = { ...event, toolName };
           sessionStateStore.updateFromToolResult(
             chatSessionId,
             toolName,

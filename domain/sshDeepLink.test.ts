@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { Host } from "./models";
 import { resolveHostAutofillPassword } from "./sshAuth";
+import { sanitizeHost } from "./host";
 import {
   buildSshDeepLinkConnectionHost,
   buildSshDeepLinkEphemeralHost,
@@ -118,6 +119,7 @@ test("buildSshDeepLinkEphemeralHostFromSaved keeps saved settings but overrides 
     proxyProfileId: "proxy-1",
     hostChain: { hostIds: ["jump-1"] },
     charset: "utf8",
+    legacyAlgorithms: true,
     moshEnabled: true,
     createdAt: 1,
   };
@@ -141,6 +143,8 @@ test("buildSshDeepLinkEphemeralHostFromSaved keeps saved settings but overrides 
   // Group is cleared so effective-host resolution cannot re-inherit
   // group credentials over the one-time password.
   assert.equal(ephemeral.group, "");
+  assert.equal(ephemeral.backedBySavedHost, true);
+  assert.equal(ephemeral.legacyAlgorithms, true);
   assert.equal(ephemeral.proxyProfileId, "proxy-1");
   assert.deepEqual(ephemeral.hostChain, { hostIds: ["jump-1"] });
   assert.equal(ephemeral.charset, "utf8");
@@ -239,8 +243,10 @@ test("buildSshDeepLinkHostDraft prepares an editable new ssh host", () => {
     tags: [],
     os: "linux",
     protocol: "ssh",
+    sshInputCompatibility: false,
     createdAt: 123,
   });
+  assert.equal(sanitizeHost(draft).sshInputCompatibility, false);
 });
 
 test("buildSshDeepLinkOpenHost falls back to a draft host when no saved host matches", () => {
@@ -327,4 +333,14 @@ test("buildSshNoteLinkOpenHost ignores unrelated external links", () => {
   );
 
   assert.equal(openHost, null);
+});
+
+
+test("deep links derived from saved hosts preserve explicit input choices", () => {
+  const target = parseSshDeepLink("ssh://alice:secret@example.com")!;
+  for (const sshInputCompatibility of [false, true]) {
+    const saved = host({ sshInputCompatibility });
+    assert.equal(buildSshDeepLinkConnectionHost(saved).sshInputCompatibility, sshInputCompatibility);
+    assert.equal(buildSshDeepLinkEphemeralHostFromSaved(saved, target, { id: "copy", now: 1 }).sshInputCompatibility, sshInputCompatibility);
+  }
 });

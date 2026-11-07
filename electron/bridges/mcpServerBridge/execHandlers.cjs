@@ -2,6 +2,7 @@
 // Module-level require: code inside createExecHandlerApi runs under `with (ctx)`
 // where bare `require` resolves to ctx.require (based in electron/bridges/).
 const { clearSessionFlowState } = require("../terminalFlowAck.cjs");
+const { getVisibleIdlePrompt } = require("../ai/shellUtils.cjs");
 const { emitJobDiag } = require("../ai/jobStartupDiagnostics.cjs");
 const {
   ensureSessionShellKind,
@@ -73,7 +74,7 @@ function createExecHandlerApi(ctx) {
       };
     }
     
-    function handleExec(params) {
+    function handleExec(params, executionContext = {}) {
       const resolved = resolveExecContext(params);
       if (!resolved.ok) return resolved;
       const {
@@ -103,6 +104,7 @@ function createExecHandlerApi(ctx) {
     
       const runExecution = (factory) => {
         try {
+          executionContext.beforeExecute?.();
           return Promise.resolve(factory()).finally(() => {
             releaseSessionExecution(sessionId, sessionToken);
             executionLock.release();
@@ -138,12 +140,14 @@ function createExecHandlerApi(ctx) {
             chatSessionId,
           });
           if (!probed.ok) return probed;
+          executionContext.beforeExecute?.();
           const safety = checkCommandSafetyForShell(command, resolveSessionBlocklistShellKind(session));
           if (safety.blocked) {
             debugLog("handleExec:blocklisted", { sessionId, matchedPattern: safety.matchedPattern });
             return { ok: false, error: `Command blocked by safety policy. Pattern: ${safety.matchedPattern}` };
           }
           return execViaPty(ptyStream, command, {
+            beforeInput: executionContext.beforeExecute,
             onInterrupt: () => clearSessionFlowState(session),
             trackForCancellation: activePtyExecs,
             timeoutMs: commandTimeoutMs,
@@ -155,6 +159,8 @@ function createExecHandlerApi(ctx) {
             onProbeAborted: (marker) => echoCommandToSession(session, sessionId, `${marker}_R`, { syntheticEcho: false }),
             onEchoSuppressionPrime: (marker) => echoCommandToSession(session, sessionId, `${marker}_I`, { syntheticEcho: false }),
             expectedPrompt: getFreshIdlePrompt(session),
+            getReadyPrompt: typeof session._promptTrackTail === "string"
+              ? () => getFreshIdlePrompt(session) || getVisibleIdlePrompt(session) : undefined,
             typedInput: true,
             echoCommand: (rawCommand) => echoCommandToSession(session, sessionId, rawCommand),
             chatSessionId,
@@ -182,6 +188,7 @@ function createExecHandlerApi(ctx) {
             chatSessionId,
           });
           if (!probed.ok) return probed;
+          executionContext.beforeExecute?.();
           const safety = checkCommandSafetyForShell(command, resolveSessionBlocklistShellKind(session));
           if (safety.blocked) {
             debugLog("handleExec:blocklisted", { sessionId, matchedPattern: safety.matchedPattern });
@@ -217,7 +224,7 @@ function createExecHandlerApi(ctx) {
       return { ok: false, error: "Session does not support command execution" };
     }
     
-    function handleJobStart(params) {
+    function handleJobStart(params, executionContext = {}) {
       const resolved = resolveExecContext(params);
       if (!resolved.ok) return resolved;
       const {
@@ -313,7 +320,9 @@ function createExecHandlerApi(ctx) {
 
         let handle;
         try {
+          executionContext.beforeExecute?.();
           handle = startPtyJob(ptyStream, command, {
+            beforeInput: executionContext.beforeExecute,
             onInterrupt: () => clearSessionFlowState(session),
             // Intentionally do NOT register in activePtyExecs: terminal_start jobs
             // are designed to survive SDK agent "Stop" so the model can stop polling
@@ -332,6 +341,8 @@ function createExecHandlerApi(ctx) {
             onEchoSuppressionPrime: (marker) => echoCommandToSession(session, sessionId, `${marker}_I`, { syntheticEcho: false }),
             chatSessionId,
             expectedPrompt: getFreshIdlePrompt(session),
+            getReadyPrompt: typeof session._promptTrackTail === "string"
+              ? () => getFreshIdlePrompt(session) || getVisibleIdlePrompt(session) : undefined,
             typedInput: true,
             echoCommand: (rawCommand) => echoCommandToSession(session, sessionId, rawCommand),
             maxBufferedChars: MAX_BACKGROUND_JOB_OUTPUT_CHARS,
@@ -352,6 +363,7 @@ function createExecHandlerApi(ctx) {
         handle.resultPromise.then((result) => {
           job.updatedAt = Date.now();
           job.exitCode = result.exitCode ?? null;
+          job.code = result.code;
           storeCompletedJobOutput(job, result.stdout || "", result);
           const isForcedCancel = typeof result.error === "string" && result.error.includes("forced");
           if (result.error === "Cancelled" || isForcedCancel) {

@@ -1,4 +1,13 @@
 export const zhCNMonitorMessages = {
+  "monitor.systemDisks": "系统分区（{count}）",
+  "monitor.systemDisksAlert": "系统分区使用率超过 80%，已自动展开。",
+  "monitor.diskIoTotal": "汇总",
+  "monitor.partitionIoHint": "此挂载点对应块设备的读写速率；共用设备的挂载点显示相同速率。取得两次有效采样前或无法识别块设备时显示 --；暂不支持 macOS。",
+  "monitor.diskIo": "磁盘 I/O",
+  "monitor.diskRead": "读取",
+  "monitor.diskWrite": "写入",
+  "monitor.diskIoHint": "Linux 底层块设备的汇总 I/O，不重复统计分区和叠加的虚拟设备。取得两次有效采样前不可用；暂不支持 macOS。",
+
   "monitor.actions": "面板操作",
   "monitor.unavailable": "监控暂不可用，连接恢复后请重新开始。",
   "monitor.username": "用户名",

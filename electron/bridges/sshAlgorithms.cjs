@@ -9,7 +9,8 @@ const FIXED_DH_GROUP_BY_KEX = Object.freeze({
 });
 
 const CIPHER_SSL_NAME_BY_ALGORITHM = Object.freeze({
-  "chacha20-poly1305@openssh.com": "chacha20",
+  // Patched ssh2 supplies original ChaCha20 when Electron/BoringSSL lacks it.
+  // Do not filter this SSH cipher against the OpenSSL-only inventory.
   "aes128-gcm@openssh.com": "aes-128-gcm",
   "aes256-gcm@openssh.com": "aes-256-gcm",
   "aes128-gcm": "aes-128-gcm",
@@ -114,6 +115,13 @@ function applyLegacyAlgorithms(algorithms) {
     ]),
   );
   algorithms.serverHostKey = [
+    "ssh-ed25519-cert-v01@openssh.com",
+    "ecdsa-sha2-nistp256-cert-v01@openssh.com",
+    "ecdsa-sha2-nistp384-cert-v01@openssh.com",
+    "ecdsa-sha2-nistp521-cert-v01@openssh.com",
+    "rsa-sha2-512-cert-v01@openssh.com",
+    "rsa-sha2-256-cert-v01@openssh.com",
+    "ssh-rsa-cert-v01@openssh.com",
     "ssh-ed25519", "ecdsa-sha2-nistp256", "ecdsa-sha2-nistp384", "ecdsa-sha2-nistp521",
     "rsa-sha2-512", "rsa-sha2-256",
     "ssh-rsa", "ssh-dss",
@@ -150,10 +158,16 @@ function applyLegacyHmacAlgorithms(algorithms) {
 }
 
 // Mirror of ssh2's DEFAULT_SERVER_HOST_KEY (see ssh2/lib/protocol/constants.js)
-// minus every ecdsa-sha2-*. Used when skipEcdsaHostKey is on but legacy mode
-// is off, so the field would otherwise be undefined and ssh2 would fall back
-// to its built-in defaults (which still include ecdsa-sha2-*).
+// minus every ecdsa-sha2-* (plain keys and host certificates). Used when
+// skipEcdsaHostKey is on but legacy mode is off, so the field would otherwise
+// be undefined and ssh2 would fall back to its built-in defaults (which still
+// include ecdsa-sha2-*). Non-ECDSA host certificates stay so a cert-only
+// bastion can still be reached.
 const MODERN_SERVER_HOST_KEY_WITHOUT_ECDSA = Object.freeze([
+  "ssh-ed25519-cert-v01@openssh.com",
+  "rsa-sha2-512-cert-v01@openssh.com",
+  "rsa-sha2-256-cert-v01@openssh.com",
+  "ssh-rsa-cert-v01@openssh.com",
   "ssh-ed25519",
   "rsa-sha2-512",
   "rsa-sha2-256",

@@ -1,4 +1,4 @@
-import test from 'node:test';
+import test, { before } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import React from 'react';
@@ -6,6 +6,12 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import { ComposerModelPicker } from './ComposerModelPicker';
 import { I18nProvider } from '../../application/i18n/I18nProvider';
+import { loadLocaleMessages } from '../../application/i18n/messages';
+
+// Non-English dictionaries load on demand; static rendering runs no effects.
+before(async () => {
+  for (const locale of ['zh-CN', 'zh-TW', 'es', 'ru']) await loadLocaleMessages(locale);
+});
 
 for (const [locale, cachedLabel] of [
   ['en', 'Cached'],
@@ -155,4 +161,37 @@ test('external agent picker shows the loading row while the live catalog is pend
   // With no presets the picker renders only the loading row; the host now
   // keeps built-in presets visible during loading and passes them through.
   assert.doesNotMatch(html, /gpt-5\.1/);
+});
+
+test('manual refresh button renders for any fetched catalog or warning and stays localized', () => {
+  const base = {
+    modelPresets: [{ id: 'm-1', name: 'M1' }],
+    selectedModelId: 'm-1',
+    prefs: { recent: [], pinned: [] },
+    onSelectModel: () => {},
+    onTogglePinned: () => {},
+  };
+  for (const [locale, refreshLabel] of [
+    ['en', 'Refresh model list'],
+    ['zh-CN', '刷新模型列表'],
+    ['zh-TW', '重新整理模型清單'],
+    ['es', 'Actualizar la lista de modelos'],
+    ['ru', 'Обновить список моделей'],
+  ]) {
+    const html = renderToStaticMarkup(
+      <I18nProvider locale={locale}>
+        <ComposerModelPicker {...base} catalogSource="last-known-good" onRefreshCatalog={() => {}} />
+      </I18nProvider>,
+    );
+    assert.ok(html.includes(`aria-label="${refreshLabel}"`));
+  }
+
+  // A plain preset list without a host refresh action stays buttonless.
+  assert.doesNotMatch(renderToStaticMarkup(<ComposerModelPicker {...base} />), /refreshModelList/);
+
+  // A degraded preset serve (warning, no source) still offers the refresh.
+  const warned = renderToStaticMarkup(
+    <ComposerModelPicker {...base} catalogWarning="live fetch failed" onRefreshCatalog={() => {}} />,
+  );
+  assert.match(warned, /aria-label="ai\.chat\.refreshModelList"/);
 });

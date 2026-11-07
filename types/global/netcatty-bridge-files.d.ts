@@ -25,7 +25,7 @@ declare global {
     listFileWatches?(): Promise<Array<{ watchId: string; localPath: string; remotePath: string; sftpId: string }>>;
     registerTempFile?(sftpId: string, localPath: string): Promise<{ success: boolean }>;
     unregisterTempFile?(sftpId: string, localPath: string): Promise<{ success: boolean; retained?: boolean }>;
-    onFileWatchSynced?(cb: (payload: { watchId: string; localPath: string; remotePath: string; bytesWritten: number }) => void): () => void;
+    onFileWatchSynced?(cb: (payload: { watchId: string; localPath: string; remotePath: string; bytesWritten: number; warning?: string }) => void): () => void;
     onFileWatchError?(cb: (payload: { watchId: string; localPath: string; remotePath: string; error: string }) => void): () => void;
     onFileWatchStopped?(cb: (payload: { watchId: string; localPath: string; remotePath: string; sftpId: string }) => void): () => void;
 
@@ -57,7 +57,10 @@ declare global {
     openCrashLogsDir?(): Promise<{ success: boolean }>;
 
     // Temp directory management
-    getTempDirInfo?(): Promise<{ path: string; fileCount: number; totalSize: number }>;
+    getTempDirInfo?(): Promise<{ path: string; fileCount: number; totalSize: number; isCustom: boolean; defaultPath: string }>;
+    chooseTempDir?(): Promise<string | null>;
+    setCustomTempDir?(dir: string): Promise<{ ok: boolean; path?: string; error?: string }>;
+    resetCustomTempDir?(): Promise<{ ok: boolean; path?: string; error?: string }>;
     clearTempDir?(): Promise<{ deletedCount: number; failedCount: number; error?: string }>;
     getTempDirPath?(): Promise<string>;
     openTempDir?(): Promise<{ success: boolean }>;
@@ -127,9 +130,11 @@ declare global {
     stopManualSessionLog?(payload: {
       sessionId: string;
     }): Promise<{ success: boolean; stopped: boolean; error?: string; filePath?: string }>;
+    prepareSessionLog?(payload: { sessionId: string }): Promise<{ success: boolean; filePath?: string; error?: string }>;
+    revealSessionLog?(payload: { sessionId: string }): Promise<{ success: boolean; error?: string }>;
     getManualSessionLogStatus?(payload: {
       sessionId: string;
-    }): Promise<{ success: boolean; isLogging: boolean; error?: string }>;
+    }): Promise<{ success: boolean; isLogging: boolean; hasSessionLog: boolean; error?: string }>;
 
     // Get file path from File object (for drag-and-drop, uses Electron's webUtils)
     getPathForFile?(file: File): string | undefined;
@@ -139,7 +144,14 @@ declare global {
       title: string;
       body: string;
       sessionId?: string;
+      /** Skip a second notification for the same approval across windows. */
+      dedupeKey?: string;
+      /** Show only when no Netcatty window is focused. */
+      whenUnfocused?: boolean;
     }): Promise<{ shown: boolean; reason?: string }>;
+    setExternalMcpApprovalAlertMode?(payload: {
+      mode: 'off' | 'unfocused' | 'always';
+    }): Promise<{ mode: 'off' | 'unfocused' | 'always' }>;
     readClipboardText?(): Promise<string>;
     writeClipboardText?(text: string): Promise<boolean>;
     readClipboardFiles?(): Promise<Array<{ path: string; name: string; isDirectory: boolean; size?: number }>>;
@@ -150,6 +162,30 @@ declare global {
     credentialsAvailable?(): Promise<boolean>;
     credentialsEncrypt?(plaintext: string): Promise<string>;
     credentialsDecrypt?(value: string): Promise<string>;
+    previewTotp?(payload: { text?: string; uri?: string }): Promise<{
+      ok: boolean;
+      uri?: string;
+      code?: string;
+      secondsRemaining?: number;
+      period?: number;
+      algorithm?: string;
+      digits?: number;
+      issuer?: string;
+      label?: string;
+      error?: string;
+    }>;
+    scanTotpQrFromScreen?(): Promise<{
+      ok: boolean;
+      uri?: string;
+      code?: string;
+      secondsRemaining?: number;
+      period?: number;
+      algorithm?: string;
+      digits?: number;
+      issuer?: string;
+      label?: string;
+      error?: string;
+    }>;
   }
 }
 

@@ -765,15 +765,27 @@ function findRemoteSftpSourceByEndpoint(sourceSessionId, expectedEndpoint, requi
   const requested = sessions?.get(sourceSessionId);
   const matchesExpectedEndpoint = (session) => {
     const actualEndpoint = session?._reuseEndpoint || session?.connRef?.endpoint;
+    // Selecting the original dial profile is not borrowing a channel. A
+    // single-channel peer may match the route while requiring a new transport.
+    // Keep the normal reuse guard for sessions that cannot dial independently.
+    const dedicatedDial = typeof session?._openDedicatedSftp === "function";
+    if (dedicatedDial && typeof session._matchesDedicatedSftpEndpoint === "function") {
+      return session._matchesDedicatedSftpEndpoint(expectedEndpoint);
+    }
+    const matchesIdentity = (requested, existing) => endpointAllowsReuse(
+      dedicatedDial ? { ...requested, singleChannelSsh: false } : requested,
+      dedicatedDial ? { ...existing, singleChannelSsh: false } : existing,
+      "channel",
+    );
     return Boolean(
       actualEndpoint
-      && (endpointAllowsReuse(expectedEndpoint, actualEndpoint, "channel")
+      && (matchesIdentity(expectedEndpoint, actualEndpoint)
         || (session._sftpReuseEndpoint
-          && endpointAllowsReuse({
+          && matchesIdentity({
             ...session._sftpReuseEndpoint,
             authFingerprint: actualEndpoint.authFingerprint,
-          }, actualEndpoint, "channel")
-          && endpointAllowsReuse(expectedEndpoint, session._sftpReuseEndpoint, "channel"))),
+          }, actualEndpoint)
+          && matchesIdentity(expectedEndpoint, session._sftpReuseEndpoint))),
     );
   };
   const hasLiveSftpConnection = (session) => {
@@ -1576,17 +1588,32 @@ async function runRemoteUploadTransaction(client, localPath, remotePath, options
   }
 
   const cleanupStage = async () => {
+    // The owner channel is already gone. unlink/delete would wait forever for
+    // a callback ssh2 never sends, and the transfer would stay on screen.
+    const channel = client?.sftp;
+    if (channel && (channel.readable === false || channel.destroyed === true)) return;
+    const removeStage = scpMode
+      ? getScpBackendForClient(client).remove(stagedLogical, {
+        recursive: false,
+        encoding,
+      })
+      : typeof client.delete === "function"
+        ? client.delete(encodedStagedPath)
+        : null;
+    if (!removeStage) return;
+    let timer = null;
     try {
-      if (scpMode) {
-        await getScpBackendForClient(client).remove(stagedLogical, {
-          recursive: false,
-          encoding,
-        });
-      } else if (typeof client.delete === "function") {
-        await client.delete(encodedStagedPath);
-      }
+      await Promise.race([
+        Promise.resolve(removeStage),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error("SFTP channel closed")), 2000);
+          if (typeof timer.unref === "function") timer.unref();
+        }),
+      ]);
     } catch {
       // Best-effort cleanup of a partial stage.
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   };
 
@@ -1599,6 +1626,7 @@ async function runRemoteUploadTransaction(client, localPath, remotePath, options
     throw err;
   }
 
+  let backupCleanupWarning;
   try {
     assertCanPromote();
     if (Number.isFinite(expectedSize) && expectedSize >= 0) {
@@ -1641,29 +1669,35 @@ async function runRemoteUploadTransaction(client, localPath, remotePath, options
           signal,
         ));
       assertCanPromote();
-      // Apply the old mode to the stage before promotion. A failed chmod must not
-      // replace an executable final with a non-executable file and report success.
-      await restoreRemoteMode(client, encodedStagedPath, plan.existingMode, {
-        bestEffort: false,
-      });
-      assertCanPromote();
-      await runCancelablePreflight(() => assertStagedPromotionTargetSafe(
-          client,
-          encodedPath,
-          remotePath,
-          plan.destinationExisted,
-          plan.destinationSnapshot,
-          signal,
-        ));
-      assertCanPromote();
+      // Mode restore is a remote chmod on the stage. Recheck the destination
+      // only after that round trip. A non-finite existingMode (new files, and
+      // targets whose mode could not be captured) makes restore a no-op, so a
+      // second lstat would be a serial RTT on every such upload.
+      if (Number.isFinite(plan.existingMode)) {
+        // Apply the old mode to the stage before promotion. A failed chmod must not
+        // replace an executable final with a non-executable file and report success.
+        await restoreRemoteMode(client, encodedStagedPath, plan.existingMode, {
+          bestEffort: false,
+        });
+        assertCanPromote();
+        await runCancelablePreflight(() => assertStagedPromotionTargetSafe(
+            client,
+            encodedPath,
+            remotePath,
+            plan.destinationExisted,
+            plan.destinationSnapshot,
+            signal,
+          ));
+        assertCanPromote();
+      }
       commitPromotion();
-      await renameRemotePath(client, encodedStagedPath, encodedPath, encodedBackupPath, {
+      backupCleanupWarning = await renameRemotePath(client, encodedStagedPath, encodedPath, encodedBackupPath, {
         stagePath: stagedLogical,
         backupPath: backupLogical,
         finalPath: remotePath,
-      });
+      }, { allowBackupCleanupWarning: true });
     }
-    return { staged: true };
+    return { staged: true, ...(backupCleanupWarning ? { warning: backupCleanupWarning } : {}) };
   } catch (err) {
     if (!err?.preserveStagedUpload) {
       await cleanupStage();
@@ -1681,7 +1715,7 @@ const posixRenameAsync = (sftp, fromPath, toPath) =>
     sftp.ext_openssh_rename(fromPath, toPath, (err) => (err ? reject(err) : resolve()));
   });
 
-async function renameRemotePath(client, fromPath, toPath, backupPath = null, recoveryPaths = {}) {
+async function renameRemotePath(client, fromPath, toPath, backupPath = null, recoveryPaths = {}, options = {}) {
   const sftp = await requireSftpChannel(client);
   if (typeof sftp?.ext_openssh_rename === "function") {
     try {
@@ -1725,13 +1759,27 @@ async function renameRemotePath(client, fromPath, toPath, backupPath = null, rec
     }
 
     if (movedExistingTarget) {
-      await deleteRemoteBackupWithRetry(
-        () => client.delete(backupPath),
-        {
-          finalPath: recoveryPaths.finalPath || toPath,
-          backupPath: recoveryPaths.backupPath || backupPath,
-        },
-      );
+      try {
+        await deleteRemoteBackupWithRetry(
+          () => client.delete(backupPath),
+          {
+            finalPath: recoveryPaths.finalPath || toPath,
+            backupPath: recoveryPaths.backupPath || backupPath,
+          },
+        );
+      } catch (error) {
+        const code = error?.cause?.code;
+        // Only a confirmed permission refusal after stage -> final succeeded is
+        // a warning. Preflight recovery, failed promotion, and transport errors
+        // must still fail; never borrow an interactive shell to bypass refusal.
+        if (!options.allowBackupCleanupWarning
+          || ![3, "3", "EACCES", "EPERM", "SSH_FX_PERMISSION_DENIED"].includes(code)) {
+          throw error;
+        }
+        return `Upload completed: ${String(recoveryPaths.finalPath || toPath)}. `
+          + `Permission denied removing backup: ${String(recoveryPaths.backupPath || backupPath)}. `
+          + "The backup was retained. Check the uploaded file before removing the backup manually.";
+      }
     }
   }
 }
@@ -1937,7 +1985,9 @@ async function openSftpForSession(_event, payload) {
   throwIfAborted(payload?.abortSignal);
   let sourceSessionId = sessionId;
   let source;
-  if (payload?.expectedEndpoint) {
+  if (payload?.reuseExactSessionOnly === true) {
+    source = { sessionId, ...ensureRemoteSftpSupport(sessionId) };
+  } else if (payload?.expectedEndpoint) {
     const expectedEndpoint = buildConnectionReuseEndpoint(payload.expectedEndpoint);
     source = findRemoteSftpSourceByEndpoint(
       sessionId,
@@ -1958,6 +2008,13 @@ async function openSftpForSession(_event, payload) {
     session.singleChannelSsh
     || remoteSoftwareRequiresSingleChannel(session.remoteSshVersion || sshClient?._remoteVer)
   ) {
+    if (payload?.reuseExactSessionOnly !== true && typeof session._openDedicatedSftp === "function") {
+      const opened = await session._openDedicatedSftp(payload);
+      const client = sftpClients?.get(opened.sftpId);
+      if (client) client.__netcattySourceSessionId = sourceSessionId;
+      copySftpEncodingState(payload?.encodingStateKey, opened.sftpId);
+      return opened;
+    }
     const err = new Error(
       "This host is configured for single-channel SSH. Opening SFTP on the terminal connection would disconnect it.",
     );
@@ -2165,7 +2222,7 @@ async function runUnifiedSftpTransfer(payload, direction) {
       throw new Error(result.error);
     }
     return direction === "upload"
-      ? { success: true, transferId, remotePath: payload.remotePath }
+      ? { success: true, transferId, remotePath: payload.remotePath, ...(result.warning ? { warning: result.warning } : {}) }
       : { success: true, transferId, localPath: payload.localPath };
   } finally {
     payload.abortSignal?.removeEventListener?.("abort", cancel);
@@ -2385,6 +2442,7 @@ const {
   completeTransportDial,
   failTransportDial,
   buildEndpointKey,
+  buildChannelAdoptionKey,
   buildConnectionReuseEndpoint,
   resolveConnectionKeepalivePolicy,
   endpointAllowsReuse,
@@ -2407,6 +2465,7 @@ const openConnectionApi = createOpenConnectionApi({
   createTransport, borrowTransport, findTransportByEndpoint,
   beginTransportDial, waitForTransportDial, completeTransportDial, failTransportDial,
   buildEndpointKey,
+  buildChannelAdoptionKey,
   buildConnectionReuseEndpoint,
   resolveConnectionKeepalivePolicy,
 });
@@ -2417,7 +2476,9 @@ async function openSftp(event, options) {
   if (options.reuseTransport !== false) {
     const endpoint = buildConnectionReuseEndpoint(options);
     const source = findRemoteSftpSourceByEndpoint(options.sourceSessionId, endpoint);
-    if (source?.session._sftpReuseEndpoint) {
+    const dedicatedDial = typeof source?.session._openDedicatedSftp === "function";
+    if (source && (source.session._sftpReuseEndpoint
+      || dedicatedDial)) {
       try {
         return await openSftpForSession(event, {
           ...options,
@@ -2425,8 +2486,11 @@ async function openSftp(event, options) {
           expectedEndpoint: options,
           requireExactSourceSession: true,
         });
-      } catch {
-        // Preserve the normal fresh-connection fallback if the channel fails.
+      } catch (error) {
+        // A dedicated dial owns its trust/lifecycle boundary. Never turn its
+        // rejection into a new login with different trust or cancellation state.
+        if (dedicatedDial) throw error;
+        // Preserve the normal fresh-connection fallback for reusable channels.
       }
     }
   }
@@ -2463,6 +2527,7 @@ const {
   lstatSftp,
   chmodSftp,
   extractSftpArchive,
+  createSftpArchive,
   getSftpHomeDir,
 } = fileOpsApi;
 
@@ -2659,6 +2724,7 @@ function registerHandlers(ipcMain, options = {}) {
       "netcatty:sftp:lstat",
       "netcatty:sftp:chmod",
       "netcatty:sftp:extract",
+      "netcatty:sftp:createArchive",
       "netcatty:sftp:homeDir",
     ].forEach((channel) => registerWorkerHandle(ipcMain, terminalWorkerManager, channel, ownership));
     return;
@@ -2682,6 +2748,7 @@ function registerHandlers(ipcMain, options = {}) {
     ["netcatty:sftp:lstat", lstatSftp],
     ["netcatty:sftp:chmod", chmodSftp],
     ["netcatty:sftp:extract", extractSftpArchive],
+    ["netcatty:sftp:createArchive", createSftpArchive],
     ["netcatty:sftp:homeDir", getSftpHomeDir],
   ].forEach(([channel, handler]) => registerActivityHandle(ipcMain, channel, handler, ownership));
 }
@@ -2730,6 +2797,7 @@ module.exports = {
   lstatSftp,
   chmodSftp,
   extractSftpArchive,
+  createSftpArchive,
   getSftpHomeDir,
   resolveEncodingForRequest,
   _tryFastShellDirectoryDeleteForTests: tryFastShellDirectoryDelete,

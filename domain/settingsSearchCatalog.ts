@@ -31,6 +31,8 @@ export const SYNC_SETTINGS_SUB_TAB_IDS = ["providers", "status"] as const;
 
 export type SyncSettingsSubTabId = (typeof SYNC_SETTINGS_SUB_TAB_IDS)[number];
 
+export type SettingsPlatform = "mac" | "win" | "linux";
+
 export type SettingsSearchEntry = {
   /** Stable id; also used as `data-settings-anchor` on the target element. */
   id: string;
@@ -47,7 +49,32 @@ export type SettingsSearchEntry = {
   sectionKey?: string;
   /** Extra English/Chinese aliases that are not full i18n strings. */
   keywords?: readonly string[];
+  /**
+   * Platforms where the destination actually renders. Omit for cross-platform
+   * entries. Entries must not be offered on a platform whose settings UI hides
+   * the anchor, otherwise search jumps to a tab with nothing to highlight.
+   */
+  platforms?: readonly SettingsPlatform[];
 };
+
+/** Resolve the host platform in the same terms the settings UI branches on. */
+export function resolveSettingsPlatform(
+  platform?: string,
+): SettingsPlatform {
+  const value = platform
+    ?? (typeof navigator !== "undefined" ? navigator.platform : "");
+  if (/mac|iphone|ipad/i.test(value)) return "mac";
+  if (/win/i.test(value)) return "win";
+  return "linux";
+}
+
+export function isSettingsEntryAvailableOn(
+  entry: SettingsSearchEntry,
+  platform: SettingsPlatform,
+): boolean {
+  if (!entry.platforms?.length) return true;
+  return entry.platforms.includes(platform);
+}
 
 export const SETTINGS_SEARCH_CATALOG: readonly SettingsSearchEntry[] = [
   // Application
@@ -107,6 +134,14 @@ export const SETTINGS_SEARCH_CATALOG: readonly SettingsSearchEntry[] = [
     labelKey: "settings.appearance.windowOpacity",
     descriptionKey: "settings.appearance.windowOpacity.desc",
     keywords: ["transparency", "透明"],
+  },
+  {
+    id: "appearance-window-background-blur",
+    tab: "appearance",
+    labelKey: "settings.appearance.windowBackgroundBlur",
+    descriptionKey: "settings.appearance.windowBackgroundBlur.desc",
+    keywords: ["blur", "frosted glass", "vibrancy", "模糊", "毛玻璃"],
+    platforms: ["mac"],
   },
   {
     id: "appearance-theme",
@@ -395,6 +430,13 @@ export const SETTINGS_SEARCH_CATALOG: readonly SettingsSearchEntry[] = [
     sectionKey: "settings.terminal.section.behavior",
   },
   {
+    id: "terminal-context-chips",
+    tab: "terminal",
+    labelKey: "settings.terminal.behavior.contextChips",
+    descriptionKey: "settings.terminal.behavior.contextChips.desc",
+    sectionKey: "settings.terminal.section.behavior",
+  },
+  {
     id: "terminal-clear-wipes-scrollback",
     tab: "terminal",
     labelKey: "settings.terminal.behavior.clearWipesScrollback",
@@ -466,11 +508,35 @@ export const SETTINGS_SEARCH_CATALOG: readonly SettingsSearchEntry[] = [
     sectionKey: "settings.terminal.section.localShell",
   },
   {
+    id: "terminal-default-proxy",
+    tab: "terminal",
+    labelKey: "settings.terminal.connection.defaultProxy",
+    descriptionKey: "settings.terminal.connection.defaultProxy.desc",
+    sectionKey: "settings.terminal.section.connection",
+    keywords: ["proxy", "socks", "默认代理", "全域"],
+  },
+  {
     id: "terminal-verify-host-keys",
     tab: "terminal",
     labelKey: "settings.terminal.connection.verifyHostKeys",
     descriptionKey: "settings.terminal.connection.verifyHostKeys.desc",
     sectionKey: "settings.terminal.section.connection",
+  },
+  {
+    id: "terminal-temporary-legacy-algorithms",
+    tab: "terminal",
+    labelKey: "settings.terminal.connection.temporaryLegacyAlgorithms",
+    descriptionKey: "settings.terminal.connection.temporaryLegacyAlgorithms.desc",
+    sectionKey: "settings.terminal.section.connection",
+    keywords: ["legacy", "kex", "putty", "旧版算法", "演算法", "堡垒机"],
+  },
+  {
+    id: "terminal-temporary-network-device-mode",
+    tab: "terminal",
+    labelKey: "settings.terminal.connection.temporaryNetworkDeviceMode",
+    descriptionKey: "settings.terminal.connection.temporaryNetworkDeviceMode.desc",
+    sectionKey: "settings.terminal.section.connection",
+    keywords: ["network", "device", "switch", "router", "网络设备", "網路裝置"],
   },
   {
     id: "terminal-ssh-auto-reconnect",
@@ -713,6 +779,24 @@ export const SETTINGS_SEARCH_CATALOG: readonly SettingsSearchEntry[] = [
     aiSubTab: "tools",
     labelKey: "ai.externalMcp.title",
     keywords: ["mcp"],
+  },
+  {
+    id: "ai-external-mcp-http",
+    tab: "ai",
+    aiSubTab: "tools",
+    labelKey: "ai.externalMcp.http.title",
+    descriptionKey: "ai.externalMcp.http.description",
+    sectionKey: "ai.externalMcp.title",
+    keywords: ["http", "sse", "streamable", "wsl", "codex"],
+  },
+  {
+    id: "ai-external-mcp-approval-alert",
+    tab: "ai",
+    aiSubTab: "tools",
+    labelKey: "ai.externalMcp.approvalAlert",
+    descriptionKey: "ai.externalMcp.approvalAlert.description",
+    sectionKey: "ai.externalMcp.title",
+    keywords: ["notification", "approval", "dock"],
   },
   {
     id: "ai-user-skills",

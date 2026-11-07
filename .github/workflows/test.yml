@@ -49,8 +49,20 @@ jobs:
       - name: Verify Codex App Server schema
         run: npm run check:codex-app-server-schema
 
+      - name: Verify plugin contract and runtime boundaries
+        run: |
+          npm run check:plugin-contract
+          npm run test:plugin-runtime
+          npm run test:plugin-examples
+          node --test --import tsx components/settings/tabs/Plugin*.test.tsx
+
       - name: Test
         run: npm test
+
+      - name: Test SSH cipher negotiation in Electron's crypto runtime
+        env:
+          NETCATTY_SSH_TEST_RUNTIME: electron
+        run: node --test electron/bridges/sshChaChaTransport.test.cjs
 
       - name: Test browser first-link lifecycle
         run: xvfb-run -a ./node_modules/.bin/electron --no-sandbox electron/hostBrowser/hostBrowser.firstLink.live.test.cjs
@@ -90,6 +102,9 @@ jobs:
 
       - name: Install deps
         run: npm ci --ignore-scripts
+
+      - name: Exercise serial named pipe transport on Windows
+        run: node --test electron/bridges/serialNamedPipe.test.cjs
 
       - name: Apply production dependency patches
         run: npx patch-package --error-on-fail
@@ -134,6 +149,11 @@ jobs:
 
       - name: Build
         run: npm run build
+
+      - name: Test SSH cipher negotiation in Windows Electron's crypto runtime
+        env:
+          NETCATTY_SSH_TEST_RUNTIME: electron
+        run: node --test electron/bridges/sshChaChaTransport.test.cjs
 
       - name: Exercise two SSH password prompts in the desktop app
         run: node scripts/terminal-broadcast-ssh.live.cjs

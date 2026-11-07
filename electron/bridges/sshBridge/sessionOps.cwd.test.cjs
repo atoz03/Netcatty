@@ -12,6 +12,16 @@ function quoteShellArg(value) {
   return "'" + String(value).replace(/'/g, "'\\''") + "'";
 }
 
+test('session metadata exposes runtime single-channel restrictions without opening exec', async () => {
+  let execCount = 0;
+  const api = makeApi({ singleChannelSsh: true, remoteSshVersion: 'OpenSSH_9.6',
+    conn: { exec() { execCount++; } } });
+  assert.deepEqual(await api.getSessionRemoteInfo(null, { sessionId: 'session-1' }), {
+    success: true, singleChannelSsh: true, remoteSshVersion: 'OpenSSH_9.6',
+  });
+  assert.equal(execCount, 0);
+});
+
 function makePwdStream(cwd, loginPid) {
   const stream = new EventEmitter();
   stream.stderr = new EventEmitter();
@@ -37,6 +47,31 @@ function makeApi(session, siblingSessions = [], overrides = {}) {
     log: () => {},
   });
 }
+
+test("getSessionPwd reads a local PTY cwd without an SSH connection", { skip: process.platform !== "linux" }, async () => {
+  const api = makeApi({
+    protocol: "local",
+    type: "local",
+    proc: { pid: process.pid },
+  });
+
+  const result = await api.getSessionPwd(null, {
+    sessionId: "session-1",
+    allowHomeFallback: false,
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(result.cwd, fs.realpathSync(process.cwd()));
+});
+
+test("getSessionPwd does not require an SSH connection for a local session", async () => {
+  const api = makeApi({ protocol: "local", type: "local" });
+
+  const result = await api.getSessionPwd(null, { sessionId: "session-1" });
+
+  assert.equal(result.success, false);
+  assert.equal(result.error, "Local session has no process");
+});
 
 test("shared terminal cwd probe refuses to guess without a shell pid", async () => {
   let execCalls = 0;
@@ -127,9 +162,10 @@ test("session cwd probe decodes the marked lsof pathname", async () => {
   assert.deepEqual(result, { success: true, cwd: "/srv/中文" });
 });
 
-test("lsof cwd fallback accepts only directory records, not diagnostic names (#3237, #3493)", async (t) => {
+async function assertLsofCwdFallback(t, remoteSshVersion) {
   let script;
   const api = makeApi({
+    remoteSshVersion,
     shellPid: "4242",
     connRef: { count: 1 },
     stream: {},
@@ -140,7 +176,7 @@ test("lsof cwd fallback accepts only directory records, not diagnostic names (#3
     },
   }, [], {
     quoteShellArg(value) {
-      if (!script && value.includes("read_shell_cwd()")) script = value;
+      if (value.startsWith("SELF=")) script = value;
       return quoteShellArg(value);
     },
   });
@@ -188,7 +224,12 @@ test("lsof cwd fallback accepts only directory records, not diagnostic names (#3
     assert.equal(result.status, expected === null ? 1 : 0, `${output}\n${result.stderr}`);
     assert.equal(result.stdout, expected === null ? "" : `NETCATTY_LSOF_CWD=${expected}\n`, output);
   }
-});
+}
+
+for (const remoteSshVersion of ["OpenSSH_9.6", "dropbear"]) {
+  test(`lsof cwd fallback accepts only directories on ${remoteSshVersion} (#3237, #3493)`,
+    (t) => assertLsofCwdFallback(t, remoteSshVersion));
+}
 
 test("session cwd probe closes a remote command that exceeds its timeout", async () => {
   const stream = new EventEmitter();
@@ -302,6 +343,9 @@ test("cwd probe forces POSIX sh, captures sshd PPID, and keeps the watchdog", as
   assert.ok(command.includes(") </dev/null >/dev/null 2>&1 & nc_watchdog_pid=$!"));
   assert.ok(command.includes('kill -9 $nc_kids "$nc_watchdog_pid"'));
   assert.ok(command.includes('find_login_shell "${NC_SSHD_PPID:-$PPID}"'));
+  assert.match(command, /ps -e -o pid= -o ppid= -o tty= -o comm=/);
+  assert.match(command, /ps -e -o pid= -o ppid= -o stat= -o comm=/);
+  assert.equal(command.includes("pid=,"), false);
 });
 
 test("immediate parked reconnect does not guess cwd from an exiting shell", async () => {
@@ -896,4 +940,53 @@ test("getSessionPwd skips exec after the CloudLinker banner stamps the runtime c
   assert.equal(result.success, false);
   assert.match(result.error, /extra exec channels/);
   assert.equal(execCalls, 0);
+});
+
+for (const shellPid of [undefined, "4242"]) {
+  test(`cwd probe fits Dropbear's limit with shell pid ${shellPid ?? "unknown"} (#3731)`, async () => {
+    let command = "";
+    const session = {
+      shellPid,
+      remoteSshVersion: "dropbear",
+      connRef: { count: 1 },
+      stream: {},
+      conn: {
+        exec(nextCommand, callback) {
+          command = nextCommand;
+          callback(null, makePwdStream("/owrt/root", "4242"));
+        },
+      },
+    };
+    const result = await makeApi(session).getSessionPwd(null, { sessionId: "session-1" });
+
+    assert.deepEqual(result, { success: true, cwd: "/owrt/root" });
+    assert.ok(Buffer.byteLength(command, "utf8") <= 9000);
+    assert.ok(command.includes('readlink "/proc/$1/cwd"'));
+    assert.ok(command.includes("-Fnt 2>/dev/null"));
+    assert.ok(command.includes("_rc_test_cwd"), "preserve annotation validation");
+    assert.ok(!command.includes("# Find the user's interactive shell"));
+  });
+}
+
+test("OpenSSH peers keep the annotation-aware lsof cwd fallback (#3493)", async () => {
+  let command = "";
+  const session = {
+    shellPid: "4242",
+    remoteSshVersion: "OpenSSH_9.6",
+    connRef: { count: 1 },
+    stream: {},
+    conn: {
+      exec(nextCommand, callback) {
+        command = nextCommand;
+        callback(null, makePwdStream("/srv/app", "4242"));
+      },
+    },
+  };
+  const api = makeApi(session);
+
+  const result = await api.getSessionPwd(null, { sessionId: "session-1" });
+
+  assert.deepEqual(result, { success: true, cwd: "/srv/app" });
+  assert.ok(command.includes("_rc_test_cwd"), "keep the #3493 annotation decode");
+  assert.ok(command.includes("-Fnt 2>/dev/null"));
 });

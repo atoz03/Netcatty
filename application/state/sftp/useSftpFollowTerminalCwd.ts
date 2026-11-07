@@ -302,6 +302,12 @@ export function useSftpFollowTerminalCwd({
       && previousOriginId !== expectedSessionId,
     );
     if (expectedSessionId) lastFollowOriginIdRef.current = expectedSessionId;
+    // Auto-follow must wait for a trusted live cwd (OSC 7, post-command
+    // backend-strict probe, or inferred). Polling preferFreshBackend here while
+    // cwd is null/untrusted races that probe: navigate starts, the probe then
+    // invalidates the sync generation, abort restores the previous path, and
+    // without a connectionPath effect dependency the panel stays put (#3588).
+    // Manual "Go to terminal directory" and first-open sync still probe.
     const usesLiveTerminalCwd = Boolean(activeTerminalCwd && activeTerminalCwdTrusted);
     let terminalCwd = usesLiveTerminalCwd ? activeTerminalCwd : null;
     if (!terminalCwd && originChanged) {
@@ -310,12 +316,6 @@ export function useSftpFollowTerminalCwd({
         originChanged,
         homeDir: sftpRef.current.leftPane.connection?.homeDir,
         currentPath: sftpRef.current.leftPane.connection?.currentPath,
-      });
-    } else if (!terminalCwd) {
-      terminalCwd = await onGetTerminalCwd({
-        preferFreshBackend: true,
-        allowRendererFallback: false,
-        requireActiveShellCwd: true,
       });
     }
     if (!terminalCwd) return;
@@ -393,12 +393,10 @@ export function useSftpFollowTerminalCwd({
       handledFollowRef.current = { connectionId: currentConnection.id, terminalCwd: targetPath };
     }
   }, [
-    activeSessionId,
     activeTerminalCwd,
     activeTerminalCwdTrusted,
     canFollowTerminalCwd,
     effectiveFollowTerminalCwd,
-    focusedSessionId,
     hasActiveWork,
     isVisible,
     onGetTerminalCwd,
@@ -430,6 +428,7 @@ export function useSftpFollowTerminalCwd({
     canFollowTerminalCwd,
     connectionId,
     connectionIsLocal,
+    connectionPath,
     connectionStatus,
     effectiveFollowTerminalCwd,
     focusedSessionId,

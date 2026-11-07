@@ -33,6 +33,50 @@ function createTestDispatcher(overrides = {}) {
   });
 }
 
+test('reconnect respects observer mode and denial before touching transport', async () => {
+  let calls = 0;
+  for (const mode of [PERMISSION_MODES.OBSERVER, PERMISSION_MODES.CONFIRM]) {
+    const dispatch = createTestDispatcher({ permissionMode: mode, evaluatePermissionWithGrants,
+      validateSessionReconnect: () => ({ ok: true }),
+      requestApprovalFromRenderer: async () => false,
+      invokeVaultAgent: async () => { calls++; return { ok: true }; } });
+    assert.equal((await dispatch('session/reconnect', { sessionId: 's', chatSessionId: 'chat' })).ok, false);
+    assert.equal((await dispatch('session/recover', { sessionId: 's', chatSessionId: 'chat' })).ok, false);
+  }
+  assert.equal(calls, 0);
+});
+
+test('reconnect revalidates scope after approval and supports public RPC', async () => {
+  let allowed = true;
+  let calls = 0;
+  const dispatch = createTestDispatcher({ evaluatePermissionWithGrants,
+    validateSessionReconnect: () => allowed ? { ok: true } : { ok: false, error: 'scope revoked' },
+    requestApprovalFromRenderer: async () => { allowed = false; return true; },
+    invokeVaultAgent: async () => { calls++; return { ok: true }; } });
+  const result = await dispatch('public/session/reconnect', { sessionId: 's', chatSessionId: 'chat' });
+  assert.equal(result.error, 'scope revoked');
+  assert.equal(calls, 0);
+});
+
+test("host open does not report success after its scope binding was revoked", async () => {
+  const dispatch = createTestDispatcher({
+    invokeVaultAgent: async () => ({ ok: true, sessionId: "opened-1" }),
+    onHostOpened: async () => false,
+  });
+  const result = await dispatch("vault/hosts/open", { hostId: "host-1", chatSessionId: "chat-1" });
+  assert.equal(result.ok, false);
+  assert.equal(result.code, "SESSION_SCOPE_BIND_FAILED");
+});
+
+test("host open confirms binding only after the ownership callback completes", async () => {
+  const dispatch = createTestDispatcher({
+    invokeVaultAgent: async () => ({ ok: true, sessionId: "opened-1" }),
+    onHostOpened: async () => true,
+  });
+  const result = await dispatch("vault/hosts/open", { hostId: "host-1", chatSessionId: "chat-1" });
+  assert.equal(result.scopeBound, true);
+});
+
 test("dispatchCapabilityRpc returns UNROUTED for netcatty builtin methods", async () => {
   const dispatch = createTestDispatcher();
   const result = await dispatch("netcatty/exec", { chatSessionId: "chat-1" });
@@ -444,4 +488,45 @@ test("implemented vault capabilities do not return CAPABILITY_NOT_IMPLEMENTED", 
   const dispatch = createTestDispatcher();
   const result = await dispatch("vault/host/get", { hostId: "host-1" });
   assert.notEqual(result.code, "CAPABILITY_NOT_IMPLEMENTED");
+});
+
+test("managed privacy is revalidated after capability approval and before writes", async () => {
+  const { createAiPrivacyService } = require("../../shared/aiPrivacyService.cjs");
+  const { createManagedPrivacyBoundary } = require("../../shared/managedPrivacyBoundary.cjs");
+  const privacy = createAiPrivacyService();
+  privacy.configure({ enabled: true });
+  const token = privacy.redact("approval-chat", "192.0.2.14");
+  let invoked = false;
+  const dispatch = createManagedPrivacyBoundary(createTestDispatcher({
+    evaluatePermissionWithGrants: () => ({ allowed: true, requiresApproval: true }),
+    requestApprovalFromRenderer: async (_tool, args) => {
+      assert.equal(args.notes, "192.0.2.14");
+      privacy.configure({ enabled: false });
+      return true;
+    },
+    invokeVaultAgent: async () => { invoked = true; return { ok: true }; },
+  }), privacy);
+  await assert.rejects(dispatch("public/vault/hostNotes/set", {
+    chatSessionId: "approval-chat", hostId: "host-1", notes: token,
+  }), /settings changed|unavailable/);
+  assert.equal(invoked, false);
+});
+
+test("managed session close revalidates privacy after asynchronous close preparation", async () => {
+  const { createAiPrivacyService } = require("../../shared/aiPrivacyService.cjs");
+  const { createManagedPrivacyBoundary } = require("../../shared/managedPrivacyBoundary.cjs");
+  const privacy = createAiPrivacyService();
+  privacy.configure({ enabled: true });
+  let invoked = false;
+  let outcome;
+  const dispatch = createManagedPrivacyBoundary(createTestDispatcher({
+    beforeSessionClose: async () => { privacy.configure({ enabled: false }); },
+    afterSessionClose: async (_params, result) => { outcome = result; },
+    invokeVaultAgent: async () => { invoked = true; return { ok: true }; },
+  }), privacy);
+  await assert.rejects(dispatch("public/session/close", {
+    chatSessionId: "closing-chat", sessionId: "session-1",
+  }), /settings changed|unavailable/);
+  assert.equal(invoked, false);
+  assert.equal(outcome.closed, false);
 });

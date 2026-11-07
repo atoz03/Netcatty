@@ -1,4 +1,5 @@
 import type { ModelMessage } from "ai";
+import { sliceHead, sliceTail } from "./textBoundaries";
 
 const RETRY_MAX_TOOL_RESULT_CHARS = 4_000;
 const RETRY_MAX_MESSAGE_TEXT_CHARS = 8_000;
@@ -14,6 +15,18 @@ const LARGE_BASE64_PATTERN = /(?:[A-Za-z0-9+/]{4}){125,}(?:==|=)?/g;
 export interface CompressMessagesForRequestTooLargeRetryResult {
   messages: ModelMessage[];
   didAdjust: boolean;
+}
+
+export interface CompressMessagesForRequestTooLargeRetryOptions {
+  /**
+   * Keep image attachments (`image` parts and `file` parts whose media type
+   * starts with `image/`) instead of replacing them with a text placeholder.
+   *
+   * Other file parts stay placeholders. Chat providers reject types such as
+   * `text/plain`, and the model reads those through attachment tools.
+   * Only the 413 retry drops images as well.
+   */
+  preserveAttachments?: boolean;
 }
 
 /**
@@ -69,7 +82,7 @@ function collapseCarriageReturnFrames(value: string): string {
 function shortenVerboseLine(line: string): string {
   if (line.length <= MAX_VERBOSE_LINE_CHARS) return line;
   const edge = Math.floor((MAX_VERBOSE_LINE_CHARS - 80) / 2);
-  return `${line.slice(0, edge)}[... long line shortened: ${line.length} chars ...]${line.slice(-edge)}`;
+  return `${sliceHead(line, edge)}[... long line shortened: ${line.length} chars ...]${sliceTail(line, edge)}`;
 }
 
 export function truncateTextWithHeadAndTail(
@@ -87,7 +100,7 @@ export function truncateTextWithHeadAndTail(
 ): string {
   if (value.length <= maxChars) return value;
   if (maxChars <= marker.length + 16) {
-    return value.slice(0, maxChars);
+    return sliceHead(value, maxChars);
   }
 
   const budget = maxChars - marker.length;
@@ -97,21 +110,23 @@ export function truncateTextWithHeadAndTail(
     tail = Math.max(0, budget - head);
   }
   if (head + tail >= value.length) {
-    return value.slice(0, maxChars);
+    return sliceHead(value, maxChars);
   }
   if (head + tail <= 0) {
-    return value.slice(0, maxChars);
+    return sliceHead(value, maxChars);
   }
 
-  return `${value.slice(0, head).trimEnd()}${marker}${value.slice(-tail).trimStart()}`;
+  return `${sliceHead(value, head).trimEnd()}${marker}${sliceTail(value, tail).trimStart()}`;
 }
 
 export function compressMessagesForRequestTooLargeRetry(
   messages: ModelMessage[],
+  options: CompressMessagesForRequestTooLargeRetryOptions = {},
 ): CompressMessagesForRequestTooLargeRetryResult {
+  const preserveAttachments = options.preserveAttachments === true;
   let didAdjust = false;
   const compressedMessages = messages.map((message) => {
-    const compressed = compressModelMessageForRequestRetry(message);
+    const compressed = compressModelMessageForRequestRetry(message, preserveAttachments);
     if (compressed !== message) didAdjust = true;
     return compressed;
   });
@@ -122,7 +137,10 @@ export function compressMessagesForRequestTooLargeRetry(
   };
 }
 
-function compressModelMessageForRequestRetry(message: ModelMessage): ModelMessage {
+function compressModelMessageForRequestRetry(
+  message: ModelMessage,
+  preserveAttachments: boolean,
+): ModelMessage {
   if (typeof message.content === "string") {
     // User text is an instruction or exact input, not terminal output. Lossy
     // cleanup can alter commands even when the request is far below its limit.
@@ -136,7 +154,7 @@ function compressModelMessageForRequestRetry(message: ModelMessage): ModelMessag
   let didAdjust = false;
   const content = message.content.map((part) => {
     if (message.role === "user" && part.type === "text") return part;
-    const compressed = compressContentPartForRequestRetry(part);
+    const compressed = compressContentPartForRequestRetry(part, preserveAttachments);
     if (compressed !== part) didAdjust = true;
     return compressed;
   });
@@ -144,7 +162,7 @@ function compressModelMessageForRequestRetry(message: ModelMessage): ModelMessag
   return didAdjust ? ({ ...message, content } as ModelMessage) : message;
 }
 
-function compressContentPartForRequestRetry(part: unknown): unknown {
+function compressContentPartForRequestRetry(part: unknown, preserveAttachments: boolean): unknown {
   if (!part || typeof part !== "object") return part;
   const record = part as Record<string, unknown>;
   const type = record.type;
@@ -178,12 +196,18 @@ function compressContentPartForRequestRetry(part: unknown): unknown {
     }
   }
 
-  if (type === "image" && typeof record.image === "string") {
-    return omittedAttachmentTextPart("image", record.image, record);
-  }
+  const mediaType = typeof record.mediaType === "string" ? record.mediaType : "";
+  const preserveImage = preserveAttachments && (
+    type === "image" || (type === "file" && mediaType.startsWith("image/"))
+  );
+  if (!preserveImage) {
+    if (type === "image" && typeof record.image === "string") {
+      return omittedAttachmentTextPart("image", record.image, record);
+    }
 
-  if (type === "file" && typeof record.data === "string") {
-    return omittedAttachmentTextPart("file", record.data, record);
+    if (type === "file" && typeof record.data === "string") {
+      return omittedAttachmentTextPart("file", record.data, record);
+    }
   }
 
   return part;

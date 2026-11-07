@@ -1,3 +1,5 @@
+import { useAppThemeStyle } from "../application/app/useAppThemeStyle";
+import { selectPluginThemeTokens } from "../application/state/pluginContributionEnvironment";
 /**
  * Settings Page - Standalone settings window content
  * This component is rendered in a separate Electron window
@@ -25,6 +27,7 @@ import { useExternalMcpGrantPersister } from "./ai/useExternalMcpGrantPersister"
 import { setupMcpApprovalBridge } from "../infrastructure/ai/shared/approvalGate";
 import { usePluginContributions } from "../application/state/usePluginContributions";
 import { PluginContributionHost } from "./plugins/PluginContributionHost";
+import { PluginPermissionHost } from "./plugins/PluginPermissionHost";
 import { matchesKeyBinding } from "../domain/models";
 import { isPrimaryModifierWBinding } from "../application/state/windowCommandClose";
 
@@ -141,6 +144,8 @@ type TerminalTabSettingsProps = Pick<
     | 'setLocalShellSidePanelAutoOpenTab'
     | 'workspaceFocusStyle'
     | 'setWorkspaceFocusStyle'
+    | 'globalDefaultProxyProfileId'
+    | 'setGlobalDefaultProxyProfileId'
 >;
 
 const SettingsTerminalTabContainer = React.memo<TerminalTabSettingsProps>(function SettingsTerminalTabContainer({
@@ -171,6 +176,8 @@ const SettingsTerminalTabContainer = React.memo<TerminalTabSettingsProps>(functi
     setLocalShellSidePanelAutoOpenTab,
     workspaceFocusStyle,
     setWorkspaceFocusStyle,
+    globalDefaultProxyProfileId,
+    setGlobalDefaultProxyProfileId,
 }) {
     const availableFonts = useAvailableFonts();
 
@@ -204,6 +211,8 @@ const SettingsTerminalTabContainer = React.memo<TerminalTabSettingsProps>(functi
             availableFonts={availableFonts}
             workspaceFocusStyle={workspaceFocusStyle}
             setWorkspaceFocusStyle={setWorkspaceFocusStyle}
+            globalDefaultProxyProfileId={globalDefaultProxyProfileId}
+            setGlobalDefaultProxyProfileId={setGlobalDefaultProxyProfileId}
         />
     );
 });
@@ -238,6 +247,8 @@ const SettingsAITabContainer: React.FC = () => {
                 setResponseIdleTimeout={aiState.setResponseIdleTimeout}
                 maxIterations={aiState.maxIterations}
                 setMaxIterations={aiState.setMaxIterations}
+                aiSessionMessageCap={aiState.aiSessionMessageCap}
+                setAiSessionMessageCap={aiState.setAiSessionMessageCap}
                 webSearchConfig={aiState.webSearchConfig}
                 setWebSearchConfig={aiState.setWebSearchConfig}
                 quickMessages={aiState.quickMessages}
@@ -264,7 +275,7 @@ const SettingsSyncTabWithVault: React.FC<{ onSettingsApplied?: () => void }> = (
         groupConfigs,
         importDataFromString,
         clearVaultData,
-    } = useVaultState();
+    } = useVaultState({ syncConnectionLogTerminalData: false });
 
     const { rules: portForwardingRules, importRules: importPortForwardingRules } = usePortForwardingState();
 
@@ -316,6 +327,9 @@ const SettingsSyncTabWithVault: React.FC<{ onSettingsApplied?: () => void }> = (
 };
 
 const SettingsPageContent: React.FC<{ settings: SettingsState; appLock?: AppLockState }> = ({ settings, appLock }) => {
+    // This publisher also runs in detached Settings: never broadcast a local preview.
+    const committedAppThemeStyle = useAppThemeStyle(false);
+    const pluginThemeTokens = useMemo(() => selectPluginThemeTokens(committedAppThemeStyle as Record<string, unknown>), [committedAppThemeStyle]);
     const { t } = useI18n();
     const { request, clearFocus, openSearch } = useSettingsFocus();
     const { notifyRendererReady, closeSettingsWindow, onWindowCommandCloseRequested } = useWindowControls();
@@ -517,7 +531,8 @@ const SettingsPageContent: React.FC<{ settings: SettingsState; appLock?: AppLock
                     </TabsList>
                 </div>
 
-                <div className="flex-1 h-full flex flex-col min-h-0 bg-muted/10">
+                {/* min-w-0: row flex item must shrink so long Agent paths truncate inside the pane. */}
+                <div className="flex-1 h-full flex flex-col min-h-0 min-w-0 bg-muted/10">
                     {mountedTabs.has("application") && (
                         <SettingsLazyTab value="application">
                             <LazySettingsApplicationTab
@@ -563,6 +578,8 @@ const SettingsPageContent: React.FC<{ settings: SettingsState; appLock?: AppLock
                                 setShowHostTreeSidebar={settings.setShowHostTreeSidebar}
                                 windowOpacity={settings.windowOpacity}
                                 setWindowOpacity={settings.setWindowOpacity}
+                                windowBackgroundBlur={settings.windowBackgroundBlur}
+                                setWindowBackgroundBlur={settings.setWindowBackgroundBlur}
                                 appIconVariant={settings.appIconVariant}
                                 setAppIconVariant={settings.setAppIconVariant}
                             />
@@ -599,6 +616,8 @@ const SettingsPageContent: React.FC<{ settings: SettingsState; appLock?: AppLock
                                 setLocalShellSidePanelAutoOpenTab={settings.setLocalShellSidePanelAutoOpenTab}
                                 workspaceFocusStyle={settings.workspaceFocusStyle}
                                 setWorkspaceFocusStyle={settings.setWorkspaceFocusStyle}
+                                globalDefaultProxyProfileId={settings.globalDefaultProxyProfileId}
+                                setGlobalDefaultProxyProfileId={settings.setGlobalDefaultProxyProfileId}
                             />
                         </SettingsLazyTab>
                     )}
@@ -706,7 +725,8 @@ const SettingsPageContent: React.FC<{ settings: SettingsState; appLock?: AppLock
             </Tabs>
         </div>
         <ExternalMcpApprovalsHost />
-        <PluginContributionHost locale={settings.uiLanguage} theme={settings.resolvedTheme} />
+        <PluginPermissionHost />
+        <PluginContributionHost locale={settings.uiLanguage} theme={settings.resolvedTheme} themeTokens={pluginThemeTokens} />
         </>
     );
 };

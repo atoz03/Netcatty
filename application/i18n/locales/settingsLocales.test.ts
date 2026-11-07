@@ -18,12 +18,29 @@ const LOCALIZED_SETTINGS_LOCALES = [
 
 const APP_LOCK_LOCALES = [
   { name: "en", messages: en },
-  { name: "zh-CN", messages: zhCN },
+  { name: "es", messages: es },
   { name: "ru", messages: ru },
+  { name: "zh-CN", messages: zhCN },
+  { name: "zh-TW", messages: zhTW },
 ];
 
+const ALL_SETTINGS_LOCALES = [
+  { name: "en", messages: en },
+  ...LOCALIZED_SETTINGS_LOCALES,
+];
+
+test("Host selection disclosure describes later permission-controlled actions without promising another confirmation", () => {
+  const permissionWords: Record<string, RegExp> = { en: /permission settings/i, es: /permisos/i, ru: /разрешени/u, 'zh-CN': /权限设置/u, 'zh-TW': /權限設定/u };
+  const oldPromise = /requires a separate confirmation|requiere otra confirmación|требует отдельного подтверждения|需要单独确认|需要另外確認/iu;
+  for (const locale of ALL_SETTINGS_LOCALES) {
+    const note = locale.messages['plugins.hostActions.selectionNote'];
+    assert.match(note, permissionWords[locale.name], locale.name);
+    assert.doesNotMatch(note, oldPromise, locale.name);
+  }
+});
+
 test("localized settings include names for every default shortcut", () => {
-  for (const locale of LOCALIZED_SETTINGS_LOCALES) {
+  for (const locale of ALL_SETTINGS_LOCALES) {
     const missing = DEFAULT_KEY_BINDINGS
       .map((binding) => `settings.shortcuts.binding.${binding.id}`)
       .filter((key) => !locale.messages[key]);
@@ -44,6 +61,56 @@ test("localized settings include workspace focus indicator labels", () => {
   for (const locale of LOCALIZED_SETTINGS_LOCALES) {
     const missing = keys.filter((key) => !locale.messages[key]);
     assert.deepEqual(missing, [], `${locale.name} is missing workspace focus labels`);
+  }
+});
+
+test("localized settings include temporary-connection legacy algorithm labels", () => {
+  const keys = [
+    "settings.terminal.connection.temporaryLegacyAlgorithms",
+    "settings.terminal.connection.temporaryLegacyAlgorithms.desc",
+  ];
+  const locales = [{ name: "en", messages: en }, ...LOCALIZED_SETTINGS_LOCALES];
+
+  for (const locale of locales) {
+    const missing = keys.filter((key) => !locale.messages[key]);
+    assert.deepEqual(missing, [], `${locale.name} is missing temporary legacy algorithm labels`);
+  }
+
+  assert.match(zhCN["settings.terminal.connection.temporaryLegacyAlgorithms"], /临时连接允许旧版算法/);
+  assert.match(zhTW["settings.terminal.connection.temporaryLegacyAlgorithms"], /臨時連線允許舊版演算法/);
+});
+
+test("localized settings include temporary-connection network device mode labels", () => {
+  const keys = [
+    "settings.terminal.connection.temporaryNetworkDeviceMode",
+    "settings.terminal.connection.temporaryNetworkDeviceMode.desc",
+  ];
+  const locales = [{ name: "en", messages: en }, ...LOCALIZED_SETTINGS_LOCALES];
+
+  for (const locale of locales) {
+    const missing = keys.filter((key) => !locale.messages[key]);
+    assert.deepEqual(missing, [], `${locale.name} is missing temporary network device mode labels`);
+  }
+
+  assert.match(zhCN["settings.terminal.connection.temporaryNetworkDeviceMode"], /临时连接使用网络设备模式/);
+  assert.match(zhTW["settings.terminal.connection.temporaryNetworkDeviceMode"], /臨時連線使用網路裝置模式/);
+  assert.match(zhTW["settings.terminal.connection.temporaryNetworkDeviceMode.desc"], /連線/);
+  assert.match(zhTW["settings.terminal.connection.temporaryNetworkDeviceMode.desc"], /設定|群組|裝置/);
+});
+
+test("localized settings include the global default proxy labels", () => {
+  const keys = [
+    "settings.terminal.connection.defaultProxy",
+    "settings.terminal.connection.defaultProxy.desc",
+    "settings.terminal.connection.defaultProxy.none",
+    "hostDetails.proxy.direct",
+    "hostDetails.proxy.directHint",
+  ];
+  const locales = [{ name: "en", messages: en }, ...LOCALIZED_SETTINGS_LOCALES];
+
+  for (const locale of locales) {
+    const missing = keys.filter((key) => !locale.messages[key]);
+    assert.deepEqual(missing, [], `${locale.name} is missing global default proxy labels`);
   }
 });
 

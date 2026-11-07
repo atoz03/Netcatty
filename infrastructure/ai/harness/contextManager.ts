@@ -1,5 +1,6 @@
 import type { ModelMessage } from 'ai';
 import type { ChatMessage, AIPermissionMode } from '../types';
+import { sliceHead } from '../textBoundaries';
 import {
   DEFAULT_CONTEXT_WINDOW_TOKENS,
   DEFAULT_PROTECT_RECENT_MESSAGES,
@@ -7,7 +8,10 @@ import {
   keepRecentContextMessages,
   prepareContextCompaction,
 } from '../contextCompaction';
-import { compressMessagesForRequestTooLargeRetry } from '../requestPayloadCompression';
+import {
+  compressMessagesForRequestTooLargeRetry,
+  type CompressMessagesForRequestTooLargeRetryOptions,
+} from '../requestPayloadCompression';
 import {
   computeCompactionThreshold,
   computeTotalInputTokens,
@@ -96,11 +100,14 @@ function emitCompactionStart(
   });
 }
 
-function applyTypedMessageCompression(messages: ModelMessage[]): {
+function applyTypedMessageCompression(
+  messages: ModelMessage[],
+  options?: CompressMessagesForRequestTooLargeRetryOptions,
+): {
   messages: ModelMessage[];
   didAdjust: boolean;
 } {
-  const compressed = compressMessagesForRequestTooLargeRetry(messages);
+  const compressed = compressMessagesForRequestTooLargeRetry(messages, options);
   return { messages: compressed.messages, didAdjust: compressed.didAdjust };
 }
 
@@ -200,6 +207,7 @@ export async function prepareTurnContext(
   });
   const stale = pruneStaleToolContext(integrity.messages, {
     underBudgetPressure,
+    chatSessionId: input.chatSessionId,
   });
   let working = stale.messages;
   let didAdjust = integrity.didAdjust || stale.didAdjust;
@@ -225,7 +233,9 @@ export async function prepareTurnContext(
     did413Fallback = typed.didAdjust;
     didAdjust = didAdjust || typed.didAdjust;
   } else {
-    const typed = applyTypedMessageCompression(working);
+    // Routine pre-turn pass: keep the user's attachment parts. Only the explicit
+    // 413 retry above may trade them for text placeholders.
+    const typed = applyTypedMessageCompression(working, { preserveAttachments: true });
     if (typed.didAdjust) {
       working = typed.messages;
       didTypedCompression = true;
@@ -322,7 +332,7 @@ export function extractLatestUserGoal(messages: ModelMessage[] | ChatMessage[]):
     const content = typeof message.content === 'string'
       ? message.content.trim()
       : '';
-    if (content && !content.startsWith('[Netcatty session context')) return content.slice(0, 500);
+    if (content && !content.startsWith('[Netcatty session context')) return sliceHead(content, 500);
   }
   return undefined;
 }
@@ -409,10 +419,13 @@ export async function prepareStepContext(
   });
   const stale = pruneStaleToolContext(integrity.messages, {
     underBudgetPressure,
+    chatSessionId: input.chatSessionId,
   });
   let working = stale.messages;
 
-  const typed = compressMessagesForRequestTooLargeRetry(working);
+  // Step-level typed compression runs before every model call, so it must keep
+  // multimodal parts: the user's image would otherwise never reach the model.
+  const typed = compressMessagesForRequestTooLargeRetry(working, { preserveAttachments: true });
   working = typed.messages;
 
   const budgetGuard = applyStepBudgetGuard(working, {

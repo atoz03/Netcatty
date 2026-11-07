@@ -1,4 +1,5 @@
 import { redactSecretsForModel } from './modelSecretRedaction';
+import { sliceHead } from '../textBoundaries';
 
 const MAX_DECISIONS = 15;
 const MAX_BLOCKERS = 10;
@@ -80,7 +81,7 @@ export class SessionStateStore {
   mergeFromUserGoal(chatSessionId: string, goal: string | undefined): void {
     if (!goal?.trim()) return;
     const state = { ...this.get(chatSessionId) };
-    state.userGoal = goal.trim().slice(0, 500);
+    state.userGoal = sliceHead(goal.trim(), 500);
     state.updatedAt = Date.now();
     this.bySession.set(chatSessionId, state);
   }
@@ -118,7 +119,7 @@ export class SessionStateStore {
   mergePlan(chatSessionId: string, items: Array<{ text: string; completed: boolean }>): void {
     const state = { ...this.get(chatSessionId) };
     state.planItems = items.slice(-30).map(item => ({
-      text: item.text.slice(0, 300),
+      text: sliceHead(item.text, 300),
       completed: item.completed,
     }));
     state.updatedAt = Date.now();
@@ -241,7 +242,7 @@ export class SessionStateStore {
     }
 
     if (isError) {
-      const preview = resultText.slice(0, 160).replace(/\s+/g, ' ').trim();
+      const preview = sliceHead(resultText, 160).replace(/\s+/g, ' ').trim();
       if (preview) {
         state.blockers = pushUnique(state.blockers, `${toolName}: ${preview}`, MAX_BLOCKERS);
       }
@@ -262,14 +263,14 @@ export class SessionStateStore {
     if (hosts.length) {
       const hostSummary = hosts
         .slice(-5)
-        .map(([id, host]) => `${id}${host.lastCommand ? ` (last: ${redactSecretsForModel(host.lastCommand)})` : ''}`)
+        .map(([id, host]) => `${id}${host.lastCommand ? ` (last: ${redactSecretsForModel(host.lastCommand, chatSessionId)})` : ''}`)
         .join(', ');
       lines.push(`Active hosts: ${hostSummary}`);
     }
     const jobs = Object.entries(state.activeJobs);
     if (jobs.length) {
       const jobSummary = jobs.slice(-5).map(([jobId, job]) => (
-        `${jobId} (status=${job.status}, offset=${job.nextOffset}${job.sessionId ? `, session=${job.sessionId}` : ''}${job.command ? `, command=${redactSecretsForModel(job.command)}` : ''})`
+        `${jobId} (status=${job.status}, offset=${job.nextOffset}${job.sessionId ? `, session=${job.sessionId}` : ''}${job.command ? `, command=${redactSecretsForModel(job.command, chatSessionId)}` : ''})`
       )).join('; ');
       lines.push(`Remembered terminal jobs (status is unverified after compaction): ${jobSummary}. Poll the existing job from its saved offset to verify current status; do not restart its command.`);
     }

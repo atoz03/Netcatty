@@ -509,6 +509,10 @@ function init(deps) {
 }
 
 function openTerminalOutputSession(sessionId, webContents) {
+  require("./rendererSessionLifetime.cjs").trackRendererSessionLifetime(
+    sessions, sessionId, webContents,
+    (event, payload) => require("./terminalBridge.cjs").closeSession(event, payload),
+  );
   terminalOutputChannel?.openSession?.(sessionId, webContents);
 }
 
@@ -519,7 +523,7 @@ function closeTerminalOutputSession(sessionId) {
 /**
  * Connect through a chain of jump hosts
  */
-async function connectThroughChain(event, options, jumpHosts, targetHost, targetPort, sessionId) {
+async function connectThroughChain(event, options, jumpHosts, targetHost, targetPort, sessionId, onHostKeyAccepted) {
   const targetConnectionTimeouts = resolveSshConnectionTimeouts(options);
   const sender = event.sender;
   const connections = options?._connectionsRef || [];
@@ -607,6 +611,7 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
         knownHosts: options.knownHosts,
         verifyHostKeys: jump.verifyHostKeys ?? options.verifyHostKeys,
         bootEpoch: options.bootEpoch,
+        onAccepted: onHostKeyAccepted,
       });
       attachSshDebugLogger(connOpts, sshDiagnosticLogger);
       logSshAlgorithms("Jump host", connOpts.algorithms, {
@@ -897,14 +902,16 @@ async function connectThroughChain(event, options, jumpHosts, targetHost, target
           hostId: jump.hostId,
           hostname: hopLabel,
           password: jump.password,
+          totp: jump.totp,
           logPrefix: `[Chain] Hop ${i + 1}/${totalHops}`,
           scope: keyboardInteractiveScope,
           allowSavePassword: options._monitorMode !== true,
           bootEpoch: options.bootEpoch,
           getAuthBanner: () => authBanner,
           shouldSkipAutoFill: () => shouldSkipKiPasswordAutoFill(hopAuthPhase),
-          onAutoFill: () => sendProgress(
-            i + 1, totalHops + 1, hopLabel, 'auth-attempt', 'using saved password',
+          onAutoFill: (kind) => sendProgress(
+            i + 1, totalHops + 1, hopLabel, 'auth-attempt',
+            kind === 'totp' ? 'using authenticator code' : 'using saved password',
           ),
           onPromptShown: () => sendProgress(
             i + 1, totalHops + 1, hopLabel, 'auth-attempt', 'waiting for user input...',
@@ -1621,7 +1628,9 @@ function registerHandlers(ipcMain, options = {}) {
       });
     });
   } else {
-    ipcMain.handle("netcatty:start", startSSHSessionWrapper);
+    ipcMain.handle("netcatty:start", options.manageSessionLogRestart === true
+      ? sessionLogStreamManager.withSessionLogRestart(startSSHSessionWrapper)
+      : startSSHSessionWrapper);
     ipcMain.handle("netcatty:ssh:exec", execCommand);
     ipcMain.handle("netcatty:ssh:pwd", getSessionPwd);
     ipcMain.handle("netcatty:ssh:remoteInfo", getSessionRemoteInfo);

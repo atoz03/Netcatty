@@ -10,9 +10,11 @@ import {
   formatTerminalTitleConnectionAddress,
   focusTerminalFromDisconnectedNotice,
   getLineTimestampToggleHostUpdate,
+  resolveLineTimestampGutterLayout,
   resolveNetworkDeviceTipRightInset,
   resolveTerminalRightInset,
   resolveTerminalTopOffsets,
+  subscribeTerminalAlternateScreenChanges,
   shouldBlockTerminalReconnectForTarget,
   shouldEnableStatusBarDisconnect,
   shouldEnableStatusBarReconnect,
@@ -182,6 +184,127 @@ test("line timestamp toolbar toggle is hidden when timestamps are unavailable", 
   assert.equal(shouldShowLineTimestampToolbarToggle(true, undefined), false);
 });
 
+test("line timestamp gutter reserves no space while the alternate screen is active", () => {
+  assert.deepEqual(resolveLineTimestampGutterLayout({
+    showLineTimestampGutter: true,
+    alternateScreenActive: true,
+    gutterWidth: 72,
+  }), { enabled: false, width: 0 });
+  assert.deepEqual(resolveLineTimestampGutterLayout({
+    showLineTimestampGutter: true,
+    alternateScreenActive: false,
+    gutterWidth: 72,
+  }), { enabled: true, width: 72 });
+  assert.deepEqual(resolveLineTimestampGutterLayout({
+    showLineTimestampGutter: false,
+    alternateScreenActive: false,
+    gutterWidth: 72,
+  }), { enabled: false, width: 0 });
+
+  const source = readFileSync(new URL("./TerminalView.tsx", import.meta.url), "utf8");
+  assert.match(source, /const activeLineTimestampGutterWidth = lineTimestampGutterLayout\.width/);
+  assert.match(source, /enabled=\{lineTimestampGutterLayout\.enabled\}/);
+  assert.doesNotMatch(source, /enabled=\{showLineTimestampGutter\}/);
+  assert.match(source, /aria-pressed=\{showLineTimestampGutter\}/);
+  assert.doesNotMatch(source, /aria-pressed=\{[^}]*alternateScreenActive/);
+});
+
+type AlternateScreenWatchTerm = {
+  buffer: { active: { type: string } };
+  onRender: (callback: () => void) => { dispose: () => void };
+};
+
+function createAlternateScreenWatchTerm(type: "normal" | "alternate") {
+  const renders: Array<() => void> = [];
+  let disposed = 0;
+  const term: AlternateScreenWatchTerm = {
+    buffer: { active: { type } },
+    onRender(callback) {
+      renders.push(callback);
+      return { dispose: () => { disposed += 1; } };
+    },
+  };
+  return {
+    term,
+    renders,
+    disposeCount: () => disposed,
+  };
+}
+
+test("alternate screen enter and leave drive the timestamp gutter", (t) => {
+  const watched = createAlternateScreenWatchTerm("normal");
+  const seen: boolean[] = [];
+  const stop = subscribeTerminalAlternateScreenChanges(
+    () => watched.term,
+    (active) => { seen.push(active); },
+  );
+  t.after(stop);
+
+  assert.deepEqual(seen, [false]);
+  watched.term.buffer.active.type = "alternate";
+  watched.renders[0]();
+  watched.renders[0]();
+  watched.term.buffer.active.type = "normal";
+  watched.renders[0]();
+  assert.deepEqual(seen, [false, true, false]);
+
+  stop();
+  assert.equal(watched.disposeCount(), 1);
+  watched.term.buffer.active.type = "alternate";
+  watched.renders[0]();
+  assert.deepEqual(seen, [false, true, false]);
+});
+
+test("alternate screen watch attaches after the terminal runtime exists", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const watched = createAlternateScreenWatchTerm("alternate");
+  let current: AlternateScreenWatchTerm | null = null;
+  const seen: boolean[] = [];
+  const stop = subscribeTerminalAlternateScreenChanges(
+    () => current,
+    (active) => { seen.push(active); },
+  );
+  t.after(() => {
+    stop();
+    t.mock.timers.reset();
+  });
+
+  assert.deepEqual(seen, [false]);
+  current = watched.term;
+  t.mock.timers.tick(50);
+  assert.deepEqual(seen, [false, true]);
+  assert.equal(watched.renders.length, 1);
+  t.mock.timers.tick(500);
+  assert.equal(watched.renders.length, 1);
+  assert.deepEqual(seen, [false, true]);
+});
+
+test("alternate screen watch follows a replacement terminal runtime", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const first = createAlternateScreenWatchTerm("alternate");
+  const second = createAlternateScreenWatchTerm("normal");
+  let current: AlternateScreenWatchTerm = first.term;
+  const seen: boolean[] = [];
+  const stop = subscribeTerminalAlternateScreenChanges(
+    () => current,
+    (active) => { seen.push(active); },
+  );
+  t.after(() => {
+    stop();
+    t.mock.timers.reset();
+  });
+
+  assert.deepEqual(seen, [true]);
+  current = second.term;
+  t.mock.timers.tick(250);
+  assert.deepEqual(seen, [true, false]);
+  assert.equal(first.disposeCount(), 1);
+  assert.equal(second.renders.length, 1);
+  second.term.buffer.active.type = "alternate";
+  second.renders[0]();
+  assert.deepEqual(seen, [true, false, true]);
+});
+
 test("selection AI overlay honors the visibility preference", () => {
   const overlayPosition = { left: 120, top: 80 };
   const addSelection = () => {};
@@ -220,7 +343,6 @@ test("disconnected terminal reconnects on plain Enter when input is not claimed 
       key: "Enter",
       status: "disconnected",
       hasRetryHandler: true,
-      isComposeBarOpen: false,
       needsAuth: false,
       needsHostKeyVerification: false,
       hasBlockingOverlay: false,
@@ -234,7 +356,6 @@ test("terminal enter reconnect ignores active controls and non-disconnected stat
     key: "Enter",
     status: "disconnected" as const,
     hasRetryHandler: true,
-    isComposeBarOpen: false,
     needsAuth: false,
     needsHostKeyVerification: false,
     hasBlockingOverlay: false,
@@ -243,14 +364,16 @@ test("terminal enter reconnect ignores active controls and non-disconnected stat
   assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, status: "connected" }), false);
   assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, key: "a" }), false);
   assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, hasRetryHandler: false }), false);
-  // Open search must not globally suppress Enter reconnect / the hint (#2546).
+  // Open search and an open compose bar must not globally suppress Enter
+  // reconnect / the hint (#2546 / #3767).
   assert.equal(shouldReconnectTerminalOnEnterKey({ ...base }), true);
-  assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, isComposeBarOpen: true }), false);
   assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, needsAuth: true }), false);
   assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, needsHostKeyVerification: true }), false);
   assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, hasBlockingOverlay: true }), false);
   assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, isReconnectActive: true }), false);
   assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, altKey: true }), false);
+  assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, shiftKey: true }), false);
+  assert.equal(shouldReconnectTerminalOnEnterKey({ ...base, isComposing: true }), false);
 });
 
 test("terminal enter reconnect ignores interactive controls outside xterm only", () => {
@@ -652,6 +775,16 @@ test("terminal boot is cancelable and closes eagerly on cleanup", () => {
   );
   // Owner panes close the pending backend; attach popups only dispose xterm.
   assert.match(neverConnectedBranch, /if \(!attachExistingSession\)/);
+  const emptySessionBranch = readFileSync(new URL("../Terminal.tsx", import.meta.url), "utf8");
+  const emptyStart = emptySessionBranch.indexOf("if (!closingSessionId)");
+  const emptyEnd = emptySessionBranch.indexOf("Observe/attach popups must not kill", emptyStart);
+  const emptyBranch = emptySessionBranch.slice(emptyStart, emptyEnd);
+  const attachGuardAt = emptyBranch.indexOf("if (attachExistingSession)");
+  const emptyCloseAt = emptyBranch.indexOf("terminalBackend.closeSession(");
+  assert.ok(
+    attachGuardAt !== -1 && emptyCloseAt !== -1 && attachGuardAt < emptyCloseAt,
+    "a second attach cleanup after sessionRef is cleared must not closeSession",
+  );
   assert.match(effectsSource, /let ownedRuntime:/);
   assert.match(
     cleanup,
@@ -730,4 +863,12 @@ test("terminal theme updates force xterm renderer to repaint immediately", () =>
   assert.match(source, /applyTerminalThemeSync\(term, effectiveTheme\)/);
   assert.match(schedulerSource, /term\.options\.theme = \{/);
   assert.match(schedulerSource, /forceSyncRenderAfterResize\(term\)/);
+});
+
+test("SFTP context action reuses the pane toolbar handler and its availability", () => {
+  const source = readFileSync(new URL("./TerminalView.tsx", import.meta.url), "utf8");
+  const terminalSource = readFileSync(new URL("../Terminal.tsx", import.meta.url), "utf8");
+  assert.match(source, /onOpenSftp=\{status === "connected" && !isSerialConnection && !host\?\.id\?\.startsWith\("serial-"\) && !isPluginHostProtocol\(host\?\.protocol\) \? ctx\.handleOpenSFTP : undefined\}/);
+  assert.match(terminalSource, /onOpenSFTP=\{handleOpenSFTP\}/);
+  assert.match(terminalSource, /<TerminalView ctx=\{\{[^\n]*handleOpenSFTP,/);
 });

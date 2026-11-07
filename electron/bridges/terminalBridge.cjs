@@ -21,6 +21,7 @@ const trackedFlowPauseSenders = new WeakSet();
 
 const pty = require("node-pty");
 const { SerialPort } = require("serialport");
+const { createSerialTransport } = require("./serialNamedPipe.cjs");
 const {
   configureTerminalSessionDataEmitter,
   emitTerminalSessionData,
@@ -62,7 +63,7 @@ const { discoverShells } = require("./shellDiscovery.cjs");
 const { isWindowsAppExecutionAliasPath } = require("../../lib/localShell.cjs");
 const moshHandshake = require("./moshHandshake.cjs");
 const tempDirBridge = require("./tempDirBridge.cjs");
-const { createTelnetAutoLogin } = require("./telnetAutoLogin.cjs");
+const { createTelnetAutoLogin, isAutoLoginWakeInput } = require("./telnetAutoLogin.cjs");
 const telnetProtocol = require("./telnetProtocol.cjs");
 const { createPtyOutputBuffer } = require("./ptyOutputBuffer.cjs");
 const { enableTcpNoDelay } = require("./tcpNoDelay.cjs");
@@ -137,6 +138,9 @@ function init(deps) {
 }
 
 function openTerminalOutputSession(sessionId, webContents) {
+  require("./rendererSessionLifetime.cjs").trackRendererSessionLifetime(
+    sessions, sessionId, webContents, closeSession,
+  );
   const generation = webContents?.claimSessionGeneration?.(sessionId);
   const session = sessions?.get?.(sessionId);
   if (session && Number.isSafeInteger(generation)) {
@@ -253,6 +257,9 @@ function handleTerminalSessionSnapshotResponse(event, payload) {
   pending.resolve({
     success: true,
     snapshot: typeof payload?.snapshot === "string" ? payload.snapshot : "",
+    perCharacterInput: typeof payload?.perCharacterInput === "boolean"
+      ? payload.perCharacterInput
+      : undefined,
     kittyKeyboardModeState: normalizeKittyKeyboardModeState(payload?.kittyKeyboardModeState),
     kittyKeyboardProtocolEnabled: typeof payload?.kittyKeyboardProtocolEnabled === "boolean"
       ? payload.kittyKeyboardProtocolEnabled
@@ -312,6 +319,9 @@ function applyTerminalSessionSnapshot(event, payload, terminalWorkerManager = nu
   const contextScrollbackSnapshot = hasContextScrollbackSnapshot ? payload.contextScrollbackSnapshot : "";
   const hasAlternateScreen = typeof payload?.alternateScreen === "boolean";
   const alternateScreen = payload?.alternateScreen === true;
+  const perCharacterInput = typeof payload?.perCharacterInput === "boolean"
+    ? payload.perCharacterInput
+    : undefined;
   const kittyKeyboardModeState = normalizeKittyKeyboardModeState(payload?.kittyKeyboardModeState);
   const kittyKeyboardProtocolEnabled = typeof payload?.kittyKeyboardProtocolEnabled === "boolean"
     ? payload.kittyKeyboardProtocolEnabled
@@ -364,6 +374,7 @@ function applyTerminalSessionSnapshot(event, payload, terminalWorkerManager = nu
           contextViewportSnapshot,
           contextScrollbackSnapshot,
           alternateScreen,
+          perCharacterInput,
           kittyKeyboardModeState,
           kittyKeyboardProtocolEnabled,
           passwordPromptActive,
@@ -540,6 +551,9 @@ async function restoreAttachedSessionOutputOnce(
           } else {
             openTerminalOutputSession(sessionId, home);
             session.webContentsId = home.id;
+            require("./rendererSessionLifetime.cjs").trackRendererSessionLifetime(
+              sessions, sessionId, home, closeSession, true,
+            );
             attachHomeWebContentsIds.delete(sessionId);
             result = { success: true, restored: true, webContentsId: home.id };
           }
@@ -621,7 +635,7 @@ async function restoreTerminalSessionOutput(event, payload, terminalWorkerManage
       if (!result?.success) {
         return { success: false, error: result?.error || "Failed to restore session output" };
       }
-      terminalWorkerManager.clearAttachHome?.(sessionId);
+      terminalWorkerManager.clearAttachHome?.(sessionId, target.id);
       return { success: true, restored: true, webContentsId: target.id };
     } catch (err) {
       return { success: false, error: err?.message || String(err) };
@@ -636,6 +650,9 @@ async function restoreTerminalSessionOutput(event, payload, terminalWorkerManage
   try {
     openTerminalOutputSession(sessionId, target);
     session.webContentsId = target.id;
+    require("./rendererSessionLifetime.cjs").trackRendererSessionLifetime(
+      sessions, sessionId, target, closeSession, true,
+    );
     attachHomeWebContentsIds.delete(sessionId);
     return { success: true, restored: true, webContentsId: target.id };
   } catch (err) {
@@ -1307,7 +1324,7 @@ async function listSerialPorts() {
 async function startSerialSession(event, options) {
   const sessionId = options.sessionId || randomUUID();
 
-  const portPath = options.path;
+  const portPath = options.path?.trim();
   const baudRate = options.baudRate || 115200;
   const dataBits = options.dataBits || 8;
   const stopBits = options.stopBits || 1;
@@ -1341,7 +1358,7 @@ async function startSerialSession(event, options) {
       resolve(value);
     };
     try {
-      const serialPort = new SerialPort({
+      const serialPort = createSerialTransport({
         path: portPath,
         baudRate: baudRate,
         dataBits: dataBits,
@@ -1351,7 +1368,7 @@ async function startSerialSession(event, options) {
         xon: flowControl === 'xon/xoff',
         xoff: flowControl === 'xon/xoff',
         autoOpen: false,
-      });
+      }, SerialPort);
 
       const abortPendingOpen = () => {
         try { serialPort.close(); } catch { /* ignore */ }
@@ -1706,8 +1723,9 @@ function writeToSessionNow(payload, data, logRewrite = payload.logRewrite) {
       (session.type === 'telnet-native' || session.type === 'serial')
       && !payload.automated
       && !isTerminalReportSequence(data)
+      && !payload.autoLoginInputHandled
     ) {
-      session.autoLogin?.handleUserInput();
+      session.autoLogin?.handleUserInput(data);
     }
 
     // Encode keystrokes with the SAME charset the output path decodes with so
@@ -1719,9 +1737,14 @@ function writeToSessionNow(payload, data, logRewrite = payload.logRewrite) {
     // the transport's native string serialization keeps handling that case.
     sessionLogStreamManager.registerSudoAutofillInput(payload.sessionId, data);
     sessionLogStreamManager.registerProgrammaticCommandLogRewrite(payload.sessionId, logRewrite);
-    const inputData = session.type === 'telnet-native'
-      ? telnetProtocol.normalizeNvtNewlines(data)
+    // xterm onBinary strings contain wire bytes, including values above 127.
+    // Convert before text charset encoding or Telnet newline normalization.
+    const wireInput = payload.binary === true && typeof data === 'string'
+      ? Buffer.from(data, 'latin1')
       : data;
+    const inputData = session.type === 'telnet-native'
+      ? telnetProtocol.normalizeNvtNewlines(wireInput)
+      : wireInput;
     const outgoing = encodeTerminalInput(inputData, session.encoding);
 
     if (session.stream) {
@@ -1798,6 +1821,8 @@ function writeToSessionWithInterception(
   paste = null,
   index = 0,
 ) {
+  // Stays the original payload until ingress classification marks this write.
+  let sessionWritePayload = payload;
   const writeWithReceipt = (nextData) => {
     if (paste && !paste.active) return;
     const current = sessions.get(payload.sessionId);
@@ -1810,7 +1835,7 @@ function writeToSessionWithInterception(
       paste.finish(index, true);
       return;
     }
-    const written = writeToSessionNow(payload, nextData, logRewrite);
+    const written = writeToSessionNow(sessionWritePayload, nextData, logRewrite);
     if (paste) paste.finish(written ? index : undefined);
   };
   const bypass = payload?.sensitive === true || isTerminalReportSequence(data);
@@ -1823,26 +1848,43 @@ function writeToSessionWithInterception(
     writeWithReceipt(data);
     return;
   }
-  // Cancel the auto-login detector at input ingress, before the asynchronous
+  // Classify auto-login at input ingress, before the asynchronous
   // interception pipeline: a slow interceptor would otherwise leave the
   // detector armed while the user's keystrokes are queued, letting a login
   // prompt that arrives during that wait trigger a saved-credential
   // transmission after the user has already taken over. Same guard
-  // conditions as writeToSessionNow; handleUserInput is idempotent, so the
-  // later call there stays a no-op.
+  // conditions as writeToSessionNow. Wake-only CR/LF is not idempotent once
+  // credentials start, so mark this write and do not classify those bytes
+  // again when they reach writeToSessionNow. That preserved classification
+  // describes the queued bytes only while they stay wake-only; writeIfCurrent
+  // classifies an interceptor rewrite that is no longer wake-only.
   if (
     expectedSession
     && (expectedSession.type === 'telnet-native' || expectedSession.type === 'serial')
     && !payload.automated
     && !isTerminalReportSequence(data)
   ) {
-    expectedSession.autoLogin?.handleUserInput();
+    expectedSession.autoLogin?.handleUserInput(data);
+    sessionWritePayload = { ...payload, autoLoginInputHandled: true };
   }
   const writeIfCurrent = (nextData) => {
     const current = sessions.get(payload.sessionId);
     if (!current || current !== expectedSession || current.closed) {
       paste?.finish();
       return;
+    }
+    // An Enter-to-command macro can turn the wake CR/LF classified above
+    // into ordinary text. Classify that transformed value before it is
+    // written. autoLoginInputHandled stays set so writeToSessionNow does not
+    // classify the same write again. A rewrite that is still only CR/LF keeps
+    // the ingress classification: those bytes are not idempotent once
+    // credentials have started.
+    if (
+      sessionWritePayload.autoLoginInputHandled
+      && !isAutoLoginWakeInput(nextData)
+      && !isTerminalReportSequence(nextData)
+    ) {
+      current.autoLogin?.handleUserInput(nextData);
     }
     writeWithReceipt(nextData);
   };
@@ -2633,11 +2675,14 @@ function registerHandlers(ipcMain, options = {}) {
     });
     return;
   }
-  ipcMain.handle("netcatty:local:start", startLocalSession);
-  ipcMain.handle("netcatty:telnet:start", startTelnetSession);
-  ipcMain.handle("netcatty:mosh:start", startMoshSession);
-  ipcMain.handle("netcatty:et:start", startEtSession);
-  ipcMain.handle("netcatty:serial:start", startSerialSession);
+  const wrapSessionStart = options.manageSessionLogRestart === true
+    ? sessionLogStreamManager.withSessionLogRestart
+    : (handler) => handler;
+  ipcMain.handle("netcatty:local:start", wrapSessionStart(startLocalSession));
+  ipcMain.handle("netcatty:telnet:start", wrapSessionStart(startTelnetSession));
+  ipcMain.handle("netcatty:mosh:start", wrapSessionStart(startMoshSession));
+  ipcMain.handle("netcatty:et:start", wrapSessionStart(startEtSession));
+  ipcMain.handle("netcatty:serial:start", wrapSessionStart(startSerialSession));
   ipcMain.handle("netcatty:serial:list", listSerialPorts);
   ipcMain.handle("netcatty:serial:ymodem-send", sendSerialYmodem);
   ipcMain.handle("netcatty:serial:ymodem-receive", receiveSerialYmodem);

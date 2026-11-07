@@ -50,8 +50,6 @@
 # traverse ignored directories, so both steps are required.
 !.github/
 !.github/**
-!.vscode/
-!.vscode/**
 !application/
 !application/**
 !build/
@@ -122,8 +120,7 @@ coverage
 /public/monaco
 
 # Editor directories and files
-.vscode/*
-!.vscode/extensions.json
+.vscode/
 .idea
 *.suo
 *.ntvs*
@@ -173,3 +170,6 @@ build_with_vs2022.bat
 /resources/et/*/et.exe
 /resources/et/*/et-*-dlls/
 /resources/et/*/*.dll
+
+# Local plugin example staging and bundles
+/examples/plugins/*/.package/

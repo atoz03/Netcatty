@@ -1,4 +1,13 @@
 export const esMonitorMessages = {
+  "monitor.systemDisks": "Particiones del sistema ({count})",
+  "monitor.systemDisksAlert": "El uso de una partición del sistema supera el 80 %; se ha expandido automáticamente.",
+  "monitor.diskIoTotal": "Total",
+  "monitor.partitionIoHint": "E/S del dispositivo de bloques de este montaje. Los montajes del mismo dispositivo muestran las mismas tasas. No disponible hasta tener dos muestras válidas o sin un dispositivo identificable; no compatible con macOS.",
+  "monitor.diskIo": "E/S de disco",
+  "monitor.diskRead": "Lectura",
+  "monitor.diskWrite": "Escritura",
+  "monitor.diskIoHint": "E/S agregada de dispositivos de bloques físicos de Linux, sin contar particiones ni capas virtuales. No disponible hasta tener dos muestras válidas; no compatible con macOS.",
+
   "monitor.actions": "Acciones del panel",
   "monitor.unavailable": "La monitorización no está disponible. Iníciala de nuevo cuando se restablezca la conexión.",
   "monitor.username": "Usuario",

@@ -90,9 +90,13 @@ test("AppSideEffects registers openManagedTerminalWithCurrentShell on the handle
     /const openManagedTerminalWithCurrentShell = useCallback\(/,
     "AppSideEffects must build the handler",
   );
-  const registerBlock = source.slice(source.indexOf("registerAppHandlers({"));
+  // Handlers are registered through stable per-key wrappers:
+  // registerAppHandlers(stabilizeAppHandlers(cache, { ... })).
+  const registerStart = source.indexOf("registerAppHandlers(stabilizeAppHandlers(");
+  assert.notEqual(registerStart, -1, "AppSideEffects must register its handler bag");
+  const registerBlock = source.slice(registerStart);
   assert.match(
-    registerBlock.slice(0, registerBlock.indexOf("});")),
+    registerBlock.slice(0, registerBlock.indexOf("}));")),
     /^\s*openManagedTerminalWithCurrentShell,\s*$/m,
     "the handler must be registered, not just defined",
   );

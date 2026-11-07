@@ -56,6 +56,166 @@ test(`failed ${direction} connection replaces Waiting with the actual error (#36
 });
 }
 
+test("upload open uses known hosts trusted after the transfer callback was created (#3310)", async () => {
+  const seen: string[] = [];
+  let fingerprint = "";
+  let ops: ReturnType<typeof useSftpTransfers> | undefined;
+  let renderer: ReactTestRenderer | undefined;
+  let firstStart: ReturnType<typeof useSftpTransfers>["startTransfer"] | undefined;
+  const restore = installGlobals({});
+  function Probe() {
+    const captured = fingerprint;
+    const acquireTransferSession = React.useCallback(async () => {
+      seen.push(captured);
+      throw new Error(`known-hosts:${captured || "empty"}`);
+    }, [captured]);
+    ops = useSftpTransfers({
+      ownerId: "known-hosts-after-trust-3310",
+      getActivePane: (side) => makePane(side === "left" ? "right" : "left"),
+      getPaneByConnectionId: () => null,
+      getTabByConnectionId: () => null,
+      updateTab: () => undefined,
+      refresh: async () => undefined,
+      clearCacheForConnection: () => undefined,
+      handleSessionError: () => undefined,
+      sftpSessionsRef: { current: new Map() },
+      connectionCacheKeyMapRef: { current: new Map() },
+      listLocalFiles: async () => [],
+      listRemoteFiles: async () => [],
+      acquireTransferSession,
+    });
+    if (!firstStart) firstStart = ops.startTransfer;
+    return null;
+  }
+  try {
+    await act(async () => { renderer = create(React.createElement(Probe)); });
+    fingerprint = "trusted-this-session";
+    await act(async () => { renderer?.update(React.createElement(Probe)); });
+    await act(async () => {
+      await firstStart!(
+        [{ name: "upload.txt", isDirectory: false }],
+        "left",
+        "right",
+      );
+    });
+    assert.deepEqual(seen, ["trusted-this-session"]);
+    const task = sftpTransferCenterStore.getOwnerTasks("known-hosts-after-trust-3310")[0];
+    assert.equal(task?.error, "known-hosts:trusted-this-session");
+  } finally {
+    await act(async () => { renderer?.unmount(); });
+    restore();
+  }
+});
+
+test("channel death fails the upload without a second session open (#3310)", async () => {
+  let acquires = 0;
+  let streams = 0;
+  const restore = installGlobals({
+    statLocal: async () => ({ size: 48, lastModified: 1 }),
+    statSftp: async () => null,
+    startStreamTransfer: async () => {
+      streams += 1;
+      return { error: "SFTP channel closed" };
+    },
+    pauseTransfer: async () => ({ success: false, reason: "Transfer is no longer active" }),
+    resumeTransfer: async () => ({ success: false, reason: "Transfer is no longer active" }),
+  });
+  let ops: ReturnType<typeof useSftpTransfers> | undefined;
+  let renderer: ReactTestRenderer | undefined;
+  const ownerId = "channel-death-no-reconnect-3310";
+  function Probe() {
+    ops = useSftpTransfers({
+      ownerId,
+      getActivePane: (side) => makePane(side === "left" ? "right" : "left"),
+      getPaneByConnectionId: () => null,
+      getTabByConnectionId: () => null,
+      updateTab: () => undefined,
+      refresh: async () => undefined,
+      clearCacheForConnection: () => undefined,
+      handleSessionError: () => undefined,
+      sftpSessionsRef: { current: new Map() },
+      connectionCacheKeyMapRef: { current: new Map() },
+      listLocalFiles: async () => [],
+      listRemoteFiles: async () => [],
+      acquireTransferSession: async () => {
+        acquires += 1;
+        return {
+          sftpId: "sftp-borrowed",
+          release: () => undefined,
+          discard: () => undefined,
+        };
+      },
+    });
+    return null;
+  }
+  try {
+    await act(async () => { renderer = create(React.createElement(Probe)); });
+    await act(async () => {
+      await ops!.startTransfer(
+        [{ name: "upload.txt", isDirectory: false }],
+        "left",
+        "right",
+      );
+    });
+    assert.equal(streams, 1, "channel death must not start another transfer dial");
+    assert.equal(acquires, 2, "work lease plus the file lease, and no retry open");
+    const task = sftpTransferCenterStore.getOwnerTasks(ownerId)[0];
+    assert.equal(task?.status, "failed");
+    assert.equal(task?.error, "SFTP channel closed");
+    assert.equal(
+      sftpTransferCenterStore.getOwnerTasks(ownerId)
+        .filter((row) => ["pending", "queued", "transferring", "pausing"].includes(row.status))
+        .length,
+      0,
+    );
+  } finally {
+    await act(async () => { renderer?.unmount(); });
+    restore();
+  }
+});
+
+test("transfer failure strips the Electron IPC wrapper (#3310)", async () => {
+  const restore = installGlobals({});
+  let ops: ReturnType<typeof useSftpTransfers> | undefined;
+  let renderer: ReactTestRenderer | undefined;
+  const ownerId = "ipc-prefix-3310";
+  function Probe() {
+    ops = useSftpTransfers({
+      ownerId,
+      getActivePane: (side) => makePane(side === "left" ? "right" : "left"),
+      getPaneByConnectionId: () => null,
+      getTabByConnectionId: () => null,
+      updateTab: () => undefined,
+      refresh: async () => undefined,
+      clearCacheForConnection: () => undefined,
+      handleSessionError: () => undefined,
+      sftpSessionsRef: { current: new Map() },
+      connectionCacheKeyMapRef: { current: new Map() },
+      listLocalFiles: async () => [],
+      listRemoteFiles: async () => [],
+      acquireTransferSession: async () => {
+        throw new Error("Error invoking remote method 'netcatty:sftp:open': Error: Host key verification required for 127.0.0.1");
+      },
+    });
+    return null;
+  }
+  try {
+    await act(async () => { renderer = create(React.createElement(Probe)); });
+    await act(async () => {
+      await ops!.startTransfer(
+        [{ name: "upload.txt", isDirectory: false }],
+        "left",
+        "right",
+      );
+    });
+    const task = sftpTransferCenterStore.getOwnerTasks(ownerId)[0];
+    assert.equal(task?.error, "Host key verification required for 127.0.0.1");
+  } finally {
+    await act(async () => { renderer?.unmount(); });
+    restore();
+  }
+});
+
 type StartOptions = {
   transferId: string;
   sourcePath: string;
@@ -280,6 +440,9 @@ test("stat-less remote source keeps the listing size in the overwrite dialog and
         "left",
         "right",
       );
+      // Lifecycle paints coalesce to one frame. The plan lives on the ref
+      // immediately; React state catches up on the queued animation frame.
+      await new Promise((resolve) => setTimeout(resolve, 0));
     });
 
     assert.equal(started.length, 0, "an unresolved conflict must not start the transfer");
@@ -710,5 +873,129 @@ test("owned cancelled directory settles recoverable children without dropping co
     await act(async () => { renderer?.unmount(); });
     restore();
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+for (const liveSize of [37, 3, 0]) {
+  test(`same-pane local copy discovers ${liveSize} bytes after the listed file changes`, async () => {
+    const pane = makePane("right");
+    pane.files = [{ ...makePane("left").files[0], name: "edited.txt", size: 15 }];
+    const started: StartOptions[] = [];
+    const restore = installGlobals({
+      statLocal: async (path: string) => path.endsWith("edited.txt")
+        ? { type: "file", size: liveSize, lastModified: 1758000002000 }
+        : null,
+      startStreamTransfer: async (options: StartOptions) => { started.push(options); return {}; },
+      pauseTransfer: async () => ({ success: false }),
+      resumeTransfer: async () => ({ success: false }),
+    });
+    let ops: ReturnType<typeof useSftpTransfers> | undefined;
+    let renderer: ReactTestRenderer | undefined;
+    function Probe() {
+      ops = useSftpTransfers({
+        ownerId: `local-edited-${liveSize}`,
+        getActivePane: () => pane,
+        getPaneByConnectionId: () => pane,
+        getTabByConnectionId: () => null,
+        updateTab: () => undefined,
+        refresh: async () => undefined,
+        clearCacheForConnection: () => undefined,
+        handleSessionError: () => undefined,
+        sftpSessionsRef: { current: new Map() },
+        connectionCacheKeyMapRef: { current: new Map() },
+        listLocalFiles: async () => [],
+        listRemoteFiles: async () => [],
+      });
+      return null;
+    }
+    try {
+      await act(async () => { renderer = create(React.createElement(Probe)); });
+      await act(async () => {
+        await ops!.startTransfer([{ name: "edited.txt", isDirectory: false }], "right", "right");
+      });
+      assert.equal(ops!.conflicts.length, 1);
+      assert.equal(ops!.conflicts[0].newSize, liveSize, "conflict must show the saved file's current size");
+      assert.equal(ops!.conflicts[0].newModified, 1758000002000);
+      await act(async () => {
+        await ops!.resolveConflict(ops!.conflicts[0].transferId, "duplicate", false);
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      });
+      assert.equal(started.length, 1);
+      assert.equal(started[0].totalBytes, liveSize || undefined, "copy must not retain the cached 15-byte size");
+    } finally {
+      await act(async () => { renderer?.unmount(); });
+      restore();
+    }
+  });
+}
+
+test("no-conflict local copy awaits discovery so a late stat cannot overwrite the settled total", async () => {
+  const pane = makePane("right");
+  pane.files = [{ ...makePane("left").files[0], name: "late.txt", size: 15 }];
+  const started: StartOptions[] = [];
+  const restore = installGlobals({
+    // Target conflict stat: missing path means the copy has no conflict.
+    lstatLocal: async () => null,
+    statLocal: async (path: string) => {
+      if (!path.endsWith("late.txt")) return null;
+      // Let the stream finish before the stat resolves — fired-and-forgotten
+      // discovery used to patch the terminal task with this stale total.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return { type: "file", size: 9_999, lastModified: 1758000002000 };
+    },
+    startStreamTransfer: async (options: StartOptions) => {
+      started.push(options);
+      sftpTransferCenterStore.ingestBackgroundEvent({
+        type: "completed",
+        transferId: options.transferId,
+        transferred: 15,
+        totalBytes: 15,
+        lifecycleEpoch: 0,
+      });
+      return {};
+    },
+    pauseTransfer: async () => ({ success: false }),
+    resumeTransfer: async () => ({ success: false }),
+  });
+
+  let ops: ReturnType<typeof useSftpTransfers> | undefined;
+  let renderer: ReactTestRenderer | undefined;
+  function Probe() {
+    ops = useSftpTransfers({
+      ownerId: "local-late-stat",
+      getActivePane: () => pane,
+      getPaneByConnectionId: () => pane,
+      getTabByConnectionId: () => null,
+      updateTab: () => undefined,
+      refresh: async () => undefined,
+      clearCacheForConnection: () => undefined,
+      handleSessionError: () => undefined,
+      sftpSessionsRef: { current: new Map() },
+      connectionCacheKeyMapRef: { current: new Map() },
+      listLocalFiles: async () => [],
+      listRemoteFiles: async () => [],
+    });
+    return null;
+  }
+  try {
+    await act(async () => { renderer = create(React.createElement(Probe)); });
+    await act(async () => {
+      await ops!.startTransfer([{ name: "late.txt", isDirectory: false }], "right", "right");
+    });
+    // Give the no longer pending deferred stat time to land if it leaked.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 600)); });
+    const row = sftpTransferCenterStore.getSnapshot().tasks.find(
+      (candidate) => candidate.originalFileName === "late.txt",
+    );
+    assert.ok(row);
+    assert.equal(row.status, "completed");
+    assert.equal(
+      row.transferredBytes,
+      row.totalBytes,
+      "a deferred stat must not desync the completed row's total from its transferred bytes",
+    );
+  } finally {
+    await act(async () => { renderer?.unmount(); });
+    restore();
   }
 });

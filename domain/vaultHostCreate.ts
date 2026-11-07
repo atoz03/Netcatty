@@ -330,6 +330,7 @@ export function buildVaultHostFromDraft(
       os,
       osOverride: parsedOs ?? 'auto',
       protocol,
+      sshInputCompatibility: false,
       createdAt: now,
       ...(keyPath
         ? {

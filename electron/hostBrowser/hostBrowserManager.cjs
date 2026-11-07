@@ -280,6 +280,17 @@ function createHostBrowserManager({ electron, app, portForwardingBridge }) {
     record.tabs.set(tab.id, tab);
     const contents = view.webContents;
     contents.setWebRTCIPHandlingPolicy("disable_non_proxied_udp");
+    // Device admin pages commonly use self-signed or private-CA certificates.
+    // Accept them only in host-browser page tabs, never in the app/chrome UI.
+    contents.on("certificate-error", (event, _url, error, _certificate, callback) => {
+      event.preventDefault();
+      const navigation = record.navigations.get(contents.id);
+      if (navigation) {
+        navigation.acceptedCertificateErrors ||= new Set();
+        navigation.acceptedCertificateErrors.add(error.replace(/^net::/, ""));
+      }
+      callback(true);
+    });
     contents.on("before-input-event", (event, input) => {
       const modifier = process.platform === "darwin" ? input.meta : input.control;
       if (input.type !== "keyDown" || !modifier) return;
@@ -635,13 +646,14 @@ function createHostBrowserManager({ electron, app, portForwardingBridge }) {
       let lastProgressAt = 0;
       item.on("updated", (_updateEvent, status) => {
         const now = Date.now();
-        if (status === "progressing" && now - lastProgressAt < 200) return;
+        const paused = item.isPaused?.() === true;
+        if (status === "progressing" && !paused && now - lastProgressAt < 200) return;
         lastProgressAt = now;
         const previous = downloadStore.get(hostId, id);
         if (!previous) return;
         const savePath = item.getSavePath() || previous.savePath;
         downloadStore.upsert({ ...previous, filename: savePath ? path.basename(savePath) : filename,
-          savePath, status, received: item.getReceivedBytes(), total: item.getTotalBytes() });
+          savePath, status, received: item.getReceivedBytes(), total: item.getTotalBytes() }, { deferProgress: !paused });
         notifyDownloads(record);
       });
       item.once("done", (_doneEvent, status) => {
@@ -909,9 +921,11 @@ function createHostBrowserManager({ electron, app, portForwardingBridge }) {
           if (record.visible && record.activeTabId === tab.id && !record.overlayOpen) contents.focus();
           try { await contents.loadURL(url); }
           catch (error) {
+            // Only suppress TLS errors this navigation explicitly accepted.
+            const acceptedCertificateError = navigation.acceptedCertificateErrors?.has(error.code);
             // Chromium rejects loadURL when a navigation becomes a download.
             // Response headers identify this request before will-download fires.
-            if (!navigation.downloading || !["ERR_FAILED", "ERR_ABORTED"].includes(error.code)) throw error;
+            if (!acceptedCertificateError && (!navigation.downloading || !["ERR_FAILED", "ERR_ABORTED"].includes(error.code))) throw error;
           } finally {
             if (record.navigations.get(contentsId) === navigation) record.navigations.delete(contentsId);
           }
@@ -936,6 +950,7 @@ function createHostBrowserManager({ electron, app, portForwardingBridge }) {
   return { focus, open, updatePanelLayout, closePanel, openPanelUrl, getPanelState, runCommand, closeAll: () => {
     unsubscribeTunnelStatus();
     for (const record of [...windows.values()]) { closeRecord(record); if (!record.embedded && !record.win.isDestroyed()) record.win.destroy(); }
+    downloadStore.flush();
   } };
 }
 

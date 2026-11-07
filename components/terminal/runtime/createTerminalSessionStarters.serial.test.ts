@@ -348,6 +348,62 @@ test("startSerial does not arm the fallback when auto-login is cancelled before 
   assert.deepEqual(writtenCommands, []);
 });
 
+test("restored serial attach ignores a startup command hydrated while the port open is pending", async () => {
+  const writtenCommands: string[] = [];
+  let autoLoginComplete: ((evt: { sessionId: string }) => void) | null = null;
+  let releaseOpen: (() => void) | undefined;
+  const openPending = new Promise<void>((resolve) => {
+    releaseOpen = resolve;
+  });
+  const bootHost = {
+    id: "serial-1",
+    hostname: "/dev/ttyUSB0",
+    protocol: "serial" as const,
+    username: "admin",
+    password: "secret",
+  };
+  const hostRef = { current: bootHost };
+
+  const backend = buildBackend({
+    startSerialSession: async () => {
+      await openPending;
+      return "serial-session";
+    },
+    onTelnetAutoLoginComplete: (
+      _sessionId: string,
+      cb: (evt: { sessionId: string }) => void,
+    ) => {
+      autoLoginComplete = cb;
+      return noop;
+    },
+    onTelnetAutoLoginCancelled: () => noop,
+    writeToSession: (_sessionId: string, data: string) => {
+      writtenCommands.push(data);
+    },
+  });
+
+  const ctx = buildCtx(backend, {
+    host: bootHost,
+    hostRef,
+    terminalSettings: { startupCommandDelayMs: 0 },
+  });
+
+  const started = createTerminalSessionStarters(ctx as never).startSerial(term as never);
+  // Vault hydration can replace the fallback host after preflight has already
+  // decided there is no command to hold for auto-login.
+  hostRef.current = { ...bootHost, startupCommand: "show version" };
+  releaseOpen?.();
+  await started;
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  autoLoginComplete?.({ sessionId: "session-1" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(autoLoginComplete, null);
+  assert.equal(ctx.hasRunStartupCommandRef.current, false);
+  assert.deepEqual(writtenCommands, []);
+});
+
 for (const runMode of ['paste', 'lineDelay', 'noAutoRun']) {
   test(`serial reconnect discards the previous delayed startup command (${runMode})`, async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
@@ -417,3 +473,19 @@ for (const sleepBeforeCompletion of [true, false]) {
     assert.deepEqual(writes, ['show version\r']);
   });
 }
+
+test("named pipe sessions preserve the endpoint and omit hardware baud information", async () => {
+  const pipePath = String.raw`\\.\pipe\vm-console`;
+  const output: string[] = [];
+  let capturedPath: unknown;
+  const backend = buildBackend({ startSerialSession: async (options: Record<string, unknown>) => {
+    capturedPath = options.path;
+    return "pipe-session";
+  } });
+  const ctx = buildCtx(backend);
+  ctx.serialConfig.path = pipePath;
+  await createTerminalSessionStarters(ctx as never).startSerial({ ...term, write: (line: string, done?: () => void) => { output.push(line); done?.(); } } as never);
+  assert.equal(capturedPath, pipePath);
+  assert.ok(output.some((line) => line.includes(`[Connected to ${pipePath}]`)));
+  assert.ok(output.every((line) => !line.includes('baud')));
+});

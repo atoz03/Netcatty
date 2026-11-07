@@ -38,6 +38,7 @@ import { useRenderTracker } from "../lib/useRenderTracker";
 import { cn } from "../lib/utils";
 import { Host, Identity, KnownHost, ProxyProfile, SSHKey, TransferTask } from "../types";
 import { resolveGroupDefaults, applyGroupDefaults } from "../domain/groupConfig";
+import { useActiveGlobalDefaultProxyProfileId } from "../application/state/useGlobalDefaultProxyProfileId";
 import { materializeHostProxyProfile } from "../domain/proxyProfiles";
 import { useSftpFileAssociations } from "../application/state/useSftpFileAssociations";
 import { registerEditorSftpWriterScoped } from "../application/state/editorSftpBridge";
@@ -118,9 +119,10 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
 
   // File watch event handlers (stable refs to avoid re-creating the useSftpState options)
   const fileWatchHandlers = useMemo(() => ({
-    onFileWatchSynced: (payload: { remotePath: string }) => {
+    onFileWatchSynced: (payload: { remotePath: string; warning?: string }) => {
       const fileName = payload.remotePath.split('/').pop() || payload.remotePath;
-      toast.success(t('sftp.autoSync.success', { fileName }));
+      if (payload.warning) toast.warning(payload.warning);
+      else toast.success(t('sftp.autoSync.success', { fileName }));
       logger.info("[SFTP] File auto-synced to remote", payload);
     },
     onFileWatchError: (payload: { error: string }) => {
@@ -161,16 +163,19 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
     resolveTransferSourceSessionId,
   ]);
 
-  // Pre-resolve group defaults so SFTP connections inherit group config
+  // Memoized on vault props, so this subscription is what refreshes the list
+  // after the global default changes.
+  const globalDefaultProxyProfileId = useActiveGlobalDefaultProxyProfileId();
   const effectiveHosts = useMemo(() => {
     const validProxyProfileIds = new Set(proxyProfiles.map((profile) => profile.id));
+    const inheritanceOptions = { validProxyProfileIds, globalProxyProfileId: globalDefaultProxyProfileId };
     return hosts.map(h => {
       const withGroupDefaults = h.group
-        ? applyGroupDefaults(h, resolveGroupDefaults(h.group, groupConfigs, { validProxyProfileIds }), { validProxyProfileIds })
-        : applyGroupDefaults(h, {}, { validProxyProfileIds });
+        ? applyGroupDefaults(h, resolveGroupDefaults(h.group, groupConfigs, inheritanceOptions), inheritanceOptions)
+        : applyGroupDefaults(h, {}, inheritanceOptions);
       return materializeHostProxyProfile(withGroupDefaults, proxyProfiles);
     });
-  }, [hosts, groupConfigs, proxyProfiles]);
+  }, [hosts, groupConfigs, proxyProfiles, globalDefaultProxyProfileId]);
 
   const hostWriteSource = writableHosts ?? hosts;
 
@@ -754,7 +759,7 @@ const SftpViewInner: React.FC<SftpViewProps> = ({
               data-section="pane-magnification-hint"
             >
               {t('terminal.paneMagnification.hint')}: {t('terminal.layer.sftp')}
-              {paneMagnificationShortcutLabel ? ` · ${paneMagnificationShortcutLabel} / Esc` : ' · Esc'}
+              {paneMagnificationShortcutLabel ? ` · ${paneMagnificationShortcutLabel}` : ''}
             </div>
           )}
         </div>

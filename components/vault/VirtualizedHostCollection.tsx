@@ -127,6 +127,7 @@ export function VirtualizedHostCollection<T>({
   onDrop?: React.DragEventHandler<HTMLDivElement>;
 }) {
   const rootRef = React.useRef<HTMLDivElement>(null);
+  const pointerFocusRef = React.useRef(false);
   const pendingFocusKeyRef = React.useRef<string | null>(null);
   const lastRequestedActiveKeyRef = React.useRef<string | null>(null);
   const [containerWidth, setContainerWidth] = React.useState(
@@ -281,8 +282,18 @@ export function VirtualizedHostCollection<T>({
       aria-label={ariaLabel}
       onDragOver={onDragOver}
       onDrop={onDrop}
-      onKeyDownCapture={handleKeyDown}
+      onPointerDownCapture={() => { pointerFocusRef.current = true; }}
+      onPointerUpCapture={() => { pointerFocusRef.current = false; }}
+      onPointerCancelCapture={() => { pointerFocusRef.current = false; }}
+      onKeyDownCapture={(event) => {
+        pointerFocusRef.current = false;
+        handleKeyDown(event);
+      }}
       onFocusCapture={(event) => {
+        if (pointerFocusRef.current) {
+          pointerFocusRef.current = false;
+          return;
+        }
         const wrapper = (event.target as HTMLElement).closest<HTMLElement>("[data-vault-item-key]");
         const index = wrapper
           ? itemIndexByKey.get(wrapper.dataset.vaultItemKey ?? "")
@@ -367,6 +378,7 @@ export function VirtualizedGroupedHostCollection<T>({
   onBoundaryNavigation?: (direction: "previous" | "next") => void;
 }) {
   const rootRef = React.useRef<HTMLDivElement>(null);
+  const pointerFocusRef = React.useRef(false);
   const pendingFocusKeyRef = React.useRef<string | null>(null);
   const lastRequestedActiveKeyRef = React.useRef<string | null>(null);
   const [containerWidth, setContainerWidth] = React.useState(
@@ -588,8 +600,18 @@ export function VirtualizedGroupedHostCollection<T>({
       aria-rowcount={viewMode === "grid" ? rows.length : undefined}
       aria-colcount={viewMode === "grid" ? columns : undefined}
       aria-label={ariaLabel}
-      onKeyDownCapture={handleKeyDown}
+      onPointerDownCapture={() => { pointerFocusRef.current = true; }}
+      onPointerUpCapture={() => { pointerFocusRef.current = false; }}
+      onPointerCancelCapture={() => { pointerFocusRef.current = false; }}
+      onKeyDownCapture={(event) => {
+        pointerFocusRef.current = false;
+        handleKeyDown(event);
+      }}
       onFocusCapture={(event) => {
+        if (pointerFocusRef.current) {
+          pointerFocusRef.current = false;
+          return;
+        }
         const wrapper = (event.target as HTMLElement).closest<HTMLElement>("[data-vault-item-key]");
         const index = wrapper
           ? itemIndexByKey.get(wrapper.dataset.vaultItemKey ?? "")

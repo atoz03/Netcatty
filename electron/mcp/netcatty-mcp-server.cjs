@@ -20,6 +20,8 @@ function catalogDescription(toolName, fallback) {
   return getCatalogToolDescription(toolName) || fallback;
 }
 
+const { createPrivacyBoundary } = require("./externalMcpPrivacyBoundary.cjs");
+
 const DEBUG_MCP = process.env.NETCATTY_MCP_DEBUG === "1";
 
 function debugLog(...args) {
@@ -36,17 +38,21 @@ function debugLog(...args) {
 
 // ── TCP Bridge to Netcatty main process ──
 
-const NETCATTY_MCP_PORT = parseInt(process.env.NETCATTY_MCP_PORT, 10);
-if (!NETCATTY_MCP_PORT) {
-  process.stderr.write("[netcatty-mcp] NETCATTY_MCP_PORT not set\n");
-  process.exit(1);
-}
-
-// Auth token for TCP bridge authentication
-const NETCATTY_MCP_TOKEN = process.env.NETCATTY_MCP_TOKEN || "";
-if (!NETCATTY_MCP_TOKEN) {
-  process.stderr.write("[netcatty-mcp] NETCATTY_MCP_TOKEN not set\n");
-  process.exit(1);
+// External stdio clients outlive Netcatty. Their port and token stay mutable so
+// a later call can refresh discovery. Managed children receive a fixed env and
+// keep the original fail-fast exit.
+const externalDiscoveryPath = process.env.NETCATTY_EXTERNAL_MCP_DISCOVERY_FILE;
+let NETCATTY_MCP_PORT = parseInt(process.env.NETCATTY_MCP_PORT, 10);
+let NETCATTY_MCP_TOKEN = process.env.NETCATTY_MCP_TOKEN || "";
+if (!externalDiscoveryPath) {
+  if (!NETCATTY_MCP_PORT) {
+    process.stderr.write("[netcatty-mcp] NETCATTY_MCP_PORT not set\n");
+    process.exit(1);
+  }
+  if (!NETCATTY_MCP_TOKEN) {
+    process.stderr.write("[netcatty-mcp] NETCATTY_MCP_TOKEN not set\n");
+    process.exit(1);
+  }
 }
 
 // Scoped session IDs (comma-separated). When set (even if empty), only listed
@@ -63,6 +69,7 @@ const CHAT_SESSION_ID = process.env.NETCATTY_MCP_CHAT_SESSION_ID || null;
 // External MCP clients may keep a long-lived stdio process; re-read discovery so
 // Settings → AI → Safety changes apply without restarting the client.
 function readPermissionMode() {
+  if (process.env.NETCATTY_MCP_DELEGATED_TOOLS !== undefined) return "confirm";
   const discoveryPath = process.env.NETCATTY_EXTERNAL_MCP_DISCOVERY_FILE;
   if (discoveryPath) {
     try {
@@ -116,9 +123,34 @@ function guardWriteOperation(command, { skipBlocklist = false } = {}) {
 }
 
 let tcpSocket = null;
-let pendingRequests = new Map(); // id -> { resolve, reject }
+let pendingRequests = new Map(); // id -> { resolve, reject, sock }
 let nextRpcId = 1;
 let tcpBuffer = "";
+
+// `destroyed` stays false after the peer FIN has already moved readyState to
+// "closed". Writing in that window hits writeAfterFIN and rejects the call
+// with "TCP connection lost" instead of reconnecting.
+function isLiveSocket(sock) {
+  return Boolean(
+    sock
+    && !sock.destroyed
+    && sock.readyState === "open"
+    && sock.writable
+    && !sock.readableEnded
+    && !sock.writableEnded
+  );
+}
+
+function rejectPendingOnSocket(sock, externalMessage) {
+  const managed = !externalDiscoveryPath;
+  if (managed && tcpSocket === sock) tcpSocket = null;
+  const message = managed ? "Not connected to Netcatty" : externalMessage;
+  for (const [id, pending] of pendingRequests) {
+    if (pending.sock !== sock) continue;
+    pendingRequests.delete(id);
+    pending.reject(new Error(message));
+  }
+}
 
 function connectTcp() {
   return new Promise((resolve, reject) => {
@@ -130,6 +162,7 @@ function connectTcp() {
     sock.setEncoding("utf-8");
     const MAX_BUFFER_SIZE = 10 * 1024 * 1024; // 10 MB
     sock.on("data", (chunk) => {
+      if (tcpSocket !== sock) return;
       tcpBuffer += chunk;
       if (tcpBuffer.length > MAX_BUFFER_SIZE) {
         process.stderr.write(`[netcatty-mcp] TCP buffer exceeded ${MAX_BUFFER_SIZE} bytes, clearing buffer\n`);
@@ -165,36 +198,115 @@ function connectTcp() {
     sock.on("error", (err) => {
       debugLog("TCP socket error", { message: err?.message || String(err) });
       reject(err);
-      // Reject all pending
-      for (const { reject: rej } of pendingRequests.values()) {
-        rej(new Error("TCP connection lost"));
-      }
-      pendingRequests.clear();
+      // External in-flight calls stay rejected and are not replayed.
+      // Managed children do not reread discovery, so a call that races the
+      // dead socket fails as not-connected rather than "TCP connection lost".
+      rejectPendingOnSocket(sock, "TCP connection lost");
     });
     sock.on("close", () => {
       debugLog("TCP socket closed");
-      // Reject all pending requests on clean close
-      for (const { reject: rej } of pendingRequests.values()) {
-        rej(new Error("TCP connection closed"));
-      }
-      pendingRequests.clear();
-      tcpSocket = null;
+      rejectPendingOnSocket(sock, "TCP connection closed");
+      if (tcpSocket === sock) tcpSocket = null;
     });
   });
 }
 
-function rpcCall(method, params) {
+function sendRpc(method, params) {
   return new Promise((resolve, reject) => {
-    if (!tcpSocket || tcpSocket.destroyed) {
-      return reject(new Error("Not connected to Netcatty"));
+    if (!isLiveSocket(tcpSocket)) {
+      reject(new Error("Not connected to Netcatty"));
+      return;
     }
+    const sock = tcpSocket;
     const id = nextRpcId++;
-    pendingRequests.set(id, { resolve, reject });
+    pendingRequests.set(id, { resolve, reject, sock });
     const msg = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
-    debugLog("rpcCall", { id, method, params });
-    tcpSocket.write(msg);
+    debugLog("rpcCall", { id, method });
+    sock.write(msg);
   });
 }
+
+function temporaryUnavailable(error) {
+  const message = error?.message || String(error || "connection failed");
+  if (message.startsWith("Netcatty is temporarily unavailable")) {
+    return error instanceof Error ? error : new Error(message);
+  }
+  return new Error(`Netcatty is temporarily unavailable: ${message}`);
+}
+
+function refreshExternalEndpoint() {
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(externalDiscoveryPath, "utf8"));
+  } catch {
+    throw new Error("Netcatty is temporarily unavailable: discovery file is missing or unreadable");
+  }
+  const port = parseInt(parsed?.port, 10);
+  const token = typeof parsed?.token === "string" ? parsed.token.trim() : "";
+  if (!port || !token) {
+    throw new Error("Netcatty is temporarily unavailable: discovery endpoint is incomplete");
+  }
+  NETCATTY_MCP_PORT = port;
+  NETCATTY_MCP_TOKEN = token;
+}
+
+function dropActiveSocket() {
+  const sock = tcpSocket;
+  tcpSocket = null;
+  tcpBuffer = "";
+  if (sock && !sock.destroyed) sock.destroy();
+}
+
+// One reconnect at a time. Auth uses sendRpc so callers waiting on this promise
+// cannot deadlock, and calls already rejected by close/error stay rejected.
+let connecting = null;
+
+async function connectAndAuth() {
+  // Drop the reference only. In-flight requests stay bound to the old socket
+  // and are rejected when that socket closes; they are not replayed.
+  if (!isLiveSocket(tcpSocket)) {
+    tcpSocket = null;
+    tcpBuffer = "";
+  }
+  refreshExternalEndpoint();
+  tcpBuffer = "";
+  try {
+    await connectTcp();
+    const authResult = await sendRpc("auth/verify", { token: NETCATTY_MCP_TOKEN });
+    if (!authResult?.ok) {
+      throw new Error("Netcatty is temporarily unavailable: TCP bridge authentication failed");
+    }
+  } catch (error) {
+    dropActiveSocket();
+    throw temporaryUnavailable(error);
+  }
+  process.stderr.write("[netcatty-mcp] Authenticated with TCP bridge\n");
+}
+
+function ensureConnected() {
+  // Join an in-flight reconnect before trusting tcpSocket. connectTcp assigns
+  // the socket before auth/verify returns; a second caller must wait for that
+  // re-auth instead of sending on an unauthenticated socket.
+  if (connecting) return connecting;
+  if (isLiveSocket(tcpSocket)) return Promise.resolve();
+  connecting = connectAndAuth().finally(() => {
+    connecting = null;
+  });
+  return connecting;
+}
+
+function rpcCall(method, params) {
+  if (!externalDiscoveryPath) return sendRpc(method, params);
+  return ensureConnected().then(() => sendRpc(method, params));
+}
+
+// External clients own connection maps here; managed agents use the main-process chat boundary.
+const exposedRpcCall = externalDiscoveryPath
+  ? createPrivacyBoundary(rpcCall, () => {
+    const discovery = JSON.parse(fs.readFileSync(externalDiscoveryPath, "utf8"));
+    return discovery.redaction;
+  })
+  : rpcCall;
 
 // ── MCP Server ──
 
@@ -219,7 +331,7 @@ server.resource(
   "netcatty://context",
   { description: "Current Netcatty workspace context: connected hosts, session IDs, and environment description." },
   async () => {
-    const ctx = await rpcCall("netcatty/getContext", scopeParams);
+    const ctx = await exposedRpcCall("netcatty/getContext", scopeParams);
     return {
       contents: [{
         uri: "netcatty://context",
@@ -231,12 +343,20 @@ server.resource(
 );
 
 // Start with core tools; load specialized catalog groups through load_netcatty_tools.
-registerProgressiveMcpTools(server, {
-  rpcCall,
+const toolDependencies = {
+  rpcCall: exposedRpcCall,
   scopeParams,
   guardWriteOperation,
   catalogDescription,
-});
+};
+if (process.env.NETCATTY_MCP_DELEGATED_TOOLS !== undefined) {
+  const { listMcpTools } = require("../capabilities/codegen/toolSurfaces.cjs");
+  const { registerMcpTools } = require("../capabilities/codegen/mcpToolRegistry.cjs");
+  const names = JSON.parse(process.env.NETCATTY_MCP_DELEGATED_TOOLS);
+  if (!Array.isArray(names) || names.length > 128 || names.some((name) => typeof name !== "string")) throw Error("Invalid delegated tool profile");
+  const allowed = new Set(names);
+  registerMcpTools(server, toolDependencies, listMcpTools().filter((tool) => allowed.has(tool.mcpTool)));
+} else registerProgressiveMcpTools(server, toolDependencies);
 
 // ── Start ──
 
@@ -247,16 +367,20 @@ async function main() {
     scopedSessionIds: SCOPED_SESSION_IDS,
     chatSessionId: CHAT_SESSION_ID,
     permissionMode: readPermissionMode(),
+    externalDiscovery: Boolean(externalDiscoveryPath),
   });
-  await connectTcp();
-
-  // Authenticate with the TCP bridge before accepting any tool calls
-  const authResult = await rpcCall("auth/verify", { token: NETCATTY_MCP_TOKEN });
-  debugLog("auth/verify result", authResult);
-  if (!authResult?.ok) {
-    throw new Error("TCP bridge authentication failed");
+  if (externalDiscoveryPath) {
+    await ensureConnected();
+  } else {
+    await connectTcp();
+    // Authenticate with the TCP bridge before accepting any tool calls.
+    const authResult = await rpcCall("auth/verify", { token: NETCATTY_MCP_TOKEN });
+    debugLog("auth/verify result", authResult);
+    if (!authResult?.ok) {
+      throw new Error("TCP bridge authentication failed");
+    }
+    process.stderr.write("[netcatty-mcp] Authenticated with TCP bridge\n");
   }
-  process.stderr.write("[netcatty-mcp] Authenticated with TCP bridge\n");
 
   const transport = new StdioServerTransport();
   // Protocol.connect keeps this callback and runs it before request dispatch.

@@ -1,5 +1,9 @@
 import type { GroupConfig, Host } from './models';
 import { migrateDeprecatedFontOverride } from '../infrastructure/config/fonts';
+import {
+  getActiveGlobalDefaultProxyProfileId,
+  normalizeGlobalDefaultProxyProfileId,
+} from './globalDefaultProxy';
 
 /**
  * Migrate deprecated primary-font ids out of a GroupConfig's
@@ -26,6 +30,12 @@ export function sanitizeGroupConfig(config: GroupConfig): GroupConfig {
 
 export interface ApplyGroupDefaultsOptions {
   validProxyProfileIds?: ReadonlySet<string>;
+  /**
+   * Saved proxy used when the host and its groups do not set one.
+   * An empty string forces no global default. When the property is omitted,
+   * the active app setting is used.
+   */
+  globalProxyProfileId?: string;
 }
 
 export const hasManualGroupSshCredentials = (config: Partial<GroupConfig>): boolean => [
@@ -48,6 +58,28 @@ const hasUsableProxyProfileId = (
 ): boolean => {
   if (!proxyProfileId) return false;
   return !options?.validProxyProfileIds || options.validProxyProfileIds.has(proxyProfileId);
+};
+
+const resolveGlobalProxyProfileId = (
+  options?: ApplyGroupDefaultsOptions,
+): string | undefined => {
+  const hasExplicit = Boolean(options)
+    && Object.prototype.hasOwnProperty.call(options, 'globalProxyProfileId');
+  const raw = hasExplicit
+    ? options?.globalProxyProfileId
+    : getActiveGlobalDefaultProxyProfileId();
+  const id = normalizeGlobalDefaultProxyProfileId(raw);
+  if (!id) return undefined;
+  if (options?.validProxyProfileIds && !options.validProxyProfileIds.has(id)) return undefined;
+  return id;
+};
+
+const withoutInheritedProxy = (host: Host): Host => {
+  if (host.proxyProfileId === undefined && host.proxyConfig === undefined) return host;
+  const next = { ...host };
+  delete next.proxyProfileId;
+  delete next.proxyConfig;
+  return next;
 };
 
 /**
@@ -149,7 +181,7 @@ export function resolveGroupDefaults(
 
 const INHERITABLE_KEYS: (keyof GroupConfig)[] = [
   'username', 'password', 'savePassword', 'authMethod', 'identityId', 'identityFileId', 'identityFilePaths',
-  'port', 'protocol', 'deviceType', 'agentForwarding', 'proxyProfileId', 'proxyConfig', 'hostChain', 'startupCommand', 'startupCommandRunMode',
+  'port', 'protocol', 'deviceType', 'agentForwarding', 'x11Forwarding', 'proxyProfileId', 'proxyConfig', 'hostChain', 'startupCommand', 'startupCommandRunMode',
   'legacyAlgorithms', 'skipEcdsaHostKey', 'algorithms',
   'environmentVariables', 'charset', 'moshEnabled', 'moshServerPath',
   'etEnabled', 'etPort',
@@ -178,12 +210,13 @@ const SSH_CREDENTIAL_KEYS = new Set<keyof GroupConfig>([
 
 // SSH transport/input settings the local-shell editor does not expose: input
 // remapping (backspace), Mosh/Eternal-Terminal transports, and SSH-only
-// algorithm/agent/chain flags. A local shell never runs through SSH, so these
+// algorithm/agent/X11/chain flags. A local shell never runs through SSH, so these
 // defaults would either remap local PTY input (`backspaceBehavior`,
 // createXTermRuntime) or make flag-first consumers report a purely local
 // session as Mosh/ET — with no way to override them in the local editor.
 const SSH_ONLY_TRANSPORT_KEYS = new Set<keyof GroupConfig>([
   'agentForwarding',
+  'x11Forwarding',
   'legacyAlgorithms',
   'skipEcdsaHostKey',
   'algorithms',
@@ -246,11 +279,19 @@ export function applyGroupDefaults(
   // local CMD/PowerShell/POSIX shell be treated as a network-device CLI
   // (no normal autocomplete, network semantics for AI/command execution).
   const isLocalShellHost = host.protocol === 'local';
+  // X11 forwarding only applies to plain SSH. Use the host value when it is
+  // set, otherwise the group transport, so a group Mosh/ET/Telnet default
+  // does not also turn X11 on.
+  const effectiveProtocol = host.protocol ?? groupDefaults.protocol;
+  const inheritsX11Forwarding = (!effectiveProtocol || effectiveProtocol === 'ssh')
+    && !(host.moshEnabled ?? groupDefaults.moshEnabled)
+    && !(host.etEnabled ?? groupDefaults.etEnabled);
 
   for (const key of INHERITABLE_KEYS) {
     if (shouldSkipGroupSshCredentialBundle && SSH_CREDENTIAL_KEYS.has(key)) continue;
     if (isSerialHost && SSH_CREDENTIAL_KEYS.has(key)) continue;
     if (isLocalShellHost && (SSH_CREDENTIAL_KEYS.has(key) || SSH_ONLY_TRANSPORT_KEYS.has(key) || key === 'startupCommand' || key === 'deviceType')) continue;
+    if (key === 'x11Forwarding' && !inheritsX11Forwarding) continue;
     if (key === 'password' && effective.savePassword === false) continue;
     if (key === 'telnetIdentityId' && hostHasManualTelnetCredentials) continue;
     if (key === 'proxyProfileId') {
@@ -267,6 +308,14 @@ export function applyGroupDefaults(
     if (shouldInherit && groupValue !== undefined) {
       (effective as unknown as Record<string, unknown>)[key] = groupValue;
     }
+  }
+  // Explicit direct beats a host proxy, the nearest group proxy, and the
+  // global default. Clearing the host setting leaves directProxy unset and
+  // still inherits.
+  if (host.directProxy === true) return withoutInheritedProxy(effective);
+  if (!effective.proxyConfig && !effective.proxyProfileId) {
+    const globalProxyProfileId = resolveGlobalProxyProfileId(options);
+    if (globalProxyProfileId) effective.proxyProfileId = globalProxyProfileId;
   }
   return effective;
 }

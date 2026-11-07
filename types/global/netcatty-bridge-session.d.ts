@@ -218,6 +218,7 @@ declare global {
       authMethod?: import("../../domain/models").HostAuthMethod;
       requiresMfa?: boolean;
       password?: string;
+      totp?: NetcattyTotpConfig;
       privateKey?: string;
       certificate?: string;
       publicKey?: string;
@@ -260,6 +261,7 @@ declare global {
     getSessionRemoteInfo?(sessionId: string): Promise<{
       success: boolean;
       remoteSshVersion?: string;
+      singleChannelSsh?: boolean;
       error?: string;
     }>;
     /**
@@ -301,6 +303,13 @@ declare global {
         gpuName?: string | null;      // First GPU name
         gpuMemUsed?: number | null;   // Summed VRAM used in MB
         gpuMemTotal?: number | null;  // Summed VRAM total in MB
+        gpus?: Array<{                // Per-GPU utilization and VRAM (MiB)
+          index: number;
+          name: string;
+          utilization: number | null;
+          memoryUsed: number | null;
+          memoryTotal: number | null;
+        }>;
         memTotal: number | null;      // Total memory in MB
         memUsed: number | null;       // Used memory in MB (excluding buffers/cache)
         memFree: number | null;       // Free memory in MB
@@ -313,10 +322,14 @@ declare global {
           memPercent: number;
           command: string;
         }>;
+        diskReadSpeed?: number | null;  // Linux hardware-backed block devices, bytes/sec; null while unavailable/warming up
+        diskWriteSpeed?: number | null; // Aggregate without partitions or stacked virtual devices
         diskPercent: number | null;   // Disk usage percentage for root partition
         diskUsed: number | null;      // Disk used in GB
         diskTotal: number | null;     // Total disk in GB
         disks: Array<{                // All mounted disks
+          diskReadSpeed?: number | null; // Mounted block-device I/O, bytes/sec
+          diskWriteSpeed?: number | null;
           capacityKey?: string;       // Filesystem or shared-pool identity
           mountPoint: string;
           used: number;               // Used in GB
@@ -347,6 +360,8 @@ declare global {
       sessionId: string,
       data: string,
       options?: {
+        /** Byte-valued xterm onBinary string; bypasses text charset encoding. */
+        binary?: boolean;
         automated?: boolean;
         pasteRequestId?: string;
         /** Host-classified secret/no-echo input; always bypasses plugin observers and interceptors. */
@@ -418,6 +433,8 @@ declare global {
     requestTerminalSessionSnapshot?(sessionId: string, authorization: string): Promise<{
       success: boolean;
       snapshot?: string;
+      /** Captured input policy for the existing backend connection. */
+      perCharacterInput?: boolean;
       kittyKeyboardModeState?: NetcattyKittyKeyboardModeState;
       kittyKeyboardProtocolEnabled?: boolean;
       passwordPromptActive?: boolean;
@@ -438,6 +455,7 @@ declare global {
       passwordPromptActive?: boolean,
       cwd?: string | null,
       title?: string | null,
+      perCharacterInput?: boolean,
     ): void;
     /** Observe popup: push current state back to the home renderer before restore. */
     applyTerminalSessionSnapshot?(
@@ -448,6 +466,7 @@ declare global {
         contextViewportSnapshot: string;
         contextScrollbackSnapshot: string;
         alternateScreen: boolean;
+        perCharacterInput?: boolean;
         kittyKeyboardModeState?: NetcattyKittyKeyboardModeState;
         kittyKeyboardProtocolEnabled?: boolean;
         passwordPromptActive?: boolean;
@@ -470,6 +489,7 @@ declare global {
         contextViewportSnapshot: string;
         contextScrollbackSnapshot: string;
         alternateScreen: boolean;
+        perCharacterInput?: boolean;
         kittyKeyboardModeState?: NetcattyKittyKeyboardModeState;
         kittyKeyboardProtocolEnabled?: boolean;
         passwordPromptActive?: boolean;
@@ -584,6 +604,7 @@ declare global {
         savedPassword?: string | null;
         /** When false, UI must not offer saving the response as the host password. */
         allowSavePassword?: boolean;
+        totpUri?: string;
         scope?: "terminal" | "external";
         bootEpoch?: number;
       }) => void

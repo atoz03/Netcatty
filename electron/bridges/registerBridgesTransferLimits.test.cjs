@@ -41,13 +41,17 @@ function createBridgeRegistrarForTest({
   tempDir,
   sftpClients = new Map(),
   transferBridge = createNoopBridge(),
+  sshBridge = null,
+  terminalBridge = null,
   electronModuleOverrides = {},
+  windows = [],
 }) {
   const noopBridge = createNoopBridge();
   const tempDirBridge = {
     ensureTempDir() {},
     registerHandlers() {},
     getTempDir: () => tempDir,
+    getCustomTempDir: () => null,
     getTempFilePath: (fileName) => Promise.resolve(path.join(tempDir, fileName)),
   };
 
@@ -58,6 +62,7 @@ function createBridgeRegistrarForTest({
         isEncryptionAvailable: () => false,
       },
       dialog: {},
+      nativeTheme: new EventEmitter(),
       ...electronModuleOverrides,
     },
     app: {
@@ -65,7 +70,7 @@ function createBridgeRegistrarForTest({
       getVersion: () => "0.0.0",
       getName: () => "Netcatty",
     },
-    BrowserWindow: { getAllWindows: () => [] },
+    BrowserWindow: { getAllWindows: () => windows },
     shell: { openExternal() {}, openPath() {} },
     clipboard: { readText: () => "", writeText() {} },
     path,
@@ -81,12 +86,12 @@ function createBridgeRegistrarForTest({
     sftpClients,
     CLOUD_SYNC_PASSWORD_FILE: "cloud-sync-password",
     getCliDiscoveryFilePath: () => path.join(tempDir, "cli-discovery.json"),
-    sshBridge: { ...noopBridge, ensureMoshStatsConnection() {} },
+    sshBridge: sshBridge || { ...noopBridge, ensureMoshStatsConnection() {} },
     sftpBridge,
     localFsBridge: noopBridge,
     transferBridge,
     portForwardingBridge: noopBridge,
-    terminalBridge: { ...noopBridge, execOnEtSession() {} },
+    terminalBridge: terminalBridge || { ...noopBridge, execOnEtSession() {} },
     crashLogBridge: noopBridge,
     ptyProcessTree: { getChildProcesses: () => [] },
     getOauthBridge: () => ({ setupOAuthBridge() {} }),
@@ -108,6 +113,36 @@ function createBridgeRegistrarForTest({
     isPathInside: () => true,
   });
 }
+
+test("registrar broadcasts system theme updates when plugin host initialization fails", async (t) => {
+  const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "netcatty-theme-registrar-test-"));
+  t.after(() => fs.promises.rm(tempDir, { recursive: true, force: true }));
+  const nativeTheme = new EventEmitter();
+  const messages = [];
+  const registerBridges = createBridgeRegistrarForTest({
+    ipcMain: createIpcMainStub(),
+    tempDir,
+    electronModuleOverrides: { nativeTheme },
+    windows: [{
+      isDestroyed: () => false,
+      webContents: {
+        isDestroyed: () => false,
+        send: (channel, payload) => messages.push({ channel, payload }),
+      },
+    }],
+  });
+
+  // This fixture intentionally lacks app.getAppPath, so the optional plugin
+  // host fails to initialize. Native theme delivery must remain independent.
+  registerBridges({});
+  assert.equal(nativeTheme.listenerCount("updated"), 1);
+  nativeTheme.shouldUseDarkColors = true;
+  nativeTheme.emit("updated");
+  assert.deepEqual(messages, [{
+    channel: "netcatty:system-theme-changed",
+    payload: { isDark: true },
+  }]);
+});
 
 test("the single temp-download entry routes direct downloads through the shared transfer bridge", async (t) => {
   const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "netcatty-download-temp-test-"));
@@ -250,3 +285,33 @@ test("downloadToTempWithProgress proxies transfer work to the terminal worker in
     cancelled: false,
   });
 });
+
+for (const mode of ["disabled", "unavailable", "worker"]) {
+  test(`registrar enables saved-log restart guards only for main fallback (${mode})`, async (t) => {
+    const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "netcatty-log-fallback-test-"));
+    const previousWorkerSetting = process.env.NETCATTY_TERMINAL_WORKER;
+    process.env.NETCATTY_TERMINAL_WORKER = mode === "disabled" ? "0" : "1";
+    t.after(async () => {
+      if (previousWorkerSetting === undefined) delete process.env.NETCATTY_TERMINAL_WORKER;
+      else process.env.NETCATTY_TERMINAL_WORKER = previousWorkerSetting;
+      await fs.promises.rm(tempDir, { recursive: true, force: true });
+    });
+    const observed = {};
+    const bridgeSpy = (name) => ({
+      ...createNoopBridge(),
+      registerHandlers(_ipcMain, options) { observed[name] = options; },
+    });
+    const registerBridges = createBridgeRegistrarForTest({
+      ipcMain: createIpcMainStub(), tempDir,
+      sshBridge: bridgeSpy("ssh"), terminalBridge: bridgeSpy("terminal"),
+      electronModuleOverrides: mode === "unavailable" ? {} : {
+        utilityProcess: { fork() { throw new Error("registration must not cold-start the worker"); } },
+      },
+    });
+    registerBridges({});
+    for (const name of ["ssh", "terminal"]) {
+      assert.equal(observed[name].manageSessionLogRestart, mode !== "worker");
+      assert.equal(Boolean(observed[name].terminalWorkerManager), mode === "worker");
+    }
+  });
+}

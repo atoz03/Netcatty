@@ -60,6 +60,8 @@ const SERVICE_BINDINGS = Object.freeze({
   "portforward.start": { domain: "portforward", method: "start" },
   "portforward.stop": { domain: "portforward", method: "stop" },
   "session.close": { domain: "session", method: "close" },
+  "session.reconnect": { domain: "session", method: "reconnect" },
+  "session.recover": { domain: "session", method: "recover" },
 });
 
 function resolveCapabilitySurface(rpcMethod) {
@@ -96,6 +98,8 @@ function createCapabilityRpcDispatcher(deps) {
   const sessionService = deps.sessionService || createSessionService({
     invokeSessionAgent: invokeVaultAgent,
     validateClose: deps.validateSessionClose,
+    validateReconnect: deps.validateSessionReconnect,
+    inspectRecovery: deps.inspectSessionRecovery,
     beforeClose: deps.beforeSessionClose,
     afterClose: deps.afterSessionClose,
     onClosed: deps.onSessionClosed,
@@ -130,10 +134,10 @@ function createCapabilityRpcDispatcher(deps) {
       return UNROUTED;
     }
 
-    // Only session.close executes against params.sessionId. host.open instead
+    // Session lifecycle operations execute against params.sessionId. host.open instead
     // targets its requested vault host; other vault/script operations must not
     // borrow an unrelated session's host grant.
-    let approvalTarget = capability.id === "session.close"
+    let approvalTarget = ["session.close", "session.reconnect", "session.recover"].includes(capability.id)
       ? (deps.getApprovalTarget?.(params) || null)
       : null;
     if (capability.id === "vault.host.open" && deps.permissionMode === PERMISSION_MODES.CONFIRM) {
@@ -157,7 +161,9 @@ function createCapabilityRpcDispatcher(deps) {
         hostname: host?.hostname || "",
       };
     }
-    const permission = evaluatePermissionWithGrants({
+    const permission = deps.isDelegatedApproval?.(approvalContext)
+      ? { allowed: !isChatSessionCancelled(params?.chatSessionId), requiresApproval: false }
+      : evaluatePermissionWithGrants({
       rpcMethod,
       surface,
       permissionMode: deps.permissionMode,
@@ -198,9 +204,14 @@ function createCapabilityRpcDispatcher(deps) {
     const hostOpenGeneration = capability.id === "vault.host.open"
       ? deps.captureHostOpenScope?.(params?.chatSessionId)
       : null;
-    const result = await handler(params);
+    approvalContext.beforeExecute?.();
+    const result = await handler(params, approvalContext);
     if (capability.id === "vault.host.open" && result?.ok !== false && result?.sessionId) {
-      await deps.onHostOpened?.(params?.chatSessionId, result.sessionId, hostOpenGeneration, result);
+      const bound = await deps.onHostOpened?.(params?.chatSessionId, result.sessionId, hostOpenGeneration, result);
+      if (bound === false) {
+        return { ok: false, code: "SESSION_SCOPE_BIND_FAILED", sessionId: result.sessionId, error: "Host opened but its session could not be bound to the requesting chat scope." };
+      }
+      if (bound === true) return { ...result, scopeBound: true };
     }
     return result;
   };

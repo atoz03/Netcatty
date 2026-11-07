@@ -18,6 +18,7 @@ import { reserveSessionSlot } from '../shared/sessionExecutionQueue';
 import { fitTerminalExecuteResultForModel } from './terminalCompression';
 import { fitLargeToolResultForModel } from './toolResultFitting';
 import { redactSecretsForModel } from './modelSecretRedaction';
+import { assertModelPrivacySession, type ModelPrivacyBridge } from './modelPrivacy';
 import {
   globalTerminalMonitorGuard,
   isStreamingMonitorCommand,
@@ -32,6 +33,7 @@ import {
   type ToolResultDedup,
 } from './toolResultDedup';
 import cattyToolSpecs from './generated/cattyToolSpecs.json';
+import globalAgentToolSpecs from './generated/globalAgentToolSpecs.json';
 import {
   cattyToolContextSchema,
   toolDepsFromContext,
@@ -251,7 +253,7 @@ async function executeLocalCattyCapability(ctx: LocalExecutionContext): Promise<
       if (result == null) {
         return { error: `Handle "${handleId}" was not found for this chat session.` };
       }
-      return { ...result, content: redactSecretsForModel(result.content) };
+      return { ...result, content: redactSecretsForModel(result.content, chatSessionId) };
     }
     case 'harness.workspace.get_info': {
       const scopeCtx = resolveContext();
@@ -425,6 +427,9 @@ function createCatalogTool(spec: CattyToolSpec) {
         }
 
         await slot?.ready;
+        // SDK approval precedes execute; the policy can change while the user
+        // decides or while this call waits behind another terminal operation.
+        await assertModelPrivacySession(deps.bridge as ModelPrivacyBridge, deps.chatSessionId);
 
         if (spec.capabilityId === 'terminal.execute') {
           const { sessionId: sid, command } = args as { sessionId: string; command: string };
@@ -749,6 +754,7 @@ export function createCattyToolsFromCatalog(
   chatSessionId?: string,
   toolOutputStore?: ToolOutputStore,
   toolResultDedup?: ToolResultDedup,
+  selection?: { agentKind?: import('../agentKinds').AgentKind; allowedCapabilityIds?: readonly string[] },
 ): CattyToolsBundle {
   const sharedContext = buildCattyToolContext({
     bridge,
@@ -764,7 +770,10 @@ export function createCattyToolsFromCatalog(
   const catalogTools: Record<string, CattyTool> = {};
   const toolsContext: Record<string, CattyToolContext> = {};
 
-  for (const rawSpec of cattyToolSpecs as CattyToolSpec[]) {
+  const selectedSpecs = selection?.agentKind === 'global' ? globalAgentToolSpecs : cattyToolSpecs;
+  const allowed = selection?.allowedCapabilityIds ? new Set(selection.allowedCapabilityIds) : null;
+  for (const rawSpec of selectedSpecs as CattyToolSpec[]) {
+    if (allowed && !allowed.has(rawSpec.capabilityId)) continue;
     if (rawSpec.capabilityId === 'harness.web.search' && !isWebSearchReady(webSearchConfig)) {
       continue;
     }

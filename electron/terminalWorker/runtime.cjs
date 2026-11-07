@@ -355,6 +355,32 @@ function createTerminalWorkerRuntime(options = {}) {
     ? options.reportSuppressedError
     : null;
   const ipcMain = createIpcMainHarness();
+  const executionValidations = new Map();
+  let executionValidationCounter = 0;
+  const executionValidationTimeoutMs = options.executionValidationTimeoutMs ?? 10_000;
+  const executionValidationError = "AI privacy session is unavailable or its settings changed; start a new chat";
+
+  function validateExecution(message) {
+    return new Promise((resolve, reject) => {
+      const validationId = `${message.requestId}:${++executionValidationCounter}`;
+      const finish = (ok) => {
+        const entry = executionValidations.get(validationId);
+        if (!entry) return;
+        executionValidations.delete(validationId);
+        clearTimeout(entry.timer);
+        if (ok) resolve();
+        else reject(new Error(executionValidationError));
+      };
+      const timer = setTimeout(() => finish(false), executionValidationTimeoutMs);
+      timer.unref?.();
+      executionValidations.set(validationId, { requestId: message.requestId, timer, finish });
+      try {
+        parentPort.postMessage({ kind: "validate-execution", requestId: message.requestId, validationId });
+      } catch {
+        finish(false);
+      }
+    });
+  }
   let started = false;
   const outputPorts = createOutputPortRegistry();
   const pendingOutputBySession = new Map();
@@ -499,11 +525,16 @@ function createTerminalWorkerRuntime(options = {}) {
       const requestedSessionGeneration = requestedSessionId
         ? (sessionOutputGenerations.get(requestedSessionId) ?? 0)
         : null;
+      const previousSessionLogToken = requestedSessionId
+        ? require("../bridges/sessionLogStreamManager.cjs").getSessionLogToken(requestedSessionId)
+        : null;
       if (requestedSessionId) {
         sessionRequestIds.set(requestedSessionId, message.requestId);
         sessionLifecycleTombstoneTimes.delete(requestedSessionId);
       }
       const result = await handler({
+        ...(message.requiresExecutionValidation === true
+          ? { beforeExecute: () => validateExecution(message) } : {}),
         sender: createSender(
           parentPort,
           message.webContentsId,
@@ -528,6 +559,14 @@ function createTerminalWorkerRuntime(options = {}) {
         const requestedGenerationStillCurrent = requestedSessionGeneration === null
           || currentGeneration === requestedSessionGeneration;
         if (!exitedDuringRequest && requestedGenerationStillCurrent) {
+          // Failed reconnects retain the previous saved log. After a successful
+          // start without a replacement log, retire only the old inactive
+          // target, never a continuing manual or newly-finalized stream.
+          if (sessionId === requestedSessionId && result.success !== false && !result.error) {
+            require("../bridges/sessionLogStreamManager.cjs").forgetInactiveSessionLog(
+              sessionId, previousSessionLogToken,
+            );
+          }
           sessionRequestIds.set(sessionId, message.requestId);
           sessionStartMarkers.add(sessionId);
           sessionLifecycleTombstoneTimes.delete(sessionId);
@@ -751,6 +790,15 @@ function createTerminalWorkerRuntime(options = {}) {
 
   function handleMessage(eventOrMessage) {
     const { message, ports } = normalizeMessageEvent(eventOrMessage);
+    if (message?.kind === "execution-validation") {
+      const entry = executionValidations.get(message.validationId);
+      if (entry?.requestId === message.requestId) entry.finish(message.ok === true);
+      return;
+    }
+    if (message?.kind === "set-custom-temp-dir") {
+      (options.applyCustomTempDir || require("../bridges/tempDirBridge.cjs").applyCustomTempDir)(message.value);
+      return;
+    }
     if (message?.kind === "set-ssh-transport-idle-ttl") {
       setDefaultTransportIdleTtlMs(message.value);
       return;

@@ -10,6 +10,12 @@
 </p>
 
 <p align="center">
+  <a href="https://trendshift.io/repositories/18391?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-18391" target="_blank" rel="noopener noreferrer">
+    <img src="https://trendshift.io/api/badge/trendshift/repositories/18391/daily?language=TypeScript" alt="binaricat/Netcatty | Trendshift" width="250" height="55"/>
+  </a>
+</p>
+
+<p align="center">
   A beautiful, feature-rich SSH workspace built with Electron, React, and xterm.js.<br/>
   🔥 Built-in AI Agent · Split terminals · Vault views · SFTP workflows · Custom themes — all in one.
 </p>
@@ -29,9 +35,9 @@
 </p>
 
 <p align="center">
-  <a href="https://ko-fi.com/binaricat">
-    <img src="https://cdn.ko-fi.com/cdn/kofi3.png?v=2" width="150" alt="Support on Ko-fi">
-  </a>
+  <a href="https://github.com/sponsors/binaricat"><img src="https://img.shields.io/badge/GitHub-Sponsors-ea4aaa?style=for-the-badge&logo=githubsponsors&logoColor=white" height="28" alt="Sponsor on GitHub"></a>
+  &nbsp;
+  <a href="https://ko-fi.com/binaricat"><img src="https://img.shields.io/badge/Ko--fi-Support-29abe0?style=for-the-badge&logo=kofi&logoColor=white" height="28" alt="Support on Ko-fi"></a>
 </p>
 
 <p align="center">
@@ -40,7 +46,8 @@
 
 ---
 
-<img width="3142" height="1764" alt="Screenshot 2026-07-02 at 22 51 24" src="https://github.com/user-attachments/assets/3116165d-623a-4d3a-a28a-914befb9b72d" />
+<img width="3358" height="1984" alt="image" src="docs/assets/readme/overview.webp" />
+
 
 ---
 
@@ -62,13 +69,15 @@
 
 Ask Catty Agent to check a server's health, and it runs the right commands, analyzes the output, and gives you a clear summary — all in seconds.
 
-<img width="1510" height="870" alt="ai-single" src="https://github.com/user-attachments/assets/d3f34e53-8476-4fab-8634-394b931d1ff1" />
+<img width="3302" height="1978" alt="image" src="docs/assets/readme/catty-single-host.webp" />
+
 
 #### 🚀 Multi-Host — Docker Swarm Cluster Setup
 
 Watch Catty Agent orchestrate a Docker Swarm cluster across two servers in one conversation. It handles the init, token exchange, and node joining — you just tell it what you want.
 
-<img width="1515" height="870" alt="ai-muti" src="https://github.com/user-attachments/assets/ca166fc5-65d9-4d7b-951a-962c2ef230d8" />
+<img width="3294" height="1974" alt="image" src="docs/assets/readme/catty-multi-host.webp" />
+
 
 ---
 
@@ -84,6 +93,7 @@ Watch Catty Agent orchestrate a Docker Swarm cluster across two servers in one c
   - [Split Terminals](#split-terminals)
 - [Supported Distros](#supported-distros)
 - [Getting Started](#getting-started)
+  - [Open a local terminal from the command line](#open-a-local-terminal-from-the-command-line)
 - [Build & Package](#build--package)
 - [Tech Stack](#tech-stack)
 - [Contributing](#contributing)
@@ -129,10 +139,12 @@ If you regularly work with a fleet of servers, Netcatty is built for speed and f
 - **Session management** — run multiple connections side-by-side
 - **Save current screen** — right-click a terminal to save the visible final text, without replaying keystrokes or overwritten output; scroll first to save an earlier screen.
 - **Inline images** — render Kitty graphics, SIXEL and iTerm inline images from remote programs
+- **Archive shortcuts** — on Linux sessions, Ctrl/Cmd+click a printed `.tar`, `.tar.gz`/`.tgz`, `.tar.bz2`/`.tbz2`, `.tar.xz` or `.zip` name to fill an extraction command with the archive's absolute path into the prompt (kept next to any typed text); press Enter to run it. Names relative to the current directory need directory tracking (OSC 7, see the toolbar's Configure directory tracking); absolute paths always work. Windows, WSL, and macOS sessions are excluded.
 
 ### 📁 SFTP + Built-in Editor
 - **File workflows** — drag & drop uploads/downloads
 - **Edit in place** — built-in editor for quick changes
+- **Create remote archives** — select files or folders, right-click **Compress...**, and create a named `.tar.gz` or `.zip` archive in the displayed destination directory; the server needs `tar`/`gzip` or `zip` for the chosen format.
 
 ### 🎨 Personalization
 - **Custom themes** — tune the app appearance to your taste
@@ -148,9 +160,11 @@ If you regularly work with a fleet of servers, Netcatty is built for speed and f
 
 The main window is designed for long-running SSH workflows: quick access to sessions, navigation, and core tools in one place.
 
-<img width="1531" height="875" alt="black-grid" src="https://github.com/user-attachments/assets/004b80f6-5bbb-4f14-b8cd-33a0a5913b8c" />
+<img width="3290" height="1988" alt="image" src="docs/assets/readme/main-window.webp" />
 
-<img width="1550" height="876" alt="light" src="https://github.com/user-attachments/assets/2b59a999-a25e-4217-944c-9aef0a09f272" />
+
+<img width="3324" height="1992" alt="image" src="docs/assets/readme/main-window-terminal.webp" />
+
 
 
 <a name="vault-views"></a>
@@ -158,9 +172,25 @@ The main window is designed for long-running SSH workflows: quick access to sess
 
 Organize and navigate your hosts using the view that best fits the moment: grid for overview, list for scanning, tree for structure.
 
-<img width="1554" height="882" alt="list" src="https://github.com/user-attachments/assets/03249f15-b5f8-4770-a3c3-d5001636ea00" />
+<img width="3292" height="1984" alt="image" src="docs/assets/readme/vault-grid.webp" />
 
-<img width="1561" height="878" alt="tree" src="https://github.com/user-attachments/assets/739f7b66-3898-43d0-8dd3-b9b97fd8e8de" />
+
+<img width="3322" height="1998" alt="image" src="docs/assets/readme/vault-list.webp" />
+
+
+
+
+## Monitoring View
+
+Inspect CPU, memory, disk, network, and latency readings, with GPU details where available. Choose visible columns, resize them, select refresh intervals down to 1 second, and open a terminal directly from a monitored host.
+
+Disk I/O shows aggregate read/write throughput for Linux hardware-backed block devices, without counting partitions or stacked virtual devices twice. Rates use two consecutive samples; `--` means unavailable or warming up, not zero activity. Disk I/O is currently unavailable on macOS; existing macOS monitoring is unchanged. The terminal system overview uses the same shared measurements.
+
+<img width="3364" height="1982" alt="image" src="docs/assets/readme/monitoring.webp" />
+
+<img width="3362" height="1980" alt="image" src="docs/assets/readme/monitoring-columns.webp" />
+
+
 
 
 <a name="split-terminals"></a>
@@ -168,7 +198,7 @@ Organize and navigate your hosts using the view that best fits the moment: grid 
 
 Split panes help you monitor multiple servers/services at the same time (deploy + logs + metrics) without juggling windows.
 
-<img width="1560" height="871" alt="split" src="https://github.com/user-attachments/assets/c93a8523-6256-4bb3-8b6e-d599831f2f9f" />
+<img width="1560" height="871" alt="split" src="docs/assets/readme/split-terminals.webp" />
 
 ---
 
@@ -221,6 +251,24 @@ application and integration are complete.
 > **Open folders in Netcatty on Windows:** The installed version adds **Open in Netcatty** to Explorer's folder context menu and folder-background context menu. It opens a local terminal in that folder. On Windows 11, choose **Show more options** first. Turn the menu off or on in **Settings → System → Windows Explorer**. ZIP and portable versions do not add this menu by default.
 
 > **macOS Users:** Current releases are expected to be code-signed and notarized. If Gatekeeper still warns, make sure you downloaded the latest official build from GitHub Releases.
+
+<a name="open-a-local-terminal-from-the-command-line"></a>
+### Open a local terminal from the command line
+
+`--open-terminal-path <dir>` opens a local terminal in that folder. `--open-terminal-shell <id-or-path>` selects the shell: a discovered id such as `pwsh`, `cmd`, or `wsl-ubuntu`, or a path to a shell executable. Either flag is enough. A shell alone opens a local tab in the default directory. A path alone uses the configured local shell. If Netcatty is already running, the tab opens in that window.
+
+Windows needs an extra `--` so Electron forwards the flags:
+
+```bat
+Netcatty.exe -- --open-terminal-shell=pwsh --open-terminal-path="D:\\proj"
+```
+
+On macOS, start a new instance with `open`, or run the binary directly:
+
+```bash
+open -n -a Netcatty --args --open-terminal-shell=zsh --open-terminal-path="$HOME/proj"
+/Applications/Netcatty.app/Contents/MacOS/Netcatty --open-terminal-shell=zsh --open-terminal-path="$HOME/proj"
+```
 
 ### Scoop (Windows x64, community-maintained)
 

@@ -1142,6 +1142,7 @@ async function startPortForward(event, payload) {
     authPolicyVersion,
     requiresMfa,
     password,
+    totp,
     privateKey,
     publicKey,
     certificate,
@@ -1660,6 +1661,7 @@ async function startPortForward(event, payload) {
     hostId,
     hostname,
     password,
+    totp,
     logPrefix: "[PortForward]",
     scope: "external",
     getAuthBanner: () => authBanner,
@@ -1976,11 +1978,11 @@ function registerHandlers(ipcMain, options = {}) {
       if (!tunnelId) return;
       trackedTunnelIds.delete(tunnelId);
       tunnelRuleIds.delete(tunnelId);
-      for (const [webContentsId, entry] of subscriptionsBySender) {
+      for (const entry of subscriptionsBySender.values()) {
         entry.tunnelIds.delete(tunnelId);
-        if (entry.tunnelIds.size > 0) continue;
-        entry.sender.removeListener?.("destroyed", entry.onDestroyed);
-        subscriptionsBySender.delete(webContentsId);
+        // Runtime subscriptions outlive individual tunnels. Keep their owner
+        // destruction hook until both subscription kinds have been released.
+        releaseEmptySenderLifecycle(entry.sender, entry);
       }
     };
 

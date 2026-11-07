@@ -77,15 +77,29 @@ module.exports = {
         // Renderer and Mosh's main-process bootstrap share the same
         // fail-closed prompt classifier at runtime.
         'domain/terminalPromptSecurity.shared.cjs',
+        'domain/pluginRuntimePolicy.cjs',
+        'domain/pluginGitHubRepository.cjs',
+        'domain/pluginPermissionDescriptions.cjs',
+        'domain/pluginThemePack.cjs',
+        'domain/pluginRemoteTreePolicy.cjs',
+        'domain/pluginViewStylePolicy.cjs',
         // Main-process SSH, SFTP, and port-forward bridges share this matcher.
         // TypeScript under domain/ is excluded below, so the .cjs must be listed.
+        'domain/systemManager/containerRuntime.shared.cjs',
         'domain/singleChannelSshBanner.shared.cjs',
         'domain/singleChannelSshBanner.shared.mjs',
         'domain/sshServerVendor.mjs',
+        // sshAuthHelper.cjs requires this at load. TypeScript under domain/
+        // is excluded below, so the shared TOTP runtime must be listed.
+        'domain/totp.shared.cjs',
+        'domain/totpPrompt.shared.cjs',
         'lib/**/*.cjs',
         'lib/**/*.json',
         'skills/**/*',
         '!public/**/*',
+        // README screenshots live under docs/ and are not app resources.
+        // Keep them out of app.asar if the files globs ever become permissive.
+        '!docs/assets/readme/**/*',
         '!**/*.map',
         '!**/*.d.ts',
         '!**/*.d.mts',
@@ -121,7 +135,8 @@ module.exports = {
         '!node_modules/@streamdown/**/*',
         '!node_modules/@tanstack/react-virtual/**/*',
         '!node_modules/pinyin-pro/**/*',
-        '!node_modules/re2js/**/*',
+        // re2js stays in the package: the main-process TOTP prompt matcher
+        // requires it so custom patterns cannot freeze Electron.
         '!node_modules/@eslint-community/regexpp/**/*',
         '!node_modules/clsx/**/*',
         '!node_modules/tailwind-merge/**/*',
@@ -195,6 +210,9 @@ module.exports = {
         'node_modules/@cursor/sdk-*/**/*',
         'node_modules/sqlite3/**/*',
         'node_modules/@modelcontextprotocol/sdk/**/*',
+        // External MCP scripts run from asarUnpack via ELECTRON_RUN_AS_NODE and
+        // must resolve re2js from a real directory (issue #3910).
+        'node_modules/re2js/**/*',
         'lib/**/*.cjs',
         'lib/**/*.json',
         'node_modules/zod/**/*',

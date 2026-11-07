@@ -170,6 +170,7 @@ export function TerminalHost() {
     if (!handlers) return null;
     return {
       addSessionToWorkspace: sessionActions?.addSessionToWorkspace,
+      moveWorkspacePane: sessionActions?.moveWorkspacePane,
       appendHostToWorkspace: sessionActions?.appendHostToWorkspace,
       appendLocalTerminalToWorkspace: sessionActions?.appendLocalTerminalToWorkspace,
       clearSessionFontSizeOverride: sessionActions?.clearSessionFontSizeOverride,
@@ -206,7 +207,11 @@ export function TerminalHost() {
       updateTerminalHosts: handlers.updateTerminalHosts,
       hotkeyScheme: terminalSettings.hotkeyScheme,
       isBroadcastEnabled: sessionActions?.isBroadcastEnabled,
+      isComposeSendToAll: sessionActions?.isComposeSendToAll,
+      onToggleComposeSendTarget: sessionActions?.toggleComposeSendTarget,
       isGlobalBroadcastEnabled: sessionActions?.isGlobalBroadcastEnabled,
+      isGlobalComposeSendToAll: sessionActions?.isGlobalComposeSendToAll,
+      onToggleGlobalComposeSendTarget: sessionActions?.toggleGlobalComposeSendTarget,
       canUseGlobalBroadcast: sessionActions?.canUseGlobalBroadcast,
       keyBindings: terminalSettings.keyBindings,
       openNoteRequest: local.openNoteRequest,
@@ -224,6 +229,7 @@ export function TerminalHost() {
       setTerminalFontFamilyId: terminalSettingsActions?.setTerminalFontFamilyId,
       setTerminalFontSize: terminalSettingsActions?.setTerminalFontSize,
       setWorkspaceFocusedSession: sessionActions?.setWorkspaceFocusedSession,
+      setWorkspaceAnchorChat: sessionActions?.setWorkspaceAnchorChat,
       sftpAutoOpenSidebar: terminalSettings.sftpAutoOpenSidebar,
       sftpFollowTerminalCwd: terminalSettings.sftpFollowTerminalCwd,
       setSftpFollowTerminalCwd: terminalSettingsActions?.setSftpFollowTerminalCwd,

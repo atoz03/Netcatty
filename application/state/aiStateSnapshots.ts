@@ -29,7 +29,12 @@ import {
 import { emitAIStateChanged } from './aiStateEvents';
 import { peekAgentRuntimeCleanup } from '../../infrastructure/ai/harness/agentRuntimeHandle';
 import { setReversibleModelPrivacy } from '../../infrastructure/ai/harness/modelSecretRedaction';
-import { DebouncedBackupMirror, readLiveSessionsArray } from './aiSessionsBackup';
+import {
+  DebouncedBackupMirror,
+  readLiveSessionsArray,
+  writeSessionsBackupGeneration,
+  type AiSessionsBackupBridge,
+} from './aiSessionsBackup';
 import {
   idbDeleteSessionIds,
   idbPutMeta,
@@ -41,7 +46,7 @@ import {
 } from './aiSessionIdbStorage';
 
 /** Typed accessor for the Electron IPC bridge exposed on `window.netcatty`. */
-export interface AIBridge {
+export interface AIBridge extends AiSessionsBackupBridge {
   aiSdkAgentCleanup?: (chatSessionId: string) => Promise<{ ok: boolean }>;
   aiPrivacyClearSession?: (chatSessionId: string) => Promise<{ ok: boolean; error?: string }>;
   deleteChatToolOutputsTemp?: (chatSessionId: string) => Promise<{ deletedCount: number }>;
@@ -51,11 +56,7 @@ export interface AIBridge {
   aiMcpSetCommandBlocklist?: (blocklist: string[]) => Promise<unknown> | unknown;
   aiMcpSetCommandTimeout?: (timeout: number) => Promise<unknown> | unknown;
   aiMcpSetMaxIterations?: (maxIterations: number) => Promise<unknown> | unknown;
-  /** Durability mirror: write one timestamped backup generation to disk. */
-  aiSessionsBackupWrite?: (payload: { json: string }) => Promise<{ ok: boolean }>;
-  aiSessionsBackupReadLatest?: () => Promise<{ ok: boolean; json?: string }>;
-  aiSessionsBackupExport?: (payload: { json: string }) => Promise<{ success: boolean; filePath?: string }>;
-  aiSessionsBackupImport?: () => Promise<{ success: boolean; json?: string }>;
+  // Durability mirror (aiSessionsBackup*): see AiSessionsBackupBridge.
 }
 
 export function getAIBridge() {
@@ -316,6 +317,13 @@ export function readAiSessionMessageCap(): number {
  * - Keeps only the MAX_STORED_SESSIONS most-recently-updated sessions.
  * - Trims each session's messages to the last `messageCap` messages.
  */
+/**
+ * 截断后的会话副本按源会话对象缓存。会话对象是不可变的（每次更新都会生成新对象），
+ * 因此同一源对象 + 同一上限得到的副本可以复用：逐条比对引用的 IndexedDB 差量写入
+ * 不会再把每个被截断的会话在每次保存时都当作“已变更”重写一遍。
+ */
+const trimmedSessionCache = new WeakMap<AISession, { messageCap: number; trimmed: AISession }>();
+
 export function pruneSessionsForStorage(
   sessions: AISession[],
   messageCap: number = readAiSessionMessageCap(),
@@ -331,6 +339,8 @@ export function pruneSessionsForStorage(
   });
   return limited.map(s => {
     if (!isHostBoundAISession(s) && s.messages.length > messageCap) {
+      const cached = trimmedSessionCache.get(s);
+      if (cached && cached.messageCap === messageCap) return cached.trimmed;
       // Do not start the retained tail with a tool result whose assistant call
       // was just trimmed. Reuse the same tool-safe boundary logic as context
       // compaction, even if that retains a few more than the nominal cap.
@@ -347,11 +357,13 @@ export function pruneSessionsForStorage(
             ),
           }
         : undefined;
-      return {
+      const trimmed: AISession = {
         ...s,
         messages: s.messages.slice(removedMessageCount),
         ...(contextCompaction ? { contextCompaction } : {}),
       };
+      trimmedSessionCache.set(s, { messageCap, trimmed });
+      return trimmed;
     }
     return s;
   });
@@ -475,11 +487,20 @@ function queueIdbSessionSync(
 // history with it. The persisted JSON is mirrored; when the count cap evicts
 // sessions, a PRE-eviction generation is written first so evicted chats stay
 // recoverable from disk (the blind spot found in issue #4123).
-const backupMirror = new DebouncedBackupMirror((json) => {
+/** 镜像载荷：会话数组按引用保存、写出时才序列化；字符串为已序列化的旧格式。 */
+type BackupMirrorPayload = readonly AISession[] | string;
+
+const backupMirror = new DebouncedBackupMirror<BackupMirrorPayload>((payload) => {
   try {
-    void getAIBridge()?.aiSessionsBackupWrite?.({ json })?.catch(() => {});
-  } catch {
+    const bridge = getAIBridge();
+    if (typeof payload === 'string') {
+      void bridge?.aiSessionsBackupWrite?.({ json: payload })?.catch(() => {});
+      return;
+    }
+    writeSessionsBackupGeneration(bridge, payload);
+  } catch (error) {
     // Backup failures must never break chat persistence.
+    console.warn('[AIState] Failed to write the AI session backup generation:', error);
   }
 });
 
@@ -504,34 +525,26 @@ export function __resetBackupMirrorForTests() {
   aiSessionsBackupRecoveryPending = false;
 }
 
-export function scheduleBackupMirror(json: string) {
+export function scheduleBackupMirror(payload: BackupMirrorPayload) {
   if (aiSessionsBackupRecoveryPending) return;
   try {
-    backupMirror.schedule(json);
+    backupMirror.schedule(payload);
   } catch {
     // ignore
   }
 }
 
 /** Write one immediate backup generation (bypasses the debounce window). */
-function writeImmediateBackupGeneration(json: string) {
+function writeImmediateBackupGeneration(sessions: readonly AISession[]) {
   if (aiSessionsBackupRecoveryPending) return;
   try {
-    backupMirror.schedule(json);
+    backupMirror.schedule(sessions);
     backupMirror.flushNow();
   } catch {
     // Backup failures must never break chat persistence.
   }
 }
 
-
-/**
- * Perf (#4121): the exact same immutable sessions array is often written
- * again by the debounced save path and by cloud-sync collection; skipping
- * the re-stringify for a reference-identical set keeps that cheap. The
- * per-record IDB diff below already makes the store write itself cheap.
- */
-let lastMirroredSessions: AISession[] | null = null;
 
 /**
  * Persist sessions. Writes go to IndexedDB, one record per session, through a
@@ -565,7 +578,7 @@ export function writeSessionsForStorage(
       .map(([, session]) => session);
     intentionallyDeletedSessionIds.clear();
     if (evicted.length > 0) {
-      writeImmediateBackupGeneration(JSON.stringify(sessions));
+      writeImmediateBackupGeneration(sessions);
       console.warn(
         `[AIState] Retention cap evicted ${evicted.length} session(s); a pre-eviction backup generation was written to disk.`,
       );
@@ -577,9 +590,10 @@ export function writeSessionsForStorage(
     const removedIds = Array.from(prevById.keys()).filter(id => !persistedIds.has(id));
     lastPersistedSessionsById = new Map(persisted.map(session => [session.id, session]));
 
-    if (changed.length > 0 || removedIds.length > 0 || lastMirroredSessions !== persisted) {
-      scheduleBackupMirror(JSON.stringify(persisted));
-      lastMirroredSessions = persisted;
+    // Perf (#4121)：同一不可变数组被防抖保存和云同步收集重复写入时，差量为空，
+    // 不再调度备份。调度只保存数组引用，整库序列化推迟到防抖窗口结束时进行一次。
+    if (changed.length > 0 || removedIds.length > 0) {
+      scheduleBackupMirror(persisted);
     }
     queueIdbSessionSync(changed, removedIds, prevById, persisted);
     return true;

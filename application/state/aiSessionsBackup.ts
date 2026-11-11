@@ -11,8 +11,18 @@ import type { AISession } from '../../infrastructure/ai/types';
 /** Debounce window: at most one backup write per mutation burst (~2s). */
 export const AI_SESSIONS_BACKUP_DEBOUNCE_MS = 2000;
 
+/**
+ * 分块备份时每条 IPC 的目标字符数。远小于主进程单条 64 MB 上限，渲染进程不再
+ * 需要为整库生成一个巨大的字符串；单个会话超过该值时独占一块。
+ */
+export const AI_SESSIONS_BACKUP_CHUNK_CHARS = 4 * 1024 * 1024;
+
 export interface AiSessionsBackupBridge {
   aiSessionsBackupWrite?: (payload: { json: string }) => Promise<{ ok: boolean }>;
+  aiSessionsBackupWriteBegin?: (payload: { id: string }) => Promise<{ ok: boolean; error?: string }>;
+  aiSessionsBackupWriteChunk?: (payload: { id: string; chunk: string }) => Promise<{ ok: boolean; error?: string }>;
+  aiSessionsBackupWriteCommit?: (payload: { id: string }) => Promise<{ ok: boolean; error?: string; file?: string }>;
+  aiSessionsBackupWriteAbort?: (payload: { id: string }) => Promise<{ ok: boolean }>;
   aiSessionsBackupReadLatest?: () => Promise<{ ok: boolean; json?: string }>;
   aiSessionsBackupExport?: (payload: { json: string }) => Promise<{ success: boolean; filePath?: string }>;
   aiSessionsBackupImport?: () => Promise<{ success: boolean; json?: string }>;
@@ -123,24 +133,26 @@ export function mergeImportedSessions(current: AISession[], imported: AISession[
  * Debounced mirror scheduler. One rolling timer per process: the last
  * mutation batch wins, and the write happens `debounceMs` after the batch
  * settles (at most once per batch, per the durability spec).
+ *
+ * 载荷按引用保存，序列化推迟到真正写出时（见 `writeSessionsBackupGeneration`）：
+ * 流式回复期间每 500ms 一次的存储写入只替换引用，不再每次把整库转成 JSON。
+ * 调用方必须传入不可变的会话数组（React 状态本身即如此）。
  */
-export class DebouncedBackupMirror {
+export class DebouncedBackupMirror<T = string> {
   private timer: ReturnType<typeof setTimeout> | null = null;
-  private pendingJson: string | null = null;
+  private pending: { payload: T } | null = null;
 
   constructor(
-    private readonly write: (json: string) => void,
+    private readonly write: (payload: T) => void,
     private readonly debounceMs: number = AI_SESSIONS_BACKUP_DEBOUNCE_MS,
   ) {}
 
-  schedule(json: string) {
-    this.pendingJson = json;
+  schedule(payload: T) {
+    this.pending = { payload };
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = null;
-      const json = this.pendingJson;
-      this.pendingJson = null;
-      if (json != null) this.write(json);
+      this.writePending();
     }, this.debounceMs);
   }
 
@@ -149,14 +161,72 @@ export class DebouncedBackupMirror {
       clearTimeout(this.timer);
       this.timer = null;
     }
-    const json = this.pendingJson;
-    this.pendingJson = null;
-    if (json != null) this.write(json);
+    this.writePending();
   }
 
   reset() {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    this.pendingJson = null;
+    this.pending = null;
   }
+
+  private writePending() {
+    const pending = this.pending;
+    this.pending = null;
+    if (pending) this.write(pending.payload);
+  }
+}
+
+let backupGenerationCounter = 0;
+
+function nextBackupGenerationId(): string {
+  backupGenerationCounter = (backupGenerationCounter + 1) % Number.MAX_SAFE_INTEGER;
+  return `${Date.now().toString(36)}-${backupGenerationCounter.toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/**
+ * 把会话数组写成一代磁盘备份，文件内容与 `JSON.stringify(sessions)` 完全一致。
+ *
+ * 桥支持分块接口时，逐个会话序列化并按 `chunkChars` 聚合成块发送：渲染进程峰值
+ * 只有一块加一个会话的字符串，单条 IPC 也远低于主进程 64 MB 上限，因此超过
+ * 64 MB 的主机归档仍能得到备份。所有 IPC 同步依次发出、不等待结果，主进程按
+ * 到达顺序串行处理，beforeunload 时调用也能完整送达。旧桥（只有 `write`）退回
+ * 整库一次写入。返回 false 表示没有可用的写入接口。
+ */
+export function writeSessionsBackupGeneration(
+  bridge: AiSessionsBackupBridge | undefined,
+  sessions: readonly AISession[],
+  chunkChars: number = AI_SESSIONS_BACKUP_CHUNK_CHARS,
+): boolean {
+  if (!bridge) return false;
+  const swallow = (promise: Promise<unknown> | undefined) => { void promise?.catch(() => {}); };
+  if (
+    bridge.aiSessionsBackupWriteBegin
+    && bridge.aiSessionsBackupWriteChunk
+    && bridge.aiSessionsBackupWriteCommit
+  ) {
+    const id = nextBackupGenerationId();
+    swallow(bridge.aiSessionsBackupWriteBegin({ id }));
+    try {
+      let chunk = '[';
+      for (let index = 0; index < sessions.length; index += 1) {
+        const part = (index === 0 ? '' : ',') + JSON.stringify(sessions[index]);
+        if (chunk.length > 0 && chunk.length + part.length > chunkChars) {
+          swallow(bridge.aiSessionsBackupWriteChunk({ id, chunk }));
+          chunk = '';
+        }
+        chunk += part;
+      }
+      chunk += ']';
+      swallow(bridge.aiSessionsBackupWriteChunk({ id, chunk }));
+    } catch (error) {
+      swallow(bridge.aiSessionsBackupWriteAbort?.({ id }));
+      throw error;
+    }
+    swallow(bridge.aiSessionsBackupWriteCommit({ id }));
+    return true;
+  }
+  if (!bridge.aiSessionsBackupWrite) return false;
+  swallow(bridge.aiSessionsBackupWrite({ json: JSON.stringify(sessions) }));
+  return true;
 }

@@ -316,7 +316,7 @@ export function useAIState() {
           setLatestAISessionsSnapshot(bootSessions);
           sessionsRef.current = bootSessions;
           setSessionsRaw(bootSessions);
-          scheduleBackupMirror(JSON.stringify(bootSessions));
+          scheduleBackupMirror(bootSessions);
           cleanupAfterHydration = true;
           return;
         }

@@ -1017,3 +1017,104 @@ test('orphan cleanup persists the host identity of legacy chats so they follow t
     Object.defineProperty(globalThis, 'window', { configurable: true, value: previousWindow });
   }
 });
+
+test('streaming writes defer backup serialization to one generation per debounce window', async (t) => {
+  const { writeSessionsForStorage, flushBackupMirror, __flushIdbWritesForTests, __resetBackupMirrorForTests, __resetIdbPersistenceForTests } =
+    await import('./aiStateSnapshots');
+  __resetBackupMirrorForTests();
+  __resetIdbPersistenceForTests();
+  const idb = installFakeIndexedDb();
+  const chunks: string[] = [];
+  let commits = 0;
+  const previousWindow = globalThis.window;
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {
+      netcatty: {
+        aiSessionsBackupWrite: async () => { throw new Error('chunked bridge expected'); },
+        aiSessionsBackupWriteBegin: async () => ({ ok: true }),
+        aiSessionsBackupWriteChunk: async ({ chunk }: { chunk: string }) => { chunks.push(chunk); return { ok: true }; },
+        aiSessionsBackupWriteCommit: async () => { commits += 1; return { ok: true }; },
+      },
+    },
+  });
+  t.mock.method(localStorageAdapter, 'read', () => null);
+  t.mock.method(localStorageAdapter, 'writeString', () => true);
+  try {
+    let sessions = [
+      { ...hostSession('active', 3, ['host-a']), messages: [] },
+      hostSession('other', 2, ['host-b']),
+    ];
+    writeSessionsForStorage(sessions);
+    flushBackupMirror();
+    chunks.length = 0;
+    commits = 0;
+    const stringify = t.mock.method(JSON, 'stringify');
+    for (let step = 0; step < 25; step += 1) {
+      const [active, ...rest] = sessions;
+      sessions = [{
+        ...active,
+        updatedAt: active.updatedAt + 1,
+        messages: [...active.messages, { id: `s${step}`, role: 'assistant', content: `chunk ${step}`, timestamp: step }],
+      } as AISession, ...rest];
+      assert.equal(writeSessionsForStorage(sessions), true);
+    }
+    // 防抖窗口内的写入只替换引用，不序列化整库。
+    assert.equal(stringify.mock.callCount(), 0);
+    flushBackupMirror();
+    assert.equal(commits, 1);
+    const mirrored = JSON.parse(chunks.join('')) as AISession[];
+    assert.deepEqual(mirrored.map(session => session.id), ['active', 'other']);
+    assert.equal(mirrored[0].messages.length, 25);
+    await __flushIdbWritesForTests();
+  } finally {
+    idb.restore();
+    __resetBackupMirrorForTests();
+    __resetIdbPersistenceForTests();
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: previousWindow });
+  }
+});
+
+test('over-cap unbound sessions are trimmed once and not rewritten on unrelated saves', async (t) => {
+  const { writeSessionsForStorage, __flushIdbWritesForTests, __resetBackupMirrorForTests, __resetIdbPersistenceForTests } =
+    await import('./aiStateSnapshots');
+  const messages = (count: number, prefix: string) => Array.from({ length: count }, (_, index) => ({
+    id: `${prefix}-${index}`, role: index % 2 ? 'assistant' : 'user', content: `${prefix} ${index}`, timestamp: index,
+  }));
+  const overCap = Array.from({ length: 10 }, (_, index) => makeSession(`global-${index}`, 100 - index, messages(80, `g${index}`)))
+    .map(session => ({ ...session, scope: { type: 'global' as const } }));
+  const first = pruneSessionsForStorage(overCap, 50);
+  const second = pruneSessionsForStorage(overCap, 50);
+  for (let index = 0; index < overCap.length; index += 1) {
+    assert.equal(first[index].messages.length, 50);
+    assert.equal(first[index], second[index], 'same source + cap reuses the trimmed copy');
+    assert.equal(overCap[index].messages.length, 80, 'the source session is never mutated');
+  }
+  const raised = pruneSessionsForStorage(overCap, 60);
+  assert.equal(raised[0].messages.length, 60, 'a changed cap trims again');
+
+  __resetBackupMirrorForTests();
+  __resetIdbPersistenceForTests();
+  const idb = installFakeIndexedDb();
+  t.mock.method(localStorageAdapter, 'read', () => null);
+  t.mock.method(localStorageAdapter, 'readNumber', () => 50);
+  t.mock.method(localStorageAdapter, 'writeString', () => true);
+  try {
+    let sessions: AISession[] = [hostSession('streaming', 1_000, ['host-a']), ...overCap];
+    writeSessionsForStorage(sessions);
+    await __flushIdbWritesForTests();
+    const putsAfterFirst = idb.db.opCounts.get('sessions')!.put;
+    assert.equal(putsAfterFirst, 11);
+    for (let step = 0; step < 5; step += 1) {
+      sessions = [{ ...sessions[0], updatedAt: sessions[0].updatedAt + 1 }, ...sessions.slice(1)];
+      writeSessionsForStorage(sessions);
+    }
+    await __flushIdbWritesForTests();
+    // 只有真正变化的会话被写入，截断后的会话不再每次重写。
+    assert.equal(idb.db.opCounts.get('sessions')!.put - putsAfterFirst, 5);
+  } finally {
+    idb.restore();
+    __resetBackupMirrorForTests();
+    __resetIdbPersistenceForTests();
+  }
+});

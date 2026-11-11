@@ -9,6 +9,7 @@ import {
   parseBackupSessions,
   readLiveSessionsArray,
   shouldRestoreFromBackup,
+  writeSessionsBackupGeneration,
 } from './aiSessionsBackup';
 import { prepareRestoredSessions, pruneSessionsForStorage } from './aiStateSnapshots';
 
@@ -146,4 +147,79 @@ test('readLiveSessionsArray treats non-array JSON as empty (corrupt)', () => {
   assert.deepEqual(readLiveSessionsArray('not-json'), []);
   assert.deepEqual(readLiveSessionsArray('[]'), []);
   assert.equal(readLiveSessionsArray('[{"id":"a"}]').length, 1);
+});
+
+test('DebouncedBackupMirror keeps the payload by reference until it writes', () => {
+  const writes: unknown[] = [];
+  const mirror = new DebouncedBackupMirror<readonly AISession[]>((payload) => writes.push(payload), 60_000);
+  const first = [makeSession('a')];
+  const second = [makeSession('b')];
+  mirror.schedule(first);
+  mirror.schedule(second);
+  mirror.flushNow();
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0], second);
+});
+
+function chunkedBridge() {
+  const calls: Array<[string, Record<string, unknown>]> = [];
+  const record = (name: string) => async (payload: Record<string, unknown>) => {
+    calls.push([name, payload]);
+    return { ok: true };
+  };
+  return {
+    calls,
+    bridge: {
+      aiSessionsBackupWrite: record('write'),
+      aiSessionsBackupWriteBegin: record('begin'),
+      aiSessionsBackupWriteChunk: record('chunk'),
+      aiSessionsBackupWriteCommit: record('commit'),
+      aiSessionsBackupWriteAbort: record('abort'),
+    },
+  };
+}
+
+test('chunked backup generation reproduces JSON.stringify exactly with bounded chunks', () => {
+  const sessions = Array.from({ length: 30 }, (_, index) => ({
+    ...makeSession(`chunk-${index}`, index),
+    messages: [{ id: `m-${index}`, role: 'user', content: '中文与 emoji 🙂 '.repeat(20 + index), timestamp: index }],
+  })) as AISession[];
+  const { bridge, calls } = chunkedBridge();
+  const chunkChars = 2_000;
+  assert.equal(writeSessionsBackupGeneration(bridge, sessions, chunkChars), true);
+
+  assert.equal(calls[0][0], 'begin');
+  assert.equal(calls.at(-1)?.[0], 'commit');
+  const chunks = calls.filter(([name]) => name === 'chunk').map(([, payload]) => payload.chunk as string);
+  assert.ok(chunks.length > 1);
+  const ids = new Set(calls.map(([, payload]) => payload.id));
+  assert.equal(ids.size, 1);
+  assert.equal(chunks.join(''), JSON.stringify(sessions));
+  const largestSession = Math.max(...sessions.map((session) => JSON.stringify(session).length + 1));
+  for (const chunk of chunks) assert.ok(chunk.length <= Math.max(chunkChars, largestSession + 1));
+  assert.equal(calls.some(([name]) => name === 'write'), false);
+});
+
+test('chunked backup generation handles an empty store and a single oversized session', () => {
+  const empty = chunkedBridge();
+  writeSessionsBackupGeneration(empty.bridge, []);
+  assert.deepEqual(empty.calls.filter(([name]) => name === 'chunk').map(([, p]) => p.chunk), ['[]']);
+
+  const big = { ...makeSession('big'), messages: [{ id: 'm', role: 'user', content: 'x'.repeat(5_000), timestamp: 1 }] } as AISession;
+  const oversized = chunkedBridge();
+  writeSessionsBackupGeneration(oversized.bridge, [makeSession('small'), big], 1_000);
+  const chunks = oversized.calls.filter(([name]) => name === 'chunk').map(([, p]) => p.chunk as string);
+  assert.equal(chunks.join(''), JSON.stringify([makeSession('small'), big]));
+  assert.equal(chunks.length, 2);
+});
+
+test('backup generation falls back to one payload on bridges without chunked writes', () => {
+  const writes: string[] = [];
+  const sessions = [makeSession('legacy')];
+  assert.equal(writeSessionsBackupGeneration({
+    aiSessionsBackupWrite: async ({ json }) => { writes.push(json); return { ok: true }; },
+  }, sessions), true);
+  assert.deepEqual(writes, [JSON.stringify(sessions)]);
+  assert.equal(writeSessionsBackupGeneration({}, sessions), false);
+  assert.equal(writeSessionsBackupGeneration(undefined, sessions), false);
 });

@@ -6,16 +6,18 @@ import { act, create, type ReactTestRenderer } from 'react-test-renderer';
 import type { TerminalSession, Workspace } from '../../types';
 import { useTerminalWorkspaceLayout } from './useTerminalWorkspaceLayout';
 
+// 只注册 resolve 钩子：Node 22（至少 22.19/22.22）只要存在同步 load 钩子，默认 load
+// 步骤就会为 CommonJS 依赖（react、lucide-react 等）返回 undefined source 并抛出
+// ERR_INVALID_RETURN_PROPERTY_VALUE；Node 24 已修复。CSS 桩因此在解析阶段替换为 data: URL。
 registerHooks({
   resolve(specifier, context, nextResolve) {
+    if (specifier.endsWith('.css')) {
+      return { url: 'data:text/javascript,export default {};', shortCircuit: true };
+    }
     if (specifier === '../Terminal' && context.parentURL?.endsWith('/TerminalLayerSupport.tsx')) {
       return { url: 'data:text/javascript,export default function Terminal(){return null}', shortCircuit: true };
     }
     return nextResolve(specifier, context);
-  },
-  load(url, context, nextLoad) {
-    if (url.endsWith('.css')) return { format: 'module', source: 'export default {};', shortCircuit: true };
-    return nextLoad(url, context);
   },
 });
 

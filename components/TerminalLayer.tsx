@@ -63,6 +63,7 @@ import { NotesManager } from './notes/NotesManager';
 import { terminalCwdStore } from '../application/state/terminalCwdStore';
 import { resolveSnippetCommand } from './SnippetExecutionProvider';
 import type { Snippet } from '../types';
+import type { ProgrammaticCommandLogRewrite } from './terminal/programmaticCommandLog';
 import { isScriptSnippet } from '../domain/snippetScript.ts';
 import {
   pauseScriptRun,

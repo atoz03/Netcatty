@@ -14,10 +14,9 @@ export type AISessionScopeHandoffLike = {
   updatedAt?: number;
 };
 
-export type AIPanelViewHandoffLike = {
-  mode: 'draft' | 'session';
-  sessionId?: string;
-};
+export type AIPanelViewHandoffLike =
+  | { mode: 'draft' }
+  | { mode: 'session'; sessionId: string };
 
 export type SeedWorkspaceAIActiveSessionResult = {
   activeSessionIdMap: Record<string, string | null>;

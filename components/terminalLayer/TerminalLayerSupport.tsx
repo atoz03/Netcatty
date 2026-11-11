@@ -28,6 +28,8 @@ import {
   resolveTerminalHibernateEnabledForProtocol,
 } from '../../domain/terminalHibernate';
 import { KeyBinding, TerminalSettings } from '../../domain/models';
+import type { TerminalTheme } from '../../domain/models';
+import type { ProgrammaticCommandLogRewrite } from '../terminal/programmaticCommandLog';
 import type { TerminalCwdChangeMeta } from '../terminal/sftpCwd';
 import { STORAGE_KEY_AI_SHOW_TERMINAL_SELECTION_ACTION } from '../../infrastructure/config/storageKeys';
 import { cn } from '../../lib/utils';

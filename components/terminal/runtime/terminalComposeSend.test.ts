@@ -126,7 +126,11 @@ for (const [name, command, expected] of [
       input: JSON.stringify(writes[0].data), encoding: 'utf8', timeout: 10000,
     });
     assert.equal(result.status, 0, result.stderr || String(result.error));
-    const lines = stripVTControlCharacters(result.stdout).split(/\r?\n/);
+    // 按终端显示语义取每行可见内容：单独的 \r 把光标移回行首。Bash 5.1 在接受
+    // 粘贴行时会输出 `ESC[?2004l\r`，去掉控制序列后首行会以 \r 开头；5.2 不会。
+    const lines = stripVTControlCharacters(result.stdout)
+      .split(/\r?\n/)
+      .map(line => line.slice(line.lastIndexOf('\r') + 1));
     assert.deepEqual(lines.filter(line => line.startsWith('__') && !line.startsWith('__COMPOSE_PROMPT__')), expected);
   });
 }

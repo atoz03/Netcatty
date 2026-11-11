@@ -109,6 +109,8 @@ export interface UseAIChatStreamingReturn {
 export interface SendToCattyContext {
   activeProvider: ProviderConfig | undefined;
   activeModelId: string;
+  /** 本轮选择的思考强度；原样传给 CattyTurnContext.reasoningEffort。 */
+  reasoningEffort?: string;
   scopeType: 'terminal' | 'workspace';
   scopeTargetId?: string;
   scopeLabel?: string;

@@ -663,7 +663,7 @@ export const zhCNAiMessages: Messages = {
   'ai.chatShortcuts.selectionAction.description': '在终端里选中文本后显示 AI 快捷按钮。',
   'ai.chatHistory.title': '聊天历史',
   'ai.chatHistory.messageCap': '每个会话保留的消息数',
-  'ai.chatHistory.messageCap.description': '每个会话最多存储的消息条数（50–2000）。调低后会在下一次写入时从存储中丢弃最旧的消息。数值越大，存储占用和云同步体积也越大。',
+  'ai.chatHistory.messageCap.description': '未绑定已保存主机的会话最多存储的消息条数（50–2000）。已保存主机的会话始终完整保留。调低后会在下一次写入时从存储中丢弃其他会话最旧的消息。数值越大，存储占用和云同步体积也越大。',
   'ai.chatHistory.messageCap.unit': '条消息',
 
   // AI Error

@@ -132,6 +132,21 @@ export function resolveRebindTargetFromArg(
   return dangling[index - 1] ?? null;
 }
 
+/**
+ * 不在当前作用域历史中的悬挂会话，是否可以由 `/chats` 列出供 `/rebind` 使用。
+ * 已保存主机仍存在的会话属于该主机的历史，打开该主机即可看到，因此不在这里列出
+ * （否则会泄露并把其他服务器的会话迁走）。没有主机身份的旧记录，或其主机已全部
+ * 不存在（主机已删除、临时串口/快速连接）的会话会被列出，确保不会无处可寻。
+ */
+export function isChatListedForRecovery(
+  session: AISession,
+  knownHostIds: ReadonlySet<string>,
+): boolean {
+  const hostIds = session.scope.hostIds ?? [];
+  if (hostIds.length === 0) return true;
+  return !hostIds.some((hostId) => knownHostIds.has(hostId));
+}
+
 /** Revalidate a cached listing entry against the current session and live scopes. */
 export function canRebindChat(session: AISession | undefined, liveScopeTargetIds: ReadonlySet<string>): boolean {
   if (!session) return false;

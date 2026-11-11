@@ -77,6 +77,7 @@ import {
   latestAIPanelViewByScopeSnapshot,
   latestAISessionsSnapshot,
   markAiSessionsHydrationComplete,
+  isHostBoundAISession,
   prepareRestoredSessions,
   readAiSessionMessageCap,
   rebindActiveSessionMap,
@@ -1260,7 +1261,9 @@ export function useAIState() {
         if (s.id !== sessionId) return s;
         let msgs = [...s.messages, message];
         // Dropping synced prefixes makes the next cloud merge add them back.
-        if (!syncEnabled && msgs.length > inMemoryCap) {
+        // 绑定已保存主机的会话是该主机的完整归档，内存中同样不截断；
+        // 模型上下文长度由上下文压缩单独控制。
+        if (!syncEnabled && !isHostBoundAISession(s) && msgs.length > inMemoryCap) {
           const systemMsgs = msgs.filter(m => m.role === 'system');
           const nonSystemMsgs = msgs.filter(m => m.role !== 'system');
           const dropped = nonSystemMsgs.length - (inMemoryCap - systemMsgs.length);
@@ -1501,8 +1504,11 @@ export function useAIState() {
     }));
   }, [updateDraft]);
 
-  const cleanupOrphanedSessions = useCallback((activeTargetIds: Set<string>) => {
-    cleanupOrphanedAISessions(activeTargetIds);
+  const cleanupOrphanedSessions = useCallback((
+    activeTargetIds: Set<string>,
+    targetHostIds?: ReadonlyMap<string, readonly string[]>,
+  ) => {
+    cleanupOrphanedAISessions(activeTargetIds, targetHostIds);
     if (!isAiSessionsHydrationComplete()) return;
 
     const nextSessions =

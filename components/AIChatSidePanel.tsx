@@ -65,7 +65,9 @@ import {
   type DefaultTargetSessionHint,
 } from '../application/state/useAIChatStreaming';
 import { getScopedHistorySessions } from './ai/scopedHistorySessions';
-import { buildAiChatsListingEntries, canRebindChat, formatAiChatsListingNote, resolveRebindTargetFromArg, type AiChatsListingEntry } from './ai/aiChatsListing';
+import { collectSessionIdsDisplayedByOtherTerminals } from './ai/sessionScopeMatch';
+import { buildAiChatsListingEntries, canRebindChat, formatAiChatsListingNote, isChatListedForRecovery, resolveRebindTargetFromArg, type AiChatsListingEntry } from './ai/aiChatsListing';
+import { LOCAL_TERMINAL_HOST_ID } from '../application/state/sessionFactories';
 import { resolveInheritedAIActiveSessionId } from '../domain/aiWorkspaceScopeInherit';
 import { resolveUndoLastTurnBoundary } from '../domain/aiUndoLastTurn';
 import { aiSessionIdSetEqual, exactScopeAISessionsEqual } from '../domain/aiSessionsForScope';
@@ -423,16 +425,12 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     setActiveSessionIdForScope(scopeKey, id);
   }, [scopeKey, setActiveSessionIdForScope]);
 
-  const activeTerminalSessionIds = useMemo(() => {
-    const sessionIds = new Set<string>();
-    const entries = Object.entries(activeSessionIdMap) as Array<[string, string | null]>;
-    for (const [sessionScopeKey, sessionId] of entries) {
-      if (!sessionScopeKey.startsWith('terminal:') || !sessionId) continue;
-      if (sessionScopeKey === scopeKey) continue;
-      sessionIds.add(sessionId);
-    }
-    return sessionIds;
-  }, [activeSessionIdMap, scopeKey]);
+  // 只有仍存活终端的活动指针才会隐藏会话：已关闭终端的指针为 /chats 恢复而保留，
+  // 不能因此把该会话从同一主机新打开的终端历史中隐藏。
+  const activeTerminalSessionIds = useMemo(
+    () => collectSessionIdsDisplayedByOtherTerminals(activeSessionIdMap, scopeKey, liveScopeTargetIds),
+    [activeSessionIdMap, liveScopeTargetIds, scopeKey],
+  );
 
   const workspaceMemberTerminalIds = useMemo(() => {
     if (scopeType !== 'workspace') return undefined;
@@ -565,8 +563,15 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     // Dangling chats no longer match any live scope (rank 0), so they must be
     // appended explicitly for the listing — that is where they become visible
     // and rebindable again (issue #4015 R2).
+    // 其他已保存主机的会话只出现在对应主机的历史里；这里只列出没有现存已保存
+    // 主机的会话，保证它们不会无处可寻。
     const listedSessionIds = new Set(historySessions.map((session) => session.id));
-    const danglingSessions = sessions.filter((session) => session.scopeDangling && !listedSessionIds.has(session.id));
+    const knownHostIds = new Set<string>([LOCAL_TERMINAL_HOST_ID, ...hosts.map((host) => host.id)]);
+    const danglingSessions = sessions.filter((session) => (
+      session.scopeDangling
+      && !listedSessionIds.has(session.id)
+      && isChatListedForRecovery(session, knownHostIds)
+    ));
     const entries = buildAiChatsListingEntries({
       sessions: [...historySessions, ...danglingSessions],
       activeSessionId,
@@ -579,7 +584,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     });
     lastChatsListingRef.current = entries;
     setPanelCommandNote(formatAiChatsListingNote(entries, t));
-  }, [activeSessionId, externalAgents, historySessions, liveScopeTargetIds, scopeLabel, scopeTargetId, scopeType, sessions, t, workspaces, workspaceMemberTerminalIds]);
+  }, [activeSessionId, externalAgents, historySessions, hosts, liveScopeTargetIds, scopeLabel, scopeTargetId, scopeType, sessions, t, workspaces, workspaceMemberTerminalIds]);
 
   // `/rebind <n>`: rebind the nth dangling chat from the last /chats listing
   // to this panel's current scope. Panel action — no agent round-trip.
@@ -2444,12 +2449,11 @@ export function aiChatSidePanelPropsAreEqual(
     const workspaceMemberTerminalIds = props.scopeType === 'workspace'
       ? new Set(memberTerminalIds)
       : undefined;
-    const activeTerminalSessionIds = new Set<string>();
-    for (const [sessionScopeKey, sessionId] of Object.entries(props.activeSessionIdMap) as Array<[string, string | null]>) {
-      if (!sessionScopeKey.startsWith('terminal:') || !sessionId) continue;
-      if (sessionScopeKey === scopeKey) continue;
-      activeTerminalSessionIds.add(sessionId);
-    }
+    const activeTerminalSessionIds = collectSessionIdsDisplayedByOtherTerminals(
+      props.activeSessionIdMap,
+      scopeKey,
+      props.liveScopeTargetIds,
+    );
     const visibleSessionIds = new Set(
       getScopedHistorySessions(
         props.sessions,

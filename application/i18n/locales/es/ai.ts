@@ -663,7 +663,7 @@ export const esAiMessages: Messages = {
   'ai.chatShortcuts.selectionAction.description': 'Muestra un pequeño botón de IA junto al texto seleccionado de la terminal.',
   'ai.chatHistory.title': 'Historial de chat',
   'ai.chatHistory.messageCap': 'Mensajes conservados por chat',
-  'ai.chatHistory.messageCap.description': 'Número máximo de mensajes almacenados por chat (50–2000). Al reducirlo, los mensajes más antiguos se descartan del almacenamiento en la siguiente escritura. Los valores más altos aumentan el almacenamiento y el tamaño de la sincronización en la nube.',
+  'ai.chatHistory.messageCap.description': 'Número máximo de mensajes almacenados por chat no vinculado a un host guardado (50–2000). Los chats de hosts guardados se conservan siempre completos. Al reducirlo, los mensajes más antiguos de los demás chats se descartan del almacenamiento en la siguiente escritura. Los valores más altos aumentan el almacenamiento y el tamaño de la sincronización en la nube.',
   'ai.chatHistory.messageCap.unit': 'mensajes',
 
   // AI Error

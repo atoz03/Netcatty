@@ -6,6 +6,7 @@ import {
   buildAiChatsListingEntries,
   canRebindChat,
   formatAiChatsListingNote,
+  isChatListedForRecovery,
   resolveChatAgentLabel,
   resolveRebindTargetFromArg,
   truncateChatTitle,
@@ -183,4 +184,16 @@ test('resolveChatAgentLabel resolves external agents and falls back to the raw i
   assert.equal(resolveChatAgentLabel('catty', externalAgents), 'Catty Agent');
   assert.equal(resolveChatAgentLabel('claude', externalAgents), 'Claude Code');
   assert.equal(resolveChatAgentLabel('mystery', externalAgents), 'mystery');
+});
+
+test('/chats recovery lists only chats without a live saved host', () => {
+  const known = new Set(['host-a', 'host-b', 'local-terminal']);
+  const scope = (hostIds?: string[]) => ({ scope: { type: 'terminal' as const, targetId: 'closed', ...(hostIds ? { hostIds } : {}) } });
+  // 其他已保存服务器的会话留在该服务器的历史中。
+  assert.equal(isChatListedForRecovery(createSession('b', scope(['host-b'])), known), false);
+  assert.equal(isChatListedForRecovery(createSession('local', scope(['local-terminal'])), known), false);
+  // 没有主机身份的旧会话，以及已删除 / 临时主机的会话，不会无处可寻。
+  assert.equal(isChatListedForRecovery(createSession('legacy', scope()), known), true);
+  assert.equal(isChatListedForRecovery(createSession('deleted', scope(['host-gone'])), known), true);
+  assert.equal(isChatListedForRecovery(createSession('serial', scope(['serial-123'])), known), true);
 });

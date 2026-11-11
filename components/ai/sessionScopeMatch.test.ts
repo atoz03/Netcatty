@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { AISession } from "../../infrastructure/ai/types.ts";
-import { getSessionScopeMatchRank } from "./sessionScopeMatch.ts";
+import { getHostIdentityMatchRank, getSessionScopeMatchRank } from "./sessionScopeMatch.ts";
 
 function createSession(id: string, targetId: string, hostIds: string[]): AISession {
   return {
@@ -145,4 +145,26 @@ test("workspace scope ignores terminal chats that are not workspace members", ()
     ),
     0,
   );
+});
+
+test("host identity rank never matches across different or unknown hosts", () => {
+  assert.equal(getHostIdentityMatchRank(["host-a"], ["host-a"]), 2);
+  assert.equal(getHostIdentityMatchRank(["host-a", "host-b"], ["host-b"]), 2);
+  assert.equal(getHostIdentityMatchRank(["host-a"], ["host-b"]), 0);
+  // 无主机 id 的会话不提供给具体主机，具体主机的会话也不提供给无主机作用域。
+  assert.equal(getHostIdentityMatchRank(undefined, ["host-a"]), 0);
+  assert.equal(getHostIdentityMatchRank([], ["host-a"]), 0);
+  assert.equal(getHostIdentityMatchRank(["host-a"], []), 0);
+  // 双方都无主机：保持原有旧行为。
+  assert.equal(getHostIdentityMatchRank(undefined, undefined), 1);
+});
+
+test("legacy terminal chat without host ids does not leak into a host terminal", () => {
+  const session: AISession = {
+    id: "legacy", title: "legacy", messages: [], createdAt: 1, updatedAt: 1, agentId: "catty",
+    scope: { type: "terminal", targetId: "terminal-closed" },
+  };
+  assert.equal(getSessionScopeMatchRank(session, "terminal", "terminal-current", ["host-a"], new Set()), 0);
+  // 它自己的终端仍会显示它。
+  assert.equal(getSessionScopeMatchRank(session, "terminal", "terminal-closed", ["host-a"], new Set()), 3);
 });

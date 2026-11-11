@@ -124,14 +124,59 @@ function isScopeKeyActive(scopeKey: string, activeTargetIds: Set<string>) {
 
 /** Last live terminal/workspace target ids observed by orphan cleanup. */
 export let latestAIActiveTargetIdsSnapshot: Set<string> = new Set();
+/** 每个存活终端/工作区目标对应的已保存主机 id（已知时）。 */
+export let latestAITargetHostIdsSnapshot: ReadonlyMap<string, readonly string[]> | undefined;
 
-export function cleanupOrphanedAISessions(activeTargetIds: Set<string>) {
+/** 测试钩子：清除最近一次观测到的目标 -> 主机 id 映射。 */
+export function __resetAITargetHostIdsSnapshotForTests() {
+  latestAITargetHostIdsSnapshot = undefined;
+}
+
+/**
+ * 在终端/工作区仍存活时，为旧会话（记录主机 id 之前保存的，或在主机尚未解析的
+ * 作用域上创建的）补上稳定的主机身份，使其在目标关闭后仍跟随该已保存主机。
+ * 被存活作用域选中的会话继承该作用域的主机。已有主机 id 的会话永不改写，
+ * 避免会话被悄悄迁移到其他服务器。
+ */
+export function backfillSessionHostIds(
+  sessions: AISession[],
+  targetHostIds: ReadonlyMap<string, readonly string[]>,
+  activeSessionIdMap: Readonly<Record<string, string | null | undefined>> = {},
+): AISession[] {
+  const hostIdsBySelectedSession = new Map<string, readonly string[]>();
+  for (const [scopeKey, sessionId] of Object.entries(activeSessionIdMap)) {
+    if (!sessionId) continue;
+    const separatorIndex = scopeKey.indexOf(':');
+    if (separatorIndex === -1) continue;
+    const hostIds = targetHostIds.get(scopeKey.slice(separatorIndex + 1));
+    if (hostIds?.length && !hostIdsBySelectedSession.has(sessionId)) {
+      hostIdsBySelectedSession.set(sessionId, hostIds);
+    }
+  }
+  let changed = false;
+  const next = sessions.map((session) => {
+    if (session.scope.type === 'global') return session;
+    if (session.scope.hostIds && session.scope.hostIds.length > 0) return session;
+    const hostIds = (session.scope.targetId ? targetHostIds.get(session.scope.targetId) : undefined)
+      ?? hostIdsBySelectedSession.get(session.id);
+    if (!hostIds || hostIds.length === 0) return session;
+    changed = true;
+    return { ...session, scope: { ...session.scope, hostIds: [...new Set(hostIds)] } };
+  });
+  return changed ? next : sessions;
+}
+
+export function cleanupOrphanedAISessions(
+  activeTargetIds: Set<string>,
+  targetHostIds?: ReadonlyMap<string, readonly string[]>,
+) {
   latestAIActiveTargetIdsSnapshot = activeTargetIds;
+  if (targetHostIds) latestAITargetHostIdsSnapshot = targetHostIds;
   // Child maintenance effects run before the provider's boot effects. Keep
   // the live targets for post-hydration cleanup without adopting stale legacy
   // history as authoritative state while IndexedDB is still loading.
   if (!isAiSessionsHydrationComplete()) return;
-  const currentSessions = latestAISessionsSnapshot ?? getPersistedAiSessionsSnapshot();
+  const storedSessions = latestAISessionsSnapshot ?? getPersistedAiSessionsSnapshot();
 
   // Sessions shown by a still-live scope must be protected from cleanup
   // even when their own `scope.targetId` points at a closed terminal —
@@ -146,6 +191,12 @@ export function cleanupOrphanedAISessions(activeTargetIds: Set<string>) {
     if (!isScopeKeyActive(scopeKey, activeTargetIds)) continue;
     activeSessionIds.add(sessionId);
   }
+
+  const hostTargets = targetHostIds ?? latestAITargetHostIdsSnapshot;
+  const currentSessions = hostTargets
+    ? backfillSessionHostIds(storedSessions, hostTargets, preCleanupActiveSessionMap)
+    : storedSessions;
+  let sessionsMarked = currentSessions !== storedSessions;
 
   const nextSessionCleanup = pruneInactiveScopedSessions(
     currentSessions,
@@ -162,7 +213,6 @@ export function cleanupOrphanedAISessions(activeTargetIds: Set<string>) {
   // with a rebind affordance; the flag clears when the chat is rebound or its
   // scope target becomes live again.
   const orphanedIds = new Set(nextSessionCleanup.orphanedSessionIds);
-  let sessionsMarked = false;
   const markedSessions = currentSessions.map((session) => {
     if (orphanedIds.has(session.id)) {
       if (session.scopeDangling) return session;
@@ -222,8 +272,21 @@ export function cleanupOrphanedAISessions(activeTargetIds: Set<string>) {
  * Maximum number of sessions kept in the persisted store. IndexedDB has no
  * shared byte quota, so retention is a plain count cap; the cap only exists
  * to keep history from growing without bound.
+ *
+ * 该上限只作用于未绑定已保存主机的会话（全局会话、旧版无 hostIds 的会话）。
+ * 绑定到已保存主机的会话是该主机的长期归档：不按数量淘汰，也不截断消息，
+ * 只能由用户显式删除。
  */
-const MAX_STORED_SESSIONS = 1000;
+export const MAX_STORED_SESSIONS = 1000;
+
+/**
+ * 会话是否绑定到已保存主机（`scope.hostIds` 非空的终端/工作区会话）。
+ * 绑定主机的会话完整保留，存储层不对其做任何自动淘汰或截断。
+ */
+export function isHostBoundAISession(session: AISession): boolean {
+  if (session.scope?.type === 'global') return false;
+  return !!session.scope?.hostIds && session.scope.hostIds.length > 0;
+}
 
 /**
  * Per-session message cap, read from user settings (clamped to 50–2000,
@@ -247,18 +310,27 @@ export function readAiSessionMessageCap(): number {
  * Only affects what is persisted — the in-memory state retains all messages
  * until the session is reloaded.
  *
+ * 绑定已保存主机的会话（见 `isHostBoundAISession`）原样保留：不计入数量上限，
+ * 也不按 `messageCap` 截断。模型上下文长度由上下文压缩单独处理，与归档历史无关。
+ * 以下两条只作用于未绑定主机的会话：
  * - Keeps only the MAX_STORED_SESSIONS most-recently-updated sessions.
  * - Trims each session's messages to the last `messageCap` messages.
  */
 export function pruneSessionsForStorage(
   sessions: AISession[],
   messageCap: number = readAiSessionMessageCap(),
+  maxUnboundSessions: number = MAX_STORED_SESSIONS,
 ): AISession[] {
   // Sort by updatedAt descending so we keep the newest
   const sorted = [...sessions].sort((a, b) => b.updatedAt - a.updatedAt);
-  const limited = sorted.slice(0, MAX_STORED_SESSIONS);
+  let keptUnbound = 0;
+  const limited = sorted.filter((session) => {
+    if (isHostBoundAISession(session)) return true;
+    keptUnbound += 1;
+    return keptUnbound <= maxUnboundSessions;
+  });
   return limited.map(s => {
-    if (s.messages.length > messageCap) {
+    if (!isHostBoundAISession(s) && s.messages.length > messageCap) {
       // Do not start the retained tail with a tool result whose assistant call
       // was just trimmed. Reuse the same tool-safe boundary logic as context
       // compaction, even if that retains a few more than the nominal cap.
@@ -296,6 +368,7 @@ export function prepareRestoredSessions(sessions: AISession[], syncEnabled: bool
 // to defend a shared quota against the cost of serializing the whole store on
 // every write, and both are gone with per-record writes. Only a count cap
 // (MAX_STORED_SESSIONS) and the per-session message cap remain.
+// 两者都只作用于未绑定已保存主机的会话。
 
 /** Last set of sessions known to be persisted, for per-record diffing. */
 let lastPersistedSessionsById: Map<string, AISession> = new Map();
@@ -450,6 +523,7 @@ function writeImmediateBackupGeneration(json: string) {
     // Backup failures must never break chat persistence.
   }
 }
+
 
 /**
  * Perf (#4121): the exact same immutable sessions array is often written

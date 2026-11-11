@@ -602,6 +602,7 @@ function TerminalLayerSidePanelSectionInner({ ctx }: { ctx: SidePanelContext }) 
     const AISidePanelStateRoot = ctx.AISidePanelStateRoot as
       | React.ComponentType<{
         validAIScopeTargetIds: Set<string>;
+        aiScopeHostIdsByTargetId?: ReadonlyMap<string, readonly string[]>;
         workspaces: import('../../types').Workspace[];
         children: React.ReactNode;
       }>
@@ -610,6 +611,7 @@ function TerminalLayerSidePanelSectionInner({ ctx }: { ctx: SidePanelContext }) 
     return (
       <AISidePanelStateRoot
         validAIScopeTargetIds={ctx.validAIScopeTargetIds as Set<string>}
+        aiScopeHostIdsByTargetId={ctx.aiScopeHostIdsByTargetId as ReadonlyMap<string, readonly string[]> | undefined}
         workspaces={ctx.workspaces as import('../../types').Workspace[]}
       >
         {null}

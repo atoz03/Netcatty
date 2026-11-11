@@ -617,6 +617,7 @@ function SidePanelAiSlotInner({
     onOpenVaultSnippetFromChat,
     onSetWorkspaceAnchorChat,
     validAIScopeTargetIds,
+    aiScopeHostIdsByTargetId,
   } = ctx;
   const workspaces = ctx.workspaces as Workspace[];
 
@@ -643,6 +644,7 @@ function SidePanelAiSlotInner({
     return (
       <AISidePanelStateRoot
         validAIScopeTargetIds={validAIScopeTargetIds}
+        aiScopeHostIdsByTargetId={aiScopeHostIdsByTargetId as ReadonlyMap<string, readonly string[]> | undefined}
         workspaces={workspaces}
       >
         {null}
@@ -660,6 +662,7 @@ function SidePanelAiSlotInner({
   return (
     <AISidePanelStateRoot
       validAIScopeTargetIds={validAIScopeTargetIds}
+      aiScopeHostIdsByTargetId={aiScopeHostIdsByTargetId as ReadonlyMap<string, readonly string[]> | undefined}
       workspaces={workspaces}
     >
       <AIChatPanelsHost

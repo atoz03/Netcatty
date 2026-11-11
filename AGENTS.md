@@ -148,6 +148,7 @@ smoke coverage. Packaged-resource changes must also pass `npm run pack:dir`.
 ## Data & Storage
 - Persisted keys: see `storageKeys.ts`. Use `localStorageAdapter` for all reads/writes.
 - Seed data: `config/defaultData.ts`; terminal themes: `config/terminalThemes.ts`.
+- **AI 会话历史身份**：会话只保存在本地（IndexedDB，外加磁盘备份镜像），绝不写入 SSH 服务器。历史跟随 `scope.hostIds` 中的已保存主机 id，而不是终端/工作区 id（后者在重连和重启后会变化）。会话只提供给主机有交集的作用域（`components/ai/sessionScopeMatch.ts`）。已关闭终端的活动指针为 `/chats` 恢复而保留，但不能把会话从存活终端中隐藏。维护逻辑会在目标存活时为旧会话补上主机 id。绑定已保存主机的会话是完整归档：不按数量淘汰、不截断消息，只能由用户显式删除；数量上限和每会话消息上限只作用于未绑定主机的会话（`pruneSessionsForStorage`）。模型上下文长度由上下文压缩单独处理。
 - **Temporary files**: All temporary files (e.g., SFTP downloaded files for external editing) must be written to Netcatty's dedicated temp directory via `tempDirBridge.getTempFilePath(fileName)`. Do not write directly to `os.tmpdir()`. This ensures proper cleanup and user visibility in Settings > System.
 
 ## Terminal Side Panel Splits

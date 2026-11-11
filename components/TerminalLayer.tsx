@@ -20,6 +20,7 @@ import {
   useCodingCliSessionSignals,
 } from '../application/state/codingCliSessionSignalController';
 import { collectSessionIds } from '../domain/workspace';
+import { buildAIScopeHostIdsByTargetId } from '../domain/aiScopeHostIds';
 import { isPluginHostProtocol } from '../domain/pluginConnection';
 import { isSameSftpHostSelection } from '../domain/sftpTerminalIdentity';
 
@@ -1478,6 +1479,13 @@ const TerminalLayerInner: React.FC<TerminalLayerProps> = ({
     return ids;
   }, [sessions, workspaces]);
 
+  // 每个存活 AI 作用域目标对应的已保存主机。AI 历史以主机 id 为键（重连、重启后不变），
+  // 维护逻辑借此在旧会话的终端仍存活时为其补上主机身份。
+  const aiScopeHostIdsByTargetId = useMemo(
+    () => buildAIScopeHostIdsByTargetId(sessions, workspaces),
+    [sessions, workspaces],
+  );
+
   useEffect(() => {
     pruneTerminalTabMemoryState({
       lastSidePanelTabRef,
@@ -2840,6 +2848,7 @@ const TerminalLayerInner: React.FC<TerminalLayerProps> = ({
     X,
     Zap,
     validAIScopeTargetIds,
+    aiScopeHostIdsByTargetId,
     validSessionActivityIds,
     workspaceBroadcastHandlersRef,
     workspaceById,

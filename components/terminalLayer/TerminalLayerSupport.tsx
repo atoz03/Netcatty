@@ -311,6 +311,8 @@ const EMPTY_WORKSPACES: Workspace[] = [];
 
 interface AIStateMaintenanceHostProps {
   validAIScopeTargetIds: Set<string>;
+  /** 每个存活终端/工作区目标对应的已保存主机 id。 */
+  aiScopeHostIdsByTargetId?: ReadonlyMap<string, readonly string[]>;
   workspaces?: Workspace[] | null;
 }
 
@@ -328,6 +330,7 @@ AIStateProvider.displayName = 'AIStateProvider';
 
 const AIStateMaintenanceHostInner: React.FC<AIStateMaintenanceHostProps> = ({
   validAIScopeTargetIds,
+  aiScopeHostIdsByTargetId,
   workspaces: workspacesProp,
 }) => {
   const aiConfig = useContext(AIConfigContext);
@@ -414,8 +417,9 @@ const AIStateMaintenanceHostInner: React.FC<AIStateMaintenanceHostProps> = ({
     previousSessionWorkspaceRef.current = new Map(workspaces.flatMap((workspace) => (
       collectSessionIds(workspace.root).map((sessionId) => [sessionId, workspace.id] as const)
     )));
-    cleanupOrphanedSessions(validAIScopeTargetIds);
+    cleanupOrphanedSessions(validAIScopeTargetIds, aiScopeHostIdsByTargetId);
   }, [
+    aiScopeHostIdsByTargetId,
     cleanupOrphanedSessions,
     handoffDissolvedWorkspaceScope,
     retargetWorkspaceActiveChatForMemberLoss,
@@ -432,18 +436,21 @@ AIStateMaintenanceHost.displayName = 'AIStateMaintenanceHost';
 
 interface AISidePanelStateRootProps {
   validAIScopeTargetIds: Set<string>;
+  aiScopeHostIdsByTargetId?: ReadonlyMap<string, readonly string[]>;
   workspaces?: Workspace[] | null;
   children: React.ReactNode;
 }
 
 const AISidePanelStateRootInner: React.FC<AISidePanelStateRootProps> = ({
   validAIScopeTargetIds,
+  aiScopeHostIdsByTargetId,
   workspaces,
   children,
 }) => (
   <AIStateProvider>
     <AIStateMaintenanceHost
       validAIScopeTargetIds={validAIScopeTargetIds}
+      aiScopeHostIdsByTargetId={aiScopeHostIdsByTargetId}
       workspaces={workspaces}
     />
     {children}

@@ -20,6 +20,8 @@ import {
   setLatestAIActiveSessionMapSnapshot,
   setLatestAISessionsSnapshot,
   rebindActiveSessionMap,
+  backfillSessionHostIds,
+  __resetAITargetHostIdsSnapshotForTests,
 } from './aiStateSnapshots';
 
 // These unit tests exercise maintenance after boot hydration.
@@ -845,5 +847,173 @@ test('rewriting the same sessions array skips re-serialization and store writes'
   } finally {
     idb.restore();
     __resetIdbPersistenceForTests();
+  }
+});
+
+function hostSession(id: string, updatedAt: number, hostIds?: string[]): AISession {
+  return {
+    ...makeSession(id, updatedAt, []),
+    scope: { type: 'terminal', targetId: `t-${id}`, ...(hostIds ? { hostIds } : {}) },
+  };
+}
+
+function toolHeavyMessages(prefix: string, turns: number) {
+  // 每轮：user -> assistant(tool call) -> tool result -> assistant 回复。
+  return Array.from({ length: turns }, (_, turn) => [
+    { id: `${prefix}-u${turn}`, role: 'user', content: `q${turn}`, timestamp: turn * 4 },
+    {
+      id: `${prefix}-call${turn}`, role: 'assistant', content: '', timestamp: turn * 4 + 1,
+      toolCalls: [{ id: `${prefix}-tc${turn}`, name: 'terminal_execute', arguments: {} }],
+    },
+    {
+      id: `${prefix}-res${turn}`, role: 'tool', content: '', timestamp: turn * 4 + 2,
+      toolResults: [{ toolCallId: `${prefix}-tc${turn}`, content: `out${turn}` }],
+    },
+    { id: `${prefix}-a${turn}`, role: 'assistant', content: `a${turn}`, timestamp: turn * 4 + 3 },
+  ]).flat();
+}
+
+test('host-bound chats are archived in full: more than 1000 chats per host are never count-evicted', () => {
+  const hostChats = Array.from({ length: 1205 }, (_, index) =>
+    hostSession(`a-${index}`, index + 1, ['host-a']));
+  const otherHost = [hostSession('b-old', 0, ['host-b'])];
+  const unbound = Array.from({ length: 1003 }, (_, index) => hostSession(`legacy-${index}`, 5000 + index));
+  const persisted = pruneSessionsForStorage([...hostChats, ...otherHost, ...unbound]);
+  const ids = new Set(persisted.map((session) => session.id));
+  for (const session of [...hostChats, ...otherHost]) {
+    assert.ok(ids.has(session.id), `${session.id} must be retained`);
+  }
+  // 未绑定主机的会话仍按原上限保留最新的 1000 个。
+  assert.equal(persisted.filter((session) => session.id.startsWith('legacy-')).length, 1000);
+  assert.equal(ids.has('legacy-0'), false);
+  assert.equal(ids.has('legacy-1002'), true);
+});
+
+test('host-bound chats keep every message beyond the message cap, including tool pairs and compaction state', () => {
+  const messages = toolHeavyMessages('h', 600); // 2400 条，超过最大 messageCap 2000
+  const hostChat: AISession = {
+    ...hostSession('host-long', 10, ['host-a']),
+    messages: messages as never,
+    contextCompaction: { compactedMessageCount: 2100 } as never,
+  };
+  const unboundChat = { ...hostSession('unbound-long', 9), messages: messages as never };
+  const [keptHost, trimmedUnbound] = pruneSessionsForStorage([hostChat, unboundChat], 50);
+  assert.equal(keptHost.id, 'host-long');
+  assert.equal(keptHost, hostChat, 'host-bound chat is persisted unchanged');
+  assert.equal(keptHost.messages.length, 2400);
+  assert.equal(keptHost.contextCompaction?.compactedMessageCount, 2100);
+  // 未绑定会话仍按上限截断，且不会以孤立的 tool 结果开头。
+  assert.equal(trimmedUnbound.id, 'unbound-long');
+  assert.ok(trimmedUnbound.messages.length < 2400);
+  assert.notEqual(trimmedUnbound.messages[0].role, 'tool');
+});
+
+test('restored and imported host history is not truncated on load', async () => {
+  const { prepareRestoredSessions } = await import('./aiStateSnapshots');
+  const hostChat: AISession = { ...hostSession('host-restored', 1, ['host-a']), messages: toolHeavyMessages('r', 300) as never };
+  const restored = prepareRestoredSessions([hostChat], false);
+  assert.equal(restored[0], hostChat);
+  assert.equal(restored[0].messages.length, 1200);
+});
+
+test('writeSessionsForStorage persists full host archives to IndexedDB and still honors explicit deletion', async (t) => {
+  const { __resetIdbPersistenceForTests, __flushIdbWritesForTests, writeSessionsForStorage, getPersistedAiSessionsSnapshot } =
+    await import('./aiStateSnapshots');
+  const idb = installFakeIndexedDb();
+  __resetIdbPersistenceForTests();
+  t.mock.method(localStorageAdapter, 'read', () => null);
+  t.mock.method(localStorageAdapter, 'readNumber', () => 50);
+  t.mock.method(localStorageAdapter, 'readString', () => null);
+  t.mock.method(localStorageAdapter, 'writeString', () => true);
+  const previousWindow = globalThis.window;
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { dispatchEvent: () => true, netcatty: {} } });
+  try {
+    const hostChats = Array.from({ length: 1001 }, (_, index) => ({
+      ...hostSession(`a-${index}`, index + 1, ['host-a']),
+      messages: (index === 1000 ? toolHeavyMessages('big', 30) : []) as never,
+    }));
+    writeSessionsForStorage(hostChats);
+    await __flushIdbWritesForTests();
+    const stored = idb.db.dumpStore('sessions') as AISession[];
+    assert.equal(stored.length, 1001);
+    assert.equal(stored.find((session) => session.id === 'a-1000')?.messages.length, 120);
+
+    // 用户显式删除仍然生效。
+    const remaining = hostChats.filter((session) => session.id !== 'a-0');
+    writeSessionsForStorage(remaining, { deletedSessionIds: ['a-0'] });
+    await __flushIdbWritesForTests();
+    assert.equal((idb.db.dumpStore('sessions') as AISession[]).some((session) => session.id === 'a-0'), false);
+    assert.equal(getPersistedAiSessionsSnapshot().length, 1000);
+  } finally {
+    __resetIdbPersistenceForTests();
+    idb.restore();
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: previousWindow });
+  }
+});
+
+test('backfillSessionHostIds gives legacy chats the host of their live target or selecting scope only', () => {
+  const ownTarget = { ...hostSession('own', 1), scope: { type: 'terminal' as const, targetId: 'term-live' } };
+  const resumed = { ...hostSession('resumed', 2), scope: { type: 'terminal' as const, targetId: 'term-closed' } };
+  const unknown = { ...hostSession('unknown', 3), scope: { type: 'terminal' as const, targetId: 'term-gone' } };
+  const alreadyBound = hostSession('bound', 4, ['host-b']);
+  const workspaceChat = { ...hostSession('ws', 5), scope: { type: 'workspace' as const, targetId: 'ws-live' } };
+  const sessions = [ownTarget, resumed, unknown, alreadyBound, workspaceChat];
+  const targetHostIds = new Map<string, string[]>([
+    ['term-live', ['host-a']],
+    ['term-other', ['host-c']],
+    ['t-bound', ['host-z']],
+    ['ws-live', ['host-a', 'host-c']],
+  ]);
+  const next = backfillSessionHostIds(sessions, targetHostIds, {
+    'terminal:term-other': 'resumed',
+    // 已关闭终端保留的指针不携带存活主机信息。
+    'terminal:term-gone-too': 'unknown',
+  });
+  const byId = new Map(next.map((session) => [session.id, session]));
+  assert.deepEqual(byId.get('own')?.scope.hostIds, ['host-a']);
+  assert.deepEqual(byId.get('resumed')?.scope.hostIds, ['host-c']);
+  assert.equal(byId.get('unknown')?.scope.hostIds, undefined);
+  // 已有主机身份永不改写（不会在主机间悄悄迁移）。
+  assert.equal(byId.get('bound'), alreadyBound);
+  assert.deepEqual(byId.get('ws')?.scope.hostIds, ['host-a', 'host-c']);
+  // 无变化时保持引用不变，维护逻辑不会重写存储。
+  assert.equal(backfillSessionHostIds(next, targetHostIds, {}), next);
+});
+
+test('orphan cleanup persists the host identity of legacy chats so they follow the host after close', async (t) => {
+  const { __resetIdbPersistenceForTests, __flushIdbWritesForTests, getPersistedAiSessionsSnapshot } =
+    await import('./aiStateSnapshots');
+  __resetIdbPersistenceForTests();
+  const previousSessions = latestAISessionsSnapshot;
+  const previousActiveSessionMap = latestAIActiveSessionMapSnapshot;
+  t.mock.method(localStorageAdapter, 'read', () => null);
+  t.mock.method(localStorageAdapter, 'readString', () => null);
+  t.mock.method(localStorageAdapter, 'write', () => true);
+  t.mock.method(localStorageAdapter, 'writeString', () => true);
+  const previousWindow = globalThis.window;
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: { dispatchEvent: () => true, netcatty: {} },
+  });
+  const legacy = { ...hostSession('legacy-live', 1), scope: { type: 'terminal' as const, targetId: 'term-1' } };
+  setLatestAISessionsSnapshot([legacy]);
+  setLatestAIActiveSessionMapSnapshot({ 'terminal:term-1': 'legacy-live' });
+  try {
+    cleanupOrphanedAISessions(new Set(['term-1']), new Map([['term-1', ['host-a']]]));
+    assert.deepEqual(latestAISessionsSnapshot?.[0]?.scope.hostIds, ['host-a']);
+    // 之后未显式传入映射的调用（导入 / 水合后重放）复用最近一次的主机映射；
+    // 关闭终端后主机身份仍保留。
+    cleanupOrphanedAISessions(new Set());
+    const persisted = latestAISessionsSnapshot?.[0];
+    assert.equal(persisted?.scopeDangling, true);
+    assert.deepEqual(persisted?.scope.hostIds, ['host-a']);
+    await __flushIdbWritesForTests();
+    assert.deepEqual(getPersistedAiSessionsSnapshot()[0]?.scope.hostIds, ['host-a']);
+  } finally {
+    __resetIdbPersistenceForTests();
+    __resetAITargetHostIdsSnapshotForTests();
+    setLatestAISessionsSnapshot(previousSessions ?? []);
+    setLatestAIActiveSessionMapSnapshot(previousActiveSessionMap ?? {});
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: previousWindow });
   }
 });

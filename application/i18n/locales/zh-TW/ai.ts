@@ -653,7 +653,7 @@ export const zhTWAiMessages: Messages = {
   'ai.chatShortcuts.selectionAction.description': '在終端裡選取文字後顯示 AI 快捷按鈕。',
   'ai.chatHistory.title': '聊天歷史',
   'ai.chatHistory.messageCap': '每個會話保留的訊息數',
-  'ai.chatHistory.messageCap.description': '每個會話最多儲存的訊息數（50–2000）。調低後會在下一次寫入時從儲存中捨棄最舊的訊息。數值越大，儲存空間與雲端同步體積也越大。',
+  'ai.chatHistory.messageCap.description': '未綁定已儲存主機的會話最多儲存的訊息數（50–2000）。已儲存主機的會話一律完整保留。調低後會在下一次寫入時從儲存中捨棄其他會話最舊的訊息。數值越大，儲存空間與雲端同步體積也越大。',
   'ai.chatHistory.messageCap.unit': '則訊息',
 
   // AI Error

@@ -688,6 +688,7 @@ const AIChatPanelsHostInner: React.FC<AIChatPanelsHostProps> = ({
                     updateProvider={aiConfig.updateProvider}
                     globalPermissionMode={aiConfig.globalPermissionMode}
                     setGlobalPermissionMode={aiConfig.setGlobalPermissionMode}
+                    aiSessionScopeMode={aiConfig.aiSessionScopeMode}
                     commandBlocklist={aiConfig.commandBlocklist}
                     commandTimeout={aiConfig.commandTimeout}
                     responseIdleTimeout={aiConfig.responseIdleTimeout}

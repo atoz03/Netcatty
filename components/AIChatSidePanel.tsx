@@ -77,6 +77,7 @@ import {
   type GlobalManagerScopeTarget,
 } from './ai/globalSessionManagerRows';
 import { resolveInheritedAIActiveSessionId } from '../domain/aiWorkspaceScopeInherit';
+import { resolveAgentScopeSessions } from '../domain/aiSessionScopeSessions';
 import { resolveUndoLastTurnBoundary } from '../domain/aiUndoLastTurn';
 import { aiSessionIdSetEqual, exactScopeAISessionsEqual } from '../domain/aiSessionsForScope';
 import { buildExternalAgentHistoryMessagesForBridge } from './ai/externalAgentHistory';
@@ -350,6 +351,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
   updateProvider,
   globalPermissionMode,
   setGlobalPermissionMode,
+  aiSessionScopeMode = 'current',
   commandBlocklist,
   commandTimeout,
   responseIdleTimeout,
@@ -737,15 +739,27 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     return undefined;
   }, [terminalSessions, scopeType, scopeTargetId]);
 
+  // Which sessions tools may target. In `all-open` mode the app-wide list
+  // replaces the scope list, so this chat can drive tabs opened elsewhere; the
+  // chat's own scope (and its history binding) stays unchanged.
+  const agentScopeSessions = useMemo(
+    () => resolveAgentScopeSessions({
+      mode: aiSessionScopeMode,
+      scopedSessions: terminalSessions,
+      allOpenSessions: appTerminalSessions,
+    }),
+    [aiSessionScopeMode, terminalSessions, appTerminalSessions],
+  );
+
   useEffect(() => {
     if (!isVisible) return;
     const bridge = getNetcattyBridge();
     if (!bridge?.aiMcpUpdateSessions) return;
 
     return scheduleWhenAiComposerIdle(() => {
-      void bridge.aiMcpUpdateSessions(terminalSessions, activeSessionId ?? undefined);
+      void bridge.aiMcpUpdateSessions(agentScopeSessions, activeSessionId ?? undefined);
     }, { initialDelayMs: 250 });
-  }, [isVisible, terminalSessions, activeSessionId]);
+  }, [isVisible, agentScopeSessions, activeSessionId]);
 
   // Workspace maintenance can retarget an inherited chat earlier in this same
   // passive-effect flush. Before clearing a selection, recheck its membership
@@ -1927,7 +1941,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
             existingSessionId: existingExternalSessionId,
             updateExternalSessionId: updateSessionExternalSessionId,
             historyMessages: buildExternalAgentHistoryMessagesForBridge(currentSession?.messages ?? [], existingExternalSessionId),
-            terminalSessions,
+            terminalSessions: agentScopeSessions,
             defaultTargetSession,
             providers,
             selectedAgentModel: sendSelectedAgentModel,
@@ -1959,7 +1973,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
           commandBlocklist,
           commandTimeout,
           responseIdleTimeout,
-          terminalSessions,
+          terminalSessions: agentScopeSessions,
           webSearchConfig,
           getExecutorContext: () => buildExecutorContextForScope(toolScope),
           autoTitleSession,
@@ -1981,7 +1995,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     createSession, addMessageToSession, updateMessageById, updateLastMessage,
     setStreamingForScope,
     sendToExternalAgent, sendToCattyAgent, reportStreamError, autoTitleSession, t,
-    abortControllersRef, terminalSessions, defaultTargetSession, providers, selectedAgentModel, updateSessionExternalSessionId,
+    abortControllersRef, agentScopeSessions, defaultTargetSession, providers, selectedAgentModel, updateSessionExternalSessionId,
     scopeType, scopeTargetId, scopeHostIds, scopeLabel, commandBlocklist, commandTimeout, responseIdleTimeout, webSearchConfig, buildExecutorContextForScope,
     toolIntegrationMode,
     clearScopeDraft, showScopeSessionView, setActiveSessionId,
@@ -2026,7 +2040,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
           commandBlocklist,
           commandTimeout,
           responseIdleTimeout,
-          terminalSessions,
+          terminalSessions: agentScopeSessions,
           webSearchConfig,
           getExecutorContext: () => buildExecutorContextForScope({
             type: scopeType,
@@ -2063,7 +2077,7 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
     scopeType,
     sendToCattyAgent,
     setStreamingForScope,
-    terminalSessions,
+    agentScopeSessions,
     webSearchConfig,
   ]);
 
@@ -2533,6 +2547,7 @@ const AI_CHAT_SIDE_PANEL_AI_STATE_KEYS = [
   'updateProvider',
   'globalPermissionMode',
   'setGlobalPermissionMode',
+  'aiSessionScopeMode',
   'commandBlocklist',
   'commandTimeout',
   'responseIdleTimeout',

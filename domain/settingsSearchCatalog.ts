@@ -1241,6 +1241,15 @@ export const SETTINGS_SEARCH_CATALOG: readonly SettingsSearchEntry[] = [
     keywords: ["confirm", "observer", "auto", "权限"],
   },
   {
+    id: "ai-safety-session-scope",
+    tab: "ai",
+    aiSubTab: "safety",
+    labelKey: "ai.safety.sessionScope",
+    descriptionKey: "ai.safety.sessionScope.description",
+    sectionKey: "ai.safety.title",
+    keywords: ["scope", "all open", "sessions", "tabs", "host_open", "作用域", "所有会话", "全部会话"],
+  },
+  {
     id: "ai-safety-command-timeout",
     tab: "ai",
     aiSubTab: "safety",

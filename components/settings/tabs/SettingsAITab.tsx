@@ -12,6 +12,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type {
   AIPermissionMode,
   AIProviderId,
+  AISessionScopeMode,
   AIToolIntegrationMode,
   CursorAuthMode,
   ExternalAgentConfig,
@@ -150,6 +151,8 @@ interface SettingsAITabProps {
   setActiveModelId: (id: string) => void;
   globalPermissionMode: AIPermissionMode;
   setGlobalPermissionMode: (mode: AIPermissionMode) => void;
+  aiSessionScopeMode: AISessionScopeMode;
+  setAiSessionScopeMode: (mode: AISessionScopeMode) => void;
   toolIntegrationMode: AIToolIntegrationMode;
   setToolIntegrationMode: (mode: AIToolIntegrationMode) => void;
   externalAgents: ExternalAgentConfig[];
@@ -189,6 +192,8 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
   setActiveModelId,
   globalPermissionMode,
   setGlobalPermissionMode,
+  aiSessionScopeMode,
+  setAiSessionScopeMode,
   toolIntegrationMode,
   setToolIntegrationMode,
   externalAgents,
@@ -1473,6 +1478,8 @@ const SettingsAITab: React.FC<SettingsAITabProps> = ({
           <SafetySettings
             globalPermissionMode={globalPermissionMode}
             setGlobalPermissionMode={setGlobalPermissionMode}
+            aiSessionScopeMode={aiSessionScopeMode}
+            setAiSessionScopeMode={setAiSessionScopeMode}
             commandBlocklist={commandBlocklist}
             setCommandBlocklist={setCommandBlocklist}
             commandTimeout={commandTimeout}

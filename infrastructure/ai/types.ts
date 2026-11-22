@@ -257,6 +257,27 @@ export interface AISessionScope {
 export type AIPermissionMode = 'observer' | 'confirm' | 'auto';
 export type AIToolIntegrationMode = 'mcp' | 'skills';
 
+/**
+ * Which terminal sessions the built-in agent may address with terminal/SFTP tools.
+ *
+ * - `current`: only the sessions of the chat's own scope (that terminal, or that
+ *   workspace's member terminals). This is the historical, least-privilege default.
+ * - `all-open`: also expose every live terminal in the app, so one chat can drive
+ *   tabs the user opened elsewhere without rebinding the chat.
+ *
+ * This only widens what tools can target. The chat's history binding
+ * (`AISessionScope.hostIds`) is unaffected, and widening stays approval-gated in
+ * confirm mode / blocked in observer mode.
+ */
+export type AISessionScopeMode = 'current' | 'all-open';
+export const AI_SESSION_SCOPE_MODES: readonly AISessionScopeMode[] = ['current', 'all-open'];
+export const DEFAULT_AI_SESSION_SCOPE_MODE: AISessionScopeMode = 'current';
+
+export function isAISessionScopeMode(value: unknown): value is AISessionScopeMode {
+  return typeof value === 'string'
+    && (AI_SESSION_SCOPE_MODES as readonly string[]).includes(value);
+}
+
 export interface HostAIPermission {
   hostId: string;
   mode: AIPermissionMode;
@@ -408,6 +429,7 @@ export interface AISettings {
   activeModelId: string;
   globalPermissionMode: AIPermissionMode;
   toolIntegrationMode: AIToolIntegrationMode;
+  aiSessionScopeMode: AISessionScopeMode;
   externalAgents: ExternalAgentConfig[];
   defaultAgentId: string;
   commandBlocklist: string[];    // global command blocklist patterns
@@ -445,6 +467,7 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
   activeModelId: '',
   globalPermissionMode: 'confirm',
   toolIntegrationMode: 'mcp',
+  aiSessionScopeMode: DEFAULT_AI_SESSION_SCOPE_MODE,
   externalAgents: [],
   defaultAgentId: 'catty',
   commandBlocklist: [...DEFAULT_COMMAND_BLOCKLIST],

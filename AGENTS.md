@@ -100,7 +100,9 @@ Placement rules (`resolveAgentKinds` in `toolSurfaces.cjs`):
 | Vault bridge | `electron/bridges/aiBridge/vaultAgentBridge.cjs` + `infrastructure/ai/vaultAgentBridgeClient.ts` | Renderer vault state; **never** returns password/privateKey |
 | AI context | `buildAITerminalSessionInfo` + `useTerminalAiContexts` | Per-session `hostChain` + `activePortForwards`; mirrored in `getContext` and Catty system prompt |
 
-**Policy:** SFTP writes/transfers, `portforward_start`, and `host_notes_set` require confirm-mode approval. Observer mode blocks writes.
+**Policy:** SFTP writes/transfers, `portforward_start`, `host_notes_set`, and `vault_host_open` (`host_open`) require confirm-mode approval. Observer mode blocks writes.
+
+**Agent scope:** a chat's tool scope is the session list its panel pushes via `aiMcpUpdateSessions(…, chatSessionId)` — that terminal, or that workspace's member terminals. `host_open` is the only way a terminal/workspace-scoped chat reaches a host outside it, and the resulting tab is visible plus approval-gated, so scope grows only through user-observable actions. Settings → AI → Safety → **AI Session Scope** (`STORAGE_KEY_AI_SESSION_SCOPE_MODE`, `resolveAgentScopeSessions` in `domain/aiSessionScopeSessions.ts`) can opt into `all-open`, which merges every live terminal into that push. It never rewrites `scope.hostIds`, so chat history binding is unaffected.
 
 **Handles:** `ToolOutputStore` persists across turns per chat session; cleared on chat session delete. Large `sftp.read` results spill to `tool_output_read`.
 

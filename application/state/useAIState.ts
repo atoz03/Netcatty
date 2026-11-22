@@ -5,6 +5,7 @@ import {
   STORAGE_KEY_AI_ACTIVE_PROVIDER,
   STORAGE_KEY_AI_ACTIVE_MODEL,
   STORAGE_KEY_AI_PERMISSION_MODE,
+  STORAGE_KEY_AI_SESSION_SCOPE_MODE,
   STORAGE_KEY_AI_TOOL_INTEGRATION_MODE,
   STORAGE_KEY_AI_HOST_PERMISSIONS,
   STORAGE_KEY_AI_EXTERNAL_AGENTS,
@@ -31,6 +32,7 @@ import type {
   AISessionContextCompaction,
   AISession,
   AIPermissionMode,
+  AISessionScopeMode,
   AIToolIntegrationMode,
   ProviderConfig,
   HostAIPermission,
@@ -40,8 +42,10 @@ import type {
   WebSearchConfig,
 } from '../../infrastructure/ai/types';
 import {
+  DEFAULT_AI_SESSION_SCOPE_MODE,
   DEFAULT_COMMAND_TIMEOUT_SECONDS,
   DEFAULT_RESPONSE_IDLE_TIMEOUT_SECONDS,
+  isAISessionScopeMode,
   normalizeCommandTimeoutSeconds,
   normalizeResponseIdleTimeoutSeconds,
 } from '../../infrastructure/ai/types';
@@ -115,6 +119,7 @@ import {
   readLiveSessionsArray,
 } from './aiSessionsBackup';
 import { AI_STATE_CHANGED_EVENT, emitAIStateChanged } from './aiStateEvents';
+import { useStoredString } from './useStoredString';
 import {
   persistCommandBlocklistSetting,
   readCommandBlocklistSetting,
@@ -200,6 +205,14 @@ export function useAIState() {
   );
   const [maxIterations, setMaxIterationsRaw] = useState<number>(() =>
     localStorageAdapter.readNumber(STORAGE_KEY_AI_MAX_ITERATIONS) ?? 20
+  );
+  // Which terminal sessions this app's agent may address. Lives in localStorage
+  // through useStoredString so the settings window and the chat panel stay in
+  // sync without a reload.
+  const [aiSessionScopeMode, setAiSessionScopeMode] = useStoredString<AISessionScopeMode>(
+    STORAGE_KEY_AI_SESSION_SCOPE_MODE,
+    DEFAULT_AI_SESSION_SCOPE_MODE,
+    isAISessionScopeMode,
   );
 
   // ── Sessions ──
@@ -1769,6 +1782,8 @@ export function useAIState() {
     setWebSearchConfig,
     quickMessages,
     setQuickMessages,
+    aiSessionScopeMode,
+    setAiSessionScopeMode,
     // sessions / activeSessionIdMap / draftsByScope / panelViewByScope live in
     // aiSessionsStore so streaming updates do not rebuild this config object.
     setActiveSessionId,
@@ -1836,6 +1851,8 @@ export function useAIState() {
     setWebSearchConfig,
     quickMessages,
     setQuickMessages,
+    aiSessionScopeMode,
+    setAiSessionScopeMode,
     setActiveSessionId,
     ensureDraftForScope,
     updateDraft,

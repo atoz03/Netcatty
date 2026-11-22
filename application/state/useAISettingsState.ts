@@ -5,6 +5,7 @@ import {
   STORAGE_KEY_AI_ACTIVE_PROVIDER,
   STORAGE_KEY_AI_ACTIVE_MODEL,
   STORAGE_KEY_AI_PERMISSION_MODE,
+  STORAGE_KEY_AI_SESSION_SCOPE_MODE,
   STORAGE_KEY_AI_TOOL_INTEGRATION_MODE,
   STORAGE_KEY_AI_EXTERNAL_AGENTS,
   STORAGE_KEY_AI_DEFAULT_AGENT,
@@ -23,14 +24,17 @@ import type { AIQuickMessage } from '../../infrastructure/ai/quickMessages';
 import { sanitizeQuickMessages } from '../../infrastructure/ai/quickMessages';
 import type {
   AIPermissionMode,
+  AISessionScopeMode,
   AIToolIntegrationMode,
   ExternalAgentConfig,
   ProviderConfig,
   WebSearchConfig,
 } from '../../infrastructure/ai/types';
 import {
+  DEFAULT_AI_SESSION_SCOPE_MODE,
   DEFAULT_COMMAND_TIMEOUT_SECONDS,
   DEFAULT_RESPONSE_IDLE_TIMEOUT_SECONDS,
+  isAISessionScopeMode,
   normalizeCommandTimeoutSeconds,
   normalizeResponseIdleTimeoutSeconds,
 } from '../../infrastructure/ai/types';
@@ -42,6 +46,7 @@ import {
 import { AI_STATE_CHANGED_EVENT, emitAIStateChanged } from './aiStateEvents';
 import { getAIBridge } from './aiStateSnapshots';
 import { useStoredBoolean } from './useStoredBoolean';
+import { useStoredString } from './useStoredString';
 import {
   persistCommandBlocklistSetting,
   readCommandBlocklistSetting,
@@ -107,6 +112,13 @@ export function useAISettingsState() {
   const [showTerminalSelectionAIAction, setShowTerminalSelectionAIAction] = useStoredBoolean(
     STORAGE_KEY_AI_SHOW_TERMINAL_SELECTION_ACTION,
     true,
+  );
+  // Which sessions the agent may address. Synced across hooks/windows by
+  // useStoredString, so the chat panel picks the change up without a reload.
+  const [aiSessionScopeMode, setAiSessionScopeMode] = useStoredString<AISessionScopeMode>(
+    STORAGE_KEY_AI_SESSION_SCOPE_MODE,
+    DEFAULT_AI_SESSION_SCOPE_MODE,
+    isAISessionScopeMode,
   );
 
   const setProviders = useCallback((value: ProviderConfig[] | ((prev: ProviderConfig[]) => ProviderConfig[])) => {
@@ -373,6 +385,8 @@ export function useAISettingsState() {
     setQuickMessages,
     showTerminalSelectionAIAction,
     setShowTerminalSelectionAIAction,
+    aiSessionScopeMode,
+    setAiSessionScopeMode,
   }), [
     providers,
     setProviders,
@@ -408,5 +422,7 @@ export function useAISettingsState() {
     setQuickMessages,
     showTerminalSelectionAIAction,
     setShowTerminalSelectionAIAction,
+    aiSessionScopeMode,
+    setAiSessionScopeMode,
   ]);
 }

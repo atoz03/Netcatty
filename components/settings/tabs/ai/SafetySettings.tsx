@@ -1,6 +1,6 @@
 import React, { useCallback, useState } from "react";
 import { Plus, X } from "lucide-react";
-import type { AIPermissionMode } from "../../../../infrastructure/ai/types";
+import type { AIPermissionMode, AISessionScopeMode } from "../../../../infrastructure/ai/types";
 import {
   DEFAULT_COMMAND_BLOCKLIST,
   MAX_COMMAND_TIMEOUT_SECONDS,
@@ -13,6 +13,8 @@ import { Select, SettingCard, SettingRow, SettingsAnchor, SettingsSection } from
 export const SafetySettings: React.FC<{
   globalPermissionMode: AIPermissionMode;
   setGlobalPermissionMode: (mode: AIPermissionMode) => void;
+  aiSessionScopeMode: AISessionScopeMode;
+  setAiSessionScopeMode: (mode: AISessionScopeMode) => void;
   commandBlocklist: string[];
   setCommandBlocklist: (value: string[]) => void;
   commandTimeout: number;
@@ -24,6 +26,8 @@ export const SafetySettings: React.FC<{
 }> = ({
   globalPermissionMode,
   setGlobalPermissionMode,
+  aiSessionScopeMode,
+  setAiSessionScopeMode,
   commandBlocklist,
   setCommandBlocklist,
   commandTimeout,
@@ -75,6 +79,11 @@ export const SafetySettings: React.FC<{
     { value: "auto", label: t('ai.safety.permissionMode.auto') },
   ];
 
+  const sessionScopeOptions = [
+    { value: "current", label: t('ai.safety.sessionScope.current') },
+    { value: "all-open", label: t('ai.safety.sessionScope.allOpen') },
+  ];
+
   return (
     <SettingsSection title={t('ai.safety.title')}>
       <div className="flex flex-col gap-4">
@@ -88,6 +97,19 @@ export const SafetySettings: React.FC<{
             value={globalPermissionMode}
             options={permissionModeOptions}
             onChange={(val) => setGlobalPermissionMode(val as AIPermissionMode)}
+            className="w-64"
+          />
+        </SettingRow>
+
+        <SettingRow
+          anchorId="ai-safety-session-scope"
+          label={t('ai.safety.sessionScope')}
+          description={t('ai.safety.sessionScope.description')}
+        >
+          <Select
+            value={aiSessionScopeMode}
+            options={sessionScopeOptions}
+            onChange={(val) => setAiSessionScopeMode(val as AISessionScopeMode)}
             className="w-64"
           />
         </SettingRow>

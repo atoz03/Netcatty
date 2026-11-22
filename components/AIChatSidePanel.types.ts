@@ -5,6 +5,7 @@ import type {
   AIToolIntegrationMode,
   AISession,
   AISessionScope,
+  AISessionScopeMode,
   ChatMessage,
   ExternalAgentConfig,
   ProviderConfig,
@@ -91,6 +92,8 @@ export interface AIChatSidePanelProps {
   // Safety
   globalPermissionMode: AIPermissionMode;
   setGlobalPermissionMode?: (mode: AIPermissionMode) => void;
+  /** Which sessions tools may target: this scope only, or every open session. */
+  aiSessionScopeMode?: AISessionScopeMode;
   commandBlocklist?: string[];
   commandTimeout?: number;
   responseIdleTimeout?: number;

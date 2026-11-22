@@ -330,15 +330,81 @@ test("workspace history only offers other workspaces' chats that share a host", 
     sessions, "workspace", "ws-new", ["host-b"], new Set(),
   );
   assert.deepEqual(history.map((session) => session.id), ["ws-ab"]);
-  // 共享主机的其他工作区会话只在历史中提供，不会被隐式自动恢复（只有精确 / 成员
-  // 匹配才会），因此自动恢复永远不会打开其他服务器的工作区会话。
+  // 共享主机的其他工作区会话属于本主机的历史：旧作用域已不存在（重连 / 新分页 /
+  // 重启），所以隐式自动恢复会把它接回，这正是"按主机保留对话记录"的行为。
   const preferred = getPreferredAutoResumeSessionId(
     history, "workspace", "ws-new", ["host-b"], new Set(),
   );
-  assert.equal(preferred, null);
+  assert.equal(preferred, "ws-ab");
   assert.deepEqual(
     resolveDisplayedPanelView(undefined, false, history, undefined, "workspace", undefined, preferred),
-    { mode: "draft" },
+    { mode: "session", sessionId: "ws-ab" },
+  );
+});
+
+test("a new tab on the same host resumes that host's most recent chat", () => {
+  const sessions = [
+    createSession("host-chat-old", { type: "workspace", targetId: "tab-gone", hostIds: ["host-a"] }, 10),
+    createSession("host-chat-new", { type: "workspace", targetId: "tab-gone-2", hostIds: ["host-a"] }, 20),
+  ];
+  const history = getScopedHistorySessions(sessions, "workspace", "tab-fresh", ["host-a"], new Set());
+  assert.deepEqual(history.map((session) => session.id), ["host-chat-new", "host-chat-old"]);
+  assert.equal(
+    getPreferredAutoResumeSessionId(
+      history, "workspace", "tab-fresh", ["host-a"], new Set(), undefined, undefined,
+      { liveScopeTargetIds: new Set(["tab-fresh"]) },
+    ),
+    "host-chat-new",
+  );
+});
+
+test("a chat another live tab is displaying is not auto-resumed twice", () => {
+  const sessions = [
+    createSession("owned-chat", { type: "workspace", targetId: "tab-open", hostIds: ["host-a"] }, 10),
+  ];
+  const history = getScopedHistorySessions(sessions, "workspace", "tab-fresh", ["host-a"], new Set());
+  assert.deepEqual(history.map((session) => session.id), ["owned-chat"]);
+  // tab-open 仍开着并正显示这条会话：另一个分页不再抢它。
+  assert.equal(
+    getPreferredAutoResumeSessionId(
+      history, "workspace", "tab-fresh", ["host-a"], new Set(), undefined,
+      { "workspace:tab-open": "owned-chat" },
+      { liveScopeTargetIds: new Set(["tab-fresh", "tab-open"]) },
+    ),
+    null,
+  );
+  // 同一个 tab-open 已关闭（指针残留）：对话跟随主机，接回来。
+  assert.equal(
+    getPreferredAutoResumeSessionId(
+      history, "workspace", "tab-fresh", ["host-a"], new Set(), undefined,
+      { "workspace:tab-open": "owned-chat" },
+      { liveScopeTargetIds: new Set(["tab-fresh"]) },
+    ),
+    "owned-chat",
+  );
+  // tab-open 仍开着但显示的是别的东西：本分页可以接上这条会话。
+  assert.equal(
+    getPreferredAutoResumeSessionId(
+      history, "workspace", "tab-fresh", ["host-a"], new Set(), undefined,
+      { "workspace:tab-open": "another-chat" },
+      { liveScopeTargetIds: new Set(["tab-fresh", "tab-open"]) },
+    ),
+    "owned-chat",
+  );
+});
+
+test("exact-scope chats win over another host chat the same tab had before", () => {
+  const sessions = [
+    createSession("other-host", { type: "workspace", targetId: "tab-gone", hostIds: ["host-b"] }, 30),
+    createSession("exact", { type: "workspace", targetId: "tab-current", hostIds: ["host-a"] }, 1),
+  ];
+  const history = getScopedHistorySessions(sessions, "workspace", "tab-current", ["host-a"], new Set());
+  assert.equal(
+    getPreferredAutoResumeSessionId(
+      history, "workspace", "tab-current", ["host-a"], new Set(), undefined, undefined,
+      { liveScopeTargetIds: new Set(["tab-current"]) },
+    ),
+    "exact",
   );
 });
 

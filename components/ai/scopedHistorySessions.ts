@@ -95,11 +95,21 @@ export function _getScopedHistoryCacheSizeForTests(sessions: AISession[]): numbe
 }
 
 /**
- * Pick the highest-ranked session eligible for implicit workspace auto-resume.
- * Only exact workspace matches and member-terminal chats (rank >= 3) qualify;
- * rank-1 chats from OTHER workspaces remain visible in the history drawer but
- * are never implicitly resumed into this workspace (preventing a source
- * workspace from re-opening a chat rebound to another workspace after restart).
+ * Pick the session a panel shows without an explicit selection.
+ *
+ * Rank >= 3 (exact scope, workspace member terminals, chats inherited from a
+ * merged scope) always qualifies. Rank 2 — a chat belonging to a *different*
+ * scope on the same saved host — also qualifies, but only when that scope is
+ * gone (`liveScopeTargetIds`): that is what makes a reconnect, a new tab for
+ * the same host, or an app restart bring that host's conversation back, which
+ * is the whole point of binding history to the saved host id instead of the
+ * terminal/workspace id.
+ *
+ * A chat another live panel is currently displaying is skipped, so two panels
+ * never show the same conversation at once. A chat whose owning tab is still
+ * open but showing something else is fair game — the per-host conversation
+ * follows the host, not the tab. `liveScopeTargetIds` keeps stale pointers of
+ * closed tabs from counting as "displayed".
  */
 export function getPreferredAutoResumeSessionId(
   historySessions: readonly AISession[],
@@ -109,6 +119,7 @@ export function getPreferredAutoResumeSessionId(
   activeTerminalSessionIds: Set<string>,
   workspaceMemberTerminalIds?: Set<string>,
   activeSessionIdMap?: Readonly<Record<string, string | null | undefined>>,
+  options?: { liveScopeTargetIds?: ReadonlySet<string> },
 ): string | null {
   const workspaceMemberActiveSessionIds = new Set<string>();
   if (scopeType === 'workspace' && workspaceMemberTerminalIds && activeSessionIdMap) {
@@ -116,6 +127,20 @@ export function getPreferredAutoResumeSessionId(
       const sessionId = activeSessionIdMap[`terminal:${terminalId}`];
       if (sessionId) workspaceMemberActiveSessionIds.add(sessionId);
     }
+  }
+  const liveScopeTargetIds = options?.liveScopeTargetIds;
+  const pointers = activeSessionIdMap ?? {};
+  // Chats another live scope is showing right now. Stale pointers of closed
+  // terminals/workspaces stay in the map on purpose (they keep the chat
+  // recoverable via /chats), so a pointer only counts while its target lives.
+  const displayedElsewhere = new Set<string>();
+  for (const [key, value] of Object.entries(pointers)) {
+    if (!value) continue;
+    const separator = key.indexOf(':');
+    const targetId = separator >= 0 ? key.slice(separator + 1) : '';
+    if (!targetId || targetId === scopeTargetId) continue;
+    if (liveScopeTargetIds && !liveScopeTargetIds.has(targetId)) continue;
+    displayedElsewhere.add(value);
   }
   for (const session of historySessions) {
     const rank = getSessionScopeMatchRank(
@@ -128,6 +153,11 @@ export function getPreferredAutoResumeSessionId(
       workspaceMemberActiveSessionIds,
     );
     if (rank >= 3) {
+      return session.id;
+    }
+    // Rank 2 is a chat from another scope on the same saved host: follow the
+    // host, unless another live panel is already showing that conversation.
+    if (rank === 2 && !displayedElsewhere.has(session.id)) {
       return session.id;
     }
   }

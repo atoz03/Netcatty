@@ -494,10 +494,11 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
   const workspaceAnchorChatId = scopeType === 'workspace'
     ? workspaces.find((workspace) => workspace.id === scopeTargetId)?.anchorChatId
     : undefined;
-  // Implicit workspace auto-resume only considers exact workspace or member-
-  // terminal matches (rank >= 3) so a workspace never silently re-opens a chat
-  // bound to another workspace (e.g. after rebinding its last chat away and
-  // restarting). Other-workspace chats remain manually selectable in history.
+  // Implicit auto-resume prefers exact/member matches (rank >= 3), then the
+  // host's own older chat (rank 2) once that chat's scope is gone — reopening a
+  // host, reconnecting or restarting brings the host's conversation back. Chats
+  // still owned by another open tab are skipped, so a chat is never shared
+  // between two panels or stolen from a live workspace.
   const preferredHistorySessionId = useMemo(
     () => getPreferredAutoResumeSessionId(
       historySessions,
@@ -507,8 +508,9 @@ const AIChatSidePanelActive: React.FC<AIChatSidePanelProps> = ({
       activeTerminalSessionIds,
       workspaceMemberTerminalIds,
       activeSessionIdMap,
+      { liveScopeTargetIds },
     ),
-    [historySessions, scopeType, scopeTargetId, scopeHostIds, activeTerminalSessionIds, workspaceMemberTerminalIds, activeSessionIdMap],
+    [historySessions, scopeType, scopeTargetId, scopeHostIds, activeTerminalSessionIds, workspaceMemberTerminalIds, activeSessionIdMap, liveScopeTargetIds],
   );
   const normalizedPanelView = useMemo<AIPanelView>(
     () => resolveDisplayedPanelView(explicitPanelView, currentDraft != null, historySessions, persistedSessionId, scopeType, workspaceAnchorChatId, preferredHistorySessionId),

@@ -3,6 +3,10 @@ import test from "node:test";
 import { JSDOM } from "jsdom";
 import type { Identity, Host } from "../types";
 
+const productionIdentity: Identity = {
+  id: "identity-alice", label: "Production identity", username: "alice", authMethod: "password", password: "preset secret", created: 1,
+};
+
 async function withWizard(
   run: (fixture: Awaited<ReturnType<typeof mountWizard>>) => Promise<void>,
   identities: Identity[] = [],
@@ -35,6 +39,13 @@ async function mountWizard(identities: Identity[]) {
   const { createRoot } = await import("react-dom/client");
   const { I18nProvider } = await import("../application/i18n/I18nProvider");
   const { default: QuickConnectWizard } = await import("./QuickConnectWizard");
+  const { getTopmostDialogCloseControl } = await import("../application/state/dialogStack");
+  const { pressCloseTabShortcut } = await import("./test-support/dialogShortcuts");
+  // Quick Connect opens from the Vault search field, which has focus until then.
+  const search = document.createElement("input");
+  search.id = "vault-search";
+  document.body.appendChild(search);
+  search.focus();
   const target = { hostname: "example.com" };
   const connected: Host[] = [];
   const saved: Host[] = [];
@@ -82,7 +93,14 @@ async function mountWizard(identities: Identity[]) {
     assert.equal(input(selector).value, value);
   };
   const key = async (element: HTMLElement, key: string) => {
-    await act(async () => { element.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key, bubbles: true })); });
+    const event = new dom.window.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true });
+    await act(async () => { element.dispatchEvent(event); });
+    return event;
+  };
+  const closeTabShortcut = async (element: HTMLElement, scheme: "mac" | "pc") => {
+    let result: ReturnType<typeof pressCloseTabShortcut> | undefined;
+    await act(async () => { result = pressCloseTabShortcut(element, scheme); });
+    return result!;
   };
   const settle = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); }); };
   const outsideClick = async () => {
@@ -94,7 +112,8 @@ async function mountWizard(identities: Identity[]) {
     overlay();
   };
   return {
-    button, input, overlay, click, type, key, settle, outsideClick, connected, saved,
+    button, input, overlay, click, type, key, closeTabShortcut, settle, outsideClick, connected, saved,
+    getTopmostDialogCloseControl,
     closeCount: () => closeCount,
     async cleanup() {
       await act(async () => { root.unmount(); });
@@ -119,8 +138,6 @@ test("background clicks preserve each Quick Connect step and typed connection de
     await f.click(f.button("Continue"));
     await f.type("#quick-password", "partly configured password");
     await f.outsideClick();
-    await f.key(f.input("#quick-password"), "Escape");
-    assert.equal(f.closeCount(), 0);
     assert.equal(f.input("#quick-password").value, "partly configured password");
     await f.click(f.button("Back"));
     assert.equal(f.input("#quick-username").value, "alice");
@@ -158,7 +175,7 @@ test("the portaled credential picker retains the wizard and selected identity", 
     assert.equal(f.connected[0].username, "alice");
     assert.equal(f.connected[0].port, 2222);
     assert.equal(f.closeCount(), 1);
-  }, [{ id: "identity-alice", label: "Production identity", username: "alice", authMethod: "password", password: "preset secret", created: 1 }]);
+  }, [productionIdentity]);
 });
 
 test("the portaled save menu preserves credentials until explicit save and connect", async () => {
@@ -227,3 +244,97 @@ for (const step of ["username", "auth"]) {
     });
   });
 }
+
+test("Escape dismisses the protocol step and returns focus to the Vault search field", async () => {
+  await withWizard(async (f) => {
+    const dialog = document.querySelector('[role="dialog"]');
+    assert.ok(dialog && document.activeElement === dialog, "The wizard takes focus from the search field");
+    await f.type('input[type="number"]', "2222");
+    const escape = await f.key(f.input('input[type="number"]'), "Escape");
+    assert.equal(escape.defaultPrevented, true);
+    assert.equal(f.closeCount(), 1);
+    assert.equal(f.connected.length, 0);
+    assert.ok(!document.querySelector('[role="dialog"]'), "Quick Connect closed");
+    assert.equal(document.activeElement?.id, "vault-search");
+  });
+});
+
+for (const step of ["username", "auth"]) {
+  test(`Escape dismisses the ${step} step like its X`, async () => {
+    await withWizard(async (f) => {
+      await f.click(f.button("Continue"));
+      await f.type("#quick-username", "alice");
+      let field = "#quick-username";
+      if (step === "auth") {
+        await f.click(f.button("Continue"));
+        await f.type("#quick-password", "secret");
+        field = "#quick-password";
+      }
+      await f.key(f.input(field), "Escape");
+      assert.equal(f.closeCount(), 1);
+      assert.equal(f.connected.length, 0);
+      assert.equal(f.saved.length, 0);
+    });
+  });
+}
+
+test("Escape closes an open credential picker before Quick Connect", async () => {
+  await withWizard(async (f) => {
+    const picker = f.input('[role="combobox"]');
+    await f.click(picker);
+    await f.settle();
+    assert.ok(document.querySelector('[role="option"]'), "The picker is open");
+    await f.key(picker, "Escape");
+    await f.settle();
+    assert.ok(!document.querySelector('[role="option"]'), "Escape closed the picker");
+    assert.equal(f.closeCount(), 0, "Quick Connect stays open");
+    await f.key(picker, "Escape");
+    assert.equal(f.closeCount(), 1);
+    assert.equal(f.connected.length, 0);
+  }, [productionIdentity]);
+});
+
+for (const scheme of ["mac", "pc"] as const) {
+  test(`${scheme === "mac" ? "Cmd" : "Ctrl"}+W closes Quick Connect instead of the tab behind it`, async () => {
+    await withWizard(async (f) => {
+      await f.type('input[type="number"]', "2222");
+      const result = await f.closeTabShortcut(f.input('input[type="number"]'), scheme);
+      assert.deepEqual(result.actions, [], "No tab or window action runs");
+      assert.equal(result.defaultPrevented, true);
+      assert.equal(f.closeCount(), 1);
+      assert.equal(f.connected.length, 0);
+    });
+  });
+}
+
+for (const scheme of ["mac", "pc"] as const) {
+  test(`${scheme === "mac" ? "Cmd" : "Ctrl"}+W closes Quick Connect while its credential picker is open`, async () => {
+    await withWizard(async (f) => {
+      const picker = f.input('[role="combobox"]');
+      await f.click(picker);
+      await f.settle();
+      assert.ok(document.querySelector('[role="option"]'), "The picker is open");
+      // The picker is a popover, not a dialog: the wizard stays on top for Cmd/Ctrl+W.
+      const control = f.getTopmostDialogCloseControl();
+      assert.ok(control && f.overlay().contains(control), "The wizard is the topmost dialog");
+      const result = await f.closeTabShortcut(picker, scheme);
+      assert.deepEqual(result.actions, []);
+      assert.equal(result.defaultPrevented, true);
+      assert.equal(f.closeCount(), 1);
+      assert.equal(f.connected.length, 0);
+    }, [productionIdentity]);
+  });
+}
+
+test("the macOS Close menu command closes Quick Connect as the topmost dialog", async () => {
+  await withWizard(async (f) => {
+    await f.click(f.button("Continue"));
+    await f.type("#quick-username", "alice");
+    // AppSideEffects clicks this control when the native Cmd+W finds an open dialog.
+    const control = f.getTopmostDialogCloseControl();
+    assert.ok(control && f.overlay().contains(control), "The wizard is the topmost dialog");
+    await f.click(control);
+    assert.equal(f.closeCount(), 1);
+    assert.equal(f.connected.length, 0);
+  });
+});

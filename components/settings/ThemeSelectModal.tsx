@@ -3,11 +3,12 @@
  * A modal dialog for selecting terminal themes in settings
  */
 
-import React, { useCallback } from 'react';
+import React, { useCallback, useId } from 'react';
 import { createPortal } from 'react-dom';
 import { Palette, X } from 'lucide-react';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { Button } from '../ui/button';
+import { CustomDialogContent } from '../ui/custom-dialog';
 import { ThemeList } from '../ThemeList';
 
 interface ThemeSelectModalProps {
@@ -28,22 +29,13 @@ export const ThemeSelectModal: React.FC<ThemeSelectModalProps> = ({
     showAutoOption,
 }) => {
     const { t } = useI18n();
+    const modalTitleId = useId();
 
     // Handle theme selection - select and close
     const handleThemeSelect = useCallback((themeId: string) => {
         onSelect(themeId);
         onClose();
     }, [onSelect, onClose]);
-
-    // Handle ESC key
-    React.useEffect(() => {
-        if (!open) return;
-        const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape') onClose();
-        };
-        document.addEventListener('keydown', handleKeyDown);
-        return () => document.removeEventListener('keydown', handleKeyDown);
-    }, [open, onClose]);
 
     // Handle backdrop click
     const handleBackdropClick = useCallback((e: React.MouseEvent) => {
@@ -52,18 +44,15 @@ export const ThemeSelectModal: React.FC<ThemeSelectModalProps> = ({
 
     if (!open) return null;
 
-    const modalTitleId = 'theme-select-modal-title';
-
     const modalContent = (
         <div
             className="fixed inset-0 flex items-center justify-center bg-black/60"
             style={{ zIndex: 99999 }}
             onClick={handleBackdropClick}
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby={modalTitleId}
         >
-            <div
+            <CustomDialogContent
+                onDismiss={onClose}
+                aria-labelledby={modalTitleId}
                 className="w-[480px] max-h-[600px] bg-background border border-border rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200"
                 onClick={(e) => e.stopPropagation()}
             >
@@ -103,7 +92,7 @@ export const ThemeSelectModal: React.FC<ThemeSelectModalProps> = ({
                         {t('common.cancel')}
                     </Button>
                 </div>
-            </div>
+            </CustomDialogContent>
         </div>
     );
 

@@ -4,14 +4,14 @@
  * Opens on top of ThemeCustomizeModal for creating/editing custom themes.
  */
 
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useId, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import { Trash2, X } from 'lucide-react';
 import { TerminalTheme } from '../../domain/models';
 import { useI18n } from '../../application/i18n/I18nProvider';
 import { CustomThemeEditor } from './CustomThemeEditor';
 import { Button } from '../ui/button';
-import { isAppLockOverlayActive } from '../../infrastructure/appLockOverlayDom';
+import { CustomDialogContent } from '../ui/custom-dialog';
 
 
 interface CustomThemeModalProps {
@@ -99,6 +99,7 @@ export const CustomThemeModal: React.FC<CustomThemeModalProps> = ({
     onCancel,
 }) => {
     const { t } = useI18n();
+    const titleId = useId();
     const [editingTheme, setEditingTheme] = useState<TerminalTheme>(initialTheme);
 
     // Reset when opened with a new theme
@@ -129,20 +130,6 @@ export const CustomThemeModal: React.FC<CustomThemeModalProps> = ({
         return `${editingTheme.name} • ${editingTheme.type.toUpperCase()}`;
     }, [editingTheme.name, editingTheme.type]);
 
-    // Handle Escape key — close child editor
-    useEffect(() => {
-        if (!open) return;
-        const handleKeyDown = (e: KeyboardEvent) => {
-            if (isAppLockOverlayActive()) return;
-            if (e.key === 'Escape') {
-                e.stopPropagation();
-                onCancel();
-            }
-        };
-        document.addEventListener('keydown', handleKeyDown, true); // capture phase
-        return () => document.removeEventListener('keydown', handleKeyDown, true);
-    }, [open, onCancel]);
-
     if (!open) return null;
 
     const modalContent = (
@@ -152,14 +139,17 @@ export const CustomThemeModal: React.FC<CustomThemeModalProps> = ({
             {/* Backdrop — clicking it dismisses the modal */}
             <div className="absolute inset-0 bg-black/60 supports-[backdrop-filter]:backdrop-blur-sm" onClick={onCancel} />
 
-            {/* Modal */}
-            <div className="relative z-10 bg-popover/95 supports-[backdrop-filter]:backdrop-blur-sm rounded-xl shadow-2xl border border-border/50 flex flex-col"
+            {/* Modal: Escape closes this child editor first, being the topmost dialog. */}
+            <CustomDialogContent
+                onDismiss={onCancel}
+                aria-labelledby={titleId}
+                className="relative z-10 bg-popover/95 supports-[backdrop-filter]:backdrop-blur-sm rounded-xl shadow-2xl border border-border/50 flex flex-col"
                 style={{ width: 'min(820px, 90vw)', height: 'min(600px, 85vh)' }}
                 onClick={(e) => e.stopPropagation()}
             >
                 {/* Header */}
                 <div className="flex items-center justify-between px-5 py-3 shrink-0 border-b border-border">
-                    <h2 className="text-sm font-semibold text-foreground">
+                    <h2 id={titleId} className="text-sm font-semibold text-foreground">
                         {isNew ? t('terminal.customTheme.newTitle') : t('terminal.customTheme.editTitle')}
                     </h2>
                     <button
@@ -222,7 +212,7 @@ export const CustomThemeModal: React.FC<CustomThemeModalProps> = ({
                         {t('common.save')}
                     </Button>
                 </div>
-            </div>
+            </CustomDialogContent>
         </div>
     );
 

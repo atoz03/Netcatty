@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { useI18n } from "../../application/i18n/I18nProvider";
 import type { Host, SSHKey } from "../../types";
 import { TerminalConnectionDialog } from "../terminal/TerminalConnectionDialog";
+import { CustomDialogContent } from "../ui/custom-dialog";
 import type { TerminalAuthMethod } from "../terminal/TerminalAuthDialog";
 import type { useHostConnectionTest } from "../../application/state/useHostConnectionTest";
 
@@ -73,8 +74,11 @@ export const HostConnectionTestDialog: React.FC<HostConnectionTestDialogProps> =
         ? "connected"
         : "disconnected";
 
+  // Escape and Cmd/Ctrl+W close like the dialog's own Close/Cancel buttons.
   return createPortal(
-    <div
+    <CustomDialogContent
+      onDismiss={handleClose}
+      aria-label={t("hostConnectionTest.title")}
       className="fixed inset-0 z-50"
       style={
         {
@@ -145,7 +149,7 @@ export const HostConnectionTestDialog: React.FC<HostConnectionTestDialogProps> =
           closeLabel: t("common.close"),
         }}
       />
-    </div>,
+    </CustomDialogContent>,
     document.body,
   );
 };

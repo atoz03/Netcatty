@@ -67,6 +67,7 @@ import { isPluginViewEditingTarget } from '../state/pluginKeybindings';
 import { resolveCloseIntent } from '../state/resolveCloseIntent';
 import { resolveSnippetsShortcutIntent } from '../state/resolveSnippetsShortcutIntent';
 import { isPrimaryModifierWBinding, resolveWindowCommandCloseIntent } from '../state/windowCommandClose';
+import { getTopmostDialogCloseControl } from '../state/dialogStack';
 import type { SyncPayload } from '../../domain/sync';
 import { prepareSyncPayloadApply, buildLocalVaultPayloadAsync, hasMeaningfulSyncData } from '../syncPayload';
 import {
@@ -1166,9 +1167,7 @@ export function AppSideEffects() {
   ]);
 
   const handleWindowCommandCloseRequest = useCallback(async () => {
-    const openDialogs = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][data-state="open"]'));
-    const topmostOpenDialog = openDialogs[openDialogs.length - 1] ?? null;
-    const topmostDialogClose = topmostOpenDialog?.querySelector<HTMLElement>('[data-dialog-close="true"]');
+    const topmostDialogClose = getTopmostDialogCloseControl();
 
     if (!topmostDialogClose && isPluginViewEditingTarget(document.activeElement)) return;
 

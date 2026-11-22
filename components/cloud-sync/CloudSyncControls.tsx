@@ -7,7 +7,7 @@
  * - Sync status and conflict resolution
  */
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useId } from 'react';
 import {
     AlertTriangle,
     Check,
@@ -36,6 +36,7 @@ import { type CloudProvider, type ConflictInfo, type SyncChangeEntityKey, type S
 import { cn } from '../../lib/utils';
 import { Button } from '../ui/button';
 import { ConfirmDialog } from '../ui/confirm-dialog';
+import { CustomDialogContent } from '../ui/custom-dialog';
 import { Input } from '../ui/input';
 import { Label } from '../ui/label';
 import { toast } from '../ui/toast';
@@ -493,6 +494,7 @@ export const GitHubDeviceFlowModal: React.FC<GitHubDeviceFlowModalProps> = ({
     onClose,
 }) => {
     const { t } = useI18n();
+    const titleId = useId();
     const [copied, setCopied] = useState(false);
 
     const copyCode = useCallback(() => {
@@ -505,7 +507,11 @@ export const GitHubDeviceFlowModal: React.FC<GitHubDeviceFlowModalProps> = ({
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-            <div className="bg-background rounded-lg shadow-xl w-full max-w-md p-6 relative">
+            <CustomDialogContent
+                onDismiss={onClose}
+                aria-labelledby={titleId}
+                className="bg-background rounded-lg shadow-xl w-full max-w-md p-6 relative"
+            >
                 <button
                     onClick={onClose}
                     className="absolute top-4 right-4 text-muted-foreground hover:text-foreground"
@@ -518,7 +524,7 @@ export const GitHubDeviceFlowModal: React.FC<GitHubDeviceFlowModalProps> = ({
                         <Github className="w-8 h-8 text-white" />
                     </div>
 
-                    <h3 className="text-lg font-semibold mb-2">{t('cloudSync.githubFlow.title')}</h3>
+                    <h3 id={titleId} className="text-lg font-semibold mb-2">{t('cloudSync.githubFlow.title')}</h3>
                     <p className="text-sm text-muted-foreground mb-6">
                         {t('cloudSync.githubFlow.desc')}
                     </p>
@@ -548,7 +554,7 @@ export const GitHubDeviceFlowModal: React.FC<GitHubDeviceFlowModalProps> = ({
                         </div>
                     )}
                 </div>
-            </div>
+            </CustomDialogContent>
         </div>
     );
 };
@@ -589,6 +595,7 @@ export const ConflictModal: React.FC<ConflictModalProps> = ({
     onClose,
 }) => {
     const { t, resolvedLocale } = useI18n();
+    const titleId = useId();
 
     if (!open || !conflict) return null;
 
@@ -611,7 +618,11 @@ export const ConflictModal: React.FC<ConflictModalProps> = ({
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-            <div className="bg-background rounded-lg shadow-xl w-full max-w-lg max-h-[calc(100vh-2rem)] p-6 relative flex flex-col">
+            <CustomDialogContent
+                onDismiss={onClose}
+                aria-labelledby={titleId}
+                className="bg-background rounded-lg shadow-xl w-full max-w-lg max-h-[calc(100vh-2rem)] p-6 relative flex flex-col"
+            >
                 <button
                     onClick={onClose}
                     className="absolute top-4 right-4 text-muted-foreground hover:text-foreground"
@@ -625,7 +636,7 @@ export const ConflictModal: React.FC<ConflictModalProps> = ({
                             <AlertTriangle className="w-5 h-5 text-amber-500" />
                         </div>
                         <div className="min-w-0">
-                            <h3 className="text-lg font-semibold">{t('cloudSync.conflict.title')}</h3>
+                            <h3 id={titleId} className="text-lg font-semibold">{t('cloudSync.conflict.title')}</h3>
                             <p className="text-sm text-muted-foreground">
                                 {t('cloudSync.conflict.desc')}
                             </p>
@@ -702,7 +713,7 @@ export const ConflictModal: React.FC<ConflictModalProps> = ({
                         {t('cloudSync.conflict.useCloud')}
                     </Button>
                 </div>
-            </div>
+            </CustomDialogContent>
         </div>
     );
 };

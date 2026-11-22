@@ -16,6 +16,7 @@ import { isPortForwardingAutoReconnectEnabled } from '../../domain/portForwardin
 import { buildNumberShortcutTabTargets } from './tabShortcutTargets';
 import { captureInheritedCwd } from '../state/inheritedCwd';
 import { fromEditorTabId, isEditorTabId } from '../state/activeTabStore';
+import { getTopmostDialogCloseControl } from '../state/dialogStack';
 import { isPluginViewEditingTarget } from '../state/pluginKeybindings';
 import { resolveBatchTabCloseFocus } from '../state/pluginViewTabStore';
 
@@ -254,9 +255,7 @@ export function handleGlobalHotkeyKeyDownImpl(getCtx: AppContextGetter, e: Keybo
     }
 
     if (isCloseTabHotkey) {
-      const openDialogs = Array.from(document.querySelectorAll<HTMLElement>('[role="dialog"][data-state="open"]'));
-      const topmostOpenDialog = openDialogs[openDialogs.length - 1] ?? null;
-      const topmostDialogClose = topmostOpenDialog?.querySelector<HTMLElement>('[data-dialog-close="true"]');
+      const topmostDialogClose = getTopmostDialogCloseControl();
       if (topmostDialogClose) {
         e.preventDefault();
         e.stopPropagation();

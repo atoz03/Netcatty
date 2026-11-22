@@ -10,7 +10,7 @@
  * - Custom themes: create, edit, delete, import .itermcolors
  */
 
-import React, { useEffect, useMemo, useState, useCallback, useRef, memo } from 'react';
+import React, { useEffect, useId, useMemo, useState, useCallback, useRef, memo } from 'react';
 import { createPortal } from 'react-dom';
 import { Check, Download, Minus, Palette, Pencil, Plus, Sparkles, Type, X } from 'lucide-react';
 import { useI18n } from '../../application/i18n/I18nProvider';
@@ -21,6 +21,7 @@ import { useCustomThemes, useCustomThemeActions } from '../../application/state/
 import { parseItermcolors } from '../../infrastructure/parsers/itermcolorsParser';
 import { CustomThemeModal } from './CustomThemeModal';
 import { Button } from '../ui/button';
+import { CustomDialogContent } from '../ui/custom-dialog';
 import { cn } from '../../lib/utils';
 import { TerminalTheme } from '../../domain/models';
 
@@ -289,6 +290,7 @@ export const ThemeCustomizeModal: React.FC<ThemeCustomizeModalProps> = ({
     onPreviewThemeChange,
 }) => {
     const { t } = useI18n();
+    const titleId = useId();
     const availableFonts = useAvailableFonts();
     const customThemes = useCustomThemes();
     const { addTheme, updateTheme, deleteTheme } = useCustomThemeActions();
@@ -505,16 +507,6 @@ export const ThemeCustomizeModal: React.FC<ThemeCustomizeModalProps> = ({
         onClose();
     }, [onThemeChange, onThemeReset, onFontFamilyChange, onFontSizeChange, onClose]);
 
-    // Handle ESC key - same as cancel, but skip when child editor is open
-    useEffect(() => {
-        if (!open) return;
-        const handleKeyDown = (e: KeyboardEvent) => {
-            if (e.key === 'Escape' && !editingTheme) handleCancel();
-        };
-        document.addEventListener('keydown', handleKeyDown);
-        return () => document.removeEventListener('keydown', handleKeyDown);
-    }, [open, handleCancel, editingTheme]);
-
     // Handle backdrop click - same as cancel
     const handleBackdropClick = useCallback((e: React.MouseEvent) => {
         if (e.target === e.currentTarget) handleCancel();
@@ -530,7 +522,10 @@ export const ThemeCustomizeModal: React.FC<ThemeCustomizeModalProps> = ({
             className="fixed inset-0 z-[200] flex items-center justify-center bg-black/60"
             onClick={handleBackdropClick}
         >
-            <div
+            {/* Escape cancels like the button; an open custom theme editor sits on top and closes first. */}
+            <CustomDialogContent
+                onDismiss={handleCancel}
+                aria-labelledby={titleId}
                 className="w-[800px] h-[560px] bg-background border border-border rounded-2xl shadow-2xl flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200"
                 onClick={(e) => e.stopPropagation()}
             >
@@ -540,7 +535,7 @@ export const ThemeCustomizeModal: React.FC<ThemeCustomizeModalProps> = ({
                         <div className="w-8 h-8 rounded-lg flex items-center justify-center bg-primary/10">
                             <Palette size={16} className="text-primary" />
                         </div>
-                        <h2 className="text-sm font-semibold text-foreground">{t('terminal.themeModal.title')}</h2>
+                        <h2 id={titleId} className="text-sm font-semibold text-foreground">{t('terminal.themeModal.title')}</h2>
                     </div>
                     <button
                         onClick={handleCancel}
@@ -772,7 +767,7 @@ export const ThemeCustomizeModal: React.FC<ThemeCustomizeModalProps> = ({
                         {t('common.save')}
                     </Button>
                 </div>
-            </div>
+            </CustomDialogContent>
         </div>
     );
 

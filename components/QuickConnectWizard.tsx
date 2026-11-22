@@ -10,7 +10,7 @@ import {
   User,
   X,
 } from "lucide-react";
-import React, { useMemo, useState } from "react";
+import React, { useId, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "../application/i18n/I18nProvider";
 import type { QuickConnectTarget } from "../domain/quickConnect";
@@ -27,6 +27,7 @@ import { cn } from "../lib/utils";
 import { Host, Identity, SSHKey } from "../types";
 import { Button } from "./ui/button";
 import { Combobox } from "./ui/combobox";
+import { CustomDialogContent } from "./ui/custom-dialog";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { Dropdown, DropdownContent, DropdownTrigger } from "./ui/dropdown";
@@ -62,6 +63,7 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
   onClose,
 }) => {
   const { t } = useI18n();
+  const titleId = useId();
   // Wizard state
   const [step, setStep] = useState<WizardStep>("protocol");
   const [protocol, setProtocol] = useState<QuickConnectProtocol>("ssh");
@@ -673,11 +675,17 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
         : `${protocolLabel} ${hostEndpoint}`
     );
 
+  // Background clicks keep the wizard open (#4154); Escape and Cmd/Ctrl+W are
+  // deliberate and close it like any other dialog. An open save menu takes
+  // Escape first.
   const wizard = (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center"
     >
-      <div
+      <CustomDialogContent
+        onDismiss={onClose}
+        dismissOnEscape={!saveOptionsOpen}
+        aria-labelledby={titleId}
         className="w-[560px] max-w-[90vw] bg-background border border-border rounded-2xl animate-in fade-in-0 zoom-in-95 duration-200"
         style={{
           boxShadow:
@@ -690,7 +698,7 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
           <div className="flex items-center gap-2 min-w-0">
             <Plug size={18} className="shrink-0 text-foreground" />
             <div className="min-w-0">
-              <h2 className="text-base font-semibold truncate">{connectTitle}</h2>
+              <h2 id={titleId} className="text-base font-semibold truncate">{connectTitle}</h2>
               {connectSubtitle ? (
                 <p className="text-xs text-muted-foreground font-mono truncate">{connectSubtitle}</p>
               ) : null}
@@ -807,7 +815,7 @@ const QuickConnectWizard: React.FC<QuickConnectWizardProps> = ({
             </Button>
           )}
         </div>
-      </div>
+      </CustomDialogContent>
     </div>
   );
 

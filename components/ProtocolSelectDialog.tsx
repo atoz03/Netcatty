@@ -1,5 +1,5 @@
 import { Plug } from "lucide-react";
-import React, { useMemo, useState } from "react";
+import React, { useId, useMemo, useState } from "react";
 import { useI18n } from "../application/i18n/I18nProvider";
 import { formatHostPort } from "../domain/host";
 import { isPluginHostProtocol } from "../domain/pluginConnection";
@@ -7,6 +7,7 @@ import { cn } from "../lib/utils";
 import { Host, HostProtocol } from "../types";
 import { getProtocolVisualStyle, type ProtocolVisualKey } from "./protocolVisuals";
 import { Button } from "./ui/button";
+import { CustomDialogContent } from "./ui/custom-dialog";
 import { Input } from "./ui/input";
 
 interface ProtocolOption {
@@ -29,6 +30,7 @@ const ProtocolSelectDialog: React.FC<ProtocolSelectDialogProps> = ({
   onCancel,
 }) => {
   const { t } = useI18n();
+  const titleId = useId();
 
   const protocolOptions = useMemo<ProtocolOption[]>(() => {
     const options: ProtocolOption[] = [];
@@ -130,7 +132,9 @@ const ProtocolSelectDialog: React.FC<ProtocolSelectDialogProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" onClick={onCancel}>
-      <div
+      <CustomDialogContent
+        onDismiss={onCancel}
+        aria-labelledby={titleId}
         className="w-[560px] max-w-[90vw] bg-background border border-border rounded-2xl animate-in fade-in-0 zoom-in-95 duration-200"
         style={{
           boxShadow:
@@ -142,7 +146,7 @@ const ProtocolSelectDialog: React.FC<ProtocolSelectDialogProps> = ({
           <div className="flex items-center gap-2 min-w-0">
             <Plug size={18} className="shrink-0 text-foreground" />
             <div className="min-w-0">
-              <h2 className="text-base font-semibold truncate">
+              <h2 id={titleId} className="text-base font-semibold truncate">
                 {t("quickConnect.connectTitle", {
                   host: host.label?.trim() || host.hostname,
                 })}
@@ -221,7 +225,7 @@ const ProtocolSelectDialog: React.FC<ProtocolSelectDialogProps> = ({
           </Button>
           <Button onClick={handleContinue}>{t("common.continue")}</Button>
         </div>
-      </div>
+      </CustomDialogContent>
     </div>
   );
 };

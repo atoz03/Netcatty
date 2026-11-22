@@ -164,6 +164,20 @@ test("Cmd+W closes the window from the Vault page", () => {
   );
 });
 
+test("Cmd+W on the Vault page closes an open dialog, such as Quick Connect, before the window", () => {
+  assert.deepEqual(
+    resolveWindowCommandCloseIntent({
+      activeTabId: "vault",
+      editorTabIds: [],
+      sessionIds: [],
+      workspaceIds: [],
+      logViewIds: [],
+      hasOpenDialog: true,
+    }),
+    { kind: "closeDialog" },
+  );
+});
+
 test("Cmd+W closes the window when nothing else is active", () => {
   assert.deepEqual(
     resolveWindowCommandCloseIntent({

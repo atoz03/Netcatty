@@ -30,6 +30,7 @@ import { PluginContributionHost } from "./plugins/PluginContributionHost";
 import { PluginPermissionHost } from "./plugins/PluginPermissionHost";
 import { matchesKeyBinding } from "../domain/models";
 import { isPrimaryModifierWBinding } from "../application/state/windowCommandClose";
+import { getTopmostDialogCloseControl } from "../application/state/dialogStack";
 
 const LazySettingsApplicationTab = lazy(() => import("./SettingsApplicationTab"));
 const LazySettingsAppearanceTab = lazy(() => import("./settings/tabs/SettingsAppearanceTab"));
@@ -381,6 +382,12 @@ const SettingsPageContent: React.FC<{ settings: SettingsState; appLock?: AppLock
                     bubbles: true,
                     cancelable: true,
                 }));
+                return;
+            }
+            // As in the main window, the topmost dialog closes before the window.
+            const topmostDialogClose = getTopmostDialogCloseControl();
+            if (topmostDialogClose) {
+                topmostDialogClose.click();
                 return;
             }
             void closeSettingsWindow();

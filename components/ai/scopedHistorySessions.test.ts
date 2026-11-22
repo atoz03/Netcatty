@@ -5,6 +5,7 @@ import type { AISession } from "../../infrastructure/ai/types.ts";
 import { resolveDisplayedPanelView } from "./aiPanelViewState.ts";
 import {
   _getScopedHistoryCacheSizeForTests,
+  getPreferredAutoResumeSessionId,
   getScopedHistorySessions,
 } from "./scopedHistorySessions.ts";
 
@@ -329,9 +330,45 @@ test("workspace history only offers other workspaces' chats that share a host", 
     sessions, "workspace", "ws-new", ["host-b"], new Set(),
   );
   assert.deepEqual(history.map((session) => session.id), ["ws-ab"]);
-  // 因此自动恢复永远不会打开其他服务器的工作区会话。
+  // 共享主机的其他工作区会话只在历史中提供，不会被隐式自动恢复（只有精确 / 成员
+  // 匹配才会），因此自动恢复永远不会打开其他服务器的工作区会话。
+  const preferred = getPreferredAutoResumeSessionId(
+    history, "workspace", "ws-new", ["host-b"], new Set(),
+  );
+  assert.equal(preferred, null);
   assert.deepEqual(
-    resolveDisplayedPanelView(undefined, false, history, undefined, "workspace", undefined, history[0]?.id ?? null),
-    { mode: "session", sessionId: "ws-ab" },
+    resolveDisplayedPanelView(undefined, false, history, undefined, "workspace", undefined, preferred),
+    { mode: "draft" },
+  );
+});
+
+test("implicit workspace auto-resume excludes other-workspace rank-1 chats after restart", () => {
+  // Workspace A's only chat was rebound to workspace B; after restart, A has
+  // empty memory-only panel views, cleared active map, and cleared anchor.
+  const movedToB = createSession("chat-moved-to-b", { type: "workspace", targetId: "workspace-B" }, 100);
+  const historyForA = getScopedHistorySessions([movedToB], "workspace", "workspace-A", [], new Set());
+  assert.deepEqual(historyForA.map((s) => s.id), ["chat-moved-to-b"], "still browseable in history");
+
+  const preferredForA = getPreferredAutoResumeSessionId(historyForA, "workspace", "workspace-A", [], new Set());
+  assert.equal(preferredForA, null, "rank-1 chat owned by workspace B is excluded from implicit resume");
+  assert.deepEqual(
+    resolveDisplayedPanelView(undefined, false, historyForA, null, "workspace", undefined, preferredForA),
+    { mode: "draft" },
+  );
+
+  // Exact workspace chats and member-terminal chats still auto-resume normally.
+  const exactForA = createSession("chat-own", { type: "workspace", targetId: "workspace-A" }, 50);
+  const memberForA = createSession("chat-member", { type: "terminal", targetId: "term-a1" }, 75);
+  const mixedHistory = getScopedHistorySessions(
+    [movedToB, exactForA, memberForA],
+    "workspace",
+    "workspace-A",
+    [],
+    new Set(),
+    new Set(["term-a1"]),
+  );
+  assert.equal(
+    getPreferredAutoResumeSessionId(mixedHistory, "workspace", "workspace-A", [], new Set(), new Set(["term-a1"])),
+    "chat-member",
   );
 });

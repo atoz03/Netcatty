@@ -64,15 +64,17 @@ test('local logging controls default off, disclose verbose risk, and call host-o
     assert.equal(switches()[0].getAttribute('aria-checked'), 'false', 'failed configuration refreshes actual OFF host state');
     assert.equal(switches()[1].getAttribute('aria-checked'), 'false');
     assert.match(document.querySelector('[role=alert]')!.textContent!, /synthetic preferences write failed/);
-    // Radix FocusScope returns focus to the trigger from a setTimeout(0) after
-    // unmount, so let that timer run inside act() as the sibling dialog tests do.
-    await act(async () => { button('Close').click(); await new Promise((resolve) => setTimeout(resolve, 20)); });
+    await act(async () => button('Close').click());
     assert.equal(document.querySelector('[role=dialog]'), null);
-    // Compare identity directly: on failure assert.equal would util.inspect two
-    // JSDOM nodes, which walks the whole window and never finishes.
-    assert.ok(document.activeElement === configure, `focus returns to Configure, got <${document.activeElement?.tagName}>`);
+    // Radix restores focus in a setTimeout(0) after the dialog unmounts.
+    // act() can finish before that timer, so drain it before checking focus.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Comparing DOM objects directly makes Node inspect the entire JSDOM graph
+    // on failure, which can stall the test process while formatting the diff.
+    assert.ok(document.activeElement === configure, `expected focus on Configure, got ${document.activeElement?.tagName}`);
   } finally {
     await act(async () => root.unmount());
+    await new Promise((resolve) => setTimeout(resolve, 0));
     dom.window.close();
     for (const [key, descriptor] of previous) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor);

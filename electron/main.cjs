@@ -88,6 +88,10 @@ const path = require("node:path");
 const os = require("node:os");
 const fs = require("node:fs");
 const { execFile } = require("node:child_process");
+// Separate profile selection from renderer loading. In particular, source
+// builds serving dist/ still need a non-production profile.
+const { configureAppProfile } = require("./appProfile.cjs");
+const { isDev, effectiveDevServerUrl } = configureAppProfile(app, process.env.VITE_DEV_SERVER_URL);
 const { getCliDiscoveryFilePath } = require("./cli/discoveryPath.cjs");
 const {
   SSH_DEEP_LINK_CHANNEL,
@@ -237,6 +241,7 @@ const {
 } = require("./main/appLockLifecycle.cjs");
 const ptyProcessTree = require("./bridges/ptyProcessTree.cjs");
 const { queryDirtyEditors } = require("./bridges/dirtyEditorGuard.cjs");
+const { finalizeSessionLogs } = require("./bridges/sessionLogShutdown.cjs");
 
 // GPU settings
 // NOTE: Do not disable Chromium sandbox by default.
@@ -290,15 +295,6 @@ app.on("web-contents-created", (_event, contents) => {
   });
 });
 
-// Application configuration
-const devServerUrl = process.env.VITE_DEV_SERVER_URL;
-// Never treat a packaged app as "dev" even if the user has VITE_DEV_SERVER_URL set globally.
-const isDev = !app.isPackaged && !!devServerUrl;
-const effectiveDevServerUrl = isDev ? devServerUrl : undefined;
-if (isDev) {
-  app.setName("Netcatty Dev");
-  app.setPath("userData", path.join(app.getPath("userData"), "dev"));
-}
 const { applyPortableDataDirectory } = require("./portableData.cjs");
 const portableData = applyPortableDataDirectory({ app });
 if (portableData) {
@@ -1665,7 +1661,17 @@ if (!gotLock) {
     }
     getWindowManager().setIsQuitting(true);
     quitGuardChannelBusy = true;
-    void runPluginShutdown()
+    void (async () => {
+      try {
+        await Promise.all(getWindowManager().getAppContentWindows().map((win) => (
+          finalizeSessionLogs(win.webContents, { ipcMain: electronModule.ipcMain })
+        )));
+        await sessionLogStreamManager.cleanupAll();
+      } catch (error) {
+        console.warn("[SessionLogs] Shutdown failed; continuing app quit:", error);
+      }
+      return runPluginShutdown();
+    })()
       .then(({ timedOut }) => {
         if (timedOut) console.warn("[Plugins] Shutdown deadline elapsed; continuing app quit");
       })
@@ -1727,11 +1733,6 @@ if (!gotLock) {
 
   // Cleanup all PTY sessions and port forwarding tunnels before quitting
   app.on("will-quit", () => {
-    try {
-      sessionLogStreamManager.cleanupAll();
-    } catch (err) {
-      console.warn("Error during session log stream cleanup:", err);
-    }
     try {
       terminalBridge.cleanupAllSessions();
     } catch (err) {

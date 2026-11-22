@@ -43,8 +43,9 @@ test("listCattyToolSpecs includes vault host tools and SFTP transfer", () => {
   const capabilityIds = listCattyToolSpecs().map((spec) => spec.capabilityId);
   assert.ok(capabilityIds.includes("vault.host.get"));
   assert.ok(capabilityIds.includes("vault.host.list"));
-  // Sidebar Catty must not open hosts; that expands scope mid-turn.
-  assert.ok(!capabilityIds.includes("vault.host.open"));
+  // Sidebar Catty may open hosts: the new tab is visible and the session joins
+  // the chat scope, so scope still only grows through user-observable actions.
+  assert.ok(capabilityIds.includes("vault.host.open"));
   assert.ok(capabilityIds.includes("vault.hosts.create"));
   assert.ok(capabilityIds.includes("vault.host.update"));
   assert.ok(capabilityIds.includes("vault.host.delete"));
@@ -55,16 +56,26 @@ test("listCattyToolSpecs includes vault host tools and SFTP transfer", () => {
   assert.ok(capabilityIds.includes("sftp.upload"));
 });
 
-test("host_open stays on MCP and global agent, not sidebar Catty", () => {
+test("host_open is offered to sidebar Catty, the global agent and MCP", () => {
   const { AGENT_KINDS, listAgentToolSpecs } = require("./toolSurfaces.cjs");
   const sidebarIds = listAgentToolSpecs(AGENT_KINDS.SIDEBAR).map((spec) => spec.capabilityId);
   const globalIds = listAgentToolSpecs(AGENT_KINDS.GLOBAL).map((spec) => spec.capabilityId);
   const mcpHostOpen = listMcpTools().find((tool) => tool.mcpTool === "host_open");
 
-  assert.ok(!sidebarIds.includes("vault.host.open"));
+  assert.ok(sidebarIds.includes("vault.host.open"));
   assert.ok(globalIds.includes("vault.host.open"));
   assert.ok(mcpHostOpen);
   assert.equal(mcpHostOpen.capabilityId, "vault.host.open");
+});
+
+test("sidebar host_open keeps confirm approval and observer blocking", () => {
+  const sidebarSpec = listCattyToolSpecs().find((spec) => spec.capabilityId === "vault.host.open");
+  assert.ok(sidebarSpec);
+  assert.equal(sidebarSpec.rpcMethod, "vault/hosts/open");
+  assert.equal(sidebarSpec.policy.write, true);
+  assert.equal(sidebarSpec.policy.bypassesApproval, false);
+  assert.equal(sidebarSpec.policy.bypassesObserverBlock, false);
+  assert.equal(sidebarSpec.policy.bypassesChatCancel, false);
 });
 
 test("listMcpTools includes vault host update and delete for external MCP clients", () => {

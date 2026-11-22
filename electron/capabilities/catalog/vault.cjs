@@ -48,10 +48,12 @@ const VAULT_CAPABILITIES = [
     domain: "vault",
     status: CAPABILITY_STATUS.IMPLEMENTED,
     description:
-      "Open a vault host by reusing its existing session when its connection settings still match (connected or connecting, including auto-reconnecting — same sessionId, no duplicate tab). Only opens a new terminal tab when no usable session for this host exists, or when newTab is true. A newly opened tab is placed in the invoking chat's bound workspace (workspace chat → that workspace; terminal chat → that terminal's workspace; unbound chats get a standalone tab). Returns the sessionId so you can run terminal/SFTP tools against it. Use vault_hosts_list first when you only know the label or hostname.",
-    // Sidebar Catty is scoped to already-open terminals/workspaces and must not
-    // expand that scope mid-turn. Keep host_open for MCP / CLI / global agent.
-    agentKinds: [AGENT_KINDS.GLOBAL],
+      "Open a vault host by reusing its existing session when its connection settings still match (connected or connecting, including auto-reconnecting — same sessionId, no duplicate tab). Only opens a new terminal tab when no usable session for this host exists, or when newTab is true. A newly opened tab is placed in the invoking chat's bound workspace (workspace chat → that workspace; terminal chat → that terminal's workspace; unbound chats get a standalone tab) and joins this chat's session scope, so get_environment lists it afterwards. Returns the sessionId so you can run terminal/SFTP tools against it. Use vault_hosts_list first when you only know the label or hostname. Opening is a write operation: confirm mode asks the user before any tab appears, observer mode blocks it.",
+    // Sidebar Catty may open hosts: that is the only sanctioned way for a
+    // terminal/workspace-scoped chat to reach a host outside its scope, and it
+    // stays visible (a tab appears) and approval-gated (policy.write). It must
+    // never silently widen the scope for hosts the user did not open.
+    agentKinds: [AGENT_KINDS.SIDEBAR, AGENT_KINDS.GLOBAL],
     policy: {
       write: true,
       sensitiveRead: false,

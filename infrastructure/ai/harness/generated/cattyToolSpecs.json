@@ -617,6 +617,39 @@
     }
   },
   {
+    "capabilityId": "vault.host.open",
+    "toolName": "host_open",
+    "rpcMethod": "vault/hosts/open",
+    "localExecution": false,
+    "description": "Open a vault host by reusing its existing session when its connection settings still match (connected or connecting, including auto-reconnecting — same sessionId, no duplicate tab). Only opens a new terminal tab when no usable session for this host exists, or when newTab is true. A newly opened tab is placed in the invoking chat's bound workspace (workspace chat → that workspace; terminal chat → that terminal's workspace; unbound chats get a standalone tab) and joins this chat's session scope, so get_environment lists it afterwards. Returns the sessionId so you can run terminal/SFTP tools against it. Use vault_hosts_list first when you only know the label or hostname. Opening is a write operation: confirm mode asks the user before any tab appears, observer mode blocks it. Reuse-first: if this hostId already has a connected or connecting session with matching connection settings (including one auto-reconnecting after a drop, which keeps the same sessionId), that sessionId is returned and no new tab is opened — retry terminal_execute against it rather than reopening the host. Open a new tab only when get_environment shows no session for the host, when the task truly needs a parallel connection, or with newTab true. Opening is approval-gated, so call it once and wait for the result instead of retrying. Call session_close when finished only for a newly opened session (reused is not true). A reused session keeps its original owner; do not close it as task cleanup. Disconnected or restored tabs needing user action are not reused. Connection may still be establishing when the tool returns — use get_environment or wait briefly before terminal_execute if needed. Auth prompts (passphrase / keyboard-interactive) still require the user in the Netcatty UI.",
+    "inputShape": {
+      "hostId": {
+        "type": "string",
+        "optional": false,
+        "description": "Vault host ID to open. Use vault_hosts_list / host_get to resolve id from label or hostname."
+      },
+      "workspaceId": {
+        "type": "string",
+        "optional": true,
+        "description": "Target workspace ID. Omit to open into the invoking chat's bound workspace (workspace chat → that workspace; terminal chat → that terminal's workspace); unbound chats get a standalone tab. 'current' means the chat's bound workspace, or the active workspace when unbound. Applies to newly opened sessions; reused sessions retain their placement."
+      },
+      "newTab": {
+        "type": "string",
+        "optional": true,
+        "description": "true or false. Force a brand-new tab even when a session for this host already exists. Default false — reuse the existing session."
+      }
+    },
+    "policy": {
+      "write": true,
+      "sensitiveRead": false,
+      "longRunning": false,
+      "requiresChatSession": false,
+      "bypassesObserverBlock": false,
+      "bypassesApproval": false,
+      "bypassesChatCancel": false
+    }
+  },
+  {
     "capabilityId": "vault.hosts.create",
     "toolName": "vault_hosts_create",
     "rpcMethod": "vault/hosts/create",
